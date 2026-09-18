@@ -12,6 +12,9 @@ import { AgentGateway } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import type { KnowledgeProvider } from '../knowledge.js';
+import { claimDigest, type GovernedBrain } from '../brain.js';
+
+export interface BrainPersistence { save(brain: GovernedBrain): Promise<void> }
 
 export const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const now = (): string => new Date().toISOString();
@@ -36,22 +39,30 @@ export class AgentEngine {
   private skills: SkillGovernance | undefined;
   private agents: AgentGateway | undefined;
   private knowledge: KnowledgeProvider | undefined;
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider }) {
+  private brain: GovernedBrain | undefined;
+  private brainPersistence: BrainPersistence | undefined;
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; brain?: GovernedBrain; brainPersistence?: BrainPersistence }) {
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
   get knowledgeConfigured() { return Boolean(this.knowledge); }
   get modelConfigured(): boolean { return Boolean(this.defaultModel || this.resolver); }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
-  async create(input: unknown, owner = 'local-owner'): Promise<AgentRun> {
+  async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
     const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };
     const selectedModel = resolution.adapter;
     const timestamp = now();
     const sources = request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m) }));
+    if (request.brainScope && !this.brain) throw new Error('brainScope was requested but Brain is not configured');
+    if (request.brainScope && this.brain) {
+      const claims = this.brain.read(request.brainScope, owner, request.privacy);
+      for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim) });
+      if (this.brainPersistence) await this.brainPersistence.save(this.brain);
+    }
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
     if (request.knowledgeQuery && this.knowledge) {
       const hits = await this.knowledge.search({ query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience: owner });
@@ -68,7 +79,7 @@ export class AgentEngine {
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       maxModelCalls: request.maxModelCalls, calls: [], plans: [], steps: [], artifacts: [], events: [], answers: [],
-      allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
+      allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.brainScope ? { brainScope: request.brainScope } : {}), ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
       ...(skillSelection ? { skillSelection } : {}),
     };
     this.adapters.set(run.id, selectedModel);

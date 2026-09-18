@@ -11,6 +11,7 @@ import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '.
 import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
 import type { AgentCard } from '../src/protocol.js';
 import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
+import { GovernedBrain } from '../src/brain.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -367,6 +368,17 @@ describe('AEEIS runtime', () => {
     await engine.advance(run.id);
     const plannerInput = model.calls[0]?.input as { sources: Array<{ id: string }> };
     expect(plannerInput.sources.map(source => source.id)).toContain('knowledge.runtime');
+    await repo.close();
+  });
+
+  it('reads an explicitly authorized Brain scope into the Runtime source catalog and audits the read', async () => {
+    const repo = await repository();
+    const brain = new GovernedBrain();
+    const claim = brain.addClaim({ owner: 'owner', scope: 'project', scopeRef: 'project.runtime', classification: 'internal', kind: 'decision', content: 'Use a durable checkpoint', sourceRefs: ['receipt.brain'], confidence: 1 }, 'owner');
+    const engine = new AgentEngine(repo, { model: new PlanningFixture(), brain });
+    const run = await engine.create({ goal: 'Use the project decision', brainScope: 'project.runtime' });
+    expect(run.context.sources.map(source => source.id)).toContain(claim.id);
+    expect(brain.auditLog().some(entry => entry.action === 'read' && entry.scopeRef === 'project.runtime')).toBe(true);
     await repo.close();
   });
 });

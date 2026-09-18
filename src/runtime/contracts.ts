@@ -15,6 +15,7 @@ export const requestSchema = z.object({
   allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
   knowledgeQuery: z.string().trim().min(1).max(2000).optional(),
   knowledgeMaxItems: z.number().int().min(1).max(20).default(8),
+  brainScope: z.string().trim().min(1).max(200).optional(),
   skillRuntime: z.string().trim().min(1).max(100).optional(),
   privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
 }).strict();
@@ -72,6 +73,7 @@ export interface AgentRun {
   allowedAgents: string[];
   knowledgeQuery?: string;
   knowledgeMaxItems: number;
+  brainScope?: string;
   approvedTools?: Array<{ id: string; version: string; capabilities: string[] }>;
   toolManifestDigest?: string;
   skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string };

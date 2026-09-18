@@ -4,7 +4,7 @@
 
 AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也不是聊天界面。当前运行时已经能把真实目标交给模型：生成动态 DAG、等待用户批准、按任务读取本次授权资料、产生产物、独立审核，并在暂停、取消、重启和模型结果不明时保持可解释状态。
 
-当前版本是开发中的可验证纵向切片，尚未宣称生产可用。工具网关、OwnHow Skill 治理、planprice 模型目录、Brain 持久化、多 Agent 协作和 RSI 自动评测仍在逐步接入。
+当前版本是开发中的可验证纵向切片，尚未宣称生产可用。核心运行时、Brain 读取、Knowledge、协作状态平面和受治理 RSI 候选已经接入；真实外部部署、生产观测和多用户控制面仍在建设。
 
 ## 本地运行
 
@@ -52,7 +52,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
-创建 Run 时可以提供 `knowledgeQuery` 和 `knowledgeMaxItems`。配置 `AEEIS_KNOWLEDGE_URL` 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；没有配置 Provider 时，提交 `knowledgeQuery` 会明确失败。
+创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。
 
 RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`。默认必须分别通过 replay、holdout、safety 三道评测门；失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
 

@@ -115,7 +115,8 @@ $('new-run').onsubmit = event => {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
   const privacy = $<HTMLSelectElement>('privacy').value;
-  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], ...(knowledgeQuery ? { knowledgeQuery } : {}), privacy })
+  const brainScope = $<HTMLInputElement>('brain-scope').value.trim();
+  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(brainScope ? { brainScope } : {}), privacy })
     .then(async result => { currentId = result.id; current = undefined; localStorage.setItem('aeeis.run', currentId); await refresh(); })
     .catch(e => message(e.message)).finally(() => { submit.disabled = false; });
 };
