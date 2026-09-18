@@ -109,6 +109,7 @@ export class AgentGateway {
     if (!card.protocols.includes('aeeis-task/1')) throw new Error('Agent does not support the AEEIS task protocol');
     const unsupported = request.taskBrief.allowedCapabilities.filter(capability => !card.capabilities.includes(capability));
     if (unsupported.length) throw new Error('Agent does not advertise required capabilities: ' + unsupported.join(', '));
+    if (request.contextPack.classification === 'private' && card.privacy.dataRetention !== 'none') throw new Error('Private Context Pack requires an Agent with no data retention');
     const cached = this.inFlight.get(request.idempotencyKey);
     if (cached?.outcome && cached.outcome.status !== 'unknown') return cached.outcome;
     if (cached?.outcome?.status === 'unknown') throw new Error('Delegation outcome is unknown; reconcile before submitting again');

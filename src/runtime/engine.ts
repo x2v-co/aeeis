@@ -41,6 +41,7 @@ export class AgentEngine {
   }
   get modelPin() { return this.defaultModel?.pin; }
   get modelConfigured(): boolean { return Boolean(this.defaultModel || this.resolver); }
+  get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   async create(input: unknown, owner = 'local-owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
