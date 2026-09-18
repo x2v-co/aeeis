@@ -216,7 +216,9 @@ function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: strin
 }
 
 export class OwnHowCliGovernance implements SkillGovernance {
-  constructor(private readonly executable = 'ownhow', private readonly stateDirectory?: string) {}
+  constructor(private readonly executable = 'ownhow', private readonly stateDirectory?: string, private readonly defaultRuntime?: string) {
+    if (defaultRuntime !== undefined && !/^[a-z][a-z0-9-]{0,63}$/.test(defaultRuntime)) throw new Error('OwnHow runtime must be a simple runtime identifier');
+  }
   private async run(args: string[]): Promise<unknown> {
     const finalArgs = [...args, '--json', ...(this.stateDirectory ? ['--state', this.stateDirectory] : [])];
     try {
@@ -229,7 +231,9 @@ export class OwnHowCliGovernance implements SkillGovernance {
   }
   async resolve(task: string, options: { runtime?: string; cached?: boolean } = {}) {
     const args = ['resolve', task];
-    if (options.runtime) args.push('--runtime', options.runtime);
+    const runtime = options.runtime ?? this.defaultRuntime;
+    if (!runtime) throw new Error('OwnHow runtime is required; set skillRuntime on the Run or AEEIS_OWNHOW_RUNTIME');
+    args.push('--runtime', runtime);
     if (options.cached) args.push('--cached');
     const value = await this.run(args) as { methodId?: string; methodVersion?: string; plan?: unknown; digest?: string };
     return { ...(value.methodId ? { methodId: value.methodId } : {}), ...(value.methodVersion ? { version: value.methodVersion } : {}), plan: value.plan ?? value, ...(value.digest ? { receiptRef: value.digest } : {}) };
@@ -238,7 +242,9 @@ export class OwnHowCliGovernance implements SkillGovernance {
     const args = ['record', input.task, '--outcome', input.outcome, '--summary', input.summary];
     if (input.correction) args.push('--correction', input.correction);
     for (const evidence of input.evidence) args.push('--evidence', evidence);
-    if (input.runtime) args.push('--runtime', input.runtime);
+    const runtime = input.runtime ?? this.defaultRuntime;
+    if (!runtime) throw new Error('OwnHow runtime is required; set skillRuntime on the Run or AEEIS_OWNHOW_RUNTIME');
+    args.push('--runtime', runtime);
     const value = await this.run(args) as { id?: string; receiptId?: string };
     const receiptRef = value.receiptId ?? value.id;
     if (!receiptRef) throw new Error('OwnHow record response did not contain a receipt reference');
