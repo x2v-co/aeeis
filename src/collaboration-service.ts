@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -13,18 +13,27 @@ import {
   type DebateMessage,
   type DebateRoom,
   type IndependentEvaluator,
-  runCompetition as executeCompetition,
 } from './collaboration.js';
 import { resultEnvelopeSchema } from './protocol.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const isoDate = z.string().datetime({ offset: true });
-const competitionStatus = z.enum(['collecting', 'evaluating', 'completed', 'partial', 'failed']);
+const competitionStatus = z.enum(['collecting', 'running', 'evaluating', 'completed', 'partial', 'failed']);
 const debateStatus = z.enum(['active', 'closed']);
+const competitionAttemptSchema = z.object({
+  id, participantAgentId: id, inputHash: z.string().regex(/^[a-f0-9]{64}$/),
+  state: z.enum(['started', 'completed', 'failed', 'reconciled']), startedAt: isoDate,
+  endedAt: isoDate.optional(), error: z.string().max(4000).optional(), result: resultEnvelopeSchema.optional(),
+}).strict();
+const evaluatorAttemptSchema = z.object({
+  id, inputHash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['started', 'completed', 'failed']),
+  startedAt: isoDate, endedAt: isoDate.optional(), error: z.string().max(4000).optional(), scores: z.array(candidateScoreSchema).max(12).optional(),
+}).strict();
 
 const competitionRecordSchema = z.object({
   schemaVersion: z.literal(1), id, brief: competitionBriefSchema, status: competitionStatus,
   candidates: z.array(resultEnvelopeSchema).max(12), scores: z.array(candidateScoreSchema).max(12),
+  attempts: z.array(competitionAttemptSchema).max(12).default([]), evaluatorAttempt: evaluatorAttemptSchema.optional(),
   evaluatorAgentId: id.optional(), selectedAgentId: id.optional(), failureReason: z.string().max(4000).optional(), totalCost: z.number().nonnegative(),
   createdAt: isoDate, updatedAt: isoDate, completedAt: isoDate.optional(),
 }).strict();
@@ -42,6 +51,7 @@ const debateInputSchema = z.object({
 }).strict();
 
 export type CompetitionRecord = z.infer<typeof competitionRecordSchema>;
+export type CompetitionAttempt = z.infer<typeof competitionAttemptSchema>;
 export type DebateRecord = z.infer<typeof debateRecordSchema>;
 
 export interface CollaborationRepository {
@@ -161,7 +171,7 @@ export class CollaborationService {
   async createCompetition(input: unknown): Promise<CompetitionRecord> {
     const brief = competitionBriefSchema.parse(input);
     const now = new Date().toISOString();
-    const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, brief, status: 'collecting', candidates: [], scores: [], totalCost: 0, createdAt: now, updatedAt: now };
+    const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, brief, status: 'collecting', candidates: [], scores: [], attempts: [], totalCost: 0, createdAt: now, updatedAt: now };
     await this.repository.createCompetition(record); return record;
   }
 
@@ -229,15 +239,69 @@ export class CollaborationService {
    */
   async runCompetition(idValue: string, evaluatorAgentId: string, runner: CandidateRunner, evaluator: IndependentEvaluator): Promise<CompetitionRecord> {
     const current = await this.repository.getCompetition(idValue);
-    if (current.status !== 'collecting') throw new Error('Competition is no longer collecting candidates');
+    if (current.status === 'evaluating' && current.evaluatorAttempt?.state === 'started') return current;
+    if (!['collecting', 'running'].includes(current.status)) throw new Error('Competition is no longer collecting candidates');
     if (current.brief.participantAgentIds.includes(evaluatorAgentId)) throw new Error('Evaluator must be independent from participants');
     try {
-      const result = await executeCompetition(current.brief, runner, evaluator);
-      for (const candidate of result.candidates) await this.submitCandidate(idValue, candidate);
-      if (result.candidates.length === 0) return this.failCompetition(idValue, result.failureReason ?? 'No valid candidate completed the isolated run');
+      await this.repository.mutateCompetition(idValue, record => ({ ...record, status: 'running', updatedAt: new Date().toISOString() }));
+      for (const participantAgentId of current.brief.participantAgentIds) {
+        const before = await this.repository.getCompetition(idValue);
+        if (before.candidates.some(candidate => candidate.agentId === participantAgentId)) continue;
+        const existing = before.attempts.find(attempt => attempt.participantAgentId === participantAgentId);
+        if (existing?.state === 'started') return before;
+        if (existing?.state === 'failed' || existing?.state === 'reconciled') continue;
+        const attemptId = `attempt_${randomUUID()}`;
+        const inputHash = createHash('sha256').update(JSON.stringify({ brief: before.brief, participantAgentId })).digest('hex');
+        let reserved = false;
+        await this.repository.mutateCompetition(idValue, record => {
+          if (record.attempts.some(attempt => attempt.participantAgentId === participantAgentId && ['started', 'completed', 'reconciled'].includes(attempt.state))) return record;
+          record.attempts.push({ id: attemptId, participantAgentId, inputHash, state: 'started', startedAt: new Date().toISOString() });
+          reserved = true;
+          return { ...record, status: 'running', updatedAt: new Date().toISOString() };
+        });
+        if (!reserved) continue;
+        try {
+          const candidate = resultEnvelopeSchema.parse(await runner.run(before.brief, { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }));
+          if (candidate.agentId !== participantAgentId || candidate.taskId !== before.brief.taskId || candidate.contextVersion !== before.brief.contextVersion || candidate.resultType !== before.brief.expectedResultType) throw new Error('Candidate result is not bound to the competition brief');
+          await this.repository.mutateCompetition(idValue, record => {
+            const attempt = record.attempts.find(item => item.id === attemptId);
+            if (!attempt || attempt.state !== 'started') return record;
+            attempt.state = 'completed'; attempt.endedAt = new Date().toISOString(); attempt.result = candidate;
+            if (!record.candidates.some(item => item.agentId === candidate.agentId)) {
+              record.candidates.push(candidate); record.totalCost = record.candidates.reduce((sum, item) => sum + (item.cost.money ?? 0), 0);
+            }
+            return { ...record, updatedAt: new Date().toISOString() };
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'Candidate runner failed';
+          await this.repository.mutateCompetition(idValue, record => {
+            const attempt = record.attempts.find(item => item.id === attemptId);
+            if (attempt?.state === 'started') { attempt.state = 'failed'; attempt.endedAt = new Date().toISOString(); attempt.error = reason; }
+            return { ...record, updatedAt: new Date().toISOString() };
+          });
+        }
+      }
+      const afterCandidates = await this.repository.getCompetition(idValue);
+      if (afterCandidates.candidates.length === 0) return this.failCompetition(idValue, afterCandidates.attempts.map(attempt => attempt.error).filter(Boolean).slice(0, 3).join('; ') || 'No valid candidate completed the isolated run');
+      const resultCandidates = afterCandidates.candidates;
+      await this.repository.mutateCompetition(idValue, record => ({ ...record, status: 'collecting', updatedAt: new Date().toISOString() }));
       await this.beginEvaluation(idValue, evaluatorAgentId);
-      const aliases = new Map(result.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
-      const viewScores = result.scores.map(score => ({ ...score, agentId: current.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
+      const aliases = new Map(resultCandidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
+      const evaluationBrief = afterCandidates.brief.blindEvaluation ? { ...afterCandidates.brief, participantAgentIds: [...aliases.values()] } : afterCandidates.brief;
+      const evaluationCandidates = afterCandidates.brief.blindEvaluation ? resultCandidates.map((candidate, index) => ({ ...candidate, agentId: `candidate_${index + 1}` })) : resultCandidates;
+      const evaluatorAttemptId = `attempt_${randomUUID()}`;
+      const evaluatorInputHash = createHash('sha256').update(JSON.stringify({ brief: evaluationBrief, candidates: evaluationCandidates })).digest('hex');
+      await this.repository.mutateCompetition(idValue, record => ({ ...record, evaluatorAttempt: { id: evaluatorAttemptId, inputHash: evaluatorInputHash, state: 'started', startedAt: new Date().toISOString() }, updatedAt: new Date().toISOString() }));
+      let rawScores: CandidateScore[];
+      try {
+        rawScores = await evaluator.evaluate(evaluationBrief, evaluationCandidates);
+        await this.repository.mutateCompetition(idValue, record => ({ ...record, evaluatorAttempt: { ...record.evaluatorAttempt!, state: 'completed', endedAt: new Date().toISOString(), scores: rawScores }, updatedAt: new Date().toISOString() }));
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'Evaluator failed';
+        await this.repository.mutateCompetition(idValue, record => ({ ...record, evaluatorAttempt: { ...record.evaluatorAttempt!, state: 'failed', endedAt: new Date().toISOString(), error: reason }, updatedAt: new Date().toISOString() }));
+        return this.failCompetition(idValue, `Competition evaluator failed: ${reason}`);
+      }
+      const viewScores = rawScores.map(score => ({ ...score, agentId: afterCandidates.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
       let persisted = await this.repository.getCompetition(idValue);
       for (const score of viewScores) {
         if (persisted.status !== 'evaluating') break;
@@ -249,6 +313,46 @@ export class CollaborationService {
       const reason = error instanceof Error ? error.message : 'Competition runner or evaluator failed';
       return this.failCompetition(idValue, `Competition execution failed: ${reason}`);
     }
+  }
+
+  /** Resolve a participant attempt after a worker restart without calling the runner again. */
+  async reconcileCompetitionAttempt(idValue: string, input: unknown): Promise<CompetitionRecord> {
+    const body = z.object({ attemptId: id, outcome: z.enum(['completed', 'failed']), result: resultEnvelopeSchema.optional(), reason: z.string().trim().min(1).max(4000) }).strict().parse(input);
+    return this.repository.mutateCompetition(idValue, current => {
+      const attempt = current.attempts.find(item => item.id === body.attemptId);
+      if (!attempt) throw new Error('Unknown competition attempt');
+      if (attempt.state !== 'started') throw new Error(`Competition attempt is already ${attempt.state}`);
+      if (body.outcome === 'completed') {
+        if (!body.result || body.result.agentId !== attempt.participantAgentId || body.result.taskId !== current.brief.taskId || body.result.contextVersion !== current.brief.contextVersion || body.result.resultType !== current.brief.expectedResultType) throw new Error('Reconciled candidate result is not bound to the competition brief');
+        attempt.result = body.result; attempt.state = 'reconciled';
+        if (!current.candidates.some(candidate => candidate.agentId === body.result!.agentId)) { current.candidates.push(body.result); current.totalCost = current.candidates.reduce((sum, item) => sum + (item.cost.money ?? 0), 0); }
+      } else { attempt.state = 'failed'; attempt.error = body.reason; }
+      attempt.endedAt = new Date().toISOString();
+      const stillStarted = current.attempts.some(item => item.state === 'started');
+      return { ...current, status: stillStarted ? 'running' : 'collecting', updatedAt: new Date().toISOString() };
+    });
+  }
+
+  /** Resolve an evaluator call after a worker restart without invoking the evaluator again. */
+  async reconcileCompetitionEvaluator(idValue: string, input: unknown): Promise<CompetitionRecord> {
+    const body = z.object({ attemptId: id, outcome: z.enum(['completed', 'failed']), scores: z.array(candidateScoreSchema).max(12).optional(), reason: z.string().trim().min(1).max(4000) }).strict().parse(input);
+    const current = await this.repository.getCompetition(idValue);
+    if (current.status !== 'evaluating' || !current.evaluatorAttempt || current.evaluatorAttempt.id !== body.attemptId || current.evaluatorAttempt.state !== 'started') throw new Error('Competition is not waiting for this evaluator reconciliation');
+    if (body.outcome === 'failed') {
+      await this.repository.mutateCompetition(idValue, record => ({ ...record, evaluatorAttempt: { ...record.evaluatorAttempt!, state: 'failed', endedAt: new Date().toISOString(), error: body.reason }, status: 'failed', failureReason: `Competition evaluator reconciliation failed: ${body.reason}`, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+      return this.repository.getCompetition(idValue);
+    }
+    if (!body.scores?.length) throw new Error('Completed evaluator reconciliation requires scores');
+    await this.repository.mutateCompetition(idValue, record => ({ ...record, evaluatorAttempt: { ...record.evaluatorAttempt!, state: 'completed', endedAt: new Date().toISOString(), scores: body.scores }, updatedAt: new Date().toISOString() }));
+    const persisted = await this.repository.getCompetition(idValue);
+    const aliases = new Map(persisted.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
+    const viewScores = body.scores.map(score => ({ ...score, agentId: persisted.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
+    let result = await this.repository.getCompetition(idValue);
+    for (const score of viewScores) {
+      if (result.status !== 'evaluating') break;
+      result = await this.submitScore(idValue, persisted.evaluatorAgentId!, score);
+    }
+    return result.status === 'evaluating' ? this.finalizePartialCompetition(idValue, 'Reconciled evaluator returned an incomplete score set') : result;
   }
 
   failCompetition(idValue: string, reason: string): Promise<CompetitionRecord> {

@@ -57,8 +57,8 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `GET /api/evolution/candidates/:id`
 - `POST /api/evolution/candidates`，以及 `/:id/evaluate|evaluate-suite|approve|start-shadow|run-shadow|record-shadow|start-canary|run-canary|record-canary|reconcile-rollout|promote|rollback`
 - 配置 `AEEIS_RSI_EVALUATOR_URL` 后，额外支持 `/:id/evaluate-suite`，按 replay、holdout、safety（以及可选 cost/shadow）套件逐门运行隔离 evaluator
-- `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
-- 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。
+- `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score|reconcile-attempt|reconcile-evaluator`
+- 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型隔离运行，独立评估器只接收盲化候选，participant/evaluator attempt 和结果持久化回 Competition；重启后通过 reconcile 继续，避免重复调用。
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。
 - `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate/Competition 快照，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道；也可配置 `AEEIS_FEISHU_WEBHOOK_URL` 使用内置飞书 Incoming Webhook 卡片适配器，私有内容会被拒绝。
 
@@ -70,7 +70,7 @@ RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `
 
 配置隔离 evaluator 后，`run-shadow` 和 `run-canary` 接收 `{ "cases": [{ "id": "case.1", "input": {} }] }`，每批最多 100 项，逐项预留 attempt、调用并落盘；遇到失败或无有效证据即停止批次。case ID 在同一候选阶段内不可重复。attempt 保留输入 hash、时间和观察结果，调用中断后的 `started` 记录会阻止新调用和阶段晋升。`reconcile-rollout` 接收 `attemptId`、`outcome`（`completed` 或 `failed`）、必填 `reason`；完成结果还必须提供 `passed`、`score` 和 `evidenceRefs`。该入口记录操作者核查结论，不重新调用 evaluator。这里的 canary 是隔离评测模式，实际生产流量分配和候选部署尚未实现。
 
-竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。Projection outbox 只发送带 hash 和幂等键的结构化快照，渠道投递失败会保留 failed 状态并可重试；渠道消息不是 canonical 状态。
+竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Participant 和 evaluator 都有带 input hash、状态和结果的 durable attempt；服务重启后不会重复调用，必须通过 `reconcile-attempt` 或 `reconcile-evaluator` 明确恢复。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。Projection outbox 只发送带 hash 和幂等键的结构化快照，渠道投递失败会保留 failed 状态并可重试；渠道消息不是 canonical 状态。
 
 ## 设计边界
 

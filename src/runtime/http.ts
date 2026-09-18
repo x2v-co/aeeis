@@ -225,6 +225,8 @@ export function buildApp(options: Options) {
       if (!options.competitionRunner || !options.competitionEvaluator || !options.competitionEvaluatorAgentId) throw new Conflict('Internal competition model pool is not configured');
       return options.collaboration.runCompetition(id, options.competitionEvaluatorAgentId, options.competitionRunner, options.competitionEvaluator);
     }
+    if (action === 'reconcile-attempt') return options.collaboration.reconcileCompetitionAttempt(id, request.body);
+    if (action === 'reconcile-evaluator') return options.collaboration.reconcileCompetitionEvaluator(id, request.body);
     throw new Conflict('Unsupported competition action');
   });
   app.get('/api/collaborations/debates', async () => options.collaboration ? options.collaboration.listDebates() : []);

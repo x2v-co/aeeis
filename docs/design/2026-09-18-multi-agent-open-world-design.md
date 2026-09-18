@@ -56,6 +56,19 @@ Planner → Researcher → Reviewer → Operator
 
 竞争输出包括候选排名、分歧点、证据差异、评估理由和未解决风险，而不是只有一个分数。
 
+### Durable Competition Attempt
+
+每个 participant 和 evaluator 都先创建持久化 Attempt，再调用外部模型或 Agent：
+
+```text
+reserve attempt(input_hash)
+→ execute once
+→ persist completed / failed result
+→ evaluate
+```
+
+如果服务在副作用之后、写回之前重启，Attempt 保持 `started`。恢复流程不得再次调用原 participant 或 evaluator；操作者必须使用 `reconcile-attempt` 或 `reconcile-evaluator` 提供已核实的 Result Envelope / score，之后编排才能继续。Attempt 的 input hash、状态、错误、结果和时间戳属于协作事实源，不能只依赖 Temporal History 或内存 Promise。
+
 ## Debate Workflow 与飞书群入口
 
 Hermes 的飞书群辩论可以作为交互入口，但群聊只是投影，正式事实来自结构化 Debate Event Log。
