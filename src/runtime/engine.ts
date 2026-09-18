@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { principalAudience, validatePrincipal } from '../security/principal.js';
 import { decisionSchema, requestSchema, reviewSchema, validatePlan } from './contracts.js';
 import type { AgentRun, ModelCall, RunStatus } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
@@ -69,10 +70,12 @@ export class AgentEngine {
     return { ready: false, detail: 'model configuration required', checkedAt: now() };
   }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
-  async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
+  async create(input: unknown, owner = 'owner', tenantId = 'local'): Promise<AgentRun> {
+    const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
+    const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
     if (request.goalId && !this.domain) throw new Error('goalId was provided but the Goal domain service is not configured');
-    if (request.goalId && this.domain && (await this.domain.getGoal(request.goalId)).status !== 'active') throw new Error('Runs can only be started for active Goals');
+    if (request.goalId && this.domain && (await this.domain.getGoal(request.goalId, owner, tenantId)).status !== 'active') throw new Error('Runs can only be started for active Goals');
     // Snapshot active evolution before choosing a model. Operational targets
     // are parsed at the runtime boundary so activation cannot widen policy by
     // smuggling arbitrary text into a prompt.
@@ -94,13 +97,13 @@ export class AgentEngine {
     const sources = request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m) }));
     if (request.brainScope && !this.brain) throw new Error('brainScope was requested but Brain is not configured');
     if (request.brainScope && this.brain) {
-      const claims = this.brain.read(request.brainScope, owner, request.privacy);
+      const claims = this.brain.read(request.brainScope, principal, request.privacy);
       for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim) });
       if (this.brainPersistence) await this.brainPersistence.save(this.brain);
     }
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
     if (request.knowledgeQuery && this.knowledge) {
-      const knowledgeRequest = { query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience: owner };
+      const knowledgeRequest = { query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience };
       const hits = validateKnowledgeHits(knowledgeRequest, await this.knowledge.search(knowledgeRequest));
       for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash });
     }
@@ -111,10 +114,10 @@ export class AgentEngine {
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
     const toolApproval: { selected: Array<{ id: string; version: string; capabilities: string[] }>; digest: string } = this.tools ? await this.approveTools(request.allowedTools) : { selected: [], digest: digest([]) };
     const run: AgentRun = {
-      schemaVersion: 1, id: id('run'), revision: 0, owner, goal: request.goal,
+      schemaVersion: 1, id: id('run'), revision: 0, owner, tenantId, goal: request.goal,
       ...(request.goalId ? { goalId: request.goalId } : {}),
       status: 'queued', createdAt: timestamp, updatedAt: timestamp,
-      context: { id: id('ctx'), audience: [owner], sources }, privacy: request.privacy,
+      context: { id: id('ctx'), audience: [audience], sources }, privacy: request.privacy,
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
@@ -353,8 +356,8 @@ export class AgentEngine {
           nodes: draft.nodes.map(node => ({ id: node.id, title: node.title, ...(node.dependsOn.length ? { dependsOn: node.dependsOn } : {}) })),
         };
         const domainPlan = planned.domainPlanId
-          ? await this.domain.createPlanRevision(domainInput)
-          : await this.domain.createPlan(domainInput);
+          ? await this.domain.createPlanRevision(domainInput, undefined, planned.owner, planned.tenantId ?? 'local')
+          : await this.domain.createPlan(domainInput, undefined, planned.owner, planned.tenantId ?? 'local');
         await this.repository.mutate(run.id, current => {
           current.domainPlanId = domainPlan.id;
           event(current, 'domain.plan.linked', { goalId: current.goalId, domainPlanId: domainPlan.id, planVersion: domainPlan.version, planHash: draft.hash });
@@ -454,13 +457,13 @@ export class AgentEngine {
 
   private async syncDomainState(run: AgentRun): Promise<void> {
     if (!this.domain || !run.goalId || !run.domainPlanId) return;
-    let domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId);
+    let domainPlan = (await this.domain.listPlans(run.goalId, run.owner, run.tenantId ?? 'local')).find(plan => plan.id === run.domainPlanId);
     if (!domainPlan) return;
     if (run.status === 'cancelled') {
       for (const node of domainPlan.nodes) {
         if (['succeeded', 'failed', 'cancelled', 'unknown'].includes(node.status)) continue;
         await this.transitionDomainTask(run, node.id, 'cancel');
-        domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId) ?? domainPlan;
+        domainPlan = (await this.domain.listPlans(run.goalId, run.owner, run.tenantId ?? 'local')).find(plan => plan.id === run.domainPlanId) ?? domainPlan;
       }
       return;
     }
@@ -484,10 +487,10 @@ export class AgentEngine {
     if (!this.domain || !run.domainPlanId) return;
     try {
       if (!run.goalId) return;
-      const domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId);
+      const domainPlan = (await this.domain.listPlans(run.goalId, run.owner, run.tenantId ?? 'local')).find(plan => plan.id === run.domainPlanId);
       const domainNode = domainPlan?.nodes.find(node => node.id === taskId);
       if (!domainNode || (transition === 'start' && domainNode.status === 'running') || (transition === 'succeed' && domainNode.status === 'succeeded') || (transition === 'wait' && domainNode.status === 'waiting') || (transition === 'fail' && domainNode.status === 'failed') || (transition === 'cancel' && domainNode.status === 'cancelled') || (transition === 'mark_unknown' && domainNode.status === 'unknown')) return;
-      const receipt = await this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition, ...(reason === undefined ? {} : { reason }) });
+      const receipt = await this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition, ...(reason === undefined ? {} : { reason }) }, undefined, run.owner, run.tenantId ?? 'local');
       await this.repository.mutate(run.id, current => event(current, 'domain.task.transitioned', { planId: run.domainPlanId, taskId, transition, receiptId: receipt.id }));
     } catch (error) {
       if (['succeed', 'fail', 'cancel', 'mark_unknown'].includes(transition) && error instanceof Error && error.message.includes('Cannot ')) return;

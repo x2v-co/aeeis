@@ -79,6 +79,30 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await repo.close();
   });
 
+  it('isolates domain aggregates by authenticated principal', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-principal-runs-'))); await repo.init();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-http-principal-domain-')), 'domain.json')); await domainStore.init();
+    const app = buildApp({
+      repository: repo,
+      domain: new AeeisService(domainStore),
+      principalTokens: {
+        'alice-token': { id: 'alice', tenantId: 'tenant-a', roles: ['owner'] },
+        'bob-token': { id: 'bob', tenantId: 'tenant-b', roles: ['owner'] },
+      },
+    });
+    const aliceHeaders = { authorization: 'Bearer alice-token' };
+    const bobHeaders = { authorization: 'Bearer bob-token' };
+    const created = await app.inject({ method: 'POST', url: '/api/goals', headers: aliceHeaders, payload: { title: 'Alice private goal' } });
+    expect(created.statusCode).toBe(200);
+    const goal = created.json() as { id: string; owner: string; tenantId: string };
+    expect(goal).toMatchObject({ owner: 'alice', tenantId: 'tenant-a' });
+    expect((await app.inject({ method: 'GET', url: '/api/goals', headers: aliceHeaders })).json()).toHaveLength(1);
+    expect((await app.inject({ method: 'GET', url: '/api/goals', headers: bobHeaders })).json()).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `/api/goals/${goal.id}`, headers: bobHeaders })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/api/goals/${goal.id}`, headers: aliceHeaders })).json()).toMatchObject({ id: goal.id, owner: 'alice' });
+    await app.close(); await domainStore.close(); await repo.close();
+  });
+
   it('exposes owner Brain operations through the local API and persists them', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-brain-runs-'))); await repo.init();
     const brainStore = new FileBrainStore(await mkdtemp(join(tmpdir(), 'aeeis-http-brain-'))); await brainStore.init();

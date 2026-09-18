@@ -76,6 +76,8 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Goal、Plan、Receipt、Memory、Context Manifest 和 RSI candidate/activation registry 到 PostgreSQL，启动时会创建所需表和索引。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
+HTTP API 默认保持本地单用户 `owner` 模式。需要做身份隔离时，可设置 `AEEIS_PRINCIPAL_TOKENS`，其值是“Bearer token → Principal”的 JSON 对象，例如 `{"alice-secret":{"id":"alice","tenantId":"team-a","roles":["owner"]}}`。Goal、Plan、Memory、Context Manifest 和 Run 会按 principal 过滤；这是开发版静态凭证边界，生产环境仍应接入组织的 OAuth/OIDC/SSO 和密钥轮换。
+
 领域 Task 转移以一次存储提交更新 Plan、Goal 完成状态和 Receipt。并发分支按最新 Plan 快照重新校验，避免状态覆盖和缺失回执；JSON 存储限制单个活动写入者，PostgreSQL 使用行锁与事务。Plan 的 `version` 仍表示 DAG 版本，不作为执行状态的修订号。
 
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。

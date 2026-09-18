@@ -27,6 +27,10 @@ export type TaskKind = "task" | "review" | "approval" | "deliverable";
 
 export interface Goal {
   id: Id;
+  /** Ownership is optional for backwards-compatible legacy snapshots. Missing
+   * ownership is treated as the local `owner` principal at the service edge. */
+  owner?: string;
+  tenantId?: string;
   title: string;
   description?: string;
   status: "active" | "completed" | "cancelled";

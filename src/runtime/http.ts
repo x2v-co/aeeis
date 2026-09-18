@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { AgentEngine, Conflict, digest, event } from './engine.js';
 import { NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
-import { brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema, type GovernedBrain } from '../brain.js';
+import { BrainAccessDenied, brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema, type GovernedBrain } from '../brain.js';
 import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
 import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
@@ -18,15 +18,21 @@ import type { RsiEvaluationHarness } from '../evaluation.js';
 import type { FileProjectionOutbox, ProjectionSink } from '../collaboration-projection.js';
 import type { SkillGovernance } from '../integrations.js';
 import type { AgentTransportResponse } from '../agent-gateway.js';
+import { principalResolver, type Principal } from '../security/principal.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; skills?: SkillGovernance; collaboration?: CollaborationService; projection?: FileProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
+declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null } }
+
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; principalTokens?: Record<string, Principal>; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; skills?: SkillGovernance; collaboration?: CollaborationService; projection?: FileProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 export function buildApp(options: Options) {
+  if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
+  const resolvePrincipal = principalResolver(options.principalTokens);
   const app = Fastify({ bodyLimit: 700000, logger: false });
+  app.decorateRequest('aeeisPrincipal', null);
   app.addHook('onRequest', async (request, reply) => {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('cache-control', 'no-store');
@@ -35,14 +41,27 @@ export function buildApp(options: Options) {
     if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host)) return reply.code(403).send({ error: 'Untrusted host' });
     if (request.headers.origin && request.headers.origin !== `http://${host}`) return reply.code(403).send({ error: 'Cross-origin access denied' });
     if (request.headers['sec-fetch-site'] === 'cross-site') return reply.code(403).send({ error: 'Cross-site access denied' });
-    if (request.url.startsWith('/internal/')) {
+    const route = request.routeOptions.url ?? '';
+    if (route.startsWith('/internal/')) {
       if (!matches(options.workerToken, request.headers.authorization)) return reply.code(401).send({ error: 'Worker authentication required' });
-    } else if (request.url.startsWith('/api/') && options.token && !matches(options.token, request.headers.authorization)) {
+    } else if (route.startsWith('/api/') && options.token && !matches(options.token, request.headers.authorization)) {
       return reply.code(401).send({ error: 'Local access token required' });
+    }
+    if (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.token !== undefined) && ['/metrics', '/readyz'].includes(route))) {
+      if (options.token && !matches(options.token, request.headers.authorization)) return reply.code(401).send({ error: 'Local access token required' });
+      const principal = resolvePrincipal(request.headers.authorization);
+      if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
+      request.aeeisPrincipal = principal;
+      // These services currently manage installation-wide configuration/state.
+      // A tenant owner never acquires installation operator privileges.
+      const operatorRoute = route === '/metrics' || /^\/api\/(evolution|skills|collaborations)(?:\/|$)/.test(route) || route.endsWith('/corrections');
+      if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
+      if (/^\/api\/(goals|plans|runs)(?:\/|$)/.test(route) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'Invalid request', issues: error.issues.map(i => ({ path: i.path, message: i.message })) });
+    if (error instanceof BrainAccessDenied) return reply.code(403).send({ error: 'Brain access denied' });
     if (error instanceof NotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof AeeisNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof AeeisConflict) return reply.code(409).send({ error: error.message });
@@ -102,53 +121,54 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
-  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: options.engine ? await options.engine.modelHealth() : { ready: false, detail: 'model configuration required' }, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), skillGovernanceConfigured: Boolean(options.skills), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
-  app.get('/api/goals', async () => options.domain ? options.domain.listGoals() : []);
+  app.get('/api/status', async request => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: options.engine ? await options.engine.modelHealth() : { ready: false, detail: 'model configuration required' }, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), skillGovernanceConfigured: Boolean(options.skills), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: options.principalTokens ? 'principal-scoped' : 'single-owner-local', principal: principalOf(request).id }));
+  app.get('/api/goals', async request => { const principal = principalOf(request); return options.domain ? options.domain.listGoals(principal.id, principal.tenantId) : []; });
   app.post('/api/goals', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(8000).optional() }).strict().parse(request.body);
-    return options.domain.createGoal({ title: body.title, ...(body.description === undefined ? {} : { description: body.description }) });
+    const principal = principalOf(request);
+    return options.domain.createGoal({ title: body.title, ...(body.description === undefined ? {} : { description: body.description }) }, undefined, principal.id, principal.tenantId);
   });
   app.get<{ Params: { id: string } }>('/api/goals/:id', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    return options.domain.getGoal(request.params.id);
+    const principal = principalOf(request); return options.domain.getGoal(request.params.id, principal.id, principal.tenantId);
   });
   app.get<{ Params: { id: string } }>('/api/goals/:id/plans', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    return options.domain.listPlans(request.params.id);
+    const principal = principalOf(request); return options.domain.listPlans(request.params.id, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/plans', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ nodes: z.array(z.object({ id: z.string().min(1).max(128), title: z.string().trim().min(1).max(500), kind: z.enum(['task', 'review', 'approval', 'deliverable']).optional(), dependsOn: z.array(z.string().min(1).max(128)).optional() }).strict()).min(1).max(100) }).strict().parse(request.body);
-    return options.domain.createPlan({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) });
+    const principal = principalOf(request); return options.domain.createPlan({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) }, undefined, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/plans/revise', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ nodes: z.array(z.object({ id: z.string().min(1).max(128), title: z.string().trim().min(1).max(500), kind: z.enum(['task', 'review', 'approval', 'deliverable']).optional(), dependsOn: z.array(z.string().min(1).max(128)).optional() }).strict()).min(1).max(100) }).strict().parse(request.body);
-    return options.domain.createPlanRevision({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) });
+    const principal = principalOf(request); return options.domain.createPlanRevision({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) }, undefined, principal.id, principal.tenantId);
   });
   app.get<{ Params: { id: string } }>('/api/goals/:id/memories', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    return options.domain.listMemories(request.params.id);
+    const principal = principalOf(request); return options.domain.listMemories(request.params.id, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/memories', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ kind: z.enum(['fact', 'decision', 'preference', 'note']), scope: z.enum(['private', 'project', 'session']).optional(), content: z.string().trim().min(1).max(30000), source: z.string().trim().max(1000).optional(), confidence: z.number().min(0).max(1).optional() }).strict().parse(request.body);
-    return options.domain.addMemory(request.params.id, { kind: body.kind, content: body.content, ...(body.scope === undefined ? {} : { scope: body.scope }), ...(body.source === undefined ? {} : { source: body.source }), ...(body.confidence === undefined ? {} : { confidence: body.confidence }) });
+    const principal = principalOf(request); return options.domain.addMemory(request.params.id, { kind: body.kind, content: body.content, ...(body.scope === undefined ? {} : { scope: body.scope }), ...(body.source === undefined ? {} : { source: body.source }), ...(body.confidence === undefined ? {} : { confidence: body.confidence }) }, undefined, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/context-manifests', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ purpose: z.string().trim().min(1).max(500), query: z.string().max(2000).optional(), audience: z.array(z.string().min(1).max(128)).max(20).optional(), maxItems: z.number().int().min(1).max(50).optional(), knowledgeClassifications: z.array(z.enum(['public', 'internal', 'confidential', 'private'])).max(4).optional() }).strict().parse(request.body);
-    return options.domain.createContextManifest(request.params.id, { purpose: body.purpose, ...(body.query === undefined ? {} : { query: body.query }), ...(body.audience === undefined ? {} : { audience: body.audience }), ...(body.maxItems === undefined ? {} : { maxItems: body.maxItems }), ...(body.knowledgeClassifications === undefined ? {} : { knowledgeClassifications: body.knowledgeClassifications }) });
+    const principal = principalOf(request); return options.domain.createContextManifest(request.params.id, { purpose: body.purpose, ...(body.query === undefined ? {} : { query: body.query }), ...(body.audience === undefined ? {} : { audience: body.audience }), ...(body.maxItems === undefined ? {} : { maxItems: body.maxItems }), ...(body.knowledgeClassifications === undefined ? {} : { knowledgeClassifications: body.knowledgeClassifications }) }, undefined, principal.id, principal.tenantId);
   });
   app.get<{ Params: { id: string } }>('/api/plans/:id/snapshot', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    return options.domain.getSnapshot(request.params.id);
+    const principal = principalOf(request); return options.domain.getSnapshot(request.params.id, principal.id, principal.tenantId);
   });
   app.post<{ Params: { planId: string; taskId: string } }>('/api/plans/:planId/tasks/:taskId/transition', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     const body = z.object({ transition: z.enum(['start', 'wait', 'request_approval', 'block', 'succeed', 'fail', 'cancel', 'mark_unknown', 'retry']), reason: z.string().max(4000).optional() }).strict().parse(request.body);
-    return options.domain.transitionTask({ planId: request.params.planId, taskId: request.params.taskId, transition: body.transition, ...(body.reason === undefined ? {} : { reason: body.reason }) });
+    const principal = principalOf(request); return options.domain.transitionTask({ planId: request.params.planId, taskId: request.params.taskId, transition: body.transition, ...(body.reason === undefined ? {} : { reason: body.reason }) }, undefined, principal.id, principal.tenantId);
   });
   app.get('/api/evolution/activation', async () => {
     if (!options.rsi) throw new Conflict('RSI service is not configured');
@@ -271,16 +291,16 @@ export function buildApp(options: Options) {
       if (!options.collaboration) throw new Conflict('Collaboration service is not configured');
       record = body.aggregateType === 'debate' ? await options.collaboration.getDebate(body.aggregateId) : await options.collaboration.getCompetition(body.aggregateId);
     } else if (body.aggregateType === 'run') {
-      record = await options.repository.get(body.aggregateId);
+      record = await getOwnedRun(options.repository, body.aggregateId, principalOf(request).id, principalOf(request).tenantId);
     } else {
       if (!options.domain) throw new Conflict('Goal domain is not configured');
-      if (body.aggregateType === 'goal') record = await options.domain.getGoal(body.aggregateId);
-      else if (body.aggregateType === 'plan') record = await options.domain.getSnapshot(body.aggregateId);
+      if (body.aggregateType === 'goal') record = await options.domain.getGoal(body.aggregateId, principalOf(request).id, principalOf(request).tenantId);
+      else if (body.aggregateType === 'plan') record = await options.domain.getSnapshot(body.aggregateId, principalOf(request).id, principalOf(request).tenantId);
       else {
         const separator = body.aggregateId.indexOf('.');
         if (separator <= 0 || separator === body.aggregateId.length - 1) throw new Conflict('Task projection ID must be planId.taskId');
         const planId = body.aggregateId.slice(0, separator); const taskId = body.aggregateId.slice(separator + 1);
-        const snapshot = await options.domain.getSnapshot(planId);
+        const snapshot = await options.domain.getSnapshot(planId, principalOf(request).id, principalOf(request).tenantId);
         const task = snapshot.plan.nodes.find(node => node.id === taskId);
         if (!task) throw new AeeisNotFound(`Unknown task: ${taskId}`);
         record = { planId, goalId: snapshot.goal.id, task };
@@ -303,34 +323,38 @@ export function buildApp(options: Options) {
     const body = z.object({ limit: z.number().int().min(1).max(100).optional() }).strict().parse(request.body ?? {});
     return options.projection.deliverPending(options.projectionSink, body.limit ?? 20);
   });
-  app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
+  app.get<{ Params: { scope: string }; Querystring: { owner?: string; classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
     if (!options.brain) return { error: 'Brain is not configured' };
-    const query = z.object({ classification: brainClassificationSchema.optional() }).strict().parse(request.query);
-    return { scope: request.params.scope, claims: options.brain.read(request.params.scope, 'owner', query.classification ?? 'internal') };
+    const query = z.object({ owner: z.string().min(1).max(200).optional(), classification: brainClassificationSchema.optional() }).strict().parse(request.query);
+    const claims = options.brain.read(request.params.scope, principalOf(request), query.classification ?? 'internal', query.owner);
+    await options.brainStore?.save(options.brain);
+    return { scope: request.params.scope, claims };
   });
   app.post('/api/brain/claims', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
-    const claim = options.brain.addClaim(brainClaimInputSchema.parse(request.body), 'owner');
+    const principal = principalOf(request);
+    const input = brainClaimInputSchema.omit({ tenantId: true }).extend({ owner: z.string().min(1).max(200).optional() }).parse(request.body);
+    const claim = options.brain.addClaim({ ...input, owner: input.owner ?? principal.id, tenantId: principal.tenantId }, principal);
     await options.brainStore.save(options.brain); return claim;
   });
   app.post('/api/brain/grants', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
-    const grant = options.brain.grant(brainGrantInputSchema.parse(request.body), 'owner');
+    const grant = options.brain.grant(brainGrantInputSchema.parse(request.body), principalOf(request));
     await options.brainStore.save(options.brain); return grant;
   });
   app.post<{ Params: { id: string } }>('/api/brain/grants/:id/revoke', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
-    options.brain.revoke(request.params.id, 'owner'); await options.brainStore.save(options.brain); return { status: 'revoked' };
+    options.brain.revoke(request.params.id, principalOf(request)); await options.brainStore.save(options.brain); return { status: 'revoked' };
   });
   app.delete<{ Params: { scope: string } }>('/api/brain/:scope', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
-    options.brain.deleteScope(request.params.scope, 'owner'); await options.brainStore.save(options.brain); return { status: 'deleted' };
+    options.brain.deleteScope(request.params.scope, principalOf(request)); await options.brainStore.save(options.brain); return { status: 'deleted' };
   });
-  app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, goalId, domainPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), status, updatedAt })));
-  app.get<{ Params: { id: string } }>('/api/runs/:id', async request => options.repository.get(request.params.id));
+  app.get('/api/runs', async request => { const principal = principalOf(request); return (await options.repository.list({ owner: principal.id, tenantId: principal.tenantId })).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, goalId, domainPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), status, updatedAt })); });
+  app.get<{ Params: { id: string } }>('/api/runs/:id', async request => { const principal = principalOf(request); return getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId); });
   app.post<{ Params: { id: string } }>('/api/runs/:id/corrections', async request => {
     if (!options.rsi) throw new Error('RSI service is not configured');
-    const run = await options.repository.get(request.params.id);
+    const principal = principalOf(request); const run = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
     const body = z.object({ target: z.enum(['profile', 'skill', 'prompt', 'workflow', 'tool-policy', 'model-policy']), baseVersion: z.string().min(1).max(200), proposedVersion: z.string().min(1).max(200), change: z.string().min(1).max(8000), reason: z.string().min(1).max(4000), risk: z.enum(['low', 'medium', 'high']), sourceReceiptRefs: z.array(z.string().min(1).max(200)).min(1).max(100) }).strict().parse(request.body);
     const evidenceRefs = new Set<string>([
       ...run.context.sources.map(source => source.id),
@@ -349,7 +373,7 @@ export function buildApp(options: Options) {
     });
     return { correction: updated.corrections?.at(-1), candidate };
   });
-  app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => projectRunGraphs(await options.repository.get(request.params.id)));
+  app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => { const principal = principalOf(request); return projectRunGraphs(await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId)); });
   async function notify(id: string): Promise<void> {
     try { await options.dispatcher?.notify(id); }
     catch {
@@ -359,22 +383,23 @@ export function buildApp(options: Options) {
   app.post('/api/runs', async (request, reply) => {
     if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a pinned model or AEEIS_PLANPRICE_URL with provider endpoints before starting an agent run' });
     const body = z.object({ goal: z.string().trim().min(1).max(8000), goalId: z.string().trim().min(1).max(200).optional(), materials: z.array(z.object({ title: z.string().trim().min(1).max(200), content: z.string().trim().min(1).max(30000), source: z.string().trim().min(1).max(1000) }).strict()).max(20).optional(), maxModelCalls: z.number().int().min(3).max(100).optional(), allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).optional(), allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).optional(), knowledgeQuery: z.string().trim().min(1).max(2000).optional(), knowledgeMaxItems: z.number().int().min(1).max(20).optional(), brainScope: z.string().trim().min(1).max(200).optional(), skillRuntime: z.string().trim().min(1).max(100).optional(), privacy: z.enum(['public', 'internal', 'confidential', 'private']).optional() }).strict().parse(request.body);
-    const run = await options.engine.create(body);
+    const principal = principalOf(request); const run = await options.engine.create(body, principal.id, principal.tenantId);
     await notify(run.id); return reply.code(202).send({ id: run.id });
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/runs', async (request, reply) => {
     if (!options.domain || !options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure the Goal service, model and dispatcher before starting a Goal run' });
-    const goal = await options.domain.getGoal(request.params.id);
+    const principal = principalOf(request);
+    const goal = await options.domain.getGoal(request.params.id, principal.id, principal.tenantId);
     const body = z.object({ materials: z.array(z.object({ title: z.string().trim().min(1).max(200), content: z.string().trim().min(1).max(30000), source: z.string().trim().min(1).max(1000) }).strict()).max(20).optional(), maxModelCalls: z.number().int().min(3).max(100).optional(), allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).optional(), allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).optional(), knowledgeQuery: z.string().trim().min(1).max(2000).optional(), knowledgeMaxItems: z.number().int().min(1).max(20).optional(), brainScope: z.string().trim().min(1).max(200).optional(), skillRuntime: z.string().trim().min(1).max(100).optional(), privacy: z.enum(['public', 'internal', 'confidential', 'private']).optional() }).strict().parse(request.body);
-    const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body });
+    const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body }, principal.id, principal.tenantId);
     await notify(run.id); return reply.code(202).send({ id: run.id, goalId: goal.id });
   });
   app.post<{ Params: { id: string; action: string } }>('/api/runs/:id/:action', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     const { id, action } = request.params;
-    await options.repository.get(id);
+    const principal = principalOf(request); await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
     if (action !== 'dispatch') await options.engine.command(id, action, request.body);
-    await notify(id); return options.repository.get(id);
+    await notify(id); return getOwnedRun(options.repository, id, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
@@ -382,6 +407,7 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/runs/:id/agent-callback', async request => {
     if (!options.engine) throw new Conflict('Model runtime is not configured');
+    const principal = principalOf(request); await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
     const header = (name: string): string | undefined => {
       const value = request.headers[name];
       return typeof value === 'string' ? value : undefined;
@@ -400,6 +426,15 @@ export function buildApp(options: Options) {
     return updated;
   });
   return app;
+}
+
+function principalOf(request: FastifyRequest): Principal {
+  if (!request.aeeisPrincipal) throw new Error('Authenticated principal missing');
+  return request.aeeisPrincipal;
+}
+
+async function getOwnedRun(repository: RunRepository, id: string, owner: string, tenantId: string) {
+  return repository.get(id, { owner, tenantId });
 }
 
 function countValues(values: string[], metric: string): string[] {

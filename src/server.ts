@@ -21,6 +21,12 @@ import { AeeisService } from './application/aeeis-service.js';
 import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
 import { FeishuWebhookProjectionSink, FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
+import { principalTokensSchema } from './security/principal.js';
+
+// Validate credentials before opening stores and acquiring writer locks.
+const principalTokens = process.env.AEEIS_PRINCIPAL_TOKENS === undefined ? undefined
+  : principalTokensSchema.parse(JSON.parse(process.env.AEEIS_PRINCIPAL_TOKENS));
+if (principalTokens !== undefined && process.env.AEEIS_ACCESS_TOKEN) throw new Error('Configure either local access token or principal tokens, not both');
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -156,6 +162,7 @@ try {
   const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), collaboration, projection, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
+    ...(principalTokens ? { principalTokens } : {}),
   });
   const port = Number(process.env.PORT ?? 4323);
   await app.listen({ port, host: '127.0.0.1' });

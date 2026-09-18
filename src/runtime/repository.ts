@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import { isOwnedBy, type Ownership } from '../security/principal.js';
 import type { AgentRun } from './contracts.js';
 
 export interface RunRepository {
   create(run: AgentRun): Promise<void>;
-  get(id: string): Promise<AgentRun>;
-  list(): Promise<AgentRun[]>;
-  mutate(id: string, change: (run: AgentRun) => void): Promise<AgentRun>;
+  get(id: string, scope?: Ownership): Promise<AgentRun>;
+  list(scope?: Ownership): Promise<AgentRun[]>;
+  mutate(id: string, change: (run: AgentRun) => void, scope?: Ownership): Promise<AgentRun>;
   close(): Promise<void>;
 }
 export class NotFound extends Error {}
@@ -60,19 +61,26 @@ export class FileRunRepository implements RunRepository {
       await this.save(run);
     });
   }
-  async get(id: string): Promise<AgentRun> {
-    try { return JSON.parse(await readFile(this.path(id), 'utf8')) as AgentRun; }
+  async get(id: string, scope?: Ownership): Promise<AgentRun> {
+    try {
+      const run = JSON.parse(await readFile(this.path(id), 'utf8')) as AgentRun;
+      if (scope && !isOwnedBy(run, scope)) throw new NotFound('Unknown run');
+      return run;
+    }
     catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound('Unknown run'); throw e; }
   }
-  async list(): Promise<AgentRun[]> {
+  async list(scope?: Ownership): Promise<AgentRun[]> {
     const { readdir } = await import('node:fs/promises');
     const ids = (await readdir(this.directory)).filter(n => /^run_[a-f0-9-]{36}\.json$/.test(n));
-    return Promise.all(ids.map(n => this.get(n.slice(0, -5))));
+    const runs = await Promise.all(ids.map(n => this.get(n.slice(0, -5))));
+    return scope ? runs.filter(run => isOwnedBy(run, scope)) : runs;
   }
-  mutate(id: string, change: (run: AgentRun) => void): Promise<AgentRun> {
+  mutate(id: string, change: (run: AgentRun) => void, scope?: Ownership): Promise<AgentRun> {
     return this.serial(async () => {
-      const run = await this.get(id);
-      change(run); run.revision++; run.updatedAt = new Date().toISOString();
+      const run = await this.get(id, scope);
+      const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+      change(run);
+      if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable'); run.revision++; run.updatedAt = new Date().toISOString();
       await this.save(run); return run;
     });
   }
@@ -87,21 +95,22 @@ export class PostgresRunRepository implements RunRepository {
       id text PRIMARY KEY, revision integer NOT NULL, state jsonb NOT NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
     )`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
   }
   async create(run: AgentRun): Promise<void> {
     await this.pool.query('INSERT INTO aeeis_runs(id, revision, state) VALUES($1, $2, $3)', [run.id, run.revision, run]);
   }
-  async get(id: string): Promise<AgentRun> {
+  async get(id: string, scope?: Ownership): Promise<AgentRun> {
     validateId(id);
-    const result = await this.pool.query('SELECT state FROM aeeis_runs WHERE id=$1', [id]);
+    const result = await this.pool.query(`SELECT state FROM aeeis_runs WHERE id=$1${scope ? " AND COALESCE(state->>'owner', 'owner')=$2 AND COALESCE(state->>'tenantId', 'local')=$3" : ''}`, scope ? [id, scope.owner, scope.tenantId] : [id]);
     if (!result.rows[0]) throw new NotFound('Unknown run');
     return result.rows[0].state as AgentRun;
   }
-  async list(): Promise<AgentRun[]> {
-    const result = await this.pool.query('SELECT state FROM aeeis_runs ORDER BY updated_at DESC');
+  async list(scope?: Ownership): Promise<AgentRun[]> {
+    const result = await this.pool.query(`SELECT state FROM aeeis_runs${scope ? " WHERE COALESCE(state->>'owner', 'owner')=$1 AND COALESCE(state->>'tenantId', 'local')=$2" : ''} ORDER BY updated_at DESC`, scope ? [scope.owner, scope.tenantId] : []);
     return result.rows.map(r => r.state as AgentRun);
   }
-  async mutate(id: string, change: (run: AgentRun) => void): Promise<AgentRun> {
+  async mutate(id: string, change: (run: AgentRun) => void, scope?: Ownership): Promise<AgentRun> {
     validateId(id);
     const client = await this.pool.connect();
     try {
@@ -109,7 +118,11 @@ export class PostgresRunRepository implements RunRepository {
       const result = await client.query('SELECT state FROM aeeis_runs WHERE id=$1 FOR UPDATE', [id]);
       if (!result.rows[0]) throw new NotFound('Unknown run');
       const run = result.rows[0].state as AgentRun;
-      change(run); run.revision++; run.updatedAt = new Date().toISOString();
+      if (scope && !isOwnedBy(run, scope)) throw new NotFound('Unknown run');
+      const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+      change(run);
+      if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable');
+      run.revision++; run.updatedAt = new Date().toISOString();
       await client.query('UPDATE aeeis_runs SET revision=$2, state=$3, updated_at=now() WHERE id=$1', [id, run.revision, run]);
       await client.query('COMMIT'); return run;
     } catch(e) { await client.query('ROLLBACK'); throw e; }

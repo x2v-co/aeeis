@@ -68,7 +68,7 @@ export interface Step {
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
 }
 export interface AgentRun {
-  schemaVersion: 1; id: string; revision: number; owner: string;
+  schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;
   goal: string; goalId?: string; domainPlanId?: string; status: RunStatus; createdAt: string; updatedAt: string;
   context: { id: string; audience: string[]; sources: Source[] };
   privacy: TaskRequest['privacy'];
