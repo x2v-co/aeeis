@@ -64,7 +64,8 @@ export class AgentEngine {
   get modelConfigured(): boolean { return Boolean(this.defaultModel || this.resolver); }
   async modelHealth(): Promise<{ ready: boolean; detail: string; checkedAt: string }> {
     if (this.defaultModel?.health) return this.defaultModel.health();
-    if (this.resolver) return { ready: true, detail: 'model catalog resolver configured; provider probe occurs when a Run selects a model', checkedAt: now() };
+    if (this.resolver?.health) return this.resolver.health();
+    if (this.resolver) return { ready: true, detail: 'model catalog resolver configured; provider health probe not configured', checkedAt: now() };
     return { ready: false, detail: 'model configuration required', checkedAt: now() };
   }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }

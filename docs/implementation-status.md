@@ -9,7 +9,7 @@
 | 任务执行、证据和 Reviewer | 已实现并测试 | 仅能读取 Run 提供的来源；artifact 引用会校验 |
 | File 持久化 | 已实现并测试 | 原子替换、fsync、单写入者锁 |
 | PostgreSQL 持久化 | Run、Goal Domain、RSI candidate 和 activation 均有适配器，并已完成本地真实验收 | `PostgresRunRepository`、`PostgresAeeisStore`、`PostgresEvolutionRepository` 和 `PostgresEvolutionActivationStore` 启动时创建表、索引并使用事务/JSONB 持久化；Task 转移和 RSI 生命周期在事务中锁定事实行；`tests/postgres-domain.test.ts`、`tests/postgres-runtime.test.ts`、`tests/postgres-evolution.test.ts` 在 PostgreSQL 17 上通过 5 个集成测试；CI 使用 PostgreSQL service 重复验收 |
-| Temporal Workflow / Worker | 已实现并实跑 | Activity 已抽出为独立协议边界：网络/限流/5xx 使用有界指数重试，认证/配置/协议错误标记为 durable non-retryable；Workflow 仍按 Run 状态等待 signal，并每 100 个 tick Continue-As-New；本地 Temporal fixture Run 已完成；生产部署、版本迁移仍未验收 |
+| Temporal Workflow / Worker | 已实现并实跑 | Activity 已抽出为独立协议边界：网络/限流/5xx 使用有界指数重试，认证/配置/协议错误标记为 durable non-retryable；Workflow 仍按 Run 状态等待 signal，并每 100 个 tick Continue-As-New；新增 `@temporalio/testing` 真实临时 Server/Worker 验收，覆盖终态、wake signal、不可重试错误恢复、Activity retry 和 Continue-As-New；生产部署、版本迁移仍未验收 |
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile；模型调用持久化稳定的 `model:<runId>:<callId>` provider 幂等键，恢复时复用原调用记录和 key；服务重启发现未完成 Tool/Agent 调用时会生成 durable unknown Receipt 并强制 provider reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现，并已接入 Runtime 的显式 `brainScope` 读取；Brain grant、state 和 API query 均做 schema 校验 | `FileBrainStore` 提供原子持久化、审计、导出和 scope 删除；Run 只在明确提供 scope 时读取，claim 以带 hash 的 Source 注入 Planner/Executor/Reviewer；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |
@@ -22,7 +22,7 @@
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息；Debate Brief 可携带受控 Context Pack；内部模型池按已持久化轮次恢复，重启后跳过已发言 Agent，避免重复消息；新增带 hash/幂等键、失败重试和 unknown/reconcile 状态的渠道无关 Projection outbox 与 HTTP sink，并支持并发去重和有界批量 drain；新增 Feishu Incoming Webhook 卡片适配器，拒绝 private 内容并默认拒绝 confidential 内容 | 飞书应用级 Bot、Hermes 具体 adapter、独立 Moderator/Adjudicator 和生产投影权限仍需接入验收 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；支持创建领域 Goal、将 Run 绑定到 Goal、查看 DAG/历史计划和 RSI 候选；没有多租户、SSO 或完整 ACL |
 | Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引、受 schema 校验的 JSON File adapter 和 HTTPS HTTP adapter；Runtime 可通过 `knowledgeQuery` 检索，并在信任边界再次校验数量、分类、重复 ID 和内容 hash，再把受 privacy 分类策略过滤的知识引用注入 Planner/Executor/Reviewer Context Manifest | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
-| React、生产运维 | 开发版可观测性已实现 | 当前 UI 是 TypeScript DOM；`/readyz` 区分存活与依赖就绪，配置 `AEEIS_MODEL_HEALTH_URL` 时会实际探测模型 provider 并返回诊断信息，`/metrics` 暴露 Prometheus 文本指标；生产部署、迁移、备份和安全验收仍缺失 |
+| React、生产运维 | 开发版可观测性已实现 | 当前 UI 是 TypeScript DOM；`/readyz` 区分存活与依赖就绪，固定模型可用 `AEEIS_MODEL_HEALTH_URL` 实际探测 provider，Planprice 目录路由可用 `AEEIS_MODEL_PROVIDER_HEALTH_URLS` 探测内部 Agent 策略选中的 provider，`/metrics` 暴露 Prometheus 文本指标；生产部署、迁移、备份和安全验收仍缺失 |
 
 测试命令：
 

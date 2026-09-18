@@ -119,7 +119,16 @@ try {
         return [key, value];
       }));
     }
-    const resolver = new CatalogModelResolver(catalog, new HttpCatalogModelFactory(providerKeys));
+    let providerHealthUrls: Record<string, string> = {};
+    if (process.env.AEEIS_MODEL_PROVIDER_HEALTH_URLS) {
+      const parsed: unknown = JSON.parse(process.env.AEEIS_MODEL_PROVIDER_HEALTH_URLS);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AEEIS_MODEL_PROVIDER_HEALTH_URLS must be a JSON object');
+      providerHealthUrls = Object.fromEntries(Object.entries(parsed).map(([key, value]) => {
+        if (typeof value !== 'string') throw new Error('Model provider health URL must be a string');
+        return [key, value];
+      }));
+    }
+    const resolver = new CatalogModelResolver(catalog, new HttpCatalogModelFactory(providerKeys, providerHealthUrls));
     modelServices = { resolver };
   }
   if (modelServices) {
