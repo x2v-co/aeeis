@@ -7,8 +7,9 @@ import { NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
 import { brainClaimInputSchema, type BrainGrant, type GovernedBrain } from '../brain.js';
 import type { FileBrainStore } from '../brain.js';
+import type { RsiService } from '../rsi.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -47,6 +48,27 @@ export function buildApp(options: Options) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
   app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', mode: 'single-owner-local' }));
+  app.get('/api/evolution/candidates', async () => {
+    if (!options.rsi) return [];
+    return options.rsi.list();
+  });
+  app.get<{ Params: { id: string } }>('/api/evolution/candidates/:id', async request => {
+    if (!options.rsi) throw new Error('RSI service is not configured');
+    return options.rsi.get(request.params.id);
+  });
+  app.post('/api/evolution/candidates', async request => {
+    if (!options.rsi) throw new Error('RSI service is not configured');
+    return options.rsi.propose(request.body);
+  });
+  app.post<{ Params: { id: string; action: string } }>('/api/evolution/candidates/:id/:action', async request => {
+    if (!options.rsi) throw new Error('RSI service is not configured');
+    const { id, action } = request.params;
+    if (action === 'evaluate') return options.rsi.evaluate(id, request.body);
+    if (action === 'approve') return options.rsi.approve(id, z.object({ approvalRef: z.string().min(1).max(200) }).strict().parse(request.body).approvalRef);
+    if (action === 'promote') return options.rsi.promote(id);
+    if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
+    throw new Conflict('Unsupported evolution action');
+  });
   app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
     if (!options.brain) return { error: 'Brain is not configured' };
     return { scope: request.params.scope, claims: options.brain.read(request.params.scope, 'owner', request.query.classification ?? 'internal') };

@@ -9,6 +9,8 @@ import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog } 
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport } from './agent-gateway.js';
 import { agentCardSchema } from './protocol.js';
+import { HttpKnowledgeProvider } from './knowledge.js';
+import { FileEvolutionRepository, RsiService } from './rsi.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -17,6 +19,9 @@ await repository.init();
 const brainStore = new FileBrainStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/brain`);
 await brainStore.init();
 const brain = await brainStore.load();
+const evolutionRepository = new FileEvolutionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
+await evolutionRepository.init();
+const rsi = new RsiService(evolutionRepository);
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 try {
   const toolkit = process.env.AEEIS_TOOLKIT_MANIFEST_URL && process.env.AEEIS_TOOLKIT_INVOKE_URL
@@ -33,6 +38,7 @@ try {
     for (const card of cards) directory.register(agentCardSchema.parse(card));
     agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN));
   }
+  const knowledge = process.env.AEEIS_KNOWLEDGE_URL ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN) : undefined;
   let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
     modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '') };
@@ -60,14 +66,14 @@ try {
     modelServices = { resolver };
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');
       dispatcher = await TemporalDispatcher.connect(process.env.TEMPORAL_ADDRESS ?? '127.0.0.1:7233', process.env.AEEIS_TASK_QUEUE ?? 'aeeis-agent');
     } else dispatcher = new LocalDispatcher(engine);
   }
-  const app = buildApp({ repository, brain, brainStore, ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, brain, brainStore, rsi, ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });
@@ -78,7 +84,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); throw error; }

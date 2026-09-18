@@ -10,6 +10,7 @@ import type { ModelPin } from '../src/runtime/contracts.js';
 import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '../src/integrations.js';
 import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
 import type { AgentCard } from '../src/protocol.js';
+import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -352,6 +353,20 @@ describe('AEEIS runtime', () => {
     const recoveredStatus = await recovered.advance(run.id);
     expect(recoveredStatus).toBe('running');
     expect((await repo.get(run.id)).delegationOutcomes?.at(-1)?.receiptRef).toBe('receipt.after-restart');
+    await repo.close();
+  });
+
+  it('retrieves classified knowledge into the Runtime source catalog', async () => {
+    const repo = await repository();
+    const knowledge = new InMemoryKnowledgeProvider([makeKnowledgeRecord({ id: 'knowledge.runtime', title: 'Runtime note', content: 'Use durable execution', source: 'owned-wiki', classification: 'internal', tags: ['runtime'], updatedAt: '2026-09-18T00:00:00.000Z' }), makeKnowledgeRecord({ id: 'knowledge.private', title: 'Private note', content: 'Do not disclose', source: 'private', classification: 'private', tags: [], updatedAt: '2026-09-18T00:00:00.000Z' })]);
+    const model = new PlanningFixture();
+    const engine = new AgentEngine(repo, { model, knowledge });
+    const run = await engine.create({ goal: 'Use project knowledge', knowledgeQuery: 'durable execution' });
+    expect(run.context.sources.map(source => source.id)).toContain('knowledge.runtime');
+    expect(run.context.sources.map(source => source.id)).not.toContain('knowledge.private');
+    await engine.advance(run.id);
+    const plannerInput = model.calls[0]?.input as { sources: Array<{ id: string }> };
+    expect(plannerInput.sources.map(source => source.id)).toContain('knowledge.runtime');
     await repo.close();
   });
 });

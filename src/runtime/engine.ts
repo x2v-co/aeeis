@@ -11,6 +11,7 @@ import type { ModelResolver } from './model-router.js';
 import { AgentGateway } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
+import type { KnowledgeProvider } from '../knowledge.js';
 
 export const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const now = (): string => new Date().toISOString();
@@ -34,9 +35,10 @@ export class AgentEngine {
   private tools: ToolGateway | undefined;
   private skills: SkillGovernance | undefined;
   private agents: AgentGateway | undefined;
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway }) {
+  private knowledge: KnowledgeProvider | undefined;
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider }) {
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
@@ -49,6 +51,11 @@ export class AgentEngine {
     const selectedModel = resolution.adapter;
     const timestamp = now();
     const sources = request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m) }));
+    if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
+    if (request.knowledgeQuery && this.knowledge) {
+      const hits = await this.knowledge.search({ query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience: owner });
+      for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash });
+    }
     const skillSelection = this.skills ? await this.skills.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) }) : undefined;
     if (request.allowedTools.length && !this.tools) throw new Error('allowedTools were requested but no toolkit gateway is configured');
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
@@ -60,7 +67,7 @@ export class AgentEngine {
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       maxModelCalls: request.maxModelCalls, calls: [], plans: [], steps: [], artifacts: [], events: [], answers: [],
-      allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
+      allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
       ...(skillSelection ? { skillSelection } : {}),
     };
     this.adapters.set(run.id, selectedModel);
@@ -418,4 +425,11 @@ function validateToolResult(request: { toolId: string; taskId: string }, result:
   if (receipt.operation !== request.toolId) throw new Error('Tool receipt operation does not match the requested tool');
   if (receipt.inputRefs.length === 0 || !receipt.inputRefs.includes(request.taskId)) throw new Error('Tool receipt does not identify the requesting task');
   if (receipt.status !== result.status) throw new Error('Tool receipt status does not match the tool result');
+}
+
+function allowedKnowledgeClassifications(privacy: AgentRun['privacy']): Array<'public' | 'internal' | 'confidential' | 'private'> {
+  if (privacy === 'private') return ['public', 'internal', 'confidential', 'private'];
+  if (privacy === 'confidential') return ['public', 'internal', 'confidential'];
+  if (privacy === 'internal') return ['public', 'internal'];
+  return ['public'];
 }

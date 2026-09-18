@@ -42,8 +42,15 @@ npm run dev
 - `POST /api/runs`
 - `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|dispatch`
 - `POST /internal/runs/:id/advance`（仅 Worker token）
+- `GET /api/evolution/candidates`
+- `GET /api/evolution/candidates/:id`
+- `POST /api/evolution/candidates`，以及 `/:id/evaluate|approve|promote|rollback`
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
+
+创建 Run 时可以提供 `knowledgeQuery` 和 `knowledgeMaxItems`。配置 `AEEIS_KNOWLEDGE_URL` 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；没有配置 Provider 时，提交 `knowledgeQuery` 会明确失败。
+
+RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`，失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
 
 ## 设计边界
 

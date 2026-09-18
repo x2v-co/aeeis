@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import { FileBrainStore } from '../src/brain.js';
+import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -39,5 +40,18 @@ describe('AEEIS HTTP boundary', () => {
     expect((await app.inject({ method: 'DELETE', url: '/api/brain/p1' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/brain/p1?classification=internal' })).json().claims).toHaveLength(0);
     await app.close(); await brainStore.close(); await repo.close();
+  });
+
+  it('exposes the governed RSI candidate lifecycle through the API', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-runs-'))); await repo.init();
+    const evolution = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-'))); await evolution.init();
+    const app = buildApp({ repository: repo, rsi: new RsiService(evolution) });
+    const created = await app.inject({ method: 'POST', url: '/api/evolution/candidates', payload: { target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Cite evidence', sourceReceiptRefs: ['receipt.1'], reason: 'Correction', risk: 'low' } });
+    expect(created.statusCode).toBe(200);
+    const candidate = created.json() as { id: string };
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind: 'replay', passed: true, score: 0.9, evidenceRefs: ['eval.1'] } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'approval.1' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} })).json().status).toBe('promoted');
+    await app.close(); await evolution.close(); await repo.close();
   });
 });
