@@ -51,6 +51,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 - `GET /api/evolution/candidates`
 - `GET /api/evolution/candidates/:id`
 - `POST /api/evolution/candidates`，以及 `/:id/evaluate|approve|promote|rollback`
+- 配置 `AEEIS_RSI_EVALUATOR_URL` 后，额外支持 `/:id/evaluate-suite`，按 replay、holdout、safety（以及可选 cost/shadow）套件逐门运行隔离 evaluator
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
 - 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。

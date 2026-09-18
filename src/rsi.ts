@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { EvolutionEngine, evolutionCandidateSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
+import { RsiEvaluator, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
 
 export interface EvolutionRepository {
   create(candidate: EvolutionCandidate): Promise<void>;
@@ -55,6 +56,16 @@ export class RsiService {
   async propose(input: unknown): Promise<EvolutionCandidate> { const candidate = this.engine.propose(proposalInputSchema.parse(input)); await this.repository.create(candidate); return candidate; }
   async proposeFromCorrection(input: { target: EvolutionCandidate['target']; baseVersion: string; proposedVersion: string; change: string; reason: string; risk: EvolutionCandidate['risk']; correctionRef: string; sourceReceiptRefs: string[] }): Promise<EvolutionCandidate> {
     return this.propose({ target: input.target, baseVersion: input.baseVersion, proposedVersion: input.proposedVersion, change: input.change, reason: `${input.reason} (correction: ${input.correctionRef})`, risk: input.risk, sourceReceiptRefs: [...new Set([...input.sourceReceiptRefs, input.correctionRef])] });
+  }
+  async evaluateSuite(id: string, input: unknown, harness: RsiEvaluationHarness): Promise<EvolutionCandidate> {
+    const body = z.object({ suite: evaluationSuiteSchema, requiredModes: z.array(z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow'])).min(1).max(5).optional(), minimumScore: z.number().min(0).max(1).optional() }).strict().parse(input);
+    const policy: RsiEvaluationPolicy = { ...(body.requiredModes ? { requiredModes: body.requiredModes } : {}), ...(body.minimumScore === undefined ? {} : { minimumScore: body.minimumScore }) };
+    const evaluator = new RsiEvaluator(policy);
+    const candidate = await this.repository.get(id);
+    const evaluations = await evaluator.evaluate(candidate, body.suite as EvaluationSuite, harness);
+    let result = candidate;
+    for (const evaluation of evaluations) result = await this.repository.mutate(id, current => this.engine.evaluate(current, evaluation));
+    return result;
   }
   get(id: string): Promise<EvolutionCandidate> { return this.repository.get(id); }
   list(): Promise<EvolutionCandidate[]> { return this.repository.list(); }

@@ -14,8 +14,9 @@ import type { CandidateRunner, IndependentEvaluator } from '../collaboration.js'
 import type { DebateRecord } from '../collaboration-service.js';
 import { projectRunGraphs } from './graphs.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
+import type { RsiEvaluationHarness } from '../evaluation.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; collaboration?: CollaborationService; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -56,7 +57,7 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
-  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), collaborationConfigured: Boolean(options.collaboration), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
+  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), collaborationConfigured: Boolean(options.collaboration), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
   app.get('/api/goals', async () => options.domain ? options.domain.listGoals() : []);
   app.post('/api/goals', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
@@ -115,6 +116,10 @@ export function buildApp(options: Options) {
     if (!options.rsi) throw new Error('RSI service is not configured');
     const { id, action } = request.params;
     if (action === 'evaluate') return options.rsi.evaluate(id, request.body);
+    if (action === 'evaluate-suite') {
+      if (!options.rsiHarness) throw new Conflict('RSI evaluator is not configured');
+      return options.rsi.evaluateSuite(id, request.body, options.rsiHarness);
+    }
     if (action === 'approve') return options.rsi.approve(id, z.object({ approvalRef: z.string().min(1).max(200) }).strict().parse(request.body).approvalRef);
     if (action === 'promote') return options.rsi.promote(id);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);

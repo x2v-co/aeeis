@@ -11,6 +11,7 @@ import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { JsonFileStore } from '../src/adapters/json-store.js';
 import { AeeisService } from '../src/application/aeeis-service.js';
+import type { RsiEvaluationHarness } from '../src/evaluation.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -107,6 +108,20 @@ describe('AEEIS HTTP boundary', () => {
     expect(response.json().candidate.status).toBe('proposed');
     expect(response.json().correction.sourceRefs).toEqual([evidenceId]);
     expect((await app.inject({ method: 'GET', url: `/api/runs/${withMaterial.id}` })).json().corrections).toHaveLength(1);
+    await app.close(); await evolution.close(); await repo.close();
+  });
+
+  it('runs a bounded RSI evaluation suite through the HTTP boundary', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-suite-runs-'))); await repo.init();
+    const evolution = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-suite-rsi-'))); await evolution.init();
+    const rsi = new RsiService(evolution);
+    const candidate = await rsi.propose({ target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Cite evidence', sourceReceiptRefs: ['receipt.1'], reason: 'Correction', risk: 'low' });
+    const harness: RsiEvaluationHarness = { evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 0.9, evidenceRefs: [`${mode}.${testCase.id}`] }) };
+    const app = buildApp({ repository: repo, rsi, rsiHarness: harness });
+    const response = await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate-suite`, payload: { suite: { replay: [{ id: 'r1', input: {} }], holdout: [{ id: 'h1', input: {} }], safety: [{ id: 's1', input: {} }] } } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe('evaluating');
+    expect(response.json().evaluations).toHaveLength(3);
     await app.close(); await evolution.close(); await repo.close();
   });
 

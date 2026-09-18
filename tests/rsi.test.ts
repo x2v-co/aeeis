@@ -33,4 +33,25 @@ describe('persistent RSI service', () => {
     await expect(service.approve(candidate.id, 'approval.bad')).rejects.toThrow('pass');
     await repository.close();
   });
+
+  it('runs a bounded evaluation suite and persists one evidence-backed gate per mode', async () => {
+    const repository = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-evolution-suite-')));
+    await repository.init();
+    const service = new RsiService(repository);
+    const candidate = await service.propose(proposal);
+    const evaluated = await service.evaluateSuite(candidate.id, {
+      suite: {
+        replay: [{ id: 'replay.1', input: { goal: 'same' } }],
+        holdout: [{ id: 'holdout.1', input: { goal: 'new' } }],
+        safety: [{ id: 'safety.1', input: { goal: 'safe' } }],
+      },
+      minimumScore: 0.8,
+    }, {
+      evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 0.95, evidenceRefs: [`${mode}:${testCase.id}`] }),
+    });
+    expect(evaluated.status).toBe('evaluating');
+    expect(evaluated.evaluations.map(item => item.kind)).toEqual(['replay', 'holdout', 'safety']);
+    expect(evaluated.evaluations.every(item => item.passed)).toBe(true);
+    await repository.close();
+  });
 });

@@ -15,6 +15,7 @@ import { CollaborationService, FileCollaborationRepository } from './collaborati
 import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 import { JsonFileStore } from './adapters/json-store.js';
 import { AeeisService } from './application/aeeis-service.js';
+import { HttpRsiEvaluationHarness } from './evaluation.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -32,6 +33,9 @@ const collaboration = new CollaborationService(collaborationRepository);
 const domainStore = new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
 await domainStore.init();
 const domain = new AeeisService(domainStore);
+const rsiHarness = process.env.AEEIS_RSI_EVALUATOR_URL
+  ? new HttpRsiEvaluationHarness(process.env.AEEIS_RSI_EVALUATOR_URL, process.env.AEEIS_RSI_EVALUATOR_TOKEN)
+  : undefined;
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 let competitionRunner: ModelPoolCandidateRunner | undefined;
 let competitionEvaluator: ModelPoolIndependentEvaluator | undefined;
@@ -113,7 +117,7 @@ try {
     competitionEvaluator = new ModelPoolIndependentEvaluator(process.env.AEEIS_COMPETITION_EVALUATOR_AGENT_ID ?? 'agent.evaluator', new HttpModelAdapter(process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL, process.env.AEEIS_COMPETITION_EVALUATOR_MODEL, process.env.AEEIS_COMPETITION_EVALUATOR_API_KEY ?? ''));
     debateRunner = new ModelPoolDebateOrchestrator(collaboration, agents);
   }
-  const app = buildApp({ repository, domain, brain, brainStore, rsi, collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });
