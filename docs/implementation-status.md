@@ -8,7 +8,7 @@
 | Goal / Plan / Task / Memory 领域服务 | 已接入本地 API 并持久化 | `src/application/aeeis-service.ts`、`src/adapters/json-store.ts`；支持 Goal、Plan、Plan revision、Task transition、Receipt、Memory、Context Manifest；Run 的 failed/unknown/needs_input/cancelled 状态会同步到领域 Task Receipt；Task 转移将 Plan、Goal 完成状态及 Receipt 一次提交，并对读取的 Plan 快照做条件写检查；并发冲突重新读取和校验状态；JSON 领域事实源采用独占写锁、临时文件、`fsync`、原子替换和目录同步；`/api/goals/:id/runs` 将 Goal 关联到 Run，Planner 计划和节点执行会同步到领域 Plan/Receipt；两套事实源仍保持明确边界 |
 | 任务执行、证据和 Reviewer | 已实现并测试 | 仅能读取 Run 提供的来源；artifact 引用会校验 |
 | File 持久化 | 已实现并测试 | 原子替换、fsync、单写入者锁 |
-| PostgreSQL 持久化 | Run、Goal Domain、RSI candidate 和 activation 均有适配器 | `PostgresRunRepository`、`PostgresAeeisStore`、`PostgresEvolutionRepository` 和 `PostgresEvolutionActivationStore` 启动时创建表、索引并使用事务/JSONB 持久化；Task 转移和 RSI 生命周期在事务中锁定事实行；当前环境没有 PostgreSQL 服务，未做真实数据库验收；可设置 `AEEIS_TEST_DATABASE_URL` 运行集成测试 |
+| PostgreSQL 持久化 | Run、Goal Domain、RSI candidate 和 activation 均有适配器，并已完成本地真实验收 | `PostgresRunRepository`、`PostgresAeeisStore`、`PostgresEvolutionRepository` 和 `PostgresEvolutionActivationStore` 启动时创建表、索引并使用事务/JSONB 持久化；Task 转移和 RSI 生命周期在事务中锁定事实行；`tests/postgres-domain.test.ts`、`tests/postgres-runtime.test.ts`、`tests/postgres-evolution.test.ts` 在 PostgreSQL 17 上通过 5 个集成测试；CI 使用 PostgreSQL service 重复验收 |
 | Temporal Workflow / Worker | 已实现并实跑 | Activity 已抽出为独立协议边界：网络/限流/5xx 使用有界指数重试，认证/配置/协议错误标记为 durable non-retryable；Workflow 仍按 Run 状态等待 signal，并每 100 个 tick Continue-As-New；本地 Temporal fixture Run 已完成；生产部署、版本迁移仍未验收 |
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile；模型调用持久化稳定的 `model:<runId>:<callId>` provider 幂等键，恢复时复用原调用记录和 key；服务重启发现未完成 Tool/Agent 调用时会生成 durable unknown Receipt 并强制 provider reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现，并已接入 Runtime 的显式 `brainScope` 读取；Brain grant、state 和 API query 均做 schema 校验 | `FileBrainStore` 提供原子持久化、审计、导出和 scope 删除；Run 只在明确提供 scope 时读取，claim 以带 hash 的 Source 注入 Planner/Executor/Reviewer；尚未接入向量检索 |
@@ -30,6 +30,9 @@
 npm run typecheck
 npm test
 npm run build
+npm run test:postgres  # 需要 AEEIS_TEST_DATABASE_URL
 ```
 
 `tests/local-e2e.test.ts` 使用显式本地 fixture model，只证明协议和状态机能完成一次闭环，不证明任何真实模型的质量。
+
+跨存储 hash 使用递归 canonical JSON，避免 PostgreSQL JSONB 重排字段后误判 model pin、计划或证据发生变化。

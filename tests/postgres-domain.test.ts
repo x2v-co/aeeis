@@ -3,11 +3,14 @@ import { AeeisService } from '../src/application/aeeis-service.js';
 import { PostgresAeeisStore } from '../src/adapters/postgres-store.js';
 import { refreshReadyTasks, transitionTask } from '../src/domain/plan.js';
 
+import { isolatedPostgres } from './support/postgres.js';
+
 const databaseUrl = process.env.AEEIS_TEST_DATABASE_URL;
 
 describe('Postgres domain store', () => {
   it.skipIf(!databaseUrl)('commits concurrent transitions across connections and rolls back a receipt insert failure', async () => {
-    const first = new PostgresAeeisStore(databaseUrl!), second = new PostgresAeeisStore(databaseUrl!);
+    const db = await isolatedPostgres(databaseUrl!);
+    const first = new PostgresAeeisStore(db.url), second = new PostgresAeeisStore(db.url);
     await first.init(); await second.init();
     try {
       const service = new AeeisService(first), other = new AeeisService(second);
@@ -31,10 +34,11 @@ describe('Postgres domain store', () => {
       const completed = await service.getSnapshot(plan.id);
       expect(completed.goal.status).toBe('completed');
       expect(completed.receipts).toHaveLength(4);
-    } finally { await first.close(); await second.close(); }
+    } finally { await first.close(); await second.close(); await db.close(); }
   });
   it.skipIf(!databaseUrl)('persists the Goal domain across service instances', async () => {
-    const first = new PostgresAeeisStore(databaseUrl!);
+    const db = await isolatedPostgres(databaseUrl!);
+    const first = new PostgresAeeisStore(db.url);
     await first.init();
     const service = new AeeisService(first);
     const goal = await service.createGoal({ title: 'Postgres domain fixture' });
@@ -43,13 +47,13 @@ describe('Postgres domain store', () => {
     await service.addMemory(goal.id, { kind: 'decision', content: 'Persist receipts in PostgreSQL' });
     await first.close();
 
-    const second = new PostgresAeeisStore(databaseUrl!);
+    const second = new PostgresAeeisStore(db.url);
     await second.init();
     const restored = await new AeeisService(second).getSnapshot(plan.id);
     expect(restored.goal.id).toBe(goal.id);
     expect(restored.plan.nodes[0]?.status).toBe('running');
     expect(restored.receipts).toHaveLength(1);
     expect(restored.memories).toHaveLength(1);
-    await second.close();
+    await second.close(); await db.close();
   });
 });

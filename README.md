@@ -19,6 +19,12 @@ npm run typecheck
 npm run dev
 ```
 
+有 PostgreSQL 时可运行真实集成验收；测试会为每个用例创建隔离 schema，并在结束时删除：
+
+```bash
+AEEIS_TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/aeeis_test npm run test:postgres
+```
+
 服务默认监听 `http://127.0.0.1:4323`，工作台位于 `/`。没有模型配置时，页面只显示配置状态，创建运行会返回 `503`，不会生成模拟成功结果。
 
 如果设置 `AEEIS_MODEL_HEALTH_URL`，`/readyz` 会用同一模型凭证探测 provider；探针失败会明确返回未就绪。未设置探针时，模型配置仍可用，但就绪信息会标明 provider health probe 未启用。

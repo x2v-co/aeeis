@@ -14,7 +14,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "worker": "node dist/temporal/worker.js",
-    "test:runtime": "vitest run tests/runtime.test.ts tests/model-http.test.ts tests/http-runtime.test.ts tests/protocol-evolution.test.ts tests/integrations-brain.test.ts"
+    "test:runtime": "vitest run tests/runtime.test.ts tests/model-http.test.ts tests/http-runtime.test.ts tests/protocol-evolution.test.ts tests/integrations-brain.test.ts",
+    "test:postgres": "node scripts/test-postgres.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
