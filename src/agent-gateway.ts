@@ -121,14 +121,20 @@ export class AgentGateway {
     return outcome;
   }
 
-  async reconcile(idempotencyKey: string): Promise<DelegationOutcome> {
-    const entry = this.inFlight.get(idempotencyKey);
-    if (!entry) throw new Error('Unknown delegation idempotency key');
-    if (!entry.outcome || entry.outcome.status !== 'unknown') throw new Error('Delegation does not require reconciliation');
+  async reconcile(idempotencyKey: string): Promise<DelegationOutcome>;
+  async reconcile(request: DelegationRequest, persistedReceipt?: DelegationReceipt): Promise<DelegationOutcome>;
+  async reconcile(input: string | DelegationRequest, persistedReceipt?: DelegationReceipt): Promise<DelegationOutcome> {
+    const entry = typeof input === 'string' ? this.inFlight.get(input) : undefined;
+    const request = typeof input === 'string' ? entry?.request : validateRequest(input);
+    if (!request) throw new Error('Unknown delegation idempotency key');
+    const card = typeof input === 'string' ? entry?.card : this.directory.get(request.agentId);
+    if (!card) throw new Error('Agent is not admitted');
+    const receipt = persistedReceipt ?? entry?.outcome?.receipt;
+    if (!receipt || receipt.status !== 'unknown') throw new Error('Delegation does not require reconciliation');
     if (!this.transport.reconcile) throw new Error('Agent transport does not support reconciliation');
-    const response = await this.transport.reconcile(entry.card, entry.request, entry.outcome.receipt);
-    const outcome = validateResponse(entry.request, response);
-    this.inFlight.set(idempotencyKey, { ...entry, outcome });
+    const response = await this.transport.reconcile(card, request, receipt);
+    const outcome = validateResponse(request, response);
+    this.inFlight.set(request.idempotencyKey, { request, card, outcome });
     return outcome;
   }
 }

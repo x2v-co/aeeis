@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Receipt, ToolInvocation } from '../integrations.js';
-import type { DelegationRequest } from '../agent-gateway.js';
+import type { DelegationReceipt, DelegationRequest } from '../agent-gateway.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -43,7 +43,7 @@ export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string };
-export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean };
+export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean; receiptRef?: string };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export interface Source { id: string; title: string; content: string; source: string; hash: string }
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; hash: string; createdAt: string }
@@ -73,7 +73,7 @@ export interface AgentRun {
   skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string };
   skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string };
   toolReceipts: Receipt[]; pendingTool?: ExternalToolInvocation; pendingDelegation?: PendingDelegation;
-  delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; result?: unknown }>;
+  delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };

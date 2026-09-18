@@ -332,15 +332,18 @@ export class AgentEngine {
   private async executePendingDelegation(run: AgentRun): Promise<void> {
     const pending = run.pendingDelegation;
     if (!pending || !this.agents) throw new Error('Pending external Agent cannot run without an Agent gateway');
-    const outcome = pending.reconcileRequested ? await this.agents.reconcile(pending.idempotencyKey) : await this.agents.delegate(pending);
+    const persistedReceipt = pending.receiptRef ? currentDelegationReceipt(run, pending.receiptRef) : undefined;
+    const outcome = pending.reconcileRequested
+      ? await this.agents.reconcile(pending, persistedReceipt)
+      : await this.agents.delegate(pending);
     await this.repository.mutate(run.id, current => {
       const live = current.steps.find(step => step.taskId === pending.taskBrief.taskId);
       current.delegationOutcomes ??= [];
-      const entry = { idempotencyKey: pending.idempotencyKey, status: outcome.status, receiptRef: outcome.receipt.receiptRef, ...(outcome.result ? { result: outcome.result } : {}) };
+      const entry = { idempotencyKey: pending.idempotencyKey, status: outcome.status, receiptRef: outcome.receipt.receiptRef, contextVersion: pending.contextPack.id, receipt: outcome.receipt, ...(outcome.result ? { result: outcome.result } : {}) };
       const existing = current.delegationOutcomes.findIndex(item => item.idempotencyKey === pending.idempotencyKey);
       if (existing >= 0) current.delegationOutcomes[existing] = entry; else current.delegationOutcomes.push(entry);
       if (outcome.status === 'unknown') {
-        current.pendingDelegation = { ...pending, reconcileRequested: false };
+        current.pendingDelegation = { ...pending, receiptRef: outcome.receipt.receiptRef, reconcileRequested: false };
         current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External Agent outcome is unknown; reconcile the provider before retrying.';
         event(current, pending.reconcileRequested ? 'agent.reconciled' : 'agent.unknown', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef, outcome: 'unknown' });
         return;
@@ -404,6 +407,10 @@ export class AgentEngine {
     const current = await this.tools.listTools();
     if (digest(current) !== run.toolManifestDigest) throw new Error('Toolkit manifest changed after approval; create a new run to pin the new tool versions');
   }
+}
+
+function currentDelegationReceipt(run: AgentRun, receiptRef: string): import('../agent-gateway.js').DelegationReceipt | undefined {
+  return run.delegationOutcomes?.find(item => item.receiptRef === receiptRef)?.receipt;
 }
 
 function validateToolResult(request: { toolId: string; taskId: string }, result: ToolResult): void {

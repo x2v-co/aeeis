@@ -334,4 +334,24 @@ describe('AEEIS runtime', () => {
     expect((await repo.get(run.id)).status).toBe('succeeded');
     await repo.close();
   });
+
+  it('reconciles a pending external Agent after a Runtime restart', async () => {
+    const repo = await repository();
+    const card: AgentCard = { schemaVersion: 'agent-card/1', agentId: 'agent.partner', name: 'Partner', owner: 'partner', protocols: ['aeeis-task/1'], capabilities: ['research'], inputSchemas: ['task-brief/1'], outputSchemas: ['result-envelope/1'], auth: ['local'], privacy: { dataRetention: 'session', regions: ['local'] }, pricing: { unit: 'run' }, cardVersion: '1' };
+    const directory = new AgentDirectory(); directory.register(card);
+    const unknownTransport = { submit: async () => ({ status: 'unknown' as const, receiptRef: 'receipt.pending' }) };
+    const firstGateway = new AgentGateway(directory, unknownTransport);
+    const first = new AgentEngine(repo, { model: new DelegationFixture(), agents: firstGateway });
+    const run = await first.create({ goal: 'Recover delegated work', allowedAgents: ['agent.partner'] });
+    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.advance(run.id); expect(await first.advance(run.id)).toBe('unknown');
+    const unknownCurrent = await repo.get(run.id);
+    const recoveredGateway = new AgentGateway(directory, { submit: async () => ({ status: 'unknown' as const, receiptRef: 'unused' }), reconcile: async (_card, _request, receipt) => ({ status: 'completed' as const, receiptRef: 'receipt.after-restart', result: { schemaVersion: 'result-envelope/1' as const, taskId: 'delegate', agentId: 'agent.partner', status: 'completed' as const, resultType: 'research/1', summary: 'reconciled', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: unknownCurrent.pendingDelegation!.contextPack.id, receiptRef: 'receipt.after-restart' } }) });
+    const recovered = new AgentEngine(repo, { model: new DelegationFixture(), agents: recoveredGateway });
+    expect((await recovered.command(run.id, 'reconcile', { reason: 'Recovered provider receipt after restart' })).status).toBe('running');
+    const recoveredStatus = await recovered.advance(run.id);
+    expect(recoveredStatus).toBe('running');
+    expect((await repo.get(run.id)).delegationOutcomes?.at(-1)?.receiptRef).toBe('receipt.after-restart');
+    await repo.close();
+  });
 });
