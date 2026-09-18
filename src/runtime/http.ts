@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { AgentEngine, Conflict, event } from './engine.js';
+import { AgentEngine, Conflict, digest, event } from './engine.js';
 import { NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
 import { brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema, type GovernedBrain } from '../brain.js';
@@ -264,10 +264,30 @@ export function buildApp(options: Options) {
     return options.projection.list(status);
   });
   app.post('/api/collaborations/projections', async request => {
-    if (!options.collaboration || !options.projection) throw new Conflict('Collaboration projection is not configured');
-    const body = z.object({ channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500), aggregateType: z.enum(['debate', 'competition']), aggregateId: z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/), idempotencyKey: z.string().trim().min(1).max(500).optional() }).strict().parse(request.body);
-    const record = body.aggregateType === 'debate' ? await options.collaboration.getDebate(body.aggregateId) : await options.collaboration.getCompetition(body.aggregateId);
-    return options.projection.enqueue({ ...body, payload: record, idempotencyKey: body.idempotencyKey ?? `${body.channel}:${body.aggregateType}:${body.aggregateId}:${record.updatedAt}` });
+    if (!options.projection) throw new Conflict('Projection outbox is not configured');
+    const body = z.object({ channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500), aggregateType: z.enum(['debate', 'competition', 'goal', 'plan', 'task', 'run']), aggregateId: z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/), idempotencyKey: z.string().trim().min(1).max(500).optional() }).strict().parse(request.body);
+    let record: unknown;
+    if (body.aggregateType === 'debate' || body.aggregateType === 'competition') {
+      if (!options.collaboration) throw new Conflict('Collaboration service is not configured');
+      record = body.aggregateType === 'debate' ? await options.collaboration.getDebate(body.aggregateId) : await options.collaboration.getCompetition(body.aggregateId);
+    } else if (body.aggregateType === 'run') {
+      record = await options.repository.get(body.aggregateId);
+    } else {
+      if (!options.domain) throw new Conflict('Goal domain is not configured');
+      if (body.aggregateType === 'goal') record = await options.domain.getGoal(body.aggregateId);
+      else if (body.aggregateType === 'plan') record = await options.domain.getSnapshot(body.aggregateId);
+      else {
+        const separator = body.aggregateId.indexOf('.');
+        if (separator <= 0 || separator === body.aggregateId.length - 1) throw new Conflict('Task projection ID must be planId.taskId');
+        const planId = body.aggregateId.slice(0, separator); const taskId = body.aggregateId.slice(separator + 1);
+        const snapshot = await options.domain.getSnapshot(planId);
+        const task = snapshot.plan.nodes.find(node => node.id === taskId);
+        if (!task) throw new AeeisNotFound(`Unknown task: ${taskId}`);
+        record = { planId, goalId: snapshot.goal.id, task };
+      }
+    }
+    const recordVersion = record && typeof record === 'object' && typeof (record as Record<string, unknown>).updatedAt === 'string' ? (record as Record<string, unknown>).updatedAt : digest(record);
+    return options.projection.enqueue({ ...body, payload: record, idempotencyKey: body.idempotencyKey ?? `${body.channel}:${body.aggregateType}:${body.aggregateId}:${recordVersion}` });
   });
   app.post<{ Params: { id: string } }>('/api/collaborations/projections/:id/deliver', async request => {
     if (!options.projection || !options.projectionSink) throw new Conflict('Projection sink is not configured');

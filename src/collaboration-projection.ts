@@ -9,7 +9,7 @@ const aggregateId = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const projectionEventSchema = z.object({
   schemaVersion: z.literal(1), id: projectionId, idempotencyKey: z.string().min(1).max(500),
   channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500),
-  aggregateType: z.enum(['debate', 'competition']), aggregateId, snapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
+  aggregateType: z.enum(['debate', 'competition', 'goal', 'plan', 'task', 'run']), aggregateId, snapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
   payload: z.unknown(), status: z.enum(['pending', 'failed', 'unknown', 'delivered']), attempts: z.number().int().nonnegative(),
   createdAt: isoDate, updatedAt: isoDate, lastError: z.string().max(4000).optional(), deliveredAt: isoDate.optional(), externalId: z.string().max(500).optional(),
 }).strict();
@@ -168,14 +168,15 @@ function projectionClassification(payload: unknown): 'public' | 'internal' | 'co
   const record = payload as Record<string, unknown>;
   const nested = record.room && typeof record.room === 'object' ? record.room as Record<string, unknown> : record.brief && typeof record.brief === 'object' ? record.brief as Record<string, unknown> : undefined;
   const context = nested?.context;
-  if (!context || typeof context !== 'object') return undefined;
-  const value = (context as Record<string, unknown>).classification;
-  return value === 'public' || value === 'internal' || value === 'confidential' || value === 'private' ? value : undefined;
+  const value = context && typeof context === 'object' ? (context as Record<string, unknown>).classification : undefined;
+  if (value === 'public' || value === 'internal' || value === 'confidential' || value === 'private') return value;
+  const privacy = record.privacy;
+  return privacy === 'public' || privacy === 'internal' || privacy === 'confidential' || privacy === 'private' ? privacy : undefined;
 }
 
 function makeFeishuCard(event: ProjectionEvent): Record<string, unknown> {
   const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-  const title = event.aggregateType === 'debate' ? 'AEEIS Debate 更新' : 'AEEIS Competition 更新';
+  const title = event.aggregateType === 'debate' ? 'AEEIS Debate 更新' : event.aggregateType === 'competition' ? 'AEEIS Competition 更新' : `AEEIS ${event.aggregateType} 更新`;
   const status = typeof payload.status === 'string' ? payload.status : 'updated';
   const lines = [`**${title}**`, `状态：${status}`, `对象：${event.aggregateId}`, `幂等键：${event.idempotencyKey}`];
   if (event.aggregateType === 'debate') {
@@ -188,11 +189,18 @@ function makeFeishuCard(event: ProjectionEvent): Record<string, unknown> {
       const item = message as Record<string, unknown>;
       lines.push(`- ${truncate(String(item.speakerAgentId ?? 'agent'), 80)} / ${String(item.type ?? 'message')}：${truncate(String(item.content ?? ''), 800)}`);
     }
-  } else {
+  } else if (event.aggregateType === 'competition') {
     const brief = payload.brief && typeof payload.brief === 'object' ? payload.brief as Record<string, unknown> : {};
     if (typeof brief.goal === 'string' && brief.goal) lines.push(`目标：${truncate(brief.goal, 500)}`);
     lines.push(`候选：${Array.isArray(payload.candidates) ? payload.candidates.length : 0} 个`, `评分：${Array.isArray(payload.scores) ? payload.scores.length : 0} 个`);
     if (typeof payload.selectedAgentId === 'string') lines.push(`选定：${payload.selectedAgentId}`);
+  } else {
+    const snapshot = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot as Record<string, unknown> : payload;
+    if (typeof snapshot.title === 'string') lines.push(`标题：${truncate(snapshot.title, 500)}`);
+    if (typeof snapshot.status === 'string') lines.push(`状态：${snapshot.status}`);
+    if (typeof snapshot.goal === 'string') lines.push(`目标：${truncate(snapshot.goal, 500)}`);
+    if (Array.isArray(snapshot.nodes)) lines.push(`节点：${snapshot.nodes.length} 个`);
+    if (typeof snapshot.taskId === 'string') lines.push(`任务：${snapshot.taskId}`);
   }
   return { config: { wide_screen_mode: true }, header: { template: status === 'failed' ? 'red' : status === 'completed' || status === 'closed' ? 'green' : 'blue', title: { tag: 'plain_text', content: title } }, elements: [{ tag: 'div', text: { tag: 'lark_md', content: lines.join('\n') } }] };
 }

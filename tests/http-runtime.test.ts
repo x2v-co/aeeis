@@ -237,6 +237,22 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await projection.close(); await collaboration.close(); await repo.close();
   });
 
+  it('projects canonical Goal, Plan and Task snapshots through the same outbox', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-domain-projection-runs-'))); await repo.init();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-http-domain-projection-')), 'domain.json')); await domainStore.init();
+    const domain = new AeeisService(domainStore);
+    const goal = await domain.createGoal({ title: 'Project this goal' });
+    const plan = await domain.createPlan({ goalId: goal.id, nodes: [{ id: 'draft', title: 'Draft' }] });
+    const projection = new FileProjectionOutbox(await mkdtemp(join(tmpdir(), 'aeeis-http-domain-projection-outbox-'))); await projection.init();
+    const app = buildApp({ repository: repo, domain, projection });
+    const goalEvent = await app.inject({ method: 'POST', url: '/api/collaborations/projections', payload: { channel: 'tasks', destination: 'project.1', aggregateType: 'goal', aggregateId: goal.id } });
+    const planEvent = await app.inject({ method: 'POST', url: '/api/collaborations/projections', payload: { channel: 'tasks', destination: 'project.1', aggregateType: 'plan', aggregateId: plan.id } });
+    const taskEvent = await app.inject({ method: 'POST', url: '/api/collaborations/projections', payload: { channel: 'tasks', destination: 'project.1', aggregateType: 'task', aggregateId: `${plan.id}.draft` } });
+    expect(goalEvent.statusCode).toBe(200); expect(planEvent.statusCode).toBe(200); expect(taskEvent.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/collaborations/projections?status=pending' })).json()).toHaveLength(3);
+    await app.close(); await projection.close(); await domainStore.close(); await repo.close();
+  });
+
   it('exposes durable competition and debate collaboration endpoints', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-collab-runs-'))); await repo.init();
     const collaboration = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-collab-'))); await collaboration.init();
