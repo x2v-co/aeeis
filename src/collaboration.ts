@@ -15,7 +15,7 @@ export const candidateScoreSchema = z.object({
   agentId: id, score: z.number().min(0).max(1), accepted: z.boolean(),
   reasons: z.array(z.string().max(2000)).max(50), evidenceRefs: z.array(id).max(100),
 }).strict();
-export interface CompetitionResult { brief: CompetitionBrief; candidates: ResultEnvelope[]; scores: CandidateScore[]; selected?: ResultEnvelope; status: 'completed' | 'partial' | 'failed'; }
+export interface CompetitionResult { brief: CompetitionBrief; candidates: ResultEnvelope[]; scores: CandidateScore[]; selected?: ResultEnvelope; status: 'completed' | 'partial' | 'failed'; failureReason?: string }
 export interface CandidateRunner { run(brief: CompetitionBrief, isolation: { candidateId: string; cannotSeeCandidateIds: string[] }): Promise<ResultEnvelope>; }
 export interface IndependentEvaluator { evaluate(brief: CompetitionBrief, candidates: ReadonlyArray<ResultEnvelope>): Promise<CandidateScore[]>; }
 
@@ -23,6 +23,7 @@ export async function runCompetition(briefInput: CompetitionBrief, runner: Candi
   const brief = competitionBriefSchema.parse(briefInput);
   if (new Set(brief.participantAgentIds).size !== brief.participantAgentIds.length) throw new Error('Competition participants must be unique');
   const settled = await Promise.allSettled(brief.participantAgentIds.map(agentId => runner.run(brief, { candidateId: agentId, cannotSeeCandidateIds: brief.participantAgentIds.filter(id => id !== agentId) })));
+  const failures = settled.flatMap(item => item.status === 'rejected' ? [item.reason instanceof Error ? item.reason.message : 'candidate runner failed'] : []);
   const candidates = settled.flatMap((item, index) => {
     if (item.status !== 'fulfilled') return [];
     const parsed = resultEnvelopeSchema.safeParse(item.value);
@@ -32,7 +33,7 @@ export async function runCompetition(briefInput: CompetitionBrief, runner: Candi
     if (candidate.agentId !== expectedAgentId || candidate.taskId !== brief.taskId || candidate.contextVersion !== brief.contextVersion || candidate.resultType !== brief.expectedResultType) return [];
     return [candidate];
   });
-  if (candidates.length === 0) return { brief, candidates: [], scores: [], status: 'failed' };
+  if (candidates.length === 0) return { brief, candidates: [], scores: [], status: 'failed', failureReason: failures.length ? `No valid candidate completed the isolated run: ${failures.slice(0, 3).join('; ')}` : 'No valid candidate completed the isolated run' };
   const aliases = new Map(candidates.map((candidate, index) => [`candidate_${index + 1}`, candidate.agentId]));
   const evaluationBrief = brief.blindEvaluation
     ? { ...brief, participantAgentIds: [...aliases.keys()] }

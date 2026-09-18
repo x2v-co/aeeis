@@ -10,6 +10,7 @@ import { receiptSchema } from '../integrations.js';
 import type { ToolGateway, SkillGovernance, ModelSelectionRequest, Receipt, ToolResult } from '../integrations.js';
 import type { ModelResolver } from './model-router.js';
 import { AgentGateway } from '../agent-gateway.js';
+import type { DelegationReceipt } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
@@ -97,12 +98,37 @@ export class AgentEngine {
   }
   async recover(): Promise<void> {
     for (const run of await this.repository.list()) {
-      if (run.calls.some(c => c.state === 'started')) {
+      if (run.calls.some(c => c.state === 'started') || (run.pendingTool && !run.pendingTool.receiptId) || (run.pendingDelegation && !run.pendingDelegation.receiptRef)) {
         await this.repository.mutate(run.id, current => {
           for (const call of current.calls.filter(c => c.state === 'started')) call.state = 'unknown';
           if (current.status !== 'cancelled') {
             current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
             current.status = 'unknown'; current.error = 'Execution interrupted during a model request. Explicit reconciliation is required before another billable call.';
+          }
+          if (current.pendingTool && !current.pendingTool.receiptId) {
+            const pending = current.pendingTool;
+            const receipt = receiptSchema.parse({
+              schemaVersion: 'receipt/1', receiptId: `receipt_${randomUUID()}`, provider: 'aeeis-recovery', operation: pending.toolId,
+              requestHash: digest(pending), inputRefs: [pending.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: pending.requestedAt,
+              completedAt: now(), status: 'unknown', errorCode: 'worker_interrupted',
+            });
+            current.toolReceipts ??= [];
+            current.toolReceipts.push(receipt);
+            current.pendingTool = { ...pending, receiptId: receipt.receiptId };
+            current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External tool execution was interrupted; reconcile the provider before retrying.';
+            event(current, 'tool.interrupted', { taskId: pending.taskId, toolId: pending.toolId, receiptId: receipt.receiptId });
+          }
+          if (current.pendingDelegation && !current.pendingDelegation.receiptRef) {
+            const pending = current.pendingDelegation;
+            const receipt: DelegationReceipt = {
+              receiptRef: `receipt_${randomUUID()}`, agentId: pending.agentId, taskId: pending.taskBrief.taskId,
+              idempotencyKey: pending.idempotencyKey, status: 'unknown', contextVersion: pending.contextPack.id, acknowledgedAt: now(),
+            };
+            current.delegationOutcomes ??= [];
+            current.delegationOutcomes.push({ idempotencyKey: pending.idempotencyKey, status: 'unknown', receiptRef: receipt.receiptRef, contextVersion: pending.contextPack.id, receipt });
+            current.pendingDelegation = { ...pending, receiptRef: receipt.receiptRef };
+            current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External Agent execution was interrupted; reconcile the provider before retrying.';
+            event(current, 'agent.interrupted', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: receipt.receiptRef });
           }
           event(current, 'run.interrupted');
         });

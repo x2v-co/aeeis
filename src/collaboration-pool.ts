@@ -60,11 +60,15 @@ export class ModelPoolDebateOrchestrator {
     let record = await this.service.getDebate(debateId);
     if (record.status !== 'active') return record;
     try {
-      for (let round = 1; round <= record.room.maxRounds && record.status === 'active'; round += 1) {
+      const highestRound = record.room.messages.reduce((highest, message) => Math.max(highest, message.round), 0);
+      for (let round = Math.max(1, highestRound); round <= record.room.maxRounds && record.status === 'active'; round += 1) {
         let reachedDecision = false;
         for (const agentId of record.room.participantAgentIds) {
           record = await this.service.getDebate(debateId);
           if (record.status !== 'active') break;
+          const existing = record.room.messages.filter(message => message.round === round);
+          if (existing.some(message => message.type === 'decision')) return this.service.closeDebate(debateId, `Debate reached a decision in round ${round}`);
+          if (existing.some(message => message.speakerAgentId === agentId)) continue;
           const agent = this.agents.get(agentId);
           if (!agent) throw new Error(`Debate participant ${agentId} is not configured`);
           const response = await agent.complete({ system: debateSystem, input: { room: record.room, round, speakerAgentId: agentId } });

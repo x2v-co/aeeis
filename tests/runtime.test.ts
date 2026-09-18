@@ -465,6 +465,29 @@ describe('AEEIS runtime', () => {
     await repo.close();
   });
 
+  it('turns an interrupted pending Tool into an unknown receipt during recovery', async () => {
+    const repo = await repository();
+    const tools: ToolGateway = {
+      listTools: async () => [{ id: 'fixture.lookup', version: '1', capabilities: ['read'], inputSchema: {}, outputSchema: {} }],
+      invoke: async () => { throw new Error('must reconcile after restart'); },
+      reconcile: async (_request, receipt) => ({ status: 'completed', output: { recovered: true }, outputRefs: ['recovered.output'], receipt: { ...receipt, status: 'completed', completedAt: new Date().toISOString(), responseHash: 'c'.repeat(64), outputRefs: ['recovered.output'] } }),
+    };
+    const first = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
+    const run = await first.create({ goal: 'Recover tool call', allowedTools: ['fixture.lookup'] });
+    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.advance(run.id);
+    await repo.mutate(run.id, saved => { saved.status = 'running'; delete saved.pendingTool!.receiptId; });
+    const recovered = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
+    await recovered.recover();
+    current = await repo.get(run.id);
+    expect(current.status).toBe('unknown');
+    expect(current.toolReceipts.at(-1)?.status).toBe('unknown');
+    expect(await recovered.command(run.id, 'reconcile', { reason: 'Provider confirmed the idempotent tool receipt' })).toMatchObject({ status: 'running' });
+    expect(await recovered.advance(run.id)).toBe('running');
+    expect((await repo.get(run.id)).toolReceipts.at(-1)?.status).toBe('completed');
+    await repo.close();
+  });
+
   it('retrieves classified knowledge into the Runtime source catalog', async () => {
     const repo = await repository();
     const knowledge = new InMemoryKnowledgeProvider([makeKnowledgeRecord({ id: 'knowledge.runtime', title: 'Runtime note', content: 'Use durable execution', source: 'owned-wiki', classification: 'internal', tags: ['runtime'], updatedAt: '2026-09-18T00:00:00.000Z' }), makeKnowledgeRecord({ id: 'knowledge.private', title: 'Private note', content: 'Do not disclose', source: 'private', classification: 'private', tags: [], updatedAt: '2026-09-18T00:00:00.000Z' })]);

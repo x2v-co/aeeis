@@ -231,19 +231,24 @@ export class CollaborationService {
     const current = await this.repository.getCompetition(idValue);
     if (current.status !== 'collecting') throw new Error('Competition is no longer collecting candidates');
     if (current.brief.participantAgentIds.includes(evaluatorAgentId)) throw new Error('Evaluator must be independent from participants');
-    const result = await executeCompetition(current.brief, runner, evaluator);
-    for (const candidate of result.candidates) await this.submitCandidate(idValue, candidate);
-    if (result.candidates.length === 0) return this.failCompetition(idValue, 'No valid candidate completed the isolated run');
-    await this.beginEvaluation(idValue, evaluatorAgentId);
-    const aliases = new Map(result.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
-    const viewScores = result.scores.map(score => ({ ...score, agentId: current.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
-    let persisted = await this.repository.getCompetition(idValue);
-    for (const score of viewScores) {
-      if (persisted.status !== 'evaluating') break;
-      persisted = await this.submitScore(idValue, evaluatorAgentId, score);
+    try {
+      const result = await executeCompetition(current.brief, runner, evaluator);
+      for (const candidate of result.candidates) await this.submitCandidate(idValue, candidate);
+      if (result.candidates.length === 0) return this.failCompetition(idValue, result.failureReason ?? 'No valid candidate completed the isolated run');
+      await this.beginEvaluation(idValue, evaluatorAgentId);
+      const aliases = new Map(result.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
+      const viewScores = result.scores.map(score => ({ ...score, agentId: current.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
+      let persisted = await this.repository.getCompetition(idValue);
+      for (const score of viewScores) {
+        if (persisted.status !== 'evaluating') break;
+        persisted = await this.submitScore(idValue, evaluatorAgentId, score);
+      }
+      if (persisted.status === 'evaluating') return this.finalizePartialCompetition(idValue, 'Evaluator returned an incomplete score set');
+      return persisted;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Competition runner or evaluator failed';
+      return this.failCompetition(idValue, `Competition execution failed: ${reason}`);
     }
-    if (persisted.status === 'evaluating') return this.finalizePartialCompetition(idValue, 'Evaluator returned an incomplete score set');
-    return persisted;
   }
 
   failCompetition(idValue: string, reason: string): Promise<CompetitionRecord> {

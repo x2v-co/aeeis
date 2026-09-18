@@ -52,6 +52,19 @@ describe('durable collaboration service', () => {
     await repository.close();
   });
 
+  it('durably marks runner and evaluator failures instead of leaving a collecting competition', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collaboration-failure-')));
+    await repository.init();
+    try {
+      const service = new CollaborationService(repository);
+      const created = await service.createCompetition({ schemaVersion: 'competition-brief/1', taskId: 'task.failure', contextVersion: 'ctx.failure', goal: 'Fail safely', participantAgentIds: ['agent.one', 'agent.two'], expectedResultType: 'result/1', maxRounds: 1, blindEvaluation: false });
+      const failed = await service.runCompetition(created.id, 'agent.evaluator', { run: async () => { throw new Error('candidate unavailable'); } }, { evaluate: async () => { throw new Error('should not run'); } });
+      expect(failed.status).toBe('failed');
+      expect(failed.failureReason).toContain('candidate unavailable');
+      expect((await service.getCompetition(created.id)).status).toBe('failed');
+    } finally { await repository.close(); }
+  });
+
   it('persists bounded debate messages and close state', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-'))); await repository.init();
     const service = new CollaborationService(repository);
