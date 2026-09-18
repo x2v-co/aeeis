@@ -45,6 +45,21 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await repo.close();
   });
 
+  it('reports a configured model provider probe failure in readiness diagnostics', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-model-probe-runs-'))); await repo.init();
+    const model: ModelAdapter = {
+      pin: { model: 'fixture', endpoint: 'http://127.0.0.1/chat/completions', promptVersion: 'fixture/1' },
+      complete: async () => ({ value: {} }),
+      health: async () => ({ ready: false, detail: 'provider health probe returned HTTP 503', checkedAt: new Date().toISOString() }),
+    };
+    const app = buildApp({ repository: repo, engine: new AgentEngine(repo, model) });
+    const ready = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json().checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'model', ready: false, detail: 'provider health probe returned HTTP 503' })]));
+    expect((await app.inject({ method: 'GET', url: '/api/status' })).json().modelHealth).toMatchObject({ ready: false });
+    await app.close(); await repo.close();
+  });
+
   it('exposes the three graph projections for a persisted run', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-graphs-'))); await repo.init();
     const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1/chat/completions', promptVersion: 'fixture/1' }, complete: async () => ({ value: { summary: 'Plan', nodes: [{ id: 'one', title: 'One', instruction: 'One', dependsOn: [] }] } }) };
