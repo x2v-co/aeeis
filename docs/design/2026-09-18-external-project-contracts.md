@@ -77,6 +77,8 @@ Temporal 仅承担执行耐久性：Workflow、Activity、Timer、Signal、Retry
 
 外部任务系统只通过投影 API 或事件同步 Goal/Task 的允许字段；外部知识系统只通过 Connector 产生 Source/Claim/Artifact 引用。AEEIS 负责授权过滤、规范化、版本、撤销、引用和写回。
 
+当前实现将知识系统抽象为 `KnowledgeProvider`：Provider 只返回带 classification、source、content hash 和 score 的知识记录，Context Manifest 再按 audience 和允许分类形成最小上下文。AEEIS 不把 Provider 返回的内容当作指令；真实向量索引（如 pgvector）可以替换 Provider，而不改变任务、授权和 Evidence Graph 语义。
+
 ## 统一 Receipt 要求
 
 所有外部调用都返回可验证 Receipt，至少包括：

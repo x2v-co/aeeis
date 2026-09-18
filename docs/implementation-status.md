@@ -20,7 +20,8 @@
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 尚未接入真实内部 Agent pool、竞争 Workflow 持久化编排或外部 Agent endpoint |
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现 | 飞书渠道和 Hermes skill 尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |
-| React、pgvector、生产运维 | 未实现 | 当前 UI 是 TypeScript DOM，索引层尚未接入 pgvector |
+| Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引和 HTTPS HTTP adapter；Context Manifest 可绑定受分类策略过滤的知识引用 | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
+| React、生产运维 | 未实现 | 当前 UI 是 TypeScript DOM；生产部署、监控、迁移、备份和安全验收仍缺失 |
 
 测试命令：
 

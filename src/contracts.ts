@@ -54,6 +54,8 @@ export interface ContextManifest {
   audience: string[];
   memoryRefs: Id[];
   included: Array<Pick<MemoryEntry, "id" | "kind" | "content" | "source" | "confidence">>;
+  knowledgeRefs?: Id[];
+  includedKnowledge?: Array<{ id: Id; title: string; content: string; source: string; classification: "public" | "internal" | "confidential" | "private"; contentHash: string; score: number }>;
   excluded: string[];
   createdAt: string;
 }
@@ -113,6 +115,7 @@ export interface CreateContextInput {
   query?: string;
   audience?: string[];
   maxItems?: number;
+  knowledgeClassifications?: Array<"public" | "internal" | "confidential" | "private">;
 }
 
 export interface CreatePlanInput {

@@ -15,6 +15,7 @@ import type {
 } from "../contracts.js";
 import { createPlan, refreshReadyTasks, transitionTask } from "../domain/plan.js";
 import type { AeeisStore } from "../adapters/in-memory-store.js";
+import type { KnowledgeProvider } from "../knowledge.js";
 
 export class AeeisService {
   public constructor(private readonly store: AeeisStore) {}
@@ -126,6 +127,18 @@ export class AeeisService {
     };
     this.store.saveContextManifest(manifest);
     return manifest;
+  }
+
+  async createContextManifestWithKnowledge(goalId: Id, input: CreateContextInput, knowledge: KnowledgeProvider, now = new Date().toISOString()): Promise<ContextManifest> {
+    const manifest = this.createContextManifest(goalId, input, now);
+    const hits = await knowledge.search({
+      query: input.query ?? '', maxItems: Math.max(1, Math.min(input.maxItems ?? 8, 50)),
+      allowedClassifications: input.knowledgeClassifications ?? ['public', 'internal'], audience: input.audience?.[0] ?? 'owner',
+    });
+    const includedKnowledge = hits.map(({ record, score }) => ({ id: record.id, title: record.title, content: record.content.slice(0, 4000), source: record.source, classification: record.classification, contentHash: record.contentHash, score }));
+    const next: ContextManifest = { ...manifest, knowledgeRefs: includedKnowledge.map(item => item.id), includedKnowledge };
+    this.store.saveContextManifest(next);
+    return next;
   }
 
   getSnapshot(planId: Id): AeeisSnapshot {
