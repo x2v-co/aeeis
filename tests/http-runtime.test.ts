@@ -103,6 +103,29 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await domainStore.close(); await repo.close();
   });
 
+  it('keeps Brain claims inside the principal tenant and owner scope', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-principal-brain-runs-'))); await repo.init();
+    const brainStore = new FileBrainStore(await mkdtemp(join(tmpdir(), 'aeeis-http-principal-brain-'))); await brainStore.init();
+    const brain = await brainStore.load();
+    const app = buildApp({
+      repository: repo,
+      brain,
+      brainStore,
+      principalTokens: {
+        'alice-token': { id: 'alice', tenantId: 'tenant-a', roles: ['owner'] },
+        'bob-token': { id: 'bob', tenantId: 'tenant-b', roles: ['owner'] },
+      },
+    });
+    const aliceHeaders = { authorization: 'Bearer alice-token' };
+    const bobHeaders = { authorization: 'Bearer bob-token' };
+    const created = await app.inject({ method: 'POST', url: '/api/brain/claims', headers: aliceHeaders, payload: { scope: 'project', scopeRef: 'p1', classification: 'internal', kind: 'decision', content: 'Alice-only decision', sourceRefs: ['src1'], confidence: 1 } });
+    expect(created.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/brain/p1', headers: aliceHeaders })).json().claims).toHaveLength(1);
+    expect((await app.inject({ method: 'GET', url: '/api/brain/p1', headers: bobHeaders })).json().claims).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: '/api/brain/p1?owner=alice', headers: bobHeaders })).statusCode).toBe(403);
+    await app.close(); await brainStore.close(); await repo.close();
+  });
+
   it('exposes owner Brain operations through the local API and persists them', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-brain-runs-'))); await repo.init();
     const brainStore = new FileBrainStore(await mkdtemp(join(tmpdir(), 'aeeis-http-brain-'))); await brainStore.init();
