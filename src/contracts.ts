@@ -101,6 +101,25 @@ export interface RunReceipt {
   reason?: string;
 }
 
+export type ProjectionAggregateType = "goal" | "plan" | "task";
+
+/** Durable intent written with the domain transition. It is deliberately
+ * transport-neutral; the Projection Outbox owns delivery and reconciliation. */
+export interface ProjectionIntent {
+  id: Id;
+  owner: string;
+  tenantId: string;
+  channel: string;
+  destination: string;
+  aggregateType: ProjectionAggregateType;
+  aggregateId: string;
+  idempotencyKey: string;
+  payload: unknown;
+  status: "pending" | "dispatched";
+  createdAt: string;
+  dispatchedAt?: string;
+}
+
 export interface CreateGoalInput {
   title: string;
   description?: string;

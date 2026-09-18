@@ -1,8 +1,8 @@
-import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
+import type { ContextManifest, Goal, Id, MemoryEntry, Plan, ProjectionIntent, RunReceipt } from "../contracts.js";
 import { assertTaskCommit } from './task-commit.js';
 
 export interface AeeisStore {
-  commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void>;
+  commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt, intents?: ProjectionIntent[]): Promise<void>;
   saveGoal(goal: Goal): Promise<void>;
   getGoal(id: Id): Promise<Goal | undefined>;
   getGoals(): Promise<Goal[]>;
@@ -15,6 +15,8 @@ export interface AeeisStore {
   getMemories(goalId?: Id): Promise<MemoryEntry[]>;
   saveContextManifest(manifest: ContextManifest): Promise<void>;
   getContextManifest(id: Id): Promise<ContextManifest | undefined>;
+  listProjectionIntents(): Promise<ProjectionIntent[]>;
+  markProjectionIntentDispatched(id: Id, dispatchedAt?: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -24,13 +26,15 @@ export class InMemoryStore implements AeeisStore {
   private readonly receipts = new Map<Id, RunReceipt[]>();
   private readonly memories = new Map<Id, MemoryEntry>();
   private readonly manifests = new Map<Id, ContextManifest>();
+  private readonly projectionIntents = new Map<Id, ProjectionIntent>();
 
-  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void> {
+  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt, intents: ProjectionIntent[] = []): Promise<void> {
     assertTaskCommit(this.plans.get(expected.id), expected, next, receipt);
     const goal = this.goals.get(next.goalId);
     if (!goal) throw new Error('Task commit references missing goal');
     this.plans.set(next.id, structuredClone(next));
     this.receipts.set(next.id, [...(this.receipts.get(next.id) ?? []), structuredClone(receipt)]);
+    for (const intent of intents) this.projectionIntents.set(intent.id, structuredClone(intent));
     if (next.nodes.every(node => node.status === 'succeeded')) this.goals.set(goal.id, { ...goal, status: 'completed' });
   }
 
@@ -87,6 +91,12 @@ export class InMemoryStore implements AeeisStore {
   async getContextManifest(id: Id): Promise<ContextManifest | undefined> {
     const manifest = this.manifests.get(id);
     return manifest ? structuredClone(manifest) : undefined;
+  }
+
+  async listProjectionIntents(): Promise<ProjectionIntent[]> { return structuredClone([...this.projectionIntents.values()].filter(intent => intent.status === 'pending')); }
+  async markProjectionIntentDispatched(id: Id, dispatchedAt = new Date().toISOString()): Promise<void> {
+    const intent = this.projectionIntents.get(id); if (!intent) return;
+    this.projectionIntents.set(id, { ...intent, status: 'dispatched', dispatchedAt });
   }
 
   async close(): Promise<void> {}

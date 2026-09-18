@@ -1,7 +1,7 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
+import type { ContextManifest, Goal, Id, MemoryEntry, Plan, ProjectionIntent, RunReceipt } from "../contracts.js";
 import type { AeeisStore } from "./in-memory-store.js";
 import { assertTaskCommit } from './task-commit.js';
 
@@ -11,6 +11,7 @@ interface StoreState {
   receipts: RunReceipt[];
   memories: MemoryEntry[];
   manifests: ContextManifest[];
+  projectionIntents: ProjectionIntent[];
 }
 
 const emptyState = (): StoreState => ({
@@ -19,6 +20,7 @@ const emptyState = (): StoreState => ({
   receipts: [],
   memories: [],
   manifests: [],
+  projectionIntents: [],
 });
 
 export class JsonFileStore implements AeeisStore {
@@ -50,7 +52,7 @@ export class JsonFileStore implements AeeisStore {
     }
     this.lockOwned = true;
     try {
-      this.state = JSON.parse(readFileSync(this.filePath, "utf8")) as StoreState;
+      this.state = { ...emptyState(), ...(JSON.parse(readFileSync(this.filePath, "utf8")) as Partial<StoreState>) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") { await this.close(); throw error; }
       this.state = emptyState();
@@ -76,7 +78,7 @@ export class JsonFileStore implements AeeisStore {
     this.persist();
   }
 
-  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void> {
+  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt, intents: ProjectionIntent[] = []): Promise<void> {
     assertTaskCommit(this.state.plans.find(plan => plan.id === expected.id), expected, next, receipt);
     const goal = this.state.goals.find(item => item.id === next.goalId);
     if (!goal) throw new Error('Task commit references missing goal');
@@ -85,6 +87,7 @@ export class JsonFileStore implements AeeisStore {
       ...previous,
       plans: replace(previous.plans, next),
       receipts: [...previous.receipts, structuredClone(receipt)],
+      projectionIntents: [...previous.projectionIntents, ...intents.map(intent => structuredClone(intent))],
       goals: next.nodes.every(node => node.status === 'succeeded')
         ? replace(previous.goals, { ...goal, status: 'completed' }) : previous.goals,
     };
@@ -124,6 +127,12 @@ export class JsonFileStore implements AeeisStore {
 
   async getContextManifest(id: Id): Promise<ContextManifest | undefined> {
     return clone(this.state.manifests.find((manifest) => manifest.id === id));
+  }
+
+  async listProjectionIntents(): Promise<ProjectionIntent[]> { return structuredClone(this.state.projectionIntents.filter(intent => intent.status === 'pending')); }
+  async markProjectionIntentDispatched(id: Id, dispatchedAt = new Date().toISOString()): Promise<void> {
+    const intent = this.state.projectionIntents.find(item => item.id === id); if (!intent) return;
+    this.state.projectionIntents = this.state.projectionIntents.map(item => item.id === id ? { ...item, status: 'dispatched', dispatchedAt } : item); this.persist();
   }
 
   async close(): Promise<void> {

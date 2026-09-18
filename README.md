@@ -78,6 +78,8 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 HTTP API 默认保持本地单用户 `owner` 模式。需要做身份隔离时，可设置 `AEEIS_PRINCIPAL_TOKENS`，其值是“Bearer token → Principal”的 JSON 对象，例如 `{"alice-secret":{"id":"alice","tenantId":"team-a","roles":["owner"]}}`。Goal、Plan、Memory、Context Manifest 和 Run 会按 principal 过滤；这是开发版静态凭证边界，生产环境仍应接入组织的 OAuth/OIDC/SSO 和密钥轮换。
 
+设置 `AEEIS_PROJECTION_TARGETS` 可启用领域变更的 transactional outbox，例如 `[{"channel":"feishu","destination":"team-room","aggregateTypes":["task","plan"]}]`。Task transition 会把 Goal/Plan/Task 投影意图和领域状态在同一次 domain commit 中持久化；后台 pump 再以幂等键写入 Projection Outbox。进程在两步之间重启时，未 dispatch 的意图会继续恢复，外部投影仍需通过已有 sink delivery/reconcile 完成。
+
 领域 Task 转移以一次存储提交更新 Plan、Goal 完成状态和 Receipt。并发分支按最新 Plan 快照重新校验，避免状态覆盖和缺失回执；JSON 存储限制单个活动写入者，PostgreSQL 使用行锁与事务。Plan 的 `version` 仍表示 DAG 版本，不作为执行状态的修订号。
 
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。

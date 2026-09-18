@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AeeisService } from "../src/application/aeeis-service.js";
 import { JsonFileStore } from "../src/adapters/json-store.js";
+import { FileProjectionOutbox } from "../src/collaboration-projection.js";
 
 describe("JsonFileStore", () => {
   it("restores goals, plans, memories, and receipts after a new store instance", () => {
@@ -29,5 +30,25 @@ describe("JsonFileStore", () => {
         });
       });
     });
+  });
+
+  it('recovers durable projection intents after restart before marking them dispatched', async () => {
+    const directory = mkdtempSync(join(tmpdir(), "aeeis-intents-"));
+    const filePath = join(directory, "domain.json");
+    const first = new JsonFileStore(filePath); await first.init();
+    const service = new AeeisService(first, [{ channel: 'hermes', destination: 'room.1', aggregateTypes: ['task'] }]);
+    const goal = await service.createGoal({ title: 'Recover projection intent' });
+    const plan = await service.createPlan({ goalId: goal.id, nodes: [{ id: 'draft', title: 'Draft' }] });
+    await service.transitionTask({ planId: plan.id, taskId: 'draft', transition: 'start' });
+    expect(await first.listProjectionIntents()).toHaveLength(1);
+    await first.close();
+
+    const second = new JsonFileStore(filePath); await second.init();
+    const outbox = new FileProjectionOutbox(join(directory, 'outbox')); await outbox.init();
+    const restoredService = new AeeisService(second, [{ channel: 'hermes', destination: 'room.1', aggregateTypes: ['task'] }]);
+    expect(await restoredService.drainProjectionIntents(outbox)).toEqual({ dispatched: 1, failed: 0 });
+    expect(await second.listProjectionIntents()).toEqual([]);
+    expect((await outbox.list())[0]).toMatchObject({ aggregateType: 'task', aggregateId: `${plan.id}.draft` });
+    await outbox.close(); await second.close();
   });
 });

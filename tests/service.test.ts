@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AeeisService } from "../src/application/aeeis-service.js";
 import { InMemoryStore } from "../src/adapters/in-memory-store.js";
+import { FileProjectionOutbox } from "../src/collaboration-projection.js";
+import { join } from 'node:path';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 describe("AeeisService", () => {
   it("creates a goal, plan, transition, and durable receipt", async () => {
@@ -47,5 +51,21 @@ describe("AeeisService", () => {
     expect(second.version).toBe(2);
     expect((await service.listPlans(goal.id)).map(plan => plan.version)).toEqual([2, 1]);
     expect((await service.getSnapshot(first.id)).plan.version).toBe(1);
+  });
+
+  it('writes task projection intents with the domain commit and drains them idempotently', async () => {
+    const store = new InMemoryStore();
+    const service = new AeeisService(store, [{ channel: 'hermes', destination: 'room.1' }]);
+    const goal = await service.createGoal({ title: 'Project state' });
+    const plan = await service.createPlan({ goalId: goal.id, nodes: [{ id: 'draft', title: 'Draft' }] });
+    const receipt = await service.transitionTask({ planId: plan.id, taskId: 'draft', transition: 'start' });
+    expect(receipt.to).toBe('running');
+    expect(await store.listProjectionIntents()).toHaveLength(3);
+
+    const outbox = new FileProjectionOutbox(await mkdtemp(join(tmpdir(), 'aeeis-domain-outbox-'))); await outbox.init();
+    expect(await service.drainProjectionIntents(outbox)).toEqual({ dispatched: 3, failed: 0 });
+    expect(await service.drainProjectionIntents(outbox)).toEqual({ dispatched: 0, failed: 0 });
+    expect((await outbox.list()).map(event => event.aggregateType).sort()).toEqual(['goal', 'plan', 'task']);
+    await outbox.close();
   });
 });

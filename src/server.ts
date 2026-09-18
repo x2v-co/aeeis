@@ -22,11 +22,17 @@ import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
 import { FeishuWebhookProjectionSink, FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
 import { principalTokensSchema } from './security/principal.js';
+import { z } from 'zod';
+import type { ProjectionTarget } from './application/aeeis-service.js';
 
 // Validate credentials before opening stores and acquiring writer locks.
 const principalTokens = process.env.AEEIS_PRINCIPAL_TOKENS === undefined ? undefined
   : principalTokensSchema.parse(JSON.parse(process.env.AEEIS_PRINCIPAL_TOKENS));
 if (principalTokens !== undefined && process.env.AEEIS_ACCESS_TOKEN) throw new Error('Configure either local access token or principal tokens, not both');
+const projectionTargets: ProjectionTarget[] = process.env.AEEIS_PROJECTION_TARGETS === undefined ? [] : z.array(z.object({
+  channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500),
+  aggregateTypes: z.array(z.enum(['goal', 'plan', 'task'])).max(3).optional(),
+}).strict()).max(20).parse(JSON.parse(process.env.AEEIS_PROJECTION_TARGETS));
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -60,7 +66,7 @@ const domainStore = process.env.DATABASE_URL
   ? new PostgresAeeisStore(process.env.DATABASE_URL)
   : new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
 await domainStore.init();
-const domain = new AeeisService(domainStore);
+const domain = new AeeisService(domainStore, projectionTargets);
 const rsiHarness = process.env.AEEIS_RSI_EVALUATOR_URL
   ? new HttpRsiEvaluationHarness(process.env.AEEIS_RSI_EVALUATOR_URL, process.env.AEEIS_RSI_EVALUATOR_TOKEN)
   : undefined;
@@ -164,6 +170,9 @@ try {
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
     ...(principalTokens ? { principalTokens } : {}),
   });
+  const projectionPump = setInterval(() => { void domain.drainProjectionIntents(projection); }, 1000);
+  projectionPump.unref();
+  await domain.drainProjectionIntents(projection);
   const port = Number(process.env.PORT ?? 4323);
   await app.listen({ port, host: '127.0.0.1' });
   console.log(`AEEIS: http://127.0.0.1:${port} (${engine ? 'model configured' : 'model configuration required'})`);
@@ -171,6 +180,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
+    clearInterval(projectionPump);
     await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());

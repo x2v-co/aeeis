@@ -11,6 +11,8 @@ import type {
   Plan,
   RunReceipt,
   MemoryEntry,
+  ProjectionAggregateType,
+  ProjectionIntent,
   TransitionTaskInput,
 } from "../contracts.js";
 import { createPlan, refreshReadyTasks, transitionTask } from "../domain/plan.js";
@@ -22,8 +24,18 @@ import type { KnowledgeProvider } from "../knowledge.js";
 export class AeeisNotFound extends Error {}
 export class AeeisConflict extends Error {}
 
+export interface ProjectionTarget {
+  channel: string;
+  destination: string;
+  aggregateTypes?: ProjectionAggregateType[] | undefined;
+}
+
+export interface ProjectionIntentSink {
+  enqueue(input: { channel: string; destination: string; aggregateType: ProjectionAggregateType; aggregateId: string; payload: unknown; idempotencyKey: string }): Promise<unknown>;
+}
+
 export class AeeisService {
-  public constructor(private readonly store: AeeisStore) {}
+  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = []) {}
 
   async createGoal(input: CreateGoalInput, now = new Date().toISOString(), owner = "owner", tenantId = "local"): Promise<Goal> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
@@ -77,7 +89,7 @@ export class AeeisService {
     for (let conflictCount = 0; conflictCount < 32; conflictCount++) {
       const current = await this.store.getPlan(input.planId);
       if (!current) throw new AeeisNotFound(`Unknown plan: ${input.planId}`);
-      this.assertOwnedGoal(await this.store.getGoal(current.goalId), current.goalId, owner, tenantId);
+      const goal = this.assertOwnedGoal(await this.store.getGoal(current.goalId), current.goalId, owner, tenantId);
       const result = transitionTask(current, input.taskId, input.transition, input.reason, now);
       const next = refreshReadyTasks(result.plan);
       const receipt: RunReceipt = {
@@ -86,8 +98,9 @@ export class AeeisService {
         occurredAt: now, attempt: result.attempt,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
       };
+      const intents = this.buildProjectionIntents(goal, next, receipt);
       try {
-        await this.store.commitTaskTransition(current, next, receipt);
+        await this.store.commitTaskTransition(current, next, receipt, intents);
         return receipt;
       } catch (error) {
         if (!(error instanceof PlanWriteConflict)) throw error;
@@ -186,6 +199,41 @@ export class AeeisService {
     this.assertOwnedGoal(await this.store.getGoal(goalId), goalId, owner, tenantId);
     return (await this.store.getPlans(goalId)).sort((left, right) => right.version - left.version || right.createdAt.localeCompare(left.createdAt));
   }
+
+  /** Move durable domain intents into the transport outbox. If the process
+   * stops after enqueue and before marking, the outbox idempotency key makes
+   * the retry harmless. */
+  async drainProjectionIntents(outbox: ProjectionIntentSink): Promise<{ dispatched: number; failed: number }> {
+    let dispatched = 0; let failed = 0;
+    for (const intent of await this.store.listProjectionIntents()) {
+      try {
+        await outbox.enqueue({ channel: intent.channel, destination: intent.destination, aggregateType: intent.aggregateType, aggregateId: intent.aggregateId, payload: intent.payload, idempotencyKey: intent.idempotencyKey });
+        await this.store.markProjectionIntentDispatched(intent.id);
+        dispatched += 1;
+      } catch { failed += 1; }
+    }
+    return { dispatched, failed };
+  }
+
+  private buildProjectionIntents(goal: Goal, next: Plan, receipt: RunReceipt): ProjectionIntent[] {
+    if (this.projectionTargets.length === 0) return [];
+    const completed = next.nodes.every(node => node.status === 'succeeded');
+    const nextGoal: Goal = { ...goal, status: completed ? 'completed' : goal.status };
+    const task = next.nodes.find(node => node.id === receipt.taskId);
+    if (!task) return [];
+    const owner = goal.owner ?? 'owner'; const tenantId = goal.tenantId ?? 'local';
+    const records: Array<{ type: ProjectionAggregateType; id: string; payload: unknown }> = [
+      { type: 'goal', id: goal.id, payload: nextGoal },
+      { type: 'plan', id: next.id, payload: { goal: nextGoal, plan: next, receipt } },
+      { type: 'task', id: `${next.id}.${task.id}`, payload: { goal: nextGoal, planId: next.id, task, receipt } },
+    ];
+    return this.projectionTargets.flatMap((target, targetIndex) => records.filter(record => !target.aggregateTypes || target.aggregateTypes.includes(record.type)).map((record, recordIndex) => ({
+      id: `intent_${receipt.id}_${targetIndex}_${recordIndex}`,
+      owner, tenantId, channel: target.channel, destination: target.destination, aggregateType: record.type, aggregateId: record.id,
+      idempotencyKey: `${target.channel}:${record.type}:${record.id}:${receipt.id}`, payload: record.payload, status: 'pending' as const, createdAt: receipt.occurredAt,
+    })));
+  }
+
 
   private owns(goal: Goal, owner: string, tenantId: string): boolean { return (goal.owner ?? "owner") === owner && (goal.tenantId ?? "local") === tenantId; }
   private assertOwnedGoal(goal: Goal | undefined, goalId: Id, owner: string, tenantId: string): Goal {
