@@ -51,6 +51,8 @@ describe('AEEIS HTTP boundary', () => {
     expect(created.statusCode).toBe(200);
     const candidate = created.json() as { id: string };
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind: 'replay', passed: true, score: 0.9, evidenceRefs: ['eval.1'] } })).statusCode).toBe(200);
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind: 'holdout', passed: true, score: 0.9, evidenceRefs: ['eval.2'] } });
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind: 'safety', passed: true, score: 0.9, evidenceRefs: ['eval.3'] } });
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'approval.1' } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} })).json().status).toBe('promoted');
     await app.close(); await evolution.close(); await repo.close();

@@ -16,7 +16,7 @@
 | toolkit_new | manifest、版本冻结、allowlist、幂等 invoke、Receipt、unknown/reconcile HTTP 端口已实现 | 尚未绑定 toolkit_new 的部署实例和真实工具调用；生产凭证与 ACL 未验收 |
 | ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record | Apply 仍需显式授权；真实 CLI 版本和治理闭环未验收 |
 | planprice | HTTP catalog adapter 已实现；按 capability/隐私筛选并锁定 provider/model/endpoint/价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实服务未验收 |
-| RSI | candidate/evaluation/approval/promotion/rollback 状态机、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据；候选不会自动修改生产 Agent |
+| RSI | candidate/evaluation/approval/promotion/rollback 状态机、默认 replay/holdout/safety 三道审批门、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据；候选不会自动修改生产 Agent |
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现；`blindEvaluation` 会对评测器隐藏真实 Agent ID；候选完整性、成本上限、重复评分防护已加固；新增 File 持久化协作状态、候选提交→独立评测→选定/partial API；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 尚未接入真实内部 Agent pool、自动触发的竞争 Workflow 或外部 Agent endpoint；当前 API 由受信调用方提交候选和评测 |
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息 | 飞书渠道、Hermes skill、Moderator/Adjudicator 自动运行尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |

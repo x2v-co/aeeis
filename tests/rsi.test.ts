@@ -14,6 +14,8 @@ describe('persistent RSI service', () => {
     const candidate = await service.propose(proposal);
     await expect(service.promote(candidate.id)).rejects.toThrow('approval');
     let current = await service.evaluate(candidate.id, { kind: 'replay', passed: true, score: 0.9, evidenceRefs: ['eval.1'] });
+    current = await service.evaluate(candidate.id, { kind: 'holdout', passed: true, score: 0.9, evidenceRefs: ['eval.2'] });
+    current = await service.evaluate(candidate.id, { kind: 'safety', passed: true, score: 0.9, evidenceRefs: ['eval.3'] });
     current = await service.approve(current.id, 'approval.1');
     expect((await service.promote(current.id)).status).toBe('promoted');
     const restored = new RsiService(repository);

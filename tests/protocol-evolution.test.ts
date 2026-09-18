@@ -21,6 +21,8 @@ describe('controlled RSI evolution', () => {
     let candidate = engine.propose({ target: 'skill', baseVersion: 'skill/1', proposedVersion: 'skill/2', change: 'Cite the observed evidence before summarizing', sourceReceiptRefs: ['receipt.1'], reason: 'User corrected unsupported claim', risk: 'low' });
     candidate = engine.evaluate(candidate, { kind: 'replay', passed: true, score: 0.9, evidenceRefs: ['eval.1'] });
     expect(() => engine.promote(candidate)).toThrow('approval');
+    candidate = engine.evaluate(candidate, { kind: 'holdout', passed: true, score: 0.9, evidenceRefs: ['eval.2'] });
+    candidate = engine.evaluate(candidate, { kind: 'safety', passed: true, score: 0.9, evidenceRefs: ['eval.3'] });
     candidate = engine.approve(candidate, 'approval.1');
     candidate = engine.promote(candidate);
     expect(candidate.status).toBe('promoted');

@@ -16,6 +16,10 @@ export type EvolutionCandidate = z.infer<typeof evolutionCandidateSchema>;
 export type EvolutionEvaluation = Omit<EvolutionCandidate['evaluations'][number], 'id' | 'completedAt'> & { id?: string; completedAt?: string };
 
 export class EvolutionEngine {
+  constructor(private readonly requiredEvaluationKinds: Array<EvolutionCandidate['evaluations'][number]['kind']> = ['replay', 'holdout', 'safety']) {
+    if (requiredEvaluationKinds.length === 0) throw new Error('At least one RSI evaluation gate is required');
+  }
+
   propose(input: Pick<EvolutionCandidate, 'target' | 'baseVersion' | 'proposedVersion' | 'change' | 'sourceReceiptRefs' | 'reason' | 'risk'>): EvolutionCandidate {
     return evolutionCandidateSchema.parse({ schemaVersion: 1, ...input, id: 'evo_' + randomUUID(), status: 'proposed', createdAt: new Date().toISOString(), evaluations: [] });
   }
@@ -29,6 +33,9 @@ export class EvolutionEngine {
   approve(candidate: EvolutionCandidate, approvalRef: string): EvolutionCandidate {
     if (candidate.status !== 'evaluating' && candidate.status !== 'held') throw new Error('Candidate must be evaluated before approval');
     if (candidate.evaluations.length === 0 || candidate.evaluations.some(item => !item.passed)) throw new Error('All required evaluations must pass before approval');
+    const completedKinds = new Set(candidate.evaluations.map(item => item.kind));
+    const missing = this.requiredEvaluationKinds.filter(kind => !completedKinds.has(kind));
+    if (missing.length > 0) throw new Error('Required evaluations are missing: ' + missing.join(', '));
     const next = structuredClone(candidate); next.status = 'approved'; next.approvalRef = approvalRef; return evolutionCandidateSchema.parse(next);
   }
   promote(candidate: EvolutionCandidate): EvolutionCandidate {
