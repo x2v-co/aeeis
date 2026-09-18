@@ -113,7 +113,9 @@ function render(run: RunView): void {
 $('new-run').onsubmit = event => {
   event.preventDefault(); const submit = $('submit') as HTMLButtonElement; submit.disabled = true; message('');
   const content = $<HTMLTextAreaElement>('materials').value.trim();
-  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [] })
+  const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
+  const privacy = $<HTMLSelectElement>('privacy').value;
+  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], ...(knowledgeQuery ? { knowledgeQuery } : {}), privacy })
     .then(async result => { currentId = result.id; current = undefined; localStorage.setItem('aeeis.run', currentId); await refresh(); })
     .catch(e => message(e.message)).finally(() => { submit.disabled = false; });
 };
@@ -125,10 +127,10 @@ $('connect').onclick = () => {
 };
 async function initialize(): Promise<void> {
   try {
-    const status = await api<{ modelConfigured: boolean; model: { model: string; endpoint: string } | null; modelRouting: string; runner: string }>('/status');
+    const status = await api<{ modelConfigured: boolean; model: { model: string; endpoint: string } | null; modelRouting: string; runner: string; knowledgeConfigured: boolean; evolutionConfigured: boolean; collaborationConfigured: boolean }>('/status');
     $('configuration').textContent = status.modelConfigured
-      ? (status.model ? `${status.model.model} · ${status.runner}。提交后，目标和本次提供的资料将发送至 ${status.model.endpoint}` : `已启用模型目录路由 · ${status.runner}。每个 Run 会根据能力、隐私和预算选择并锁定模型`)
-      : '尚未配置模型。请在服务端设置 AEEIS_MODEL_BASE_URL、AEEIS_MODEL，或配置 AEEIS_PLANPRICE_URL 后重启；当前不会生成模拟结果。';
+      ? `${status.model ? `${status.model.model} · ${status.runner}` : `模型目录路由 · ${status.runner}`}。${status.knowledgeConfigured ? 'Knowledge 已启用；' : ''}${status.evolutionConfigured ? 'RSI 候选存储已启用；' : ''}${status.collaborationConfigured ? '协作平面已启用。' : ''}`
+      : '尚未配置模型。请在服务端设置 AEEIS_MODEL_BASE_URL、AEEIS_MODEL，或配置 AEEIS_PLANPRICE_URL 后重启；Knowledge、RSI 和协作状态仍可查看，但不会生成模拟结果。';
     ($('submit') as HTMLButtonElement).disabled = !status.modelConfigured; await refresh(); message('');
   } catch (e) { message((e as Error).message); }
 }

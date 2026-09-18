@@ -7,8 +7,9 @@
 <p id="configuration" class="notice">正在连接运行服务…</p><p id="error" role="alert"></p>
 <div class="layout"><aside>
 <section><h2>新目标</h2><form id="new-run"><label for="goal">你想完成什么？</label><textarea id="goal" rows="4" required maxlength="8000" placeholder="例如：根据下面的项目资料，梳理发布风险并提出下一周的具体行动计划"></textarea><label for="materials">本次允许使用的资料</label><textarea id="materials" rows="8" maxlength="30000" placeholder="粘贴项目进展、约束和已有决策；这些资料将用于模型规划和执行。"></textarea><button id="submit" disabled>交给 AEEIS</button></form></section>
+<section><h2>运行边界</h2><form id="run-options"><label for="knowledge-query">可选：查询项目知识</label><input id="knowledge-query" maxlength="2000" placeholder="例如：发布风险和回滚策略"><label for="privacy">资料隐私级别</label><select id="privacy"><option value="internal" selected>内部</option><option value="public">公开</option><option value="confidential">机密</option><option value="private">私人</option></select><p class="muted">知识结果会按隐私级别过滤，并作为带来源 hash 的上下文交给 Agent。</p></form></section>
 <section><h2>运行记录</h2><nav id="runs" aria-label="运行记录"></nav></section>
-</aside><div><section id="empty"><h2>从一个真实目标开始</h2><p>Agent 会先提出具体计划。批准后，它将读取你提供的资料、执行任务并交付产物；缺少信息时会向你提问。</p><p class="muted">当前执行器支持项目资料读取和报告生成。外部工具、共享权限和 RSI 正在实现中。</p></section>
+</aside><div><section id="empty"><h2>从一个真实目标开始</h2><p>Agent 会先提出具体计划。批准后，它将读取你提供的资料、执行任务并交付产物；缺少信息时会向你提问。</p><p class="muted">运行结果、证据、模型回执、知识引用和协作状态都会保留在 AEEIS 的本地事实源中。</p></section>
 <div id="detail" hidden><section><div class="run-heading"><h2 id="run-title"></h2><span id="run-status"></span></div><p id="usage" class="muted"></p><p id="run-error" role="status"></p><div id="controls"></div></section>
 <section id="input-panel" hidden><h2>需要你的信息</h2><p id="question"></p><form id="answer-form"><label for="answer">回复</label><textarea id="answer" required maxlength="8000"></textarea><button>提交并继续</button></form></section>
 <section><h2>执行计划</h2><p id="plan-summary" class="muted"></p><div id="graph" role="region" aria-label="任务依赖图"></div></section>

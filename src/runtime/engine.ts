@@ -42,6 +42,7 @@ export class AgentEngine {
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
+  get knowledgeConfigured() { return Boolean(this.knowledge); }
   get modelConfigured(): boolean { return Boolean(this.defaultModel || this.resolver); }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   async create(input: unknown, owner = 'local-owner'): Promise<AgentRun> {
