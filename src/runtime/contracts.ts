@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Receipt, ToolInvocation } from '../integrations.js';
 import type { DelegationReceipt, DelegationRequest } from '../agent-gateway.js';
+import type { ActiveEvolution } from '../evolution-activation.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -73,6 +74,7 @@ export interface AgentRun {
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;
   model: ModelPin; modelDecision?: Record<string, unknown>; maxModelCalls: number; calls: ModelCall[];
+  evolution?: ActiveEvolution[];
   allowedTools: string[];
   allowedAgents: string[];
   knowledgeQuery?: string;

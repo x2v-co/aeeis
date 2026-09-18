@@ -146,6 +146,10 @@ export function buildApp(options: Options) {
     const body = z.object({ transition: z.enum(['start', 'wait', 'request_approval', 'block', 'succeed', 'fail', 'cancel', 'mark_unknown', 'retry']), reason: z.string().max(4000).optional() }).strict().parse(request.body);
     return options.domain.transitionTask({ planId: request.params.planId, taskId: request.params.taskId, transition: body.transition, ...(body.reason === undefined ? {} : { reason: body.reason }) });
   });
+  app.get('/api/evolution/activation', async () => {
+    if (!options.rsi) throw new Conflict('RSI service is not configured');
+    return options.rsi.activationStatus();
+  });
   app.get('/api/evolution/candidates', async () => {
     if (!options.rsi) return [];
     return options.rsi.list();
@@ -181,6 +185,7 @@ export function buildApp(options: Options) {
     }
     if (action === 'record-canary') return options.rsi.recordCanary(id, request.body);
     if (action === 'promote') return options.rsi.promote(id);
+    if (action === 'activate') return options.rsi.activate(id, z.object({ activationRef: z.string().trim().min(1).max(200) }).strict().parse(request.body).activationRef);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
     throw new Conflict('Unsupported evolution action');
   });

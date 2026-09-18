@@ -14,6 +14,8 @@ import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge
 import { GovernedBrain } from '../src/brain.js';
 import { JsonFileStore } from '../src/adapters/json-store.js';
 import { AeeisService } from '../src/application/aeeis-service.js';
+import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
+import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -264,6 +266,28 @@ describe('AEEIS runtime', () => {
     expect(current.events.map(e => e.type)).toContain('tool.completed');
     expect(model.calls.filter(call => call.system.includes('Plan a real deliverable'))).toHaveLength(1);
     await repo.close();
+  });
+
+  it('snapshots an activated RSI prompt into new Runs and leaves existing Runs unchanged', async () => {
+    const repo = await repository();
+    const evolutionDirectory = await mkdtemp(join(tmpdir(), 'aeeis-runtime-evolution-'));
+    const evolution = new FileEvolutionRepository(evolutionDirectory); await evolution.init();
+    const activation = new FileEvolutionActivationStore(evolutionDirectory); await activation.init();
+    const rsi = new RsiService(evolution, activation);
+    const candidate = await rsi.propose({ target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Cite every claim with an evidence reference.', sourceReceiptRefs: ['receipt.rsi.1'], reason: 'Review found an unsupported claim', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await rsi.evaluate(candidate.id, { kind, passed: true, score: 1, evidenceRefs: [`evidence.${kind}`] });
+    await rsi.approve(candidate.id, 'approval.rsi.1'); await rsi.promote(candidate.id); await rsi.activate(candidate.id, 'activation.rsi.1');
+    const model = new PlanningFixture();
+    const engine = new AgentEngine(repo, { model, evolution: rsi });
+    const run = await engine.create({ goal: 'Use activated policy' });
+    expect(run.evolution?.[0]).toMatchObject({ candidateId: candidate.id, version: 'prompt/2' });
+    expect(run.events.map(item => item.type)).toContain('evolution.snapshot');
+    await engine.advance(run.id);
+    expect(model.calls[0]?.system).toContain('Cite every claim with an evidence reference');
+    await rsi.rollback(candidate.id, 'Activate the baseline after validation');
+    const next = await engine.create({ goal: 'Use baseline policy' });
+    expect(next.evolution).toBeUndefined();
+    await activation.close(); await evolution.close(); await repo.close();
   });
 
   it('serializes concurrent mutations and preserves revisions on disk', async () => {

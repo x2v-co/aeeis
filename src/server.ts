@@ -12,6 +12,7 @@ import { FileGrantLedger } from './agent-ledger.js';
 import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
+import { FileEvolutionActivationStore } from './evolution-activation.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
 import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 import { JsonFileStore } from './adapters/json-store.js';
@@ -30,7 +31,9 @@ await brainStore.init();
 const brain = await brainStore.load();
 const evolutionRepository = new FileEvolutionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
 await evolutionRepository.init();
-const rsi = new RsiService(evolutionRepository);
+const evolutionActivation = new FileEvolutionActivationStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
+await evolutionActivation.init();
+const rsi = new RsiService(evolutionRepository, evolutionActivation);
 const collaborationRepository = new FileCollaborationRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration`);
 await collaborationRepository.init();
 const grantLedger = new FileGrantLedger(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/agent-grants.json`);
@@ -116,7 +119,7 @@ try {
     modelServices = { resolver };
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, evolution: rsi, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');
@@ -148,7 +151,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close(); throw error; }

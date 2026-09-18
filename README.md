@@ -53,9 +53,11 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `POST /api/runs`
 - `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|replan|dispatch`（`replan` 会保留旧计划并生成新的版本）
 - `POST /internal/runs/:id/advance`（仅 Worker token）
+- `GET /api/evolution/activation`
 - `GET /api/evolution/candidates`
 - `GET /api/evolution/candidates/:id`
 - `POST /api/evolution/candidates`，以及 `/:id/evaluate|evaluate-suite|approve|start-shadow|run-shadow|record-shadow|start-canary|run-canary|record-canary|reconcile-rollout|promote|rollback`
+- `POST /api/evolution/candidates/:id/activate`（仅已晋升的 `profile`/`prompt` 候选，要求 `activationRef`）
 - 配置 `AEEIS_RSI_EVALUATOR_URL` 后，额外支持 `/:id/evaluate-suite`，按 replay、holdout、safety（以及可选 cost/shadow）套件逐门运行隔离 evaluator
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score|reconcile-attempt|reconcile-evaluator`
 - 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型隔离运行，独立评估器只接收盲化候选，participant/evaluator attempt 和结果持久化回 Competition；重启后通过 reconcile 继续，避免重复调用。
@@ -68,7 +70,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。
 
-RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `proposed → evaluating → approved → promoted` 后显式晋升；中高风险候选必须经过 `approved → shadowing → canarying → promoted`，每个阶段都要记录带证据的观察，失败会进入 `held` 并可回滚。Run 的 `/corrections` 入口会校验纠正引用是否来自该 Run 的真实上下文、产物、Receipt 或模型调用，再创建绑定 correction 引用的 candidate。默认必须分别通过 replay、holdout、safety 三道评测门。它不会自动修改生产 Agent。
+RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `proposed → evaluating → approved → promoted` 后显式晋升；中高风险候选必须经过 `approved → shadowing → canarying → promoted`，每个阶段都要记录带证据的观察，失败会进入 `held` 并可回滚。Run 的 `/corrections` 入口会校验纠正引用是否来自该 Run 的真实上下文、产物、Receipt 或模型调用，再创建绑定 correction 引用的 candidate。默认必须分别通过 replay、holdout、safety 三道评测门。晋升后仍需用 activation reference 激活；当前 `profile`/`prompt` 激活会持久化不可变版本、校验 base version，并在新 Run 创建时冻结为 governed prompt supplement。回滚会撤销激活候选并恢复父版本，旧 Run 不受影响；workflow、Skill、tool-policy 和 model-policy 仍需各自的 typed adapter，不能把文本候选冒充成已生效的生产配置。
 
 配置隔离 evaluator 后，`run-shadow` 和 `run-canary` 接收 `{ "cases": [{ "id": "case.1", "input": {} }] }`，每批最多 100 项，逐项预留 attempt、调用并落盘；遇到失败或无有效证据即停止批次。case ID 在同一候选阶段内不可重复。attempt 保留输入 hash、时间和观察结果，调用中断后的 `started` 记录会阻止新调用和阶段晋升。`reconcile-rollout` 接收 `attemptId`、`outcome`（`completed` 或 `failed`）、必填 `reason`；完成结果还必须提供 `passed`、`score` 和 `evidenceRefs`。该入口记录操作者核查结论，不重新调用 evaluator。这里的 canary 是隔离评测模式，实际生产流量分配和候选部署尚未实现。
 

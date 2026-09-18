@@ -6,6 +6,7 @@ import { buildApp } from '../src/runtime/http.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import { FileBrainStore } from '../src/brain.js';
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
+import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
@@ -129,6 +130,23 @@ describe('AEEIS HTTP boundary', () => {
     for (let index = 1; index <= 3; index++) await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/record-canary`, payload: { id: `canary.${index}`, passed: true, score: 0.9, evidenceRefs: [`canary.${index}`] } });
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} })).json().status).toBe('promoted');
     await app.close(); await evolution.close(); await repo.close();
+  });
+
+  it('exposes the explicit RSI activation boundary and active version snapshot', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-activation-runs-'))); await repo.init();
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-activation-'));
+    const evolution = new FileEvolutionRepository(directory); await evolution.init();
+    const activation = new FileEvolutionActivationStore(directory); await activation.init();
+    const app = buildApp({ repository: repo, rsi: new RsiService(evolution, activation) });
+    const created = await app.inject({ method: 'POST', url: '/api/evolution/candidates', payload: { target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Cite evidence', sourceReceiptRefs: ['receipt.1'], reason: 'Correction', risk: 'low' } });
+    const candidate = created.json() as { id: string };
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind, passed: true, score: 0.9, evidenceRefs: [`eval.${kind}`] } });
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'approval.activation' } });
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} });
+    const active = await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/activate`, payload: { activationRef: 'owner.activation' } });
+    expect(active.statusCode).toBe(200); expect(active.json()).toMatchObject({ candidateId: candidate.id, version: 'prompt/2' });
+    expect((await app.inject({ method: 'GET', url: '/api/evolution/activation' })).json().active).toHaveLength(1);
+    await app.close(); await activation.close(); await evolution.close(); await repo.close();
   });
 
   it('exposes explicit Skill governance proposal, apply and rollback operations', async () => {

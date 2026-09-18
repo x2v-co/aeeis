@@ -3,6 +3,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
+import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 
 const proposal = { target: 'skill' as const, baseVersion: 'skill/1', proposedVersion: 'skill/2', change: 'Require evidence citations', sourceReceiptRefs: ['receipt.1'], reason: 'User correction', risk: 'low' as const };
 
@@ -21,6 +22,33 @@ describe('persistent RSI service', () => {
     const restored = new RsiService(repository);
     expect((await restored.get(candidate.id)).status).toBe('promoted');
     await repository.close();
+  });
+
+  it('activates only promoted prompt releases, enforces the base version, and restores the predecessor on rollback', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-evolution-activation-'));
+    const repository = new FileEvolutionRepository(directory); await repository.init();
+    const activation = new FileEvolutionActivationStore(directory); await activation.init();
+    const service = new RsiService(repository, activation);
+    const first = await service.propose({ target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Always cite the evidence graph.', sourceReceiptRefs: ['receipt.prompt.1'], reason: 'Observed unsupported claim', risk: 'low' });
+    await expect(service.activate(first.id, 'before-approval')).rejects.toThrow('promoted');
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(first.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.1`] });
+    await service.approve(first.id, 'owner.approval.1'); await service.promote(first.id);
+    const active = await service.activate(first.id, 'owner.activation.1');
+    expect(active).toMatchObject({ target: 'prompt', version: 'prompt/2', candidateId: first.id });
+    const second = await service.propose({ target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/3', change: 'Use shorter answers.', sourceReceiptRefs: ['receipt.prompt.2'], reason: 'Observed verbosity', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(second.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.2`] });
+    await service.approve(second.id, 'owner.approval.2'); await service.promote(second.id);
+    await expect(service.activate(second.id, 'owner.activation.2')).rejects.toThrow('base version conflict');
+    const third = await service.propose({ target: 'prompt', baseVersion: 'prompt/2', proposedVersion: 'prompt/3', change: 'Use shorter answers.', sourceReceiptRefs: ['receipt.prompt.3'], reason: 'Observed verbosity', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(third.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.3`] });
+    await service.approve(third.id, 'owner.approval.3'); await service.promote(third.id); await service.activate(third.id, 'owner.activation.3');
+    expect((await service.listActive())[0]).toMatchObject({ candidateId: third.id, version: 'prompt/3', parentCandidateId: first.id });
+    expect((await service.rollback(third.id, 'Shorter prompt regressed quality')).status).toBe('rolled_back');
+    expect((await service.listActive())[0]).toMatchObject({ candidateId: first.id, version: 'prompt/2' });
+    expect((await service.rollback(first.id, 'Prompt regression')).status).toBe('rolled_back');
+    expect((await service.listActive())).toEqual([]);
+    expect((await service.activationStatus()).history.at(-1)).toMatchObject({ action: 'rolled_back', candidateId: first.id });
+    await activation.close(); await repository.close();
   });
 
   it('holds a failed evaluation and keeps it non-promotable', async () => {

@@ -131,6 +131,7 @@ async function renderCandidateDetail(): Promise<void> {
   const shadowReady = (candidate.shadowObservations?.length ?? 0) >= (candidate.risk === 'high' ? 5 : candidate.risk === 'medium' ? 3 : 1) && (candidate.shadowObservations ?? []).every(item => item.passed);
   if (candidate.status === 'shadowing' && shadowReady) controls.append(button('开始 Canary', () => candidateCommand(candidate.id, 'start-canary')));
   if (candidate.status === 'canarying' && (candidate.canaryObservations?.length ?? 0) > 0) controls.append(button('晋升 Canary 候选', () => candidateCommand(candidate.id, 'promote')));
+  if (candidate.status === 'promoted' && ['profile', 'prompt'].includes(candidate.target)) controls.append(button('激活到新 Run', async () => { const activationRef = window.prompt('激活引用（必填）')?.trim(); if (activationRef) await candidateCommand(candidate.id, 'activate', { activationRef }); }));
   if (['approved', 'shadowing', 'canarying', 'held', 'promoted'].includes(candidate.status)) controls.append(button('回滚候选', async () => { const reason = window.prompt('回滚原因（必填）')?.trim(); if (reason) await candidateCommand(candidate.id, 'rollback', { reason }); }));
 }
 async function command(action: string, body: unknown = {}): Promise<void> {

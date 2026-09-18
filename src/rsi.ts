@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
 import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
+import { activationTargetSchema, baselineVersions, evolutionContentHash, type EvolutionActivationStore, type ActiveEvolution } from './evolution-activation.js';
 
 export interface EvolutionRepository {
   create(candidate: EvolutionCandidate): Promise<void>;
@@ -52,7 +53,7 @@ const evaluationInputSchema = z.object({ kind: z.enum(['replay', 'holdout', 'saf
 
 export class RsiService {
   private readonly engine = new EvolutionEngine();
-  constructor(private readonly repository: EvolutionRepository) {}
+  constructor(private readonly repository: EvolutionRepository, private readonly activation?: EvolutionActivationStore) {}
   async propose(input: unknown): Promise<EvolutionCandidate> { const candidate = this.engine.propose(proposalInputSchema.parse(input)); await this.repository.create(candidate); return candidate; }
   async proposeFromCorrection(input: { target: EvolutionCandidate['target']; baseVersion: string; proposedVersion: string; change: string; reason: string; risk: EvolutionCandidate['risk']; correctionRef: string; sourceReceiptRefs: string[] }): Promise<EvolutionCandidate> {
     return this.propose({ target: input.target, baseVersion: input.baseVersion, proposedVersion: input.proposedVersion, change: input.change, reason: `${input.reason} (correction: ${input.correctionRef})`, risk: input.risk, sourceReceiptRefs: [...new Set([...input.sourceReceiptRefs, input.correctionRef])] });
@@ -156,6 +157,28 @@ export class RsiService {
 
   get(id: string): Promise<EvolutionCandidate> { return this.repository.get(id); }
   list(): Promise<EvolutionCandidate[]> { return this.repository.list(); }
+  async listActive(): Promise<ActiveEvolution[]> {
+    if (!this.activation) return [];
+    const active = await this.activation.list();
+    for (const release of active) {
+      const candidate = await this.repository.get(release.candidateId);
+      if (candidate.status !== 'promoted' || candidate.target !== release.target || candidate.baseVersion !== release.baseVersion || candidate.proposedVersion !== release.version || candidate.change !== release.change || release.contentHash !== evolutionContentHash(release)) {
+        throw new Error('Active evolution no longer matches its promoted candidate; reconcile activation before creating new Runs');
+      }
+    }
+    return active;
+  }
+  async activationStatus() {
+    return { configured: Boolean(this.activation), baselineVersions, active: await this.listActive(), history: this.activation ? await this.activation.history() : [] };
+  }
+  async activate(id: string, activationRef: string): Promise<ActiveEvolution> {
+    if (!this.activation) throw new Error('Evolution activation store is not configured');
+    const candidate = await this.repository.get(id);
+    if (candidate.status !== 'promoted') throw new Error('Only a promoted candidate can be activated');
+    const target = activationTargetSchema.safeParse(candidate.target);
+    if (!target.success) throw new Error(`No runtime activation adapter exists for ${candidate.target}`);
+    return this.activation.activate({ target: target.data, candidateId: candidate.id, baseVersion: candidate.baseVersion, version: candidate.proposedVersion, change: candidate.change, activationRef: z.string().trim().min(1).max(200).parse(activationRef) });
+  }
   evaluate(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.evaluate(candidate, evaluationInputSchema.parse(input) as EvolutionEvaluation)); }
   approve(id: string, approvalRef: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.approve(candidate, z.string().min(1).max(200).parse(approvalRef))); }
   startShadow(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.startShadow(candidate)); }
@@ -163,7 +186,16 @@ export class RsiService {
   startCanary(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.startCanary(candidate)); }
   recordCanary(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.recordCanary(candidate, parseRolloutObservation(input))); }
   promote(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.promote(candidate)); }
-  rollback(id: string, reason: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.rollback(candidate, z.string().min(1).max(4000).parse(reason))); }
+  async rollback(id: string, reason: string): Promise<EvolutionCandidate> {
+    const validatedReason = z.string().trim().min(1).max(4000).parse(reason);
+    const candidate = await this.repository.get(id);
+    if (candidate.status !== 'rolled_back') this.engine.rollback(candidate, validatedReason);
+    // Deactivate/revoke before changing candidate state. If the second write
+    // fails, new Runs already use the predecessor and repeating rollback is safe.
+    // A concurrent activation cannot resurrect a revoked candidate.
+    if (this.activation) await this.activation.revoke(id, validatedReason);
+    return this.repository.mutate(id, current => current.status === 'rolled_back' ? current : this.engine.rollback(current, validatedReason));
+  }
 }
 
 function parseRolloutObservation(input: unknown) {

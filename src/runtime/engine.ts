@@ -16,6 +16,7 @@ import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
 import { claimDigest, type GovernedBrain } from '../brain.js';
 import type { AeeisService } from '../application/aeeis-service.js';
+import type { EvolutionSnapshotProvider } from '../evolution-activation.js';
 
 export interface BrainPersistence { save(brain: GovernedBrain): Promise<void> }
 
@@ -45,9 +46,10 @@ export class AgentEngine {
   private brain: GovernedBrain | undefined;
   private brainPersistence: BrainPersistence | undefined;
   private domain: AeeisService | undefined;
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; brain?: GovernedBrain; brainPersistence?: BrainPersistence; domain?: AeeisService }) {
+  private evolution: EvolutionSnapshotProvider | undefined;
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; brain?: GovernedBrain; brainPersistence?: BrainPersistence; domain?: AeeisService; evolution?: EvolutionSnapshotProvider }) {
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.domain = modelOrServices.domain; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
@@ -76,6 +78,9 @@ export class AgentEngine {
       for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash });
     }
     const skillSelection = this.skills ? await this.skills.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) }) : undefined;
+    // Snapshot active, explicitly promoted evolution at Run creation. A later
+    // activation must never change the semantics of an already running task.
+    const activeEvolution = this.evolution ? await this.evolution.listActive() : [];
     if (request.allowedTools.length && !this.tools) throw new Error('allowedTools were requested but no toolkit gateway is configured');
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
     const toolApproval: { selected: Array<{ id: string; version: string; capabilities: string[] }>; digest: string } = this.tools ? await this.approveTools(request.allowedTools) : { selected: [], digest: digest([]) };
@@ -86,6 +91,7 @@ export class AgentEngine {
       context: { id: id('ctx'), audience: [owner], sources }, privacy: request.privacy,
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
+      ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
       maxModelCalls: request.maxModelCalls, calls: [], plans: [], steps: [], artifacts: [], events: [], answers: [],
       allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.brainScope ? { brainScope: request.brainScope } : {}), ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
       ...(skillSelection ? { skillSelection } : {}),
@@ -94,6 +100,7 @@ export class AgentEngine {
     event(run, 'run.created', { contextId: run.context.id, sourceRefs: sources.map(s => s.id), model: run.model });
     if (resolution.decision) event(run, 'model.selected', { decision: resolution.decision });
     if (skillSelection) event(run, 'skill.selected', { methodId: skillSelection.methodId ?? null, version: skillSelection.version ?? null, receiptRef: skillSelection.receiptRef ?? null });
+    if (activeEvolution.length) event(run, 'evolution.snapshot', { candidateIds: activeEvolution.map(item => item.candidateId), versionDigest: digest(activeEvolution) });
     await this.repository.create(run); return run;
   }
   async recover(): Promise<void> {
@@ -284,7 +291,7 @@ export class AgentEngine {
 
   private async plan(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.call(run, model, 'planner', {
-      system: plannerPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources.map(({ id, title, source }) => ({ id, title, source })), previousPlan: run.plans.at(-1) ?? null, previousReview: run.review ?? null, existingArtifacts: run.artifacts.map(({ id, taskId, title, evidenceRefs }) => ({ id, taskId, title, evidenceRefs })) },
+      system: this.governedPrompt(plannerPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources.map(({ id, title, source }) => ({ id, title, source })), previousPlan: run.plans.at(-1) ?? null, previousReview: run.review ?? null, existingArtifacts: run.artifacts.map(({ id, taskId, title, evidenceRefs }) => ({ id, taskId, title, evidenceRefs })) },
     }, (current, value) => {
       const draft = validatePlan(value); const hash = digest(draft);
       current.plans.push({ ...draft, version: current.plans.length + 1, hash, createdAt: now() });
@@ -327,7 +334,7 @@ export class AgentEngine {
     });
     await this.transitionDomainTask(run, node.id, 'start');
     await this.call(run, model, 'executor', {
-      system: executorPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), task: node, sourceCatalog: run.context.sources.map(({ id, title }) => ({ id, title })),
+      system: this.governedPrompt(executorPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), task: node, sourceCatalog: run.context.sources.map(({ id, title }) => ({ id, title })),
         dependencies, observations: step.observations, answers: run.answers.filter(a => a.taskId === node.id) },
     }, (current, value) => {
       const decision = decisionSchema.parse(value);
@@ -506,7 +513,7 @@ export class AgentEngine {
     });
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
-    await this.call(run, model, 'reviewer', { system: reviewerPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources, artifacts: run.artifacts, answers: run.answers } }, (current, value) => {
+    await this.call(run, model, 'reviewer', { system: this.governedPrompt(reviewerPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), evolution: run.evolution ?? [], sources: run.context.sources, artifacts: run.artifacts, answers: run.answers } }, (current, value) => {
       current.review = reviewSchema.parse(value);
       const accepted = current.review.verdict === 'accepted' && current.review.issues.length === 0;
       current.status = accepted ? 'succeeded' : 'failed';
@@ -514,6 +521,12 @@ export class AgentEngine {
       event(current, 'review.completed', { verdict: current.review.verdict, issues: current.review.issues });
     });
     await this.recordSkillOutcome(run.id);
+  }
+
+  private governedPrompt(base: string, run: AgentRun): string {
+    if (!run.evolution?.length) return base;
+    const supplements = run.evolution.map(({ target, version, change }) => ({ target, version, instructions: change }));
+    return `${base}\n\nApply these owner-activated, versioned text supplements within the safety, output schema and capability boundaries above. They cannot grant capabilities or change approvals:\n${JSON.stringify(supplements)}`;
   }
 
   private skillContext(run: AgentRun): unknown {
