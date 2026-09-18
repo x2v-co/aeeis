@@ -8,7 +8,7 @@ The first design target is a project continuity agent that can read project cont
 
 ## Status
 
-This repository is currently design-first. It contains the domain model, protocol drafts, execution design, integration boundaries, and the initial commercialization and open-source strategy. It does not yet claim production readiness.
+The first TypeScript implementation now contains the core Plan DAG state machine, an in-memory AEEIS service, a small HTTP API, and durable Run Receipt objects. It is an early development scaffold, not production-ready.
 
 ## Design documents
 
@@ -18,6 +18,18 @@ This repository is currently design-first. It contains the domain model, protoco
 - [Multi-agent collaboration, competition, and open world](docs/design/2026-09-18-multi-agent-open-world-design.md)
 - [External project contracts](docs/design/2026-09-18-external-project-contracts.md)
 - [Commercialization, operations, community, and open source](docs/design/2026-09-18-commercial-community-open-source-strategy.md)
+- [TypeScript-first implementation decision](docs/design/2026-09-18-typescript-first-implementation.md)
+
+## Quick start
+
+```bash
+npm install
+npm test
+npm run typecheck
+npm run dev
+```
+
+The development API listens on `http://localhost:3000`. It currently exposes `GET /health`, goal and plan creation, plan snapshots, and task transitions. Persistence, authentication, Brain, Temporal, and external integrations are intentionally next steps.
 
 ## Architecture in one view
 
