@@ -7,7 +7,7 @@ import { buildApp } from './runtime/http.js';
 import { FileBrainStore } from './brain.js';
 import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitRegistryGateway } from './integrations.js';
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
-import { AgentDirectory, AgentGateway, HttpAgentTransport } from './agent-gateway.js';
+import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider } from './agent-gateway.js';
 import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
@@ -15,6 +15,7 @@ import { CollaborationService, FileCollaborationRepository } from './collaborati
 import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 import { JsonFileStore } from './adapters/json-store.js';
 import { AeeisService } from './application/aeeis-service.js';
+import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
 import { FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
 
@@ -70,7 +71,12 @@ try {
         return [key, value];
       }));
     }
-    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys));
+    let oauthProvider: OAuthClientCredentialsProvider | undefined;
+    if (process.env.AEEIS_AGENT_OAUTH_CONFIG) {
+      const configs = oauthClientConfigsSchema.parse(JSON.parse(process.env.AEEIS_AGENT_OAUTH_CONFIG));
+      oauthProvider = new OAuthClientCredentialsProvider(configs);
+    }
+    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider));
   }
   const knowledge = process.env.AEEIS_KNOWLEDGE_URL
     ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN)

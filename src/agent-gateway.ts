@@ -1,5 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import type { OAuthTokenProvider } from './oauth.js';
+export { OAuthClientCredentialsProvider } from './oauth.js';
 import {
   acknowledgementSchema,
   agentCardSchema,
@@ -149,7 +151,7 @@ export class AgentGateway {
 }
 
 export class HttpAgentTransport implements AgentTransport {
-  constructor(private readonly timeoutMs = 60_000, private readonly bearerToken?: string, private readonly signingKeys: Readonly<Record<string, string>> = {}) {}
+  constructor(private readonly timeoutMs = 60_000, private readonly bearerToken?: string, private readonly signingKeys: Readonly<Record<string, string>> = {}, private readonly oauthProvider?: OAuthTokenProvider) {}
 
   async submit(card: AgentCard, request: DelegationRequest): Promise<AgentTransportResponse> {
     if (!card.endpoint) throw new Error('Agent Card has no endpoint');
@@ -165,19 +167,20 @@ export class HttpAgentTransport implements AgentTransport {
 
   private checkAuth(card: AgentCard): void {
     if (card.auth.includes('signed_request') && !this.signingKeys[card.agentId]) throw new Error('Agent Card requires a signing key');
-    if (card.auth.includes('oauth')) throw new Error('HTTP Agent transport requires a dedicated OAuth adapter for this Agent Card');
+    if (card.auth.includes('oauth') && !this.oauthProvider) throw new Error('Agent Card requires an OAuth token provider');
     if (card.auth.includes('bearer') && !this.bearerToken) throw new Error('Agent Card requires a bearer token');
   }
 
   private async send(card: AgentCard, body: unknown): Promise<AgentTransportResponse> {
     if (!card.endpoint) throw new Error('Agent Card has no endpoint');
     const url = new URL(card.endpoint);
-    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('External Agent endpoint must use HTTPS except loopback');
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('External Agent endpoint must use HTTPS except loopback');
     if (url.username || url.password || url.hash) throw new Error('External Agent endpoint must not contain credentials or fragments');
     const serialized = JSON.stringify(body);
     const timestamp = String(Date.now());
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
+    if (card.auth.includes('oauth')) headers.authorization = `Bearer ${await this.oauthProvider!.token(card.agentId, card)}`;
+    else if (card.auth.includes('bearer') && this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
     if (card.auth.includes('signed_request')) {
       const key = this.signingKeys[card.agentId]!;
       headers['x-aeeis-timestamp'] = timestamp;

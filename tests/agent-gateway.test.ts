@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
-import { AgentDirectory, AgentGateway, HttpAgentTransport } from '../src/agent-gateway.js';
+import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider } from '../src/agent-gateway.js';
 import { createContextPack, type AgentCard, type DelegationGrant, type TaskBrief } from '../src/protocol.js';
 import type { AgentTransport, AgentTransportResponse, DelegationRequest } from '../src/agent-gateway.js';
 
@@ -90,5 +90,35 @@ describe('external Agent gateway', () => {
     await Promise.all([first, second]); expect(calls).toBe(1);
     await expect(gateway.delegate({ ...request, idempotencyKey: 'second-key' })).rejects.toThrow('budget');
     await expect(gateway.delegate({ ...request, idempotencyKey: 'expired-context', contextPack: { ...context, expiresAt: '2020-01-01T00:00:00.000Z' } })).rejects.toThrow('expired');
+  });
+
+  it('delegates through OAuth and still enforces the Gateway acknowledgement boundary', async () => {
+    let tokenCalls = 0; const authorizations: Array<string | undefined> = [];
+    let includeAcknowledgement = true;
+    const tokenServer = createServer(async (_request, response) => { tokenCalls += 1; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ access_token: 'oauth-token', token_type: 'Bearer', expires_in: 300 })); });
+    const agentServer = createServer(async (request, response) => {
+      authorizations.push(request.headers.authorization);
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ status: 'completed', receiptRef: 'receipt.external', ...(includeAcknowledgement ? { acknowledgement: acknowledgement() } : {}), result: result() }));
+    });
+    await new Promise<void>(resolve => tokenServer.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => agentServer.listen(0, '127.0.0.1', resolve));
+    try {
+      const tokenAddress = tokenServer.address(); const agentAddress = agentServer.address();
+      if (!tokenAddress || typeof tokenAddress === 'string' || !agentAddress || typeof agentAddress === 'string') throw new Error('Servers did not bind');
+      const oauthCard: AgentCard = { ...card, auth: ['oauth'], endpoint: `http://127.0.0.1:${agentAddress.port}` };
+      const directory = new AgentDirectory(); directory.register(oauthCard);
+      const provider = new OAuthClientCredentialsProvider({ [oauthCard.agentId]: { tokenUrl: `http://127.0.0.1:${tokenAddress.port}/token`, clientId: 'client', clientSecret: 'secret' } });
+      const gateway = new AgentGateway(directory, new HttpAgentTransport(5_000, undefined, {}, provider));
+      const request: DelegationRequest = { agentId: oauthCard.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 2 } }, mode: 'sync', idempotencyKey: 'delegation-oauth' };
+      expect((await gateway.delegate(request)).status).toBe('completed');
+      includeAcknowledgement = false;
+      await expect(gateway.delegate({ ...request, idempotencyKey: 'delegation-oauth-2' })).rejects.toThrow('Context Acknowledgement');
+      expect(tokenCalls).toBe(1);
+      expect(authorizations).toEqual(['Bearer oauth-token', 'Bearer oauth-token']);
+    } finally {
+      await new Promise<void>(resolve => tokenServer.close(() => resolve()));
+      await new Promise<void>(resolve => agentServer.close(() => resolve()));
+    }
   });
 });

@@ -13,7 +13,7 @@
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现，并已接入 Runtime 的显式 `brainScope` 读取；Brain grant、state 和 API query 均做 schema 校验 | `FileBrainStore` 提供原子持久化、审计、导出和 scope 删除；Run 只在明确提供 scope 时读取，claim 以带 hash 的 Source 注入 Planner/Executor/Reviewer；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |
-| 外部 Agent Gateway | 已实现本地目录、HTTP sync/async/stream 委托端口、Context Pack/Grant 校验、Context Acknowledgement、幂等并发合并、unknown/reconcile、Result Envelope 验证、Context 过期和 Grant calls/tokens 预算校验，并接入 Runtime Executor；delegation receipt 持久化支持重启恢复；新增按 Agent ID 配置的 HMAC signed request/response 验证 | 尚未接入 Web 工作台、OAuth 适配器和真实外部 Agent 的生产验收 |
+| 外部 Agent Gateway | 已实现本地目录、HTTP sync/async/stream 委托端口、Context Pack/Grant 校验、Context Acknowledgement、幂等并发合并、unknown/reconcile、Result Envelope 验证、Context 过期和 Grant calls/tokens 预算校验，并接入 Runtime Executor；delegation receipt 持久化支持重启恢复；支持按 Agent ID 配置的 OAuth client-credentials token 缓存和 HMAC signed request/response 验证 | 尚未接入 Web 工作台、企业 OAuth/SSO 策略和真实外部 Agent 的生产验收 |
 | toolkit_new | manifest、版本冻结、allowlist、幂等 invoke、Receipt、unknown/reconcile HTTP 端口已实现；新增对 toolkit_new Registry index/Manifest 与 `/api/v1/t/:slug` 的协议转换适配器，并用本地 HTTP fixture 验证 | 尚未绑定 toolkit_new 的部署实例和真实工具调用；生产凭证与 ACL 未验收 |
 | ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record；已用本地 OwnHow CLI 验证 resolve/record/status，并要求明确 runtime | Apply 仍需显式授权；真实外部生产部署和治理闭环未验收 |
 | planprice | HTTP catalog adapter 已实现并用本地 Planprice 服务验收；读取 grouped 渠道价格与汇率、按 capability/隐私筛选并锁定 provider/model/endpoint/归一化价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实模型调用和价格新鲜度 SLA 未验收 |
