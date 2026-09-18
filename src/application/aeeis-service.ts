@@ -15,6 +15,7 @@ import type {
 } from "../contracts.js";
 import { createPlan, refreshReadyTasks, transitionTask } from "../domain/plan.js";
 import type { AeeisStore } from "../adapters/in-memory-store.js";
+import { PlanWriteConflict } from "../adapters/task-commit.js";
 import type { KnowledgeProvider } from "../knowledge.js";
 
 export class AeeisNotFound extends Error {}
@@ -67,28 +68,27 @@ export class AeeisService {
   }
 
   async transitionTask(input: TransitionTaskInput, now = new Date().toISOString()): Promise<RunReceipt> {
-    const current = await this.store.getPlan(input.planId);
-    if (!current) throw new AeeisNotFound(`Unknown plan: ${input.planId}`);
-    const result = transitionTask(current, input.taskId, input.transition, input.reason, now);
-    const next = refreshReadyTasks(result.plan);
-    await this.store.savePlan(next);
-    if (next.nodes.every((node) => node.status === "succeeded")) {
-      const goal = await this.store.getGoal(next.goalId);
-      if (goal) await this.store.saveGoal({ ...goal, status: "completed" });
+    // Recompute the transition after a stale read; never replay a stale Plan
+    // snapshot over another task's committed state.
+    for (let conflictCount = 0; conflictCount < 32; conflictCount++) {
+      const current = await this.store.getPlan(input.planId);
+      if (!current) throw new AeeisNotFound(`Unknown plan: ${input.planId}`);
+      const result = transitionTask(current, input.taskId, input.transition, input.reason, now);
+      const next = refreshReadyTasks(result.plan);
+      const receipt: RunReceipt = {
+        id: `receipt_${randomUUID()}`, planId: input.planId, taskId: input.taskId,
+        transition: input.transition, from: result.from, to: result.to,
+        occurredAt: now, attempt: result.attempt,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      };
+      try {
+        await this.store.commitTaskTransition(current, next, receipt);
+        return receipt;
+      } catch (error) {
+        if (!(error instanceof PlanWriteConflict)) throw error;
+      }
     }
-    const receipt: RunReceipt = {
-      id: `receipt_${randomUUID()}`,
-      planId: input.planId,
-      taskId: input.taskId,
-      transition: input.transition,
-      from: result.from,
-      to: result.to,
-      occurredAt: now,
-      attempt: result.attempt,
-      ...(input.reason === undefined ? {} : { reason: input.reason }),
-    };
-    await this.store.appendReceipt(receipt);
-    return receipt;
+    throw new AeeisConflict('Plan is busy; retry the task transition');
   }
 
   async addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString()): Promise<MemoryEntry> {

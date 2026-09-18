@@ -17,6 +17,7 @@ describe("JsonFileStore", () => {
         const plan = await service.createProjectPulsePlan(goal.id);
         await service.transitionTask({ planId: plan.id, taskId: "understand", transition: "start" });
 
+        await first.close();
         const second = new JsonFileStore(filePath);
         return second.init().then(async () => {
         const restored = await new AeeisService(second).getSnapshot(plan.id);
@@ -24,6 +25,7 @@ describe("JsonFileStore", () => {
         expect(restored.memories).toHaveLength(1);
         expect(restored.receipts).toHaveLength(1);
         expect(readFileSync(filePath, "utf8")).toContain("understand");
+        await second.close();
         });
       });
     });

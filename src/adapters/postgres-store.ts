@@ -1,6 +1,7 @@
 import pg from 'pg';
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from '../contracts.js';
 import type { AeeisStore } from './in-memory-store.js';
+import { assertTaskCommit } from './task-commit.js';
 
 /** PostgreSQL domain store. Each aggregate is kept as validated JSONB while
  * indexed ownership columns support the bounded Goal/Plan/Memory queries. */
@@ -28,6 +29,23 @@ export class PostgresAeeisStore implements AeeisStore {
   async getGoals(): Promise<Goal[]> { return many<Goal>(this.pool, 'SELECT state FROM aeeis_goals ORDER BY created_at DESC'); }
   async savePlan(plan: Plan): Promise<void> {
     await this.pool.query('INSERT INTO aeeis_plans(id,goal_id,state,created_at) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET goal_id=EXCLUDED.goal_id, state=EXCLUDED.state, created_at=EXCLUDED.created_at', [plan.id, plan.goalId, plan, plan.createdAt]);
+  }
+  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const locked = await client.query<{ state: Plan }>('SELECT state FROM aeeis_plans WHERE id=$1 FOR UPDATE', [expected.id]);
+      assertTaskCommit(locked.rows[0]?.state, expected, next, receipt);
+      const goal = await client.query('SELECT id FROM aeeis_goals WHERE id=$1 FOR UPDATE', [next.goalId]);
+      if (!goal.rowCount) throw new Error('Task commit references missing goal');
+      await client.query('UPDATE aeeis_plans SET state=$2 WHERE id=$1', [next.id, next]);
+      await client.query('INSERT INTO aeeis_receipts(id,plan_id,state,occurred_at) VALUES($1,$2,$3,$4)', [receipt.id, receipt.planId, receipt, receipt.occurredAt]);
+      if (next.nodes.every(node => node.status === 'succeeded')) {
+        await client.query(`UPDATE aeeis_goals SET state=jsonb_set(state, '{status}', '"completed"'::jsonb) WHERE id=$1`, [next.goalId]);
+      }
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   }
   async getPlan(id: Id): Promise<Plan | undefined> { return one<Plan>(this.pool, 'SELECT state FROM aeeis_plans WHERE id=$1', [id]); }
   async getPlans(goalId?: Id): Promise<Plan[]> { return goalId === undefined ? many<Plan>(this.pool, 'SELECT state FROM aeeis_plans ORDER BY created_at') : many<Plan>(this.pool, 'SELECT state FROM aeeis_plans WHERE goal_id=$1 ORDER BY created_at', [goalId]); }

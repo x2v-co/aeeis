@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
 import type { AeeisStore } from "./in-memory-store.js";
+import { assertTaskCommit } from './task-commit.js';
 
 interface StoreState {
   goals: Goal[];
@@ -23,15 +24,35 @@ const emptyState = (): StoreState => ({
 export class JsonFileStore implements AeeisStore {
   private state: StoreState = emptyState();
   private loaded = false;
+  private lockOwned = false;
 
   public constructor(private readonly filePath: string) {}
 
   async init(): Promise<void> {
     if (this.loaded) return;
+    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+    // Separate instances must not overwrite each other's cached snapshots.
+    // Only reclaim a lock when its owner is confirmed dead.
+    try {
+      const lock = openSync(`${this.filePath}.lock`, 'wx', 0o600);
+      try { writeSync(lock, String(process.pid)); } finally { closeSync(lock); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const pid = Number(readFileSync(`${this.filePath}.lock`, 'utf8'));
+      if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid domain store lock; inspect before recovery');
+      try { process.kill(pid, 0); }
+      catch (probeError) {
+        if ((probeError as NodeJS.ErrnoException).code !== 'ESRCH') throw probeError;
+        unlinkSync(`${this.filePath}.lock`);
+        return this.init();
+      }
+      throw new Error('Domain store already has a live writer');
+    }
+    this.lockOwned = true;
     try {
       this.state = JSON.parse(readFileSync(this.filePath, "utf8")) as StoreState;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { await this.close(); throw error; }
       this.state = emptyState();
     }
     this.loaded = true;
@@ -53,6 +74,21 @@ export class JsonFileStore implements AeeisStore {
   async savePlan(plan: Plan): Promise<void> {
     this.state.plans = replace(this.state.plans, plan);
     this.persist();
+  }
+
+  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void> {
+    assertTaskCommit(this.state.plans.find(plan => plan.id === expected.id), expected, next, receipt);
+    const goal = this.state.goals.find(item => item.id === next.goalId);
+    if (!goal) throw new Error('Task commit references missing goal');
+    const previous = this.state;
+    const staged: StoreState = {
+      ...previous,
+      plans: replace(previous.plans, next),
+      receipts: [...previous.receipts, structuredClone(receipt)],
+      goals: next.nodes.every(node => node.status === 'succeeded')
+        ? replace(previous.goals, { ...goal, status: 'completed' }) : previous.goals,
+    };
+    this.persist(staged);
   }
 
   async getPlan(id: Id): Promise<Plan | undefined> {
@@ -90,13 +126,17 @@ export class JsonFileStore implements AeeisStore {
     return clone(this.state.manifests.find((manifest) => manifest.id === id));
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    if (this.lockOwned) { unlinkSync(`${this.filePath}.lock`); this.lockOwned = false; }
+    this.loaded = false;
+  }
 
-  private persist(): void {
+  private persist(snapshot: StoreState = this.state): void {
+    if (!this.loaded || !this.lockOwned) throw new Error('Domain store is not open');
     const directory = dirname(this.filePath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
-    const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
     let descriptor: number | undefined;
     try {
       descriptor = openSync(tempPath, "wx", 0o600);
@@ -105,6 +145,9 @@ export class JsonFileStore implements AeeisStore {
       closeSync(descriptor);
       descriptor = undefined;
       renameSync(tempPath, this.filePath);
+      // After rename, reads must match the committed file even if the directory
+      // durability barrier fails. Before rename a rejected commit stays invisible.
+      this.state = snapshot;
       const directoryDescriptor = openSync(directory, "r");
       try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
     } catch (error) {

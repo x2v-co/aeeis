@@ -64,6 +64,8 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Goal、Plan、Receipt、Memory 和 Context Manifest 到 PostgreSQL，启动时会创建所需表和索引。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
+领域 Task 转移以一次存储提交更新 Plan、Goal 完成状态和 Receipt。并发分支按最新 Plan 快照重新校验，避免状态覆盖和缺失回执；JSON 存储限制单个活动写入者，PostgreSQL 使用行锁与事务。Plan 的 `version` 仍表示 DAG 版本，不作为执行状态的修订号。
+
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。
 
 RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `proposed → evaluating → approved → promoted` 后显式晋升；中高风险候选必须经过 `approved → shadowing → canarying → promoted`，每个阶段都要记录带证据的观察，失败会进入 `held` 并可回滚。Run 的 `/corrections` 入口会校验纠正引用是否来自该 Run 的真实上下文、产物、Receipt 或模型调用，再创建绑定 correction 引用的 candidate。默认必须分别通过 replay、holdout、safety 三道评测门。它不会自动修改生产 Agent。

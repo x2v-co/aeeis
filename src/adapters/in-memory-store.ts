@@ -1,6 +1,8 @@
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
+import { assertTaskCommit } from './task-commit.js';
 
 export interface AeeisStore {
+  commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void>;
   saveGoal(goal: Goal): Promise<void>;
   getGoal(id: Id): Promise<Goal | undefined>;
   getGoals(): Promise<Goal[]>;
@@ -22,6 +24,15 @@ export class InMemoryStore implements AeeisStore {
   private readonly receipts = new Map<Id, RunReceipt[]>();
   private readonly memories = new Map<Id, MemoryEntry>();
   private readonly manifests = new Map<Id, ContextManifest>();
+
+  async commitTaskTransition(expected: Plan, next: Plan, receipt: RunReceipt): Promise<void> {
+    assertTaskCommit(this.plans.get(expected.id), expected, next, receipt);
+    const goal = this.goals.get(next.goalId);
+    if (!goal) throw new Error('Task commit references missing goal');
+    this.plans.set(next.id, structuredClone(next));
+    this.receipts.set(next.id, [...(this.receipts.get(next.id) ?? []), structuredClone(receipt)]);
+    if (next.nodes.every(node => node.status === 'succeeded')) this.goals.set(goal.id, { ...goal, status: 'completed' });
+  }
 
   async saveGoal(goal: Goal): Promise<void> {
     this.goals.set(goal.id, structuredClone(goal));
