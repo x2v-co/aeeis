@@ -7,10 +7,13 @@ import {
   candidateScoreSchema,
   competitionBriefSchema,
   debateRoomSchema,
+  type CandidateRunner,
   type CandidateScore,
   type CompetitionBrief,
   type DebateMessage,
   type DebateRoom,
+  type IndependentEvaluator,
+  runCompetition as executeCompetition,
 } from './collaboration.js';
 import { resultEnvelopeSchema } from './protocol.js';
 
@@ -22,7 +25,7 @@ const debateStatus = z.enum(['active', 'closed']);
 const competitionRecordSchema = z.object({
   schemaVersion: z.literal(1), id, brief: competitionBriefSchema, status: competitionStatus,
   candidates: z.array(resultEnvelopeSchema).max(12), scores: z.array(candidateScoreSchema).max(12),
-  evaluatorAgentId: id.optional(), selectedAgentId: id.optional(), totalCost: z.number().nonnegative(),
+  evaluatorAgentId: id.optional(), selectedAgentId: id.optional(), failureReason: z.string().max(4000).optional(), totalCost: z.number().nonnegative(),
   createdAt: isoDate, updatedAt: isoDate, completedAt: isoDate.optional(),
 }).strict();
 const debateRecordSchema = z.object({
@@ -215,6 +218,41 @@ export class CollaborationService {
       const complete = current.candidates.length === current.brief.participantAgentIds.length && !overBudget;
       return { ...current, scores, status: complete ? 'completed' : 'partial', ...(selected ? { selectedAgentId: selected.agentId } : {}), completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     });
+  }
+
+  /**
+   * Run an entire competition through isolated candidate runners and an
+   * independent evaluator, while persisting every accepted candidate and
+   * score. Candidate runners are invoked concurrently, but the evaluator only
+   * receives the bounded, blind view produced by the domain workflow.
+   */
+  async runCompetition(idValue: string, evaluatorAgentId: string, runner: CandidateRunner, evaluator: IndependentEvaluator): Promise<CompetitionRecord> {
+    const current = await this.repository.getCompetition(idValue);
+    if (current.status !== 'collecting') throw new Error('Competition is no longer collecting candidates');
+    if (current.brief.participantAgentIds.includes(evaluatorAgentId)) throw new Error('Evaluator must be independent from participants');
+    const result = await executeCompetition(current.brief, runner, evaluator);
+    for (const candidate of result.candidates) await this.submitCandidate(idValue, candidate);
+    if (result.candidates.length === 0) return this.failCompetition(idValue, 'No valid candidate completed the isolated run');
+    await this.beginEvaluation(idValue, evaluatorAgentId);
+    const aliases = new Map(result.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
+    const viewScores = result.scores.map(score => ({ ...score, agentId: current.brief.blindEvaluation ? aliases.get(score.agentId) ?? score.agentId : score.agentId }));
+    let persisted = await this.repository.getCompetition(idValue);
+    for (const score of viewScores) {
+      if (persisted.status !== 'evaluating') break;
+      persisted = await this.submitScore(idValue, evaluatorAgentId, score);
+    }
+    if (persisted.status === 'evaluating') return this.finalizePartialCompetition(idValue, 'Evaluator returned an incomplete score set');
+    return persisted;
+  }
+
+  failCompetition(idValue: string, reason: string): Promise<CompetitionRecord> {
+    const clean = z.string().trim().min(1).max(4000).parse(reason);
+    return this.repository.mutateCompetition(idValue, current => ({ ...current, status: 'failed', failureReason: clean, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  }
+
+  finalizePartialCompetition(idValue: string, reason: string): Promise<CompetitionRecord> {
+    const clean = z.string().trim().min(1).max(4000).parse(reason);
+    return this.repository.mutateCompetition(idValue, current => ({ ...current, status: 'partial', failureReason: clean, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
   }
 
   async createDebate(input: unknown): Promise<DebateRecord> {

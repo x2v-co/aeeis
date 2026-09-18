@@ -12,6 +12,7 @@ import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
+import { ModelPoolCandidateRunner, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -27,6 +28,8 @@ const collaborationRepository = new FileCollaborationRepository(`${process.env.A
 await collaborationRepository.init();
 const collaboration = new CollaborationService(collaborationRepository);
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
+let competitionRunner: ModelPoolCandidateRunner | undefined;
+let competitionEvaluator: ModelPoolIndependentEvaluator | undefined;
 try {
   const toolkit = process.env.AEEIS_TOOLKIT_REGISTRY_URL
     ? new ToolkitRegistryGateway(process.env.AEEIS_TOOLKIT_REGISTRY_URL, process.env.AEEIS_TOOLKIT_TOKEN)
@@ -90,7 +93,20 @@ try {
       dispatcher = await TemporalDispatcher.connect(process.env.TEMPORAL_ADDRESS ?? '127.0.0.1:7233', process.env.AEEIS_TASK_QUEUE ?? 'aeeis-agent');
     } else dispatcher = new LocalDispatcher(engine);
   }
-  const app = buildApp({ repository, brain, brainStore, rsi, collaboration, ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  if (process.env.AEEIS_COMPETITION_AGENT_MODELS && process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL && process.env.AEEIS_COMPETITION_EVALUATOR_MODEL) {
+    const parsed: unknown = JSON.parse(process.env.AEEIS_COMPETITION_AGENT_MODELS);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AEEIS_COMPETITION_AGENT_MODELS must be a JSON object');
+    const agents = new Map<string, HttpModelAdapter>();
+    for (const [agentId, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Competition model config for ${agentId} must be an object`);
+      const config = value as Record<string, unknown>;
+      if (typeof config.baseUrl !== 'string' || typeof config.model !== 'string') throw new Error(`Competition model config for ${agentId} requires baseUrl and model`);
+      agents.set(agentId, new HttpModelAdapter(config.baseUrl, config.model, typeof config.apiKey === 'string' ? config.apiKey : '', typeof config.provider === 'string' ? config.provider : undefined));
+    }
+    competitionRunner = new ModelPoolCandidateRunner(agents);
+    competitionEvaluator = new ModelPoolIndependentEvaluator(process.env.AEEIS_COMPETITION_EVALUATOR_AGENT_ID ?? 'agent.evaluator', new HttpModelAdapter(process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL, process.env.AEEIS_COMPETITION_EVALUATOR_MODEL, process.env.AEEIS_COMPETITION_EVALUATOR_API_KEY ?? ''));
+  }
+  const app = buildApp({ repository, brain, brainStore, rsi, collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });

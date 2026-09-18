@@ -2,9 +2,11 @@ import { z } from 'zod';
 import { resultEnvelopeSchema, type ResultEnvelope } from './protocol.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
+const contextClaimSchema = z.object({ id, text: z.string().min(1).max(4000), evidenceRefs: z.array(id).max(100) }).strict();
 export const competitionBriefSchema = z.object({
   schemaVersion: z.literal('competition-brief/1'), taskId: id, contextVersion: id, goal: z.string().min(1).max(8000),
   participantAgentIds: z.array(id).min(2).max(12), expectedResultType: z.string().min(1).max(200),
+  context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(contextClaimSchema).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
   maxRounds: z.number().int().min(1).max(12), maxCost: z.number().nonnegative().optional(), blindEvaluation: z.boolean(),
 }).strict();
 export type CompetitionBrief = z.infer<typeof competitionBriefSchema>;

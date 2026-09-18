@@ -13,6 +13,29 @@ function candidate(agentId: string) {
 }
 
 describe('durable collaboration service', () => {
+  it('orchestrates isolated candidates and independent blind scoring into durable state', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collab-run-'))); await repository.init();
+    const service = new CollaborationService(repository);
+    const created = await service.createCompetition(brief);
+    const seen: string[][] = [];
+    const finished = await service.runCompetition(created.id, 'agent.evaluator', {
+      run: async (current, isolation) => {
+        seen.push(isolation.cannotSeeCandidateIds);
+        return candidate(isolation.candidateId);
+      },
+    }, {
+      evaluate: async (current, candidates) => {
+        expect(current.participantAgentIds).toEqual(['candidate_1', 'candidate_2']);
+        return candidates.map(item => ({ agentId: item.agentId, score: item.agentId === 'candidate_2' ? 0.9 : 0.4, accepted: true, reasons: ['evidence fit'], evidenceRefs: [] }));
+      },
+    });
+    expect(seen).toEqual([['agent.two'], ['agent.one']]);
+    expect(finished.status).toBe('completed');
+    expect(finished.selectedAgentId).toBe('agent.two');
+    expect((await service.getEvaluationView(created.id)).scores).toHaveLength(2);
+    await repository.close();
+  });
+
   it('persists competition collection, independent scoring and selection', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collab-'))); await repository.init();
     const service = new CollaborationService(repository);

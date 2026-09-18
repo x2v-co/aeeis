@@ -9,9 +9,10 @@ import { brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema
 import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
 import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
+import type { CandidateRunner, IndependentEvaluator } from '../collaboration.js';
 import { projectRunGraphs } from './graphs.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -94,6 +95,10 @@ export function buildApp(options: Options) {
       const body = z.object({ evaluatorAgentId: z.string().min(1).max(128), score: z.unknown() }).strict().parse(request.body);
       await options.collaboration.submitScore(id, body.evaluatorAgentId, body.score);
       return options.collaboration.getEvaluationView(id);
+    }
+    if (action === 'run') {
+      if (!options.competitionRunner || !options.competitionEvaluator || !options.competitionEvaluatorAgentId) throw new Conflict('Internal competition model pool is not configured');
+      return options.collaboration.runCompetition(id, options.competitionEvaluatorAgentId, options.competitionRunner, options.competitionEvaluator);
     }
     throw new Conflict('Unsupported competition action');
   });

@@ -49,6 +49,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 - `GET /api/evolution/candidates/:id`
 - `POST /api/evolution/candidates`，以及 `/:id/evaluate|approve|promote|rollback`
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
+- 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close`
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
