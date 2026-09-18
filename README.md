@@ -43,6 +43,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 - `GET /health`
 - `GET /api/status`
+- `GET /api/skills/proposals`、`POST /api/skills/proposals/:id/apply`、`POST /api/skills/:methodId/:version/rollback`（启用 OwnHow 后可用；apply 要求显式 `approvalRef`）
 - `GET /api/runs`
 - `GET /api/runs/:id`
 - `POST /api/runs/:id/corrections`（把带证据引用的用户纠正转为受治理 RSI candidate）

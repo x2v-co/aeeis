@@ -13,6 +13,7 @@ import { JsonFileStore } from '../src/adapters/json-store.js';
 import { AeeisService } from '../src/application/aeeis-service.js';
 import type { RsiEvaluationHarness } from '../src/evaluation.js';
 import { FileProjectionOutbox } from '../src/collaboration-projection.js';
+import type { SkillGovernance } from '../src/integrations.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -93,6 +94,26 @@ describe('AEEIS HTTP boundary', () => {
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'approval.1' } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} })).json().status).toBe('promoted');
     await app.close(); await evolution.close(); await repo.close();
+  });
+
+  it('exposes explicit Skill governance proposal, apply and rollback operations', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-skills-runs-'))); await repo.init();
+    const calls: string[] = [];
+    const skills: SkillGovernance = {
+      resolve: async () => ({ plan: {} }),
+      record: async () => ({ receiptRef: 'skill.receipt.1' }),
+      propose: async () => [{ id: 'proposal.1', task: 'project pulse', status: 'ready', sourceReceiptId: 'receipt.1' }],
+      apply: async proposalId => { calls.push(`apply:${proposalId}`); return { methodId: 'project-pulse', version: '2' }; },
+      rollback: async (methodId, version) => { calls.push(`rollback:${methodId}@${version}`); return { methodId, version }; },
+    };
+    const app = buildApp({ repository: repo, skills });
+    expect((await app.inject({ method: 'GET', url: '/api/skills/proposals' })).json()).toEqual([{ id: 'proposal.1', task: 'project pulse', status: 'ready', sourceReceiptId: 'receipt.1' }]);
+    expect((await app.inject({ method: 'POST', url: '/api/skills/proposals/proposal.1/apply', payload: {} })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/skills/proposals/proposal.1/apply', payload: { approvalRef: 'owner.approval.1' } })).json()).toEqual({ methodId: 'project-pulse', version: '2' });
+    expect((await app.inject({ method: 'POST', url: '/api/skills/project-pulse/2/rollback', payload: { reason: 'regression' } })).json()).toEqual({ methodId: 'project-pulse', version: '2' });
+    expect(calls).toEqual(['apply:proposal.1', 'rollback:project-pulse@2']);
+    expect((await app.inject({ method: 'GET', url: '/api/status' })).json().skillGovernanceConfigured).toBe(true);
+    await app.close(); await repo.close();
   });
 
   it('turns a Run correction into an evidence-bound RSI candidate', async () => {

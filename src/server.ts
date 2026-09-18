@@ -129,7 +129,7 @@ try {
     competitionEvaluator = new ModelPoolIndependentEvaluator(process.env.AEEIS_COMPETITION_EVALUATOR_AGENT_ID ?? 'agent.evaluator', new HttpModelAdapter(process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL, process.env.AEEIS_COMPETITION_EVALUATOR_MODEL, process.env.AEEIS_COMPETITION_EVALUATOR_API_KEY ?? ''));
     debateRunner = new ModelPoolDebateOrchestrator(collaboration, agents);
   }
-  const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), collaboration, projection, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), collaboration, projection, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });

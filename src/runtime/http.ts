@@ -16,8 +16,9 @@ import { projectRunGraphs } from './graphs.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
 import type { RsiEvaluationHarness } from '../evaluation.js';
 import type { FileProjectionOutbox, ProjectionSink } from '../collaboration-projection.js';
+import type { SkillGovernance } from '../integrations.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; collaboration?: CollaborationService; projection?: FileProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; skills?: SkillGovernance; collaboration?: CollaborationService; projection?: FileProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -58,7 +59,7 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
-  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
+  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), skillGovernanceConfigured: Boolean(options.skills), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
   app.get('/api/goals', async () => options.domain ? options.domain.listGoals() : []);
   app.post('/api/goals', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
@@ -125,6 +126,20 @@ export function buildApp(options: Options) {
     if (action === 'promote') return options.rsi.promote(id);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
     throw new Conflict('Unsupported evolution action');
+  });
+  app.get('/api/skills/proposals', async () => {
+    if (!options.skills) throw new Conflict('Skill governance is not configured');
+    return options.skills.propose();
+  });
+  app.post<{ Params: { id: string } }>('/api/skills/proposals/:id/apply', async request => {
+    if (!options.skills) throw new Conflict('Skill governance is not configured');
+    z.object({ approvalRef: z.string().trim().min(1).max(200) }).strict().parse(request.body ?? {});
+    return options.skills.apply(request.params.id);
+  });
+  app.post<{ Params: { methodId: string; version: string } }>('/api/skills/:methodId/:version/rollback', async request => {
+    if (!options.skills) throw new Conflict('Skill governance is not configured');
+    const body = z.object({ reason: z.string().trim().min(1).max(4000) }).strict().parse(request.body ?? {});
+    return options.skills.rollback(request.params.methodId, request.params.version);
   });
   app.get('/api/collaborations/competitions', async () => options.collaboration ? options.collaboration.listCompetitions() : []);
   app.get<{ Params: { id: string } }>('/api/collaborations/competitions/:id', async request => {
