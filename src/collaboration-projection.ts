@@ -114,3 +114,70 @@ export class HttpProjectionSink implements ProjectionSink {
     return body.externalId === undefined ? {} : { externalId: body.externalId };
   }
 }
+
+/**
+ * Feishu incoming-webhook adapter. The webhook is a delivery boundary only:
+ * AEEIS remains the source of truth and sends a compact status card without
+ * forwarding Context Pack contents or raw candidate artifacts.
+ */
+export class FeishuWebhookProjectionSink implements ProjectionSink {
+  private readonly endpoint: string;
+  constructor(private readonly webhookUrl: string, private readonly allowConfidential = false, private readonly timeoutMs = 30_000) {
+    const url = new URL(webhookUrl);
+    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Feishu webhook URL must use HTTPS except loopback');
+    if (url.username || url.password || url.hash) throw new Error('Feishu webhook URL must not contain credentials or fragments');
+    this.endpoint = url.toString();
+  }
+  async deliver(event: ProjectionEvent): Promise<{ externalId?: string }> {
+    if (event.channel !== 'feishu') throw new Error('Feishu sink only accepts feishu projection events');
+    const classification = projectionClassification(event.payload);
+    if (classification === 'private' || (classification === 'confidential' && !this.allowConfidential)) throw new Error('Feishu projection refuses private or confidential context');
+    const card = makeFeishuCard(event);
+    const response = await fetch(this.endpoint, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ msg_type: 'interactive', card, uuid: event.idempotencyKey.slice(0, 64) }),
+    });
+    if (!response.ok) throw new Error(`Feishu webhook returned HTTP ${response.status}`);
+    const body = z.object({ code: z.number().optional(), msg: z.string().optional(), StatusCode: z.number().optional(), StatusMessage: z.string().optional() }).passthrough().parse(await response.json());
+    const code = body.code ?? body.StatusCode ?? 0;
+    if (code !== 0) throw new Error(`Feishu webhook rejected projection: ${body.msg ?? body.StatusMessage ?? 'unknown error'}`);
+    return { externalId: event.idempotencyKey };
+  }
+}
+
+function projectionClassification(payload: unknown): 'public' | 'internal' | 'confidential' | 'private' | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  const nested = record.room && typeof record.room === 'object' ? record.room as Record<string, unknown> : record.brief && typeof record.brief === 'object' ? record.brief as Record<string, unknown> : undefined;
+  const context = nested?.context;
+  if (!context || typeof context !== 'object') return undefined;
+  const value = (context as Record<string, unknown>).classification;
+  return value === 'public' || value === 'internal' || value === 'confidential' || value === 'private' ? value : undefined;
+}
+
+function makeFeishuCard(event: ProjectionEvent): Record<string, unknown> {
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+  const title = event.aggregateType === 'debate' ? 'AEEIS Debate 更新' : 'AEEIS Competition 更新';
+  const status = typeof payload.status === 'string' ? payload.status : 'updated';
+  const lines = [`**${title}**`, `状态：${status}`, `对象：${event.aggregateId}`, `幂等键：${event.idempotencyKey}`];
+  if (event.aggregateType === 'debate') {
+    const room = payload.room && typeof payload.room === 'object' ? payload.room as Record<string, unknown> : {};
+    if (typeof room.goal === 'string' && room.goal) lines.push(`目标：${truncate(room.goal, 500)}`);
+    const messages = Array.isArray(room.messages) ? room.messages : [];
+    lines.push(`消息：${messages.length} 条`);
+    for (const message of messages.slice(-8)) {
+      if (!message || typeof message !== 'object') continue;
+      const item = message as Record<string, unknown>;
+      lines.push(`- ${truncate(String(item.speakerAgentId ?? 'agent'), 80)} / ${String(item.type ?? 'message')}：${truncate(String(item.content ?? ''), 800)}`);
+    }
+  } else {
+    const brief = payload.brief && typeof payload.brief === 'object' ? payload.brief as Record<string, unknown> : {};
+    if (typeof brief.goal === 'string' && brief.goal) lines.push(`目标：${truncate(brief.goal, 500)}`);
+    lines.push(`候选：${Array.isArray(payload.candidates) ? payload.candidates.length : 0} 个`, `评分：${Array.isArray(payload.scores) ? payload.scores.length : 0} 个`);
+    if (typeof payload.selectedAgentId === 'string') lines.push(`选定：${payload.selectedAgentId}`);
+  }
+  return { config: { wide_screen_mode: true }, header: { template: status === 'failed' ? 'red' : status === 'completed' || status === 'closed' ? 'green' : 'blue', title: { tag: 'plain_text', content: title } }, elements: [{ tag: 'div', text: { tag: 'lark_md', content: lines.join('\n') } }] };
+}
+
+function truncate(value: string, max: number): string { return value.length <= max ? value : value.slice(0, max - 1) + '…'; }

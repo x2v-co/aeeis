@@ -58,7 +58,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
 - 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。
-- `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate/Competition 快照，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道。
+- `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate/Competition 快照，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道；也可配置 `AEEIS_FEISHU_WEBHOOK_URL` 使用内置飞书 Incoming Webhook 卡片适配器，私有内容会被拒绝。
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 

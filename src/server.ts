@@ -17,7 +17,7 @@ import { JsonFileStore } from './adapters/json-store.js';
 import { AeeisService } from './application/aeeis-service.js';
 import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
-import { FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
+import { FeishuWebhookProjectionSink, FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -34,7 +34,9 @@ await collaborationRepository.init();
 const collaboration = new CollaborationService(collaborationRepository);
 const projection = new FileProjectionOutbox(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration-projection`);
 await projection.init();
-const projectionSink = process.env.AEEIS_PROJECTION_SINK_URL
+const projectionSink = process.env.AEEIS_FEISHU_WEBHOOK_URL
+  ? new FeishuWebhookProjectionSink(process.env.AEEIS_FEISHU_WEBHOOK_URL, process.env.AEEIS_FEISHU_ALLOW_CONFIDENTIAL === '1')
+  : process.env.AEEIS_PROJECTION_SINK_URL
   ? new HttpProjectionSink(process.env.AEEIS_PROJECTION_SINK_URL, process.env.AEEIS_PROJECTION_SINK_TOKEN)
   : undefined;
 const domainStore = new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
