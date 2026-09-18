@@ -6,6 +6,8 @@ AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也�
 
 当前版本是开发中的可验证纵向切片，尚未宣称生产可用。核心运行时、Brain 读取、Knowledge、协作状态平面和受治理 RSI 候选已经接入；真实外部部署、生产观测和多用户控制面仍在建设。
 
+Goal、Plan、Task、Memory 也由 AEEIS 自己持有，并通过 `/api/goals`、`/api/goals/:id/plans`、`/api/plans/:id/tasks/:taskId/transition` 和 `/api/goals/:id/memories` 暴露；这些领域对象保存在 `data/runs/domain.json`，与 Run 的执行事实源分开，但可以通过 Goal 和计划快照关联。
+
 ## 本地运行
 
 需要 Node.js 22 或更新版本。

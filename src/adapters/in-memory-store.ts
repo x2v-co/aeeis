@@ -3,6 +3,7 @@ import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from ".
 export interface AeeisStore {
   saveGoal(goal: Goal): void;
   getGoal(id: Id): Goal | undefined;
+  getGoals(): Goal[];
   savePlan(plan: Plan): void;
   getPlan(id: Id): Plan | undefined;
   getPlans(goalId?: Id): Plan[];
@@ -28,6 +29,10 @@ export class InMemoryStore implements AeeisStore {
   getGoal(id: Id): Goal | undefined {
     const goal = this.goals.get(id);
     return goal ? structuredClone(goal) : undefined;
+  }
+
+  getGoals(): Goal[] {
+    return structuredClone([...this.goals.values()]);
   }
 
   savePlan(plan: Plan): void {

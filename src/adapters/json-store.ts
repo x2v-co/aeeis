@@ -45,6 +45,10 @@ export class JsonFileStore implements AeeisStore {
     return clone(this.state.goals.find((goal) => goal.id === id));
   }
 
+  getGoals(): Goal[] {
+    return structuredClone(this.state.goals);
+  }
+
   savePlan(plan: Plan): void {
     this.state.plans = replace(this.state.plans, plan);
     this.persist();

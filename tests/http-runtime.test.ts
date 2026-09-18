@@ -9,6 +9,8 @@ import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
+import { JsonFileStore } from '../src/adapters/json-store.js';
+import { AeeisService } from '../src/application/aeeis-service.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -53,6 +55,27 @@ describe('AEEIS HTTP boundary', () => {
     expect((await app.inject({ method: 'DELETE', url: '/api/brain/p1' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/brain/p1?classification=internal' })).json().claims).toHaveLength(0);
     await app.close(); await brainStore.close(); await repo.close();
+  });
+
+  it('exposes durable Goal, Plan, Task and Memory domain operations', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-domain-runs-'))); await repo.init();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-http-domain-')), 'domain.json')); await domainStore.init();
+    const app = buildApp({ repository: repo, domain: new AeeisService(domainStore) });
+    const created = await app.inject({ method: 'POST', url: '/api/goals', payload: { title: 'Ship domain API', description: 'Persist core objects' } });
+    expect(created.statusCode).toBe(200);
+    const goal = created.json() as { id: string };
+    const memory = await app.inject({ method: 'POST', url: `/api/goals/${goal.id}/memories`, payload: { kind: 'decision', content: 'Keep AEEIS as the source of truth' } });
+    expect(memory.statusCode).toBe(200);
+    const planResponse = await app.inject({ method: 'POST', url: `/api/goals/${goal.id}/plans`, payload: { nodes: [{ id: 'draft', title: 'Draft', dependsOn: [] }, { id: 'review', title: 'Review', dependsOn: ['draft'] }] } });
+    expect(planResponse.statusCode).toBe(200);
+    const plan = planResponse.json() as { id: string };
+    expect((await app.inject({ method: 'POST', url: `/api/plans/${plan.id}/tasks/draft/transition`, payload: { transition: 'start' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/plans/${plan.id}/tasks/draft/transition`, payload: { transition: 'succeed' } })).statusCode).toBe(200);
+    const snapshot = await app.inject({ method: 'GET', url: `/api/plans/${plan.id}/snapshot` });
+    expect(snapshot.statusCode).toBe(200);
+    expect(snapshot.json()).toMatchObject({ goal: { id: goal.id }, plan: { id: plan.id }, receipts: [{ to: 'running' }, { to: 'succeeded' }] });
+    expect((await app.inject({ method: 'GET', url: `/api/goals/${goal.id}/memories` })).json()).toHaveLength(1);
+    await app.close(); await repo.close();
   });
 
   it('exposes the governed RSI candidate lifecycle through the API', async () => {

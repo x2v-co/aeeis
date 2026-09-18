@@ -12,8 +12,9 @@ import { CollaborationNotFound, type CollaborationService } from '../collaborati
 import type { CandidateRunner, IndependentEvaluator } from '../collaboration.js';
 import type { DebateRecord } from '../collaboration-service.js';
 import { projectRunGraphs } from './graphs.js';
+import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -38,6 +39,8 @@ export function buildApp(options: Options) {
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'Invalid request', issues: error.issues.map(i => ({ path: i.path, message: i.message })) });
     if (error instanceof NotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof AeeisNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof AeeisConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof Conflict) return reply.code(409).send({ error: error.message });
     const e = error as { statusCode?: number };
@@ -52,7 +55,49 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
-  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), collaborationConfigured: Boolean(options.collaboration), mode: 'single-owner-local' }));
+  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), collaborationConfigured: Boolean(options.collaboration), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
+  app.get('/api/goals', async () => options.domain ? options.domain.listGoals() : []);
+  app.post('/api/goals', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(8000).optional() }).strict().parse(request.body);
+    return options.domain.createGoal({ title: body.title, ...(body.description === undefined ? {} : { description: body.description }) });
+  });
+  app.get<{ Params: { id: string } }>('/api/goals/:id', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    return options.domain.getGoal(request.params.id);
+  });
+  app.get<{ Params: { id: string } }>('/api/goals/:id/plans', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    return options.domain.listPlans(request.params.id);
+  });
+  app.post<{ Params: { id: string } }>('/api/goals/:id/plans', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ nodes: z.array(z.object({ id: z.string().min(1).max(128), title: z.string().trim().min(1).max(500), kind: z.enum(['task', 'review', 'approval', 'deliverable']).optional(), dependsOn: z.array(z.string().min(1).max(128)).optional() }).strict()).min(1).max(100) }).strict().parse(request.body);
+    return options.domain.createPlan({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) });
+  });
+  app.get<{ Params: { id: string } }>('/api/goals/:id/memories', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    return options.domain.listMemories(request.params.id);
+  });
+  app.post<{ Params: { id: string } }>('/api/goals/:id/memories', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ kind: z.enum(['fact', 'decision', 'preference', 'note']), scope: z.enum(['private', 'project', 'session']).optional(), content: z.string().trim().min(1).max(30000), source: z.string().trim().max(1000).optional(), confidence: z.number().min(0).max(1).optional() }).strict().parse(request.body);
+    return options.domain.addMemory(request.params.id, { kind: body.kind, content: body.content, ...(body.scope === undefined ? {} : { scope: body.scope }), ...(body.source === undefined ? {} : { source: body.source }), ...(body.confidence === undefined ? {} : { confidence: body.confidence }) });
+  });
+  app.post<{ Params: { id: string } }>('/api/goals/:id/context-manifests', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ purpose: z.string().trim().min(1).max(500), query: z.string().max(2000).optional(), audience: z.array(z.string().min(1).max(128)).max(20).optional(), maxItems: z.number().int().min(1).max(50).optional(), knowledgeClassifications: z.array(z.enum(['public', 'internal', 'confidential', 'private'])).max(4).optional() }).strict().parse(request.body);
+    return options.domain.createContextManifest(request.params.id, { purpose: body.purpose, ...(body.query === undefined ? {} : { query: body.query }), ...(body.audience === undefined ? {} : { audience: body.audience }), ...(body.maxItems === undefined ? {} : { maxItems: body.maxItems }), ...(body.knowledgeClassifications === undefined ? {} : { knowledgeClassifications: body.knowledgeClassifications }) });
+  });
+  app.get<{ Params: { id: string } }>('/api/plans/:id/snapshot', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    return options.domain.getSnapshot(request.params.id);
+  });
+  app.post<{ Params: { planId: string; taskId: string } }>('/api/plans/:planId/tasks/:taskId/transition', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ transition: z.enum(['start', 'wait', 'request_approval', 'block', 'succeed', 'fail', 'cancel', 'mark_unknown', 'retry']), reason: z.string().max(4000).optional() }).strict().parse(request.body);
+    return options.domain.transitionTask({ planId: request.params.planId, taskId: request.params.taskId, transition: body.transition, ...(body.reason === undefined ? {} : { reason: body.reason }) });
+  });
   app.get('/api/evolution/candidates', async () => {
     if (!options.rsi) return [];
     return options.rsi.list();

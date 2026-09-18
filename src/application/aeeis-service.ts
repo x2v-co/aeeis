@@ -17,6 +17,9 @@ import { createPlan, refreshReadyTasks, transitionTask } from "../domain/plan.js
 import type { AeeisStore } from "../adapters/in-memory-store.js";
 import type { KnowledgeProvider } from "../knowledge.js";
 
+export class AeeisNotFound extends Error {}
+export class AeeisConflict extends Error {}
+
 export class AeeisService {
   public constructor(private readonly store: AeeisStore) {}
 
@@ -34,7 +37,7 @@ export class AeeisService {
   }
 
   createPlan(input: CreatePlanInput, now = new Date().toISOString()): Plan {
-    if (!this.store.getGoal(input.goalId)) throw new Error(`Unknown goal: ${input.goalId}`);
+    if (!this.store.getGoal(input.goalId)) throw new AeeisNotFound(`Unknown goal: ${input.goalId}`);
     const plan = createPlan(`plan_${randomUUID()}`, input.goalId, 1, input.nodes, now);
     this.store.savePlan(plan);
     return plan;
@@ -54,7 +57,7 @@ export class AeeisService {
 
   transitionTask(input: TransitionTaskInput, now = new Date().toISOString()): RunReceipt {
     const current = this.store.getPlan(input.planId);
-    if (!current) throw new Error(`Unknown plan: ${input.planId}`);
+    if (!current) throw new AeeisNotFound(`Unknown plan: ${input.planId}`);
     const result = transitionTask(current, input.taskId, input.transition, input.reason, now);
     const next = refreshReadyTasks(result.plan);
     this.store.savePlan(next);
@@ -78,7 +81,7 @@ export class AeeisService {
   }
 
   addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString()): MemoryEntry {
-    if (!this.store.getGoal(goalId)) throw new Error(`Unknown goal: ${goalId}`);
+    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     if (!input.content.trim()) throw new Error("Memory content is required");
     const memory: MemoryEntry = {
       id: `memory_${randomUUID()}`,
@@ -96,12 +99,12 @@ export class AeeisService {
   }
 
   listMemories(goalId: Id): MemoryEntry[] {
-    if (!this.store.getGoal(goalId)) throw new Error(`Unknown goal: ${goalId}`);
+    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     return this.store.getMemories(goalId);
   }
 
   createContextManifest(goalId: Id, input: CreateContextInput, now = new Date().toISOString()): ContextManifest {
-    if (!this.store.getGoal(goalId)) throw new Error(`Unknown goal: ${goalId}`);
+    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     if (!input.purpose.trim()) throw new Error("Context purpose is required");
     const queryTerms = tokenize(input.query ?? "");
     const maxItems = Math.max(1, Math.min(input.maxItems ?? 8, 50));
@@ -143,9 +146,9 @@ export class AeeisService {
 
   getSnapshot(planId: Id): AeeisSnapshot {
     const plan = this.store.getPlan(planId);
-    if (!plan) throw new Error(`Unknown plan: ${planId}`);
+    if (!plan) throw new AeeisNotFound(`Unknown plan: ${planId}`);
     const goal = this.store.getGoal(plan.goalId);
-    if (!goal) throw new Error(`Plan ${planId} references missing goal ${plan.goalId}`);
+    if (!goal) throw new AeeisNotFound(`Plan ${planId} references missing goal ${plan.goalId}`);
     return { goal, plan, receipts: this.store.getReceipts(planId), memories: this.store.getMemories(plan.goalId) };
   }
 
@@ -153,7 +156,7 @@ export class AeeisService {
     const plan = this.listPlans(goalId)[0];
     if (!plan) {
       const goal = this.store.getGoal(goalId);
-      if (!goal) throw new Error(`Unknown goal: ${goalId}`);
+      if (!goal) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
       throw new Error(`Goal ${goalId} has no plan`);
     }
     return this.getSnapshot(plan.id);
@@ -161,12 +164,16 @@ export class AeeisService {
 
   getGoal(goalId: Id): Goal {
     const goal = this.store.getGoal(goalId);
-    if (!goal) throw new Error(`Unknown goal: ${goalId}`);
+    if (!goal) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     return goal;
   }
 
+  listGoals(): Goal[] {
+    return this.store.getGoals().sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
   listPlans(goalId: Id): Plan[] {
-    if (!this.store.getGoal(goalId)) throw new Error(`Unknown goal: ${goalId}`);
+    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     // Stores intentionally expose a small MVP query through their plan IDs in a later adapter.
     // The current store contract is extended by this in-memory-compatible scan method.
     return this.store.getPlans(goalId);
