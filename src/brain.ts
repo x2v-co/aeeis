@@ -3,20 +3,24 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 
-const classification = z.enum(['public', 'internal', 'confidential', 'private']);
+export const brainClassificationSchema = z.enum(['public', 'internal', 'confidential', 'private']);
 const scope = z.enum(['identity', 'project', 'room', 'task', 'session']);
 const id = z.string().regex(/^brain_[a-f0-9-]{36}$/);
 const claimSchema = z.object({
   schemaVersion: z.literal(1), id, owner: z.string().min(1).max(200), scope, scopeRef: z.string().min(1).max(200),
-  classification, kind: z.enum(['fact', 'decision', 'preference', 'note']), content: z.string().min(1).max(30000),
+  classification: brainClassificationSchema, kind: z.enum(['fact', 'decision', 'preference', 'note']), content: z.string().min(1).max(30000),
   sourceRefs: z.array(z.string().max(200)).max(100), confidence: z.number().min(0).max(1), version: z.number().int().positive(),
   state: z.enum(['active', 'retracted']), createdAt: z.string().datetime({ offset: true }), updatedAt: z.string().datetime({ offset: true }),
 }).strict();
 export const brainClaimInputSchema = claimSchema.omit({ schemaVersion: true, id: true, version: true, state: true, createdAt: true, updatedAt: true });
 export type BrainClaim = z.infer<typeof claimSchema>;
-export interface BrainGrant { id: string; subject: string; scopeRef: string; classifications: Array<z.infer<typeof classification>>; actions: Array<'read' | 'write' | 'retract'>; expiresAt: string; revokedAt?: string; }
-export interface BrainAudit { id: string; at: string; actor: string; action: 'write' | 'read' | 'grant' | 'revoke' | 'retract' | 'export' | 'delete'; scopeRef?: string; ref?: string; contentHash?: string }
+export const brainGrantInputSchema = z.object({ subject: z.string().min(1).max(200), scopeRef: z.string().min(1).max(200), classifications: z.array(brainClassificationSchema).min(1).max(4), actions: z.array(z.enum(['read', 'write', 'retract'])).min(1).max(3), expiresAt: z.string().datetime({ offset: true }) }).strict();
+export const brainGrantSchema = brainGrantInputSchema.extend({ id: z.string().regex(/^grant_[a-f0-9-]{36}$/), revokedAt: z.string().datetime({ offset: true }).optional() }).strict();
+export type BrainGrant = z.infer<typeof brainGrantSchema>;
+export interface BrainAudit { id: string; at: string; actor: string; action: 'write' | 'read' | 'grant' | 'revoke' | 'retract' | 'export' | 'delete'; scopeRef?: string | undefined; ref?: string | undefined; contentHash?: string | undefined }
 export interface BrainState { schemaVersion: 1; claims: BrainClaim[]; grants: BrainGrant[]; audit: BrainAudit[] }
+const brainAuditSchema = z.object({ id: z.string().min(1).max(200), at: z.string().datetime({ offset: true }), actor: z.string().min(1).max(200), action: z.enum(['write', 'read', 'grant', 'revoke', 'retract', 'export', 'delete']), scopeRef: z.string().max(200).optional(), ref: z.string().max(200).optional(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
+export const brainStateSchema = z.object({ schemaVersion: z.literal(1), claims: z.array(claimSchema).max(100000), grants: z.array(brainGrantSchema).max(10000), audit: z.array(brainAuditSchema).max(200000) }).strict();
 
 export class GovernedBrain {
   private claims = new Map<string, BrainClaim[]>();
@@ -30,8 +34,9 @@ export class GovernedBrain {
   }
   grant(input: Omit<BrainGrant, 'id'>, issuer: string): BrainGrant {
     if (issuer !== 'owner') throw new Error('Only the owner can issue Brain grants');
-    if (new Date(input.expiresAt).getTime() <= Date.now()) throw new Error('Grant must expire in the future');
-    const value = { ...input, id: 'grant_' + randomUUID() }; this.grants.set(value.id, value); this.record('grant', issuer, input.scopeRef, value.id); return value;
+    const parsed = brainGrantInputSchema.parse(input);
+    if (new Date(parsed.expiresAt).getTime() <= Date.now()) throw new Error('Grant must expire in the future');
+    const value = brainGrantSchema.parse({ ...parsed, id: 'grant_' + randomUUID() }); this.grants.set(value.id, value); this.record('grant', issuer, parsed.scopeRef, value.id); return value;
   }
   revoke(grantId: string, issuer: string): void {
     if (issuer !== 'owner') throw new Error('Only the owner can revoke Brain grants');
@@ -39,6 +44,7 @@ export class GovernedBrain {
     grant.revokedAt = new Date().toISOString(); this.record('revoke', issuer, grant.scopeRef, grant.id);
   }
   read(scopeRef: string, actor: string, classificationLimit: BrainGrant['classifications'][number] = 'internal'): BrainClaim[] {
+    brainClassificationSchema.parse(classificationLimit);
     this.assertGrant(actor, scopeRef, classificationLimit, 'read');
     const result = structuredClone((this.claims.get(scopeRef) ?? []).filter(claim => claim.state === 'active' && rank(claim.classification) <= rank(classificationLimit)));
     this.record('read', actor, scopeRef); return result;
@@ -57,7 +63,8 @@ export class GovernedBrain {
   }
   state(): BrainState { return structuredClone({ schemaVersion: 1 as const, claims: [...this.claims.values()].flat(), grants: [...this.grants.values()], audit: this.audit }); }
   auditLog(): BrainAudit[] { return structuredClone(this.audit); }
-  static fromState(state: BrainState): GovernedBrain {
+  static fromState(input: unknown): GovernedBrain {
+    const state = brainStateSchema.parse(input);
     const brain = new GovernedBrain();
     for (const claim of state.claims) brain.claims.set(claim.scopeRef, [...(brain.claims.get(claim.scopeRef) ?? []), claim]);
     for (const grant of state.grants) brain.grants.set(grant.id, grant);

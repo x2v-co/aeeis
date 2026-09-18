@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { AgentEngine, Conflict, event } from './engine.js';
 import { NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
-import { brainClaimInputSchema, type BrainGrant, type GovernedBrain } from '../brain.js';
+import { brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema, type GovernedBrain } from '../brain.js';
 import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
 import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
@@ -115,7 +115,8 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
     if (!options.brain) return { error: 'Brain is not configured' };
-    return { scope: request.params.scope, claims: options.brain.read(request.params.scope, 'owner', request.query.classification ?? 'internal') };
+    const query = z.object({ classification: brainClassificationSchema.optional() }).strict().parse(request.query);
+    return { scope: request.params.scope, claims: options.brain.read(request.params.scope, 'owner', query.classification ?? 'internal') };
   });
   app.post('/api/brain/claims', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
@@ -124,7 +125,7 @@ export function buildApp(options: Options) {
   });
   app.post('/api/brain/grants', async request => {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
-    const grant = options.brain.grant(request.body as Omit<BrainGrant, 'id'>, 'owner');
+    const grant = options.brain.grant(brainGrantInputSchema.parse(request.body), 'owner');
     await options.brainStore.save(options.brain); return grant;
   });
   app.post<{ Params: { id: string } }>('/api/brain/grants/:id/revoke', async request => {

@@ -30,6 +30,11 @@ describe('governed Brain', () => {
     expect((await store.load()).export('project-2', 'owner')).toEqual([]);
     await store.close();
   });
+
+  it('rejects malformed Brain grants before they can enter state', () => {
+    const brain = new GovernedBrain();
+    expect(() => brain.grant({ subject: 'agent', scopeRef: 'project', classifications: ['internal'], actions: [] as never[], expiresAt: '2030-01-01T00:00:00.000Z' }, 'owner')).toThrow();
+  });
 });
 
 describe('model routing port', () => {
