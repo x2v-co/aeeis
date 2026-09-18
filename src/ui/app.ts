@@ -51,11 +51,28 @@ async function refresh(): Promise<void> {
 }
 function renderGoals(goals: GoalSummary[]): void {
   const list = $('goals'); list.replaceChildren(); $('goals-empty').hidden = goals.length > 0;
+  const selector = $<HTMLSelectElement>('goal-id');
+  const selected = selector.value;
+  selector.replaceChildren(element('option', '不绑定，创建独立运行'));
+  selector.options[0]!.value = '';
+  for (const goal of goals) {
+    const option = element('option', `${goal.title} · ${goal.status}`);
+    option.value = goal.id; selector.append(option);
+  }
+  if (goals.some(goal => goal.id === selected)) selector.value = selected;
   for (const goal of goals) {
     const item = element('div', '', 'fact-row');
     item.append(element('strong', goal.title), element('small', `${goal.status} · ${new Date(goal.createdAt).toLocaleDateString()}`)); list.append(item);
   }
 }
+($('new-goal') as HTMLFormElement).onsubmit = event => {
+  event.preventDefault(); message('');
+  const form = $('new-goal') as HTMLFormElement;
+  const submit = form.querySelector('button') as HTMLButtonElement; submit.disabled = true;
+  void api('/goals', { title: $<HTMLInputElement>('goal-title').value, description: $<HTMLTextAreaElement>('goal-description').value || undefined })
+    .then(async () => { $<HTMLInputElement>('goal-title').value = ''; $<HTMLTextAreaElement>('goal-description').value = ''; await refresh(); })
+    .catch(e => message(e.message)).finally(() => { submit.disabled = false; });
+};
 function renderCandidates(candidates: EvolutionSummary[]): void {
   const list = $('candidates'); list.replaceChildren(); $('candidates-empty').hidden = candidates.length > 0;
   for (const candidate of candidates) {
@@ -139,7 +156,8 @@ $('new-run').onsubmit = event => {
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
   const privacy = $<HTMLSelectElement>('privacy').value;
   const brainScope = $<HTMLInputElement>('brain-scope').value.trim();
-  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(brainScope ? { brainScope } : {}), privacy })
+  const goalId = $<HTMLSelectElement>('goal-id').value;
+  void api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, ...(goalId ? { goalId } : {}), materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(brainScope ? { brainScope } : {}), privacy })
     .then(async result => { currentId = result.id; current = undefined; localStorage.setItem('aeeis.run', currentId); await refresh(); })
     .catch(e => message(e.message)).finally(() => { submit.disabled = false; });
 };
