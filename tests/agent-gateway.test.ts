@@ -11,7 +11,7 @@ const card: AgentCard = {
 };
 const brief: TaskBrief = {
   schemaVersion: 'task-brief/1', taskId: 'task.external', goal: 'Research a bounded question', nonGoals: [], contextManifestId: 'ctx.external',
-  knownFacts: [], constraints: [], expectedOutput: 'result-envelope/1', budget: {}, allowedCapabilities: ['research'],
+  knownFacts: [], constraints: [], expectedOutput: 'research/1', budget: {}, allowedCapabilities: ['research'],
 };
 const context = createContextPack({ schemaVersion: 'context-pack/1', id: 'ctx.external', taskId: 'task.external', version: 1, audience: ['agent.external'], classification: 'public', expiresAt: date, sourceRefs: [], artifactRefs: [], claims: [], redactions: [] });
 const grant: DelegationGrant = {

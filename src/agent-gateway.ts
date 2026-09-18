@@ -111,6 +111,7 @@ export class AgentGateway {
     if (unsupported.length) throw new Error('Agent does not advertise required capabilities: ' + unsupported.join(', '));
     const cached = this.inFlight.get(request.idempotencyKey);
     if (cached?.outcome && cached.outcome.status !== 'unknown') return cached.outcome;
+    if (cached?.outcome?.status === 'unknown') throw new Error('Delegation outcome is unknown; reconcile before submitting again');
     if (cached && !sameRequest(cached.request, request)) throw new Error('Idempotency key is bound to a different delegation request');
     this.inFlight.set(request.idempotencyKey, { request, card });
     const response = await this.transport.submit(card, request);
@@ -202,6 +203,7 @@ function validateResponse(request: DelegationRequest, response: AgentTransportRe
   if (status.result) {
     validateResultForGrant(status.result, request.grant);
     if (status.result.contextVersion !== request.contextPack.id) throw new Error('Agent result context version does not match the delegated Context Pack');
+    if (status.result.resultType !== request.taskBrief.expectedOutput) throw new Error('Agent result type does not match the Task Brief');
     if (status.result.status !== status.status) throw new Error('Agent result status does not match transport status');
   } else if (status.status === 'completed' || status.status === 'partial' || status.status === 'failed' || status.status === 'rejected') {
     throw new Error('Completed Agent response must include a Result Envelope');
