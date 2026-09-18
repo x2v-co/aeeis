@@ -10,7 +10,7 @@
 | PostgreSQL 持久化 | 已实现适配器 | 当前环境没有 PostgreSQL 服务，未做真实数据库验收 |
 | Temporal Workflow / Worker | 已实现并实跑 | 本地 Temporal fixture Run 已完成；生产部署、版本迁移仍未验收 |
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile，避免盲重试 |
-| Brain claim、provenance、grant、撤销 | 核心语义已实现 | 当前是内存 governed core，尚未接入持久化和向量检索 |
+| Brain claim、provenance、grant、撤销 | 核心语义已实现 | `FileBrainStore` 已提供原子持久化、审计、导出和 scope 删除；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |
 | toolkit_new | 端口与 HTTPS HTTP adapter 已实现 | 尚未绑定 toolkit_new 的部署实例和真实工具调用 |
 | ownhow | CLI governance adapter 已实现 | 尚未在 AEEIS Run 中自动选择 / 记录；Apply 仍需显式授权 |

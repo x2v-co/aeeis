@@ -4,11 +4,15 @@ import { AgentEngine } from './runtime/engine.js';
 import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
 import { buildApp } from './runtime/http.js';
+import { FileBrainStore } from './brain.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
   : new FileRunRepository(process.env.AEEIS_DATA_DIR ?? 'data/runs');
 await repository.init();
+const brainStore = new FileBrainStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/brain`);
+await brainStore.init();
+const brain = await brainStore.load();
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 try {
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
@@ -20,7 +24,7 @@ try {
       dispatcher = await TemporalDispatcher.connect(process.env.TEMPORAL_ADDRESS ?? '127.0.0.1:7233', process.env.AEEIS_TASK_QUEUE ?? 'aeeis-agent');
     } else dispatcher = new LocalDispatcher(engine);
   }
-  const app = buildApp({ repository, ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, brain, brainStore, ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });
@@ -31,7 +35,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); throw error; }

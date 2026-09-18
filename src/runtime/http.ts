@@ -5,8 +5,10 @@ import { z } from 'zod';
 import { AgentEngine, Conflict, event } from './engine.js';
 import { NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
+import { brainClaimInputSchema, type BrainGrant, type GovernedBrain } from '../brain.js';
+import type { FileBrainStore } from '../brain.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -45,6 +47,28 @@ export function buildApp(options: Options) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
   app.get('/api/status', async () => ({ modelConfigured: Boolean(options.engine), model: options.engine?.modelPin ?? null, runner: options.dispatcher?.constructor.name ?? 'unconfigured', mode: 'single-owner-local' }));
+  app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
+    if (!options.brain) return { error: 'Brain is not configured' };
+    return { scope: request.params.scope, claims: options.brain.read(request.params.scope, 'owner', request.query.classification ?? 'internal') };
+  });
+  app.post('/api/brain/claims', async request => {
+    if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
+    const claim = options.brain.addClaim(brainClaimInputSchema.parse(request.body), 'owner');
+    await options.brainStore.save(options.brain); return claim;
+  });
+  app.post('/api/brain/grants', async request => {
+    if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
+    const grant = options.brain.grant(request.body as Omit<BrainGrant, 'id'>, 'owner');
+    await options.brainStore.save(options.brain); return grant;
+  });
+  app.post<{ Params: { id: string } }>('/api/brain/grants/:id/revoke', async request => {
+    if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
+    options.brain.revoke(request.params.id, 'owner'); await options.brainStore.save(options.brain); return { status: 'revoked' };
+  });
+  app.delete<{ Params: { scope: string } }>('/api/brain/:scope', async request => {
+    if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
+    options.brain.deleteScope(request.params.scope, 'owner'); await options.brainStore.save(options.brain); return { status: 'deleted' };
+  });
   app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, status, updatedAt }) => ({ id, goal, status, updatedAt })));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => options.repository.get(request.params.id));
   async function notify(id: string): Promise<void> {
