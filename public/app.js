@@ -62,7 +62,7 @@ async function loadPlan(goalId, planId) {
 }
 
 function render() {
-  $("nodes").innerHTML = current.plan.nodes.map((node) => `<article class="node ${node.status}"><div class="status">${node.status}</div><strong>${escapeHtml(node.title)}</strong><div class="muted">${node.id}${node.dependsOn.length ? ` · after ${node.dependsOn.join(", ")}` : ""}</div>${action(node)}</article>`).join("");
+  $("nodes").innerHTML = current.plan.nodes.map((node) => `<article class="node ${escapeHtml(node.status)}"><div class="status">${escapeHtml(node.status)}</div><strong>${escapeHtml(node.title)}</strong><div class="muted">${escapeHtml(node.id)}${node.dependsOn.length ? ` · after ${escapeHtml(node.dependsOn.join(", "))}` : ""}</div>${action(node)}</article>`).join("");
   $("nodes").querySelectorAll("button[data-task]").forEach((button) => button.addEventListener("click", async () => {
     try { await api(`/plans/${current.plan.id}/tasks/${button.dataset.task}/transitions`, { method: "POST", body: JSON.stringify({ transition: button.dataset.transition }) }); current = await api(`/plans/${current.plan.id}`); render(); } catch (error) { showError(error); }
   }));
@@ -71,6 +71,6 @@ function render() {
 
 function action(node) {
   const transition = node.status === "ready" ? "start" : node.status === "running" ? "succeed" : node.status === "waiting" || node.status === "needs_approval" || node.status === "blocked" ? "start" : node.status === "failed" || node.status === "unknown" ? "retry" : null;
-  return transition ? `<button data-task="${node.id}" data-transition="${transition}">${transition}</button>` : "";
+  return transition ? `<button data-task="${escapeHtml(node.id)}" data-transition="${transition}">${transition}</button>` : "";
 }
 function escapeHtml(value) { return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[character])); }

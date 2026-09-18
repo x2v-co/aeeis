@@ -19,7 +19,8 @@ describe("Brain context", () => {
     });
 
     expect(manifest.memoryRefs).not.toContain(privateMemory.id);
-    expect(manifest.excluded).toContain(privateMemory.id);
+    expect(manifest.excluded).toHaveLength(1);
+    expect(manifest.excluded[0]).not.toContain(privateMemory.id);
     expect(manifest.included[0]?.content).toContain("Temporal");
   });
 });

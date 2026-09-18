@@ -112,17 +112,16 @@ export class AeeisService {
       .sort((left, right) => right.score - left.score || right.memory.updatedAt.localeCompare(left.memory.updatedAt))
       .slice(0, maxItems)
       .map(({ memory }) => memory);
-    const excluded = this.store
+    const privateMemoryCount = this.store
       .getMemories(goalId)
-      .filter((memory) => memory.scope === "private")
-      .map((memory) => memory.id);
+      .filter((memory) => memory.scope === "private").length;
     const manifest: ContextManifest = {
       id: `ctx_${randomUUID()}`,
       purpose: input.purpose.trim(),
       audience: input.audience ?? ["owner"],
       memoryRefs: memories.map((memory) => memory.id),
       included: memories.map(({ id, kind, content, source, confidence }) => ({ id, kind, content, source, confidence })),
-      excluded,
+      excluded: privateMemoryCount > 0 ? ["private memories omitted by scope policy"] : [],
       createdAt: now,
     };
     this.store.saveContextManifest(manifest);

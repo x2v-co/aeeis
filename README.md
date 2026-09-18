@@ -8,7 +8,7 @@ The first design target is a project continuity agent that can read project cont
 
 ## Status
 
-The first TypeScript implementation now contains the core Plan DAG state machine, an in-memory AEEIS service, a small HTTP API, and durable Run Receipt objects. It is an early development scaffold, not production-ready.
+The first TypeScript implementation now contains the core Plan DAG state machine, a durable local AEEIS service, a small HTTP API, and Run Receipt objects. It is an early development scaffold, not production-ready.
 
 ## Design documents
 
