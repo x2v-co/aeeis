@@ -21,6 +21,7 @@ export class FileProjectionOutbox {
   private readonly lockPath: string;
   private readonly statePath: string;
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly deliveries = new Map<string, Promise<ProjectionEvent>>();
   constructor(private readonly directory: string) { this.lockPath = join(directory, '.writer.lock'); this.statePath = join(directory, 'projections.json'); }
   async init(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -57,6 +58,13 @@ export class FileProjectionOutbox {
   async get(id: string): Promise<ProjectionEvent> { const item = (await this.load()).events.find(event => event.id === id); if (!item) throw new Error('Unknown projection event'); return structuredClone(item); }
   async list(status?: ProjectionEvent['status']): Promise<ProjectionEvent[]> { return (await this.load()).events.filter(event => status === undefined || event.status === status).map(event => structuredClone(event)); }
   async deliver(id: string, sink: ProjectionSink): Promise<ProjectionEvent> {
+    const active = this.deliveries.get(id);
+    if (active) return active;
+    const work = this.deliverOnce(id, sink).finally(() => this.deliveries.delete(id));
+    this.deliveries.set(id, work);
+    return work;
+  }
+  private async deliverOnce(id: string, sink: ProjectionSink): Promise<ProjectionEvent> {
     const current = await this.get(id);
     if (current.status === 'delivered') return current;
     await this.serial(async () => {
@@ -77,6 +85,16 @@ export class FileProjectionOutbox {
       });
       throw error;
     }
+  }
+  async deliverPending(sink: ProjectionSink, limit = 20): Promise<{ delivered: number; failed: number; events: ProjectionEvent[] }> {
+    const bounded = Math.max(1, Math.min(Math.floor(limit), 100));
+    const candidates = (await this.list()).filter(event => event.status === 'pending' || event.status === 'failed').slice(0, bounded);
+    const events: ProjectionEvent[] = []; let failed = 0;
+    for (const candidate of candidates) {
+      try { events.push(await this.deliver(candidate.id, sink)); }
+      catch { failed += 1; events.push(await this.get(candidate.id)); }
+    }
+    return { delivered: events.filter(event => event.status === 'delivered').length, failed, events };
   }
   async close(): Promise<void> { await this.queue; await unlink(this.lockPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
 }

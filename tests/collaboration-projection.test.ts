@@ -24,4 +24,17 @@ describe('collaboration projection outbox', () => {
     expect(delivered.status).toBe('delivered'); expect(delivered.attempts).toBe(2); expect(delivered.externalId).toBe('msg.1');
     await outbox.close();
   });
+
+  it('shares one in-flight delivery and drains pending events with a bounded batch', async () => {
+    const outbox = new FileProjectionOutbox(await mkdtemp(join(tmpdir(), 'aeeis-projection-batch-'))); await outbox.init();
+    const first = await outbox.enqueue({ channel: 'feishu', destination: 'chat.1', aggregateType: 'debate', aggregateId: 'debate.3', payload: { n: 1 }, idempotencyKey: 'k1' });
+    await outbox.enqueue({ channel: 'feishu', destination: 'chat.1', aggregateType: 'debate', aggregateId: 'debate.4', payload: { n: 2 }, idempotencyKey: 'k2' });
+    let calls = 0;
+    const sink: ProjectionSink = { deliver: async () => { calls += 1; await new Promise(resolve => setTimeout(resolve, 5)); return {}; } };
+    const [one, two] = await Promise.all([outbox.deliver(first.id, sink), outbox.deliver(first.id, sink)]);
+    expect(one.id).toBe(two.id); expect(calls).toBe(1);
+    const drained = await outbox.deliverPending(sink, 10);
+    expect(drained.delivered).toBe(1); expect(drained.failed).toBe(0); expect(calls).toBe(2);
+    await outbox.close();
+  });
 });

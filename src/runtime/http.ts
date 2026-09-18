@@ -190,6 +190,11 @@ export function buildApp(options: Options) {
     if (!options.projection || !options.projectionSink) throw new Conflict('Projection sink is not configured');
     return options.projection.deliver(request.params.id, options.projectionSink);
   });
+  app.post('/api/collaborations/projections/deliver-pending', async request => {
+    if (!options.projection || !options.projectionSink) throw new Conflict('Projection sink is not configured');
+    const body = z.object({ limit: z.number().int().min(1).max(100).optional() }).strict().parse(request.body ?? {});
+    return options.projection.deliverPending(options.projectionSink, body.limit ?? 20);
+  });
   app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
     if (!options.brain) return { error: 'Brain is not configured' };
     const query = z.object({ classification: brainClassificationSchema.optional() }).strict().parse(request.query);
