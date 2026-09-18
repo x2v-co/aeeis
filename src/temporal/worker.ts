@@ -1,5 +1,6 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { fileURLToPath } from 'node:url';
+import { createAdvanceRunActivity } from './activity.js';
 
 const token = process.env.AEEIS_WORKER_TOKEN;
 if (!token) throw new Error('Set AEEIS_WORKER_TOKEN for the private activity endpoint');
@@ -9,17 +10,7 @@ try {
   const worker = await Worker.create({
     connection, taskQueue: process.env.AEEIS_TASK_QUEUE ?? 'aeeis-agent',
     workflowsPath: fileURLToPath(new URL('./workflows.js', import.meta.url)),
-    activities: {
-      async advanceRun(id: string): Promise<string> {
-        const response = await fetch(`${api}/internal/runs/${encodeURIComponent(id)}/advance`, {
-          method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-          body: '{}', signal: AbortSignal.timeout(90000), redirect: 'error',
-        });
-        if (!response.ok) throw new Error(`Activity endpoint returned HTTP ${response.status}`);
-        const body = await response.json() as { status: string };
-        return body.status;
-      },
-    },
+    activities: { advanceRun: createAdvanceRunActivity({ api, token }) },
   });
   await worker.run();
 } finally { await connection.close(); }

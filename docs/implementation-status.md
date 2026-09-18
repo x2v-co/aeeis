@@ -9,7 +9,7 @@
 | 任务执行、证据和 Reviewer | 已实现并测试 | 仅能读取 Run 提供的来源；artifact 引用会校验 |
 | File 持久化 | 已实现并测试 | 原子替换、fsync、单写入者锁 |
 | PostgreSQL 持久化 | Run 与 Goal Domain 均有适配器 | `PostgresRunRepository` 和 `PostgresAeeisStore` 启动时创建表、索引并使用事务/JSONB 持久化；当前环境没有 PostgreSQL 服务，未做真实数据库验收；可设置 `AEEIS_TEST_DATABASE_URL` 运行集成测试 |
-| Temporal Workflow / Worker | 已实现并实跑 | 本地 Temporal fixture Run 已完成；生产部署、版本迁移仍未验收 |
+| Temporal Workflow / Worker | 已实现并实跑 | Activity 已抽出为独立协议边界：网络/限流/5xx 使用有界指数重试，认证/配置/协议错误标记为 durable non-retryable；Workflow 仍按 Run 状态等待 signal，并每 100 个 tick Continue-As-New；本地 Temporal fixture Run 已完成；生产部署、版本迁移仍未验收 |
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile，服务重启发现未完成 Tool/Agent 调用时会生成 durable unknown Receipt 并强制 provider reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现，并已接入 Runtime 的显式 `brainScope` 读取；Brain grant、state 和 API query 均做 schema 校验 | `FileBrainStore` 提供原子持久化、审计、导出和 scope 删除；Run 只在明确提供 scope 时读取，claim 以带 hash 的 Source 注入 Planner/Executor/Reviewer；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |

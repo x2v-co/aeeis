@@ -97,6 +97,8 @@ prepare → execute → verify
 
 瞬时网络错误、限流和 Worker 故障可以按策略重试；参数错误、权限拒绝、业务冲突和安全拒绝应立即失败或等待修正。重试策略必须写入 Workflow/Skill 版本并记录在 Run Receipt。
 
+当前 Temporal Activity 将这条边界具体化：网络异常、408/425/429 和 5xx 进入最多五次的指数退避；认证、配置和协议错误使用 `AeeisPermanentError` / `AeeisProtocolError` 标记为不可重试。Activity 只返回经过 schema 校验的 Run status，业务事实仍由 AEEIS Run Repository 持有；Workflow 在 Activity 失败后等待 `wake` 或定时再次尝试，避免把 Temporal Failure 当成业务 Task 状态。
+
 ### 历史与版本
 
 - 长循环使用 `Continue-As-New`，避免 Workflow History 无限增长；
