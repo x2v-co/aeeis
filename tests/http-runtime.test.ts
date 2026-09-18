@@ -28,6 +28,22 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await repo.close();
   });
 
+  it('separates liveness from readiness and exposes bounded Prometheus metrics', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-health-runs-'))); await repo.init();
+    const app = buildApp({ repository: repo });
+    const live = await app.inject({ method: 'GET', url: '/health' });
+    expect(live.statusCode).toBe(200); expect(live.json()).toMatchObject({ status: 'ok', protocol: 'aeeis-health/1' });
+    const ready = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(ready.statusCode).toBe(503); expect(ready.json()).toMatchObject({ protocol: 'aeeis-readiness/1', status: 'not_ready' });
+    expect(ready.json().checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'repository', ready: true, required: true }),
+      expect.objectContaining({ name: 'model', ready: false, required: true }),
+    ]));
+    const metrics = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(metrics.statusCode).toBe(200); expect(metrics.headers['content-type']).toContain('text/plain'); expect(metrics.body).toContain('aeeis_model_configured 0');
+    await app.close(); await repo.close();
+  });
+
   it('exposes the three graph projections for a persisted run', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-graphs-'))); await repo.init();
     const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1/chat/completions', promptVersion: 'fixture/1' }, complete: async () => ({ value: { summary: 'Plan', nodes: [{ id: 'one', title: 'One', instruction: 'One', dependsOn: [] }] } }) };

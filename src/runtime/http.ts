@@ -52,7 +52,46 @@ export function buildApp(options: Options) {
     console.error('Request failed', error instanceof Error ? error.name : 'Error');
     return reply.code(500).send({ error: 'Internal operation failed; inspect the server log' });
   });
-  app.get('/health', async () => ({ status: 'ok', service: 'aeeis-agent' }));
+  app.get('/health', async () => ({ status: 'ok', service: 'aeeis-agent', protocol: 'aeeis-health/1' }));
+  app.get('/readyz', async (_request, reply) => {
+    const checks: Array<{ name: string; ready: boolean; required: boolean; detail: string }> = [];
+    const check = async (name: string, required: boolean, operation: () => Promise<void>, detail: string): Promise<void> => {
+      try { await operation(); checks.push({ name, ready: true, required, detail }); }
+      catch { checks.push({ name, ready: false, required, detail: 'dependency check failed' }); }
+    };
+    await check('repository', true, async () => { await options.repository.list(); }, 'run repository reachable');
+    checks.push({ name: 'model', ready: Boolean(options.engine?.modelConfigured), required: true, detail: options.engine?.modelConfigured ? 'model configured' : 'model configuration required' });
+    checks.push({ name: 'dispatcher', ready: Boolean(options.engine && options.dispatcher), required: true, detail: options.dispatcher?.constructor.name ?? 'dispatcher unavailable' });
+    checks.push({ name: 'domain', ready: Boolean(options.domain), required: true, detail: options.domain ? 'Goal/Plan domain configured' : 'domain unavailable' });
+    checks.push({ name: 'brain', ready: Boolean(options.brain), required: false, detail: options.brain ? 'Brain configured' : 'Brain unavailable' });
+    checks.push({ name: 'evolution', ready: Boolean(options.rsi), required: false, detail: options.rsi ? 'RSI repository configured' : 'RSI unavailable' });
+    checks.push({ name: 'collaboration', ready: Boolean(options.collaboration), required: false, detail: options.collaboration ? 'collaboration repository configured' : 'collaboration unavailable' });
+    const ready = checks.every(checkResult => !checkResult.required || checkResult.ready);
+    return reply.code(ready ? 200 : 503).send({ protocol: 'aeeis-readiness/1', status: ready ? 'ready' : 'not_ready', checks });
+  });
+  app.get('/metrics', async (_request, reply) => {
+    const runs = await options.repository.list();
+    const lines = [
+      '# HELP aeeis_runs_total Number of durable runs by status.',
+      '# TYPE aeeis_runs_total gauge',
+      ...countValues(runs.map(run => run.status), 'aeeis_runs_total'),
+      `aeeis_model_configured ${options.engine?.modelConfigured ? 1 : 0}`,
+      `aeeis_dispatcher_configured ${options.dispatcher ? 1 : 0}`,
+      `aeeis_domain_configured ${options.domain ? 1 : 0}`,
+      `aeeis_rsi_configured ${options.rsi ? 1 : 0}`,
+      `aeeis_collaboration_configured ${options.collaboration ? 1 : 0}`,
+      `aeeis_projection_sink_configured ${options.projectionSink ? 1 : 0}`,
+    ];
+    if (options.rsi) {
+      const candidates = await options.rsi.list();
+      lines.push('# HELP aeeis_evolution_candidates_total Evolution candidates by status.', '# TYPE aeeis_evolution_candidates_total gauge', ...countValues(candidates.map(candidate => candidate.status), 'aeeis_evolution_candidates_total'));
+    }
+    if (options.projection) {
+      const projections = await options.projection.list();
+      lines.push('# HELP aeeis_projection_events_total Projection outbox events by status.', '# TYPE aeeis_projection_events_total gauge', ...countValues(projections.map(event => event.status), 'aeeis_projection_events_total'));
+    }
+    return reply.type('text/plain; version=0.0.4; charset=utf-8').send(lines.join('\n') + '\n');
+  });
   const assets: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'],
   };
@@ -293,3 +332,11 @@ export function buildApp(options: Options) {
   });
   return app;
 }
+
+function countValues(values: string[], metric: string): string[] {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([value, count]) => `${metric}{status="${escapeMetricLabel(value)}"} ${count}`);
+}
+
+function escapeMetricLabel(value: string): string { return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n'); }

@@ -42,6 +42,8 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 ## 当前 API
 
 - `GET /health`
+- `GET /readyz`（依赖未就绪时返回 503，供部署和长时任务监控使用）
+- `GET /metrics`（Prometheus 文本格式的运行、RSI、投影和依赖指标）
 - `GET /api/status`
 - `GET /api/skills/proposals`、`POST /api/skills/proposals/:id/apply`、`POST /api/skills/:methodId/:version/rollback`（启用 OwnHow 后可用；apply 要求显式 `approvalRef`）
 - `GET /api/runs`

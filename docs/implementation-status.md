@@ -22,7 +22,7 @@
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息；Debate Brief 可携带受控 Context Pack；新增内部模型池的有界回合编排和 `run` API；新增带 hash/幂等键、失败重试状态的渠道无关 Projection outbox 与 HTTP sink，并支持并发去重和有界批量 drain；新增 Feishu Incoming Webhook 卡片适配器，拒绝 private 内容并默认拒绝 confidential 内容 | 飞书应用级 Bot、Hermes 具体 adapter、独立 Moderator/Adjudicator 和生产投影权限仍需接入验收 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |
 | Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引、受 schema 校验的 JSON File adapter 和 HTTPS HTTP adapter；Runtime 可通过 `knowledgeQuery` 检索，并在信任边界再次校验数量、分类、重复 ID 和内容 hash，再把受 privacy 分类策略过滤的知识引用注入 Planner/Executor/Reviewer Context Manifest | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
-| React、生产运维 | 未实现 | 当前 UI 是 TypeScript DOM；生产部署、监控、迁移、备份和安全验收仍缺失 |
+| React、生产运维 | 开发版可观测性已实现 | 当前 UI 是 TypeScript DOM；`/readyz` 区分存活与依赖就绪，`/metrics` 暴露 Prometheus 文本指标；生产部署、迁移、备份和安全验收仍缺失 |
 
 测试命令：
 
