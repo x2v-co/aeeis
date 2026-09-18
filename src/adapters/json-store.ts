@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
 import type { AeeisStore } from "./in-memory-store.js";
@@ -90,10 +91,27 @@ export class JsonFileStore implements AeeisStore {
   }
 
   private persist(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
-    renameSync(tempPath, this.filePath);
+    const directory = dirname(this.filePath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
+    const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(tempPath, "wx", 0o600);
+      writeSync(descriptor, serialized, undefined, "utf8");
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      renameSync(tempPath, this.filePath);
+      const directoryDescriptor = openSync(directory, "r");
+      try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
+    } catch (error) {
+      if (descriptor !== undefined) closeSync(descriptor);
+      try { unlinkSync(tempPath); } catch (cleanupError) {
+        if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
+      }
+      throw error;
+    }
   }
 }
 
