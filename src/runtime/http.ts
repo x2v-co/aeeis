@@ -17,6 +17,7 @@ import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis
 import type { RsiEvaluationHarness } from '../evaluation.js';
 import type { FileProjectionOutbox, ProjectionSink } from '../collaboration-projection.js';
 import type { SkillGovernance } from '../integrations.js';
+import type { AgentTransportResponse } from '../agent-gateway.js';
 
 interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; rsiHarness?: RsiEvaluationHarness; skills?: SkillGovernance; collaboration?: CollaborationService; projection?: FileProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
@@ -358,6 +359,10 @@ export function buildApp(options: Options) {
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     return { status: await options.engine.advance(request.params.id) };
+  });
+  app.post<{ Params: { id: string } }>('/api/runs/:id/agent-callback', async request => {
+    if (!options.engine) throw new Conflict('Model runtime is not configured');
+    return options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse);
   });
   return app;
 }

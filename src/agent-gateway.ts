@@ -157,6 +157,21 @@ export class AgentGateway {
     this.inFlight.set(request.idempotencyKey, { request, card, outcome });
     return outcome;
   }
+
+  /** Accepts a callback delivered by an asynchronous Agent. The callback is
+   * validated against the original task, context, grant and result schema;
+   * it never grants the remote Agent a write path into AEEIS state. */
+  async acceptCallback(requestInput: DelegationRequest, response: AgentTransportResponse): Promise<DelegationOutcome> {
+    const request = validateRequest(requestInput);
+    const card = this.directory.get(request.agentId);
+    if (!card.protocols.includes('aeeis-task/1')) throw new Error('Agent does not support the AEEIS task protocol');
+    const outcome = validateResponse(request, response);
+    await this.ledger.ensureUnknown(request.grant.grantId, request.idempotencyKey, request.grant.budget);
+    if (outcome.status === 'unknown') await this.ledger.markUnknown(request.grant.grantId, request.idempotencyKey);
+    else await this.ledger.settle(request.grant.grantId, request.idempotencyKey, outcome.result?.cost);
+    this.inFlight.set(request.idempotencyKey, { request, card, outcome });
+    return outcome;
+  }
 }
 
 export class HttpAgentTransport implements AgentTransport {

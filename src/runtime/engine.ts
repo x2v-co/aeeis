@@ -10,7 +10,7 @@ import { receiptSchema } from '../integrations.js';
 import type { ToolGateway, SkillGovernance, ModelSelectionRequest, Receipt, ToolResult } from '../integrations.js';
 import type { ModelResolver } from './model-router.js';
 import { AgentGateway } from '../agent-gateway.js';
-import type { DelegationReceipt } from '../agent-gateway.js';
+import type { AgentTransportResponse, DelegationReceipt, DelegationOutcome } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
@@ -207,6 +207,23 @@ export class AgentEngine {
     });
     await this.syncDomainState(result);
     return result;
+  }
+
+  /** Applies a validated callback from an asynchronous external Agent. */
+  async acceptAgentCallback(runId: string, response: AgentTransportResponse): Promise<AgentRun> {
+    if (!this.agents) throw new Conflict('Agent gateway is not configured');
+    const run = await this.repository.get(runId);
+    const pending = run.pendingDelegation;
+    if (!pending) {
+      const receiptRef = response.receiptRef;
+      if (run.delegationOutcomes?.some(outcome => outcome.receiptRef === receiptRef)) return run;
+      throw new Conflict('Run has no pending external Agent delegation');
+    }
+    const outcome = await this.agents.acceptCallback(pending, response);
+    await this.persistDelegationOutcome(runId, pending, outcome);
+    const updated = await this.repository.get(runId);
+    await this.syncDomainState(updated);
+    return this.repository.get(runId);
   }
   // One bounded operation per tick. The caller (Temporal or local driver) schedules subsequent ticks.
   async advance(runId: string): Promise<RunStatus> {
@@ -503,7 +520,11 @@ export class AgentEngine {
     const outcome = pending.reconcileRequested
       ? await this.agents.reconcile(pending, persistedReceipt)
       : await this.agents.delegate(pending);
-    await this.repository.mutate(run.id, current => {
+    await this.persistDelegationOutcome(run.id, pending, outcome);
+  }
+
+  private async persistDelegationOutcome(runId: string, pending: PendingDelegation, outcome: DelegationOutcome): Promise<void> {
+    await this.repository.mutate(runId, current => {
       const live = current.steps.find(step => step.taskId === pending.taskBrief.taskId);
       current.delegationOutcomes ??= [];
       const entry = { idempotencyKey: pending.idempotencyKey, status: outcome.status, receiptRef: outcome.receipt.receiptRef, contextVersion: pending.contextPack.id, receipt: outcome.receipt, ...(outcome.result ? { result: outcome.result } : {}) };
