@@ -8,7 +8,7 @@ function result(agentId: string, summary: string) { return { schemaVersion: 'res
 describe('multi-agent competition', () => {
   it('isolates candidates and selects through an independent evaluator', async () => {
     const seen: string[][] = [];
-    const output = await runCompetition(brief, { run: async (current, isolation) => { seen.push(isolation.cannotSeeCandidateIds); return result(isolation.candidateId, isolation.candidateId); } }, { evaluate: async (_brief, candidates) => candidates.map(candidate => ({ agentId: candidate.agentId, score: candidate.agentId === 'agent.2' ? 0.9 : 0.4, accepted: true, reasons: ['evidence fit'], evidenceRefs: [] })) });
+    const output = await runCompetition(brief, { run: async (current, isolation) => { seen.push(isolation.cannotSeeCandidateIds); return result(isolation.candidateId, isolation.candidateId); } }, { evaluate: async (currentBrief, candidates) => { expect(currentBrief.participantAgentIds).toEqual(['candidate_1', 'candidate_2']); expect(candidates.every(candidate => candidate.agentId.startsWith('candidate_'))).toBe(true); return candidates.map(candidate => ({ agentId: candidate.agentId, score: candidate.agentId === 'candidate_2' ? 0.9 : 0.4, accepted: true, reasons: ['evidence fit'], evidenceRefs: [] })); } });
     expect(output.selected?.agentId).toBe('agent.2');
     expect(seen).toEqual([['agent.2'], ['agent.1']]);
   });

@@ -20,8 +20,10 @@ describe('durable collaboration service', () => {
     await service.submitCandidate(created.id, candidate('agent.one'));
     await service.submitCandidate(created.id, candidate('agent.two'));
     await service.beginEvaluation(created.id, 'agent.evaluator');
-    await service.submitScore(created.id, 'agent.evaluator', { agentId: 'agent.one', score: 0.4, accepted: true, reasons: ['weak'], evidenceRefs: [] });
-    const finished = await service.submitScore(created.id, 'agent.evaluator', { agentId: 'agent.two', score: 0.9, accepted: true, reasons: ['strong'], evidenceRefs: [] });
+    const evaluationView = await service.getEvaluationView(created.id);
+    expect(evaluationView.candidates.map(item => item.agentId)).toEqual(['candidate_1', 'candidate_2']);
+    await service.submitScore(created.id, 'agent.evaluator', { agentId: 'candidate_1', score: 0.4, accepted: true, reasons: ['weak'], evidenceRefs: [] });
+    const finished = await service.submitScore(created.id, 'agent.evaluator', { agentId: 'candidate_2', score: 0.9, accepted: true, reasons: ['strong'], evidenceRefs: [] });
     expect(finished.status).toBe('completed'); expect(finished.selectedAgentId).toBe('agent.two');
     expect((await new CollaborationService(repository).getCompetition(created.id)).status).toBe('completed');
     await repository.close();

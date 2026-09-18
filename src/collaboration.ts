@@ -31,7 +31,15 @@ export async function runCompetition(briefInput: CompetitionBrief, runner: Candi
     return [candidate];
   });
   if (candidates.length === 0) return { brief, candidates: [], scores: [], status: 'failed' };
-  const scores = await evaluator.evaluate(brief, candidates);
+  const aliases = new Map(candidates.map((candidate, index) => [`candidate_${index + 1}`, candidate.agentId]));
+  const evaluationBrief = brief.blindEvaluation
+    ? { ...brief, participantAgentIds: [...aliases.keys()] }
+    : brief;
+  const evaluationCandidates = brief.blindEvaluation
+    ? candidates.map((candidate, index) => ({ ...candidate, agentId: `candidate_${index + 1}` }))
+    : candidates;
+  const rawScores = await evaluator.evaluate(evaluationBrief, evaluationCandidates);
+  const scores = rawScores.map(score => ({ ...score, agentId: aliases.get(score.agentId) ?? score.agentId }));
   const candidateIds = new Set(candidates.map(candidate => candidate.agentId));
   const seenScores = new Set<string>();
   const validScores = scores.filter(score => {

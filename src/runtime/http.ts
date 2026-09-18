@@ -84,10 +84,15 @@ export function buildApp(options: Options) {
     if (!options.collaboration) throw new Error('Collaboration service is not configured');
     const { id, action } = request.params;
     if (action === 'candidate') return options.collaboration.submitCandidate(id, request.body);
-    if (action === 'begin-evaluation') return options.collaboration.beginEvaluation(id, z.object({ evaluatorAgentId: z.string().min(1).max(128) }).strict().parse(request.body).evaluatorAgentId);
+    if (action === 'begin-evaluation') {
+      const evaluatorAgentId = z.object({ evaluatorAgentId: z.string().min(1).max(128) }).strict().parse(request.body).evaluatorAgentId;
+      await options.collaboration.beginEvaluation(id, evaluatorAgentId);
+      return options.collaboration.getEvaluationView(id);
+    }
     if (action === 'score') {
       const body = z.object({ evaluatorAgentId: z.string().min(1).max(128), score: z.unknown() }).strict().parse(request.body);
-      return options.collaboration.submitScore(id, body.evaluatorAgentId, body.score);
+      await options.collaboration.submitScore(id, body.evaluatorAgentId, body.score);
+      return options.collaboration.getEvaluationView(id);
     }
     throw new Conflict('Unsupported competition action');
   });

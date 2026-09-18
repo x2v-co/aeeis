@@ -164,6 +164,20 @@ export class CollaborationService {
   listCompetitions(): Promise<CompetitionRecord[]> { return this.repository.listCompetitions(); }
   getCompetition(idValue: string): Promise<CompetitionRecord> { return this.repository.getCompetition(idValue); }
 
+  /** Returns the evaluator-facing view. Blind competitions never expose participant IDs here. */
+  async getEvaluationView(idValue: string): Promise<CompetitionRecord> {
+    const current = await this.repository.getCompetition(idValue);
+    if (!current.brief.blindEvaluation) return current;
+    const aliases = new Map(current.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
+    return {
+      ...current,
+      brief: { ...current.brief, participantAgentIds: current.brief.participantAgentIds.map((_agent, index) => `candidate_${index + 1}`) },
+      candidates: current.candidates.map(candidate => ({ ...candidate, agentId: aliases.get(candidate.agentId)! })),
+      scores: current.scores.map(score => ({ ...score, agentId: aliases.get(score.agentId) ?? score.agentId })),
+      ...(current.selectedAgentId ? { selectedAgentId: aliases.get(current.selectedAgentId) ?? current.selectedAgentId } : {}),
+    };
+  }
+
   submitCandidate(idValue: string, input: unknown): Promise<CompetitionRecord> {
     return this.repository.mutateCompetition(idValue, current => {
       if (current.status !== 'collecting') throw new Error('Competition is no longer collecting candidates');
@@ -189,9 +203,12 @@ export class CollaborationService {
     return this.repository.mutateCompetition(idValue, current => {
       if (current.status !== 'evaluating' || current.evaluatorAgentId !== evaluatorAgentId) throw new Error('Competition is not awaiting this evaluator');
       const score = candidateScoreSchema.parse(input);
-      if (!current.candidates.some(candidate => candidate.agentId === score.agentId)) throw new Error('Score refers to an unknown candidate');
-      if (current.scores.some(existing => existing.agentId === score.agentId)) throw new Error('Candidate has already been scored');
-      const scores = [...current.scores, score];
+      const aliases = new Map(current.candidates.map((candidate, index) => [`candidate_${index + 1}`, candidate.agentId]));
+      const actualAgentId = current.brief.blindEvaluation ? aliases.get(score.agentId) : score.agentId;
+      if (!actualAgentId) throw new Error('Score refers to an unknown candidate');
+      if (!current.candidates.some(candidate => candidate.agentId === actualAgentId)) throw new Error('Score refers to an unknown candidate');
+      if (current.scores.some(existing => existing.agentId === actualAgentId)) throw new Error('Candidate has already been scored');
+      const scores = [...current.scores, { ...score, agentId: actualAgentId }];
       if (scores.length < current.candidates.length) return { ...current, scores, updatedAt: new Date().toISOString() };
       const overBudget = current.brief.maxCost !== undefined && current.totalCost > current.brief.maxCost;
       const selected = !overBudget ? scores.filter(item => item.accepted).sort((a, b) => b.score - a.score)[0] : undefined;

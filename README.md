@@ -56,7 +56,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`，失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
 
-竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。当前这些 API 提供可靠的协作状态平面，真正的内部 Agent pool、飞书投影和外部自动调度仍需接入。
+竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。当前这些 API 提供可靠的协作状态平面，真正的内部 Agent pool、飞书投影和外部自动调度仍需接入。
 
 ## 设计边界
 
