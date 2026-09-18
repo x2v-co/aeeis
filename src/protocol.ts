@@ -14,7 +14,7 @@ export const agentCardSchema = z.object({
   auth: z.array(z.enum(['signed_request', 'oauth', 'bearer', 'local'])).max(10),
   privacy: z.object({ dataRetention: z.enum(['none', 'session', 'declared']), regions: z.array(z.string().max(100)).max(20) }).strict(),
   pricing: z.object({ unit: z.string().min(1).max(100), amount: z.number().nonnegative().optional(), currency: z.string().max(10).optional() }).strict(),
-  cardVersion: z.string().regex(/^\d+$/), expiresAt: isoDate.optional(),
+  cardVersion: z.string().regex(/^\d+$/), endpoint: z.string().url().optional(), expiresAt: isoDate.optional(),
 }).strict();
 
 export const taskBriefSchema = z.object({
