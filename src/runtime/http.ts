@@ -368,9 +368,16 @@ export function buildApp(options: Options) {
     };
     const timestamp = header('x-aeeis-timestamp');
     const signature = header('x-aeeis-signature');
-    return options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse, {
+    const updated = await options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse, {
       ...(timestamp === undefined ? {} : { timestamp }), ...(signature === undefined ? {} : { signature }),
     });
+    try { await options.dispatcher?.notify(request.params.id); }
+    catch (error) {
+      await options.repository.mutate(request.params.id, run => {
+        event(run, 'dispatch.failed', { reason: error instanceof Error ? error.message : 'Execution service unavailable', source: 'agent-callback' });
+      });
+    }
+    return updated;
   });
   return app;
 }
