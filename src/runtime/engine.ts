@@ -10,7 +10,7 @@ import { receiptSchema } from '../integrations.js';
 import type { ToolGateway, SkillGovernance, ModelSelectionRequest, Receipt, ToolResult } from '../integrations.js';
 import type { ModelResolver } from './model-router.js';
 import { AgentGateway } from '../agent-gateway.js';
-import type { AgentTransportResponse, DelegationReceipt, DelegationOutcome } from '../agent-gateway.js';
+import type { AgentCallbackAuthentication, AgentTransportResponse, DelegationReceipt, DelegationOutcome } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
@@ -210,7 +210,7 @@ export class AgentEngine {
   }
 
   /** Applies a validated callback from an asynchronous external Agent. */
-  async acceptAgentCallback(runId: string, response: AgentTransportResponse): Promise<AgentRun> {
+  async acceptAgentCallback(runId: string, response: AgentTransportResponse, authentication?: AgentCallbackAuthentication): Promise<AgentRun> {
     if (!this.agents) throw new Conflict('Agent gateway is not configured');
     const run = await this.repository.get(runId);
     const pending = run.pendingDelegation;
@@ -219,7 +219,7 @@ export class AgentEngine {
       if (run.delegationOutcomes?.some(outcome => outcome.receiptRef === receiptRef)) return run;
       throw new Conflict('Run has no pending external Agent delegation');
     }
-    const outcome = await this.agents.acceptCallback(pending, response);
+    const outcome = await this.agents.acceptCallback(pending, response, authentication);
     await this.persistDelegationOutcome(runId, pending, outcome);
     const updated = await this.repository.get(runId);
     await this.syncDomainState(updated);

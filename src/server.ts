@@ -91,7 +91,7 @@ try {
       const configs = oauthClientConfigsSchema.parse(JSON.parse(process.env.AEEIS_AGENT_OAUTH_CONFIG));
       oauthProvider = new OAuthClientCredentialsProvider(configs);
     }
-    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider), grantLedger);
+    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider), grantLedger, signingKeys);
   }
   const knowledge = process.env.AEEIS_KNOWLEDGE_URL
     ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN)

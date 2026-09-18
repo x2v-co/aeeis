@@ -77,6 +77,22 @@ describe('external Agent gateway', () => {
     expect(submits).toBe(1); expect(reconciles).toBe(1);
   });
 
+  it('requires a fresh HMAC callback signature for signed asynchronous Agents and keeps callbacks idempotent', async () => {
+    const key = 'callback-signing-secret-0123456789';
+    const signedCard: AgentCard = { ...card, auth: ['signed_request'] };
+    const directory = new AgentDirectory(); directory.register(signedCard);
+    const gateway = new AgentGateway(directory, { submit: async () => ({ status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: acknowledgement() }) }, undefined, { [signedCard.agentId]: key });
+    const request: DelegationRequest = { agentId: signedCard.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 1 } }, mode: 'async', idempotencyKey: 'delegation-callback' };
+    const response: AgentTransportResponse = { status: 'completed', receiptRef: 'receipt.callback', acknowledgement: acknowledgement(), result: { ...result(), receiptRef: 'receipt.callback' } };
+    const timestamp = String(Date.now());
+    const signature = createHmac('sha256', key).update(`${timestamp}.${JSON.stringify(response)}`).digest('hex');
+    await expect(gateway.acceptCallback(request, response, { timestamp, signature: 'bad' })).rejects.toThrow('failed verification');
+    const accepted = await gateway.acceptCallback(request, response, { timestamp, signature });
+    expect(accepted.status).toBe('completed');
+    expect((await gateway.acceptCallback(request, response, { timestamp, signature })).status).toBe('completed');
+    await expect(gateway.acceptCallback(request, response, { timestamp: String(Date.now() - 6 * 60_000), signature })).rejects.toThrow('missing or expired');
+  });
+
   it('signs requests and verifies signed responses for signed Agent Cards', async () => {
     const key = 'test-signing-secret-0123456789';
     const server = createServer(async (request, response) => {

@@ -362,7 +362,15 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/runs/:id/agent-callback', async request => {
     if (!options.engine) throw new Conflict('Model runtime is not configured');
-    return options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse);
+    const header = (name: string): string | undefined => {
+      const value = request.headers[name];
+      return typeof value === 'string' ? value : undefined;
+    };
+    const timestamp = header('x-aeeis-timestamp');
+    const signature = header('x-aeeis-signature');
+    return options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse, {
+      ...(timestamp === undefined ? {} : { timestamp }), ...(signature === undefined ? {} : { signature }),
+    });
   });
   return app;
 }

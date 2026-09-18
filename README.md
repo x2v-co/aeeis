@@ -43,6 +43,8 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 外部 Agent 通过 `AEEIS_AGENT_CARDS` 注册（JSON 数组），Run 请求仍需显式提供 `allowedAgents`；Agent Card 只描述能力，真正的任务级权限由 AEEIS 生成的 Context Pack 和 Delegation Grant 决定。Gateway 会校验 Context Pack 过期时间、Context Acknowledgement、幂等并发和 Grant 的 calls/tokens/money 预算，并把预算账本持久化到 `${AEEIS_DATA_DIR}/agent-grants.json`，因此重启后已 reserve 的委托只能 reconcile。`signed_request` Agent 可在 `AEEIS_AGENT_SIGNING_KEYS` 中按 Agent ID 配置共享密钥，OAuth Agent 可通过 `AEEIS_AGENT_OAUTH_CONFIG` 使用 client-credentials token；HTTP 传输会验证 HTTPS、签名响应和结构化 Result Envelope。
 
+异步 Agent 可以通过 `POST /api/runs/:id/agent-callback` 返回最终 Result Envelope。带 `signed_request` 的 Agent 必须使用同一共享密钥对 `timestamp + JSON callback body` 生成 HMAC，并提供 `x-aeeis-timestamp` / `x-aeeis-signature`；时间窗为 5 分钟。OAuth/bearer Agent 的异步 callback 当前必须同时声明 `signed_request`，避免只有一个公开 Run ID 就能伪造结果。重复 callback 按 delegation receipt 幂等处理，不能重复推进任务或重复结算预算。
+
 OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`、`clientId`、`clientSecret` 和可选 `scopes`；`authMethod` 默认 `client_secret_basic`，也可选 `client_secret_post`。token 只在内存缓存，并发申请会合并；按服务商有效期提前刷新，不报告有效期则不缓存。不跟随 token endpoint 重定向，也不在认证失败后自动重发 Agent 任务。用户交互授权、SSO 和生产授权服务器仍未验收。
 
 开发环境可以使用 loopback HTTP；非 loopback endpoint 必须使用 HTTPS。模型调用不会自动重试，传输结果不明会进入 `unknown`，需要显式核查后才能再次调用。每次模型调用都会生成稳定的 `model:<runId>:<callId>` provider 幂等键；reconcile 会复用原调用记录和同一个 key，避免把一次不明结果变成重复计费或重复请求。外部 Agent 返回异步 `accepted` 时，Run 会进入持久化的 `waiting_external`，保留 delegation receipt，只有显式 reconcile 收到最终 Result Envelope 后才继续。服务重启发现未完成的 Tool/Agent 调用时，会恢复为带 Receipt 的 `unknown`，强制走 provider reconcile，不会直接再次发送副作用请求。

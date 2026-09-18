@@ -56,6 +56,11 @@ export interface AgentTransportResponse {
   result?: ResultEnvelope;
 }
 
+export interface AgentCallbackAuthentication {
+  timestamp?: string;
+  signature?: string;
+}
+
 export interface AgentTransport {
   submit(card: AgentCard, request: DelegationRequest): Promise<AgentTransportResponse>;
   reconcile?(card: AgentCard, request: DelegationRequest, receipt: DelegationReceipt): Promise<AgentTransportResponse>;
@@ -105,7 +110,12 @@ export class AgentDirectory {
 export class AgentGateway {
   private readonly inFlight = new Map<string, { request: DelegationRequest; card: AgentCard; outcome?: DelegationOutcome; promise?: Promise<DelegationOutcome> }>();
 
-  constructor(private readonly directory: AgentDirectory, private readonly transport: AgentTransport, private readonly ledger: GrantLedger = new InMemoryGrantLedger()) {}
+  constructor(
+    private readonly directory: AgentDirectory,
+    private readonly transport: AgentTransport,
+    private readonly ledger: GrantLedger = new InMemoryGrantLedger(),
+    private readonly callbackSigningKeys: Readonly<Record<string, string>> = {},
+  ) {}
 
   async delegate(input: DelegationRequest): Promise<DelegationOutcome> {
     const request = validateRequest(input);
@@ -161,10 +171,11 @@ export class AgentGateway {
   /** Accepts a callback delivered by an asynchronous Agent. The callback is
    * validated against the original task, context, grant and result schema;
    * it never grants the remote Agent a write path into AEEIS state. */
-  async acceptCallback(requestInput: DelegationRequest, response: AgentTransportResponse): Promise<DelegationOutcome> {
+  async acceptCallback(requestInput: DelegationRequest, response: AgentTransportResponse, authentication?: AgentCallbackAuthentication): Promise<DelegationOutcome> {
     const request = validateRequest(requestInput);
     const card = this.directory.get(request.agentId);
     if (!card.protocols.includes('aeeis-task/1')) throw new Error('Agent does not support the AEEIS task protocol');
+    verifyCallbackAuthentication(card, response, authentication, this.callbackSigningKeys);
     const outcome = validateResponse(request, response);
     await this.ledger.ensureUnknown(request.grant.grantId, request.idempotencyKey, request.grant.budget);
     if (outcome.status === 'unknown') await this.ledger.markUnknown(request.grant.grantId, request.idempotencyKey);
@@ -232,10 +243,24 @@ function sign(key: string, timestamp: string, body: string): string {
 }
 
 function verifySignature(key: string, headers: Headers, body: string): void {
-  const timestamp = headers.get('x-aeeis-timestamp'); const received = headers.get('x-aeeis-signature');
-  if (!timestamp || !received || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000 || !/^\d+$/.test(timestamp)) throw new Error('Signed Agent response is missing or expired');
+  const timestamp = headers.get('x-aeeis-timestamp') ?? undefined; const received = headers.get('x-aeeis-signature') ?? undefined;
+  verifySignatureValues(key, timestamp, received, body, 'Signed Agent response');
+}
+
+function verifyCallbackAuthentication(card: AgentCard, response: AgentTransportResponse, authentication: AgentCallbackAuthentication | undefined, keys: Readonly<Record<string, string>>): void {
+  if (!card.auth.includes('signed_request')) {
+    if (card.auth.includes('oauth') || card.auth.includes('bearer')) throw new Error('Asynchronous Agent callbacks require signed_request authentication');
+    return;
+  }
+  const key = keys[card.agentId];
+  if (!key) throw new Error('Agent Card requires a callback signing key');
+  verifySignatureValues(key, authentication?.timestamp, authentication?.signature, JSON.stringify(response), 'Signed Agent callback');
+}
+
+function verifySignatureValues(key: string, timestamp: string | undefined, received: string | undefined, body: string, label: string): void {
+  if (!timestamp || !received || !/^\d+$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000) throw new Error(`${label} is missing or expired`);
   const expected = sign(key, timestamp, body); const left = Buffer.from(expected); const right = Buffer.from(received);
-  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new Error('Signed Agent response failed verification');
+  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new Error(`${label} failed verification`);
 }
 
 const responseSchema = z.object({
