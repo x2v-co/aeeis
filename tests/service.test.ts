@@ -36,4 +36,16 @@ describe("AeeisService", () => {
     }
     expect((await service.getGoal(goal.id)).status).toBe("completed");
   });
+
+  it("creates immutable plan revisions with increasing versions", async () => {
+    const service = new AeeisService(new InMemoryStore());
+    const goal = await service.createGoal({ title: "Iterate safely" });
+    const first = await service.createPlan({ goalId: goal.id, nodes: [{ id: "draft", title: "Draft" }] });
+    const second = await service.createPlanRevision({ goalId: goal.id, nodes: [{ id: "review", title: "Review" }] });
+
+    expect(second.id).not.toBe(first.id);
+    expect(second.version).toBe(2);
+    expect((await service.listPlans(goal.id)).map(plan => plan.version)).toEqual([2, 1]);
+    expect((await service.getSnapshot(first.id)).plan.version).toBe(1);
+  });
 });

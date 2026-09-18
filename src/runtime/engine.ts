@@ -144,6 +144,14 @@ export class AgentEngine {
         if (run.calls.length >= run.maxModelCalls) throw new Conflict('Call budget exhausted; create a new run with an appropriate budget');
         run.status = run.plans.length === 0 ? 'queued' : run.steps.every(s => s.status === 'succeeded') ? 'reviewing' : 'running';
         delete run.error; event(run, 'run.retry_requested');
+      } else if (action === 'replan') {
+        if (run.status !== 'failed') throw new Conflict('Only failed runs can be replanned');
+        if (run.calls.length >= run.maxModelCalls) throw new Conflict('Call budget exhausted; create a new run with an appropriate budget');
+        if (this.active.has(runId)) throw new Conflict('A model request is still in flight');
+        const reason = z.object({ reason: z.string().trim().min(1).max(2000).optional() }).strict().parse(body).reason;
+        run.status = 'planning';
+        delete run.error; delete run.approval; delete run.question; delete run.resumeStatus;
+        event(run, 'plan.revision_requested', { reason: reason ?? 'Owner requested a revised plan' });
       } else { throw new Conflict('Unsupported run command'); }
     });
   }
@@ -226,7 +234,7 @@ export class AgentEngine {
 
   private async plan(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.call(run, model, 'planner', {
-      system: plannerPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources.map(({ id, title, source }) => ({ id, title, source })) },
+      system: plannerPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources.map(({ id, title, source }) => ({ id, title, source })), previousPlan: run.plans.at(-1) ?? null, previousReview: run.review ?? null, existingArtifacts: run.artifacts.map(({ id, taskId, title, evidenceRefs }) => ({ id, taskId, title, evidenceRefs })) },
     }, (current, value) => {
       const draft = validatePlan(value); const hash = digest(draft);
       current.plans.push({ ...draft, version: current.plans.length + 1, hash, createdAt: now() });
@@ -236,15 +244,18 @@ export class AgentEngine {
     });
     if (this.domain) {
       const planned = await this.repository.get(run.id);
-      if (planned.goalId && !planned.domainPlanId && planned.plans.at(-1)) {
+      if (planned.goalId && planned.plans.at(-1)) {
         const draft = planned.plans.at(-1)!;
-        const domainPlan = await this.domain.createPlan({
+        const domainInput = {
           goalId: planned.goalId,
           nodes: draft.nodes.map(node => ({ id: node.id, title: node.title, ...(node.dependsOn.length ? { dependsOn: node.dependsOn } : {}) })),
-        });
+        };
+        const domainPlan = planned.domainPlanId
+          ? await this.domain.createPlanRevision(domainInput)
+          : await this.domain.createPlan(domainInput);
         await this.repository.mutate(run.id, current => {
           current.domainPlanId = domainPlan.id;
-          event(current, 'domain.plan.linked', { goalId: current.goalId, domainPlanId: domainPlan.id, planHash: draft.hash });
+          event(current, 'domain.plan.linked', { goalId: current.goalId, domainPlanId: domainPlan.id, planVersion: domainPlan.version, planHash: draft.hash });
         });
       }
     }

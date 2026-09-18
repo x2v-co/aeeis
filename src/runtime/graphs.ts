@@ -5,16 +5,17 @@ export interface GraphEdge { from: string; to: string; type: string }
 export interface PlanGraph { kind: 'plan'; runId: string; version: number; hash: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface ExecutionGraph { kind: 'execution'; runId: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface EvidenceGraph { kind: 'evidence'; runId: string; nodes: GraphNode[]; edges: GraphEdge[] }
-export interface RunGraphs { plan: PlanGraph | undefined; execution: ExecutionGraph; evidence: EvidenceGraph }
+export interface RunGraphs { plan: PlanGraph | undefined; planHistory: PlanGraph[]; execution: ExecutionGraph; evidence: EvidenceGraph }
 
 /** Stable projections for the UI, audit tools, and external task projections. */
 export function projectRunGraphs(run: AgentRun): RunGraphs {
-  const plan = run.plans.at(-1);
-  const planGraph = plan ? {
+  const toPlanGraph = (plan: AgentRun['plans'][number]): PlanGraph => ({
     kind: 'plan' as const, runId: run.id, version: plan.version, hash: plan.hash,
     nodes: plan.nodes.map(node => ({ id: node.id, type: 'task', label: node.title, status: run.steps.find(step => step.taskId === node.id)?.status ?? 'pending' })),
     edges: plan.nodes.flatMap(node => node.dependsOn.map(dependency => ({ from: dependency, to: node.id, type: 'depends_on' }))),
-  } : undefined;
+  });
+  const planHistory = run.plans.map(toPlanGraph);
+  const planGraph = planHistory.at(-1);
 
   const executionNodes: GraphNode[] = run.steps.map(step => ({ id: `step:${step.taskId}`, type: 'step', label: step.taskId, status: step.status, metadata: { attempts: step.attempts } }));
   const executionEdges: GraphEdge[] = [];
@@ -47,5 +48,5 @@ export function projectRunGraphs(run: AgentRun): RunGraphs {
     const modelCallId = event && typeof event.data.modelCallId === 'string' ? event.data.modelCallId : undefined;
     if (modelCallId && evidenceNodes.some(node => node.id === modelCallId)) evidenceEdges.push({ from: modelCallId, to: artifact.id, type: 'generated' });
   }
-  return { plan: planGraph, execution: { kind: 'execution', runId: run.id, nodes: executionNodes, edges: executionEdges }, evidence: { kind: 'evidence', runId: run.id, nodes: evidenceNodes, edges: evidenceEdges } };
+  return { plan: planGraph, planHistory, execution: { kind: 'execution', runId: run.id, nodes: executionNodes, edges: executionEdges }, evidence: { kind: 'evidence', runId: run.id, nodes: evidenceNodes, edges: evidenceEdges } };
 }

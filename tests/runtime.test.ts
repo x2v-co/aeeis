@@ -37,6 +37,28 @@ class PlanningFixture implements ModelAdapter {
   }
 }
 
+class RevisionFixture implements ModelAdapter {
+  readonly pin = pin;
+  plannerCalls = 0;
+  reviewerCalls = 0;
+  async complete(request: ModelRequest) {
+    if (request.system.includes('Plan a real deliverable')) {
+      this.plannerCalls += 1;
+      return { value: this.plannerCalls === 1
+        ? { summary: 'Initial plan', nodes: [{ id: 'draft', title: 'Draft', instruction: 'Draft', dependsOn: [] }] }
+        : { summary: 'Revised plan', nodes: [{ id: 'research', title: 'Research', instruction: 'Research', dependsOn: [] }, { id: 'synthesize', title: 'Synthesize', instruction: 'Synthesize', dependsOn: ['research'] }] } };
+    }
+    if (request.system.includes('Independently review')) {
+      this.reviewerCalls += 1;
+      return { value: this.reviewerCalls === 1
+        ? { verdict: 'needs_revision', summary: 'The plan needs a second research step', issues: ['Add independent research'] }
+        : { verdict: 'accepted', summary: 'Revised plan is supported', issues: [] } };
+    }
+    const input = request.input as { task: { id: string }; sourceCatalog: Array<{ id: string }> ; dependencies: Array<{ id: string }> };
+    return { value: { type: 'finish', title: input.task.id, content: `Completed ${input.task.id}`, evidenceRefs: input.dependencies.length ? input.dependencies.map(item => item.id) : input.sourceCatalog.map(item => item.id) } };
+  }
+}
+
 async function repository() {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-runtime-'));
   const repo = new FileRunRepository(directory);
@@ -152,6 +174,33 @@ describe('AEEIS runtime', () => {
     const snapshot = await domain.getSnapshot((await domain.listPlans(goal.id))[0]!.id);
     expect(snapshot.receipts.map(receipt => receipt.to)).toEqual(['running', 'succeeded', 'running', 'succeeded']);
     expect(snapshot.plan.nodes.every(node => node.status === 'succeeded')).toBe(true);
+    await repo.close();
+  });
+
+  it('replans a failed review into a new runtime and domain Plan version', async () => {
+    const repo = await repository();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-domain-replan-')), 'domain.json'));
+    await domainStore.init();
+    const domain = new AeeisService(domainStore);
+    const goal = await domain.createGoal({ title: 'Revise this release plan' });
+    const model = new RevisionFixture();
+    const engine = new AgentEngine(repo, { model, domain });
+    const run = await engine.create({ goal: goal.title, goalId: goal.id, materials: [{ title: 'Brief', source: 'fixture', content: 'Evidence' }] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    for (let index = 0; index < 8; index += 1) {
+      const status = await engine.advance(run.id);
+      if (['succeeded', 'failed'].includes(status)) break;
+    }
+    expect((await repo.get(run.id)).status).toBe('failed');
+    await engine.command(run.id, 'replan', { reason: 'Address review issue' });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    current = await repo.get(run.id);
+    expect(current.plans.map(plan => plan.version)).toEqual([1, 2]);
+    expect(current.events.map(item => item.type)).toContain('plan.revision_requested');
+    expect((await domain.listPlans(goal.id)).map(plan => plan.version)).toEqual([2, 1]);
+    expect(model.plannerCalls).toBe(2);
     await repo.close();
   });
 

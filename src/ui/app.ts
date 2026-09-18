@@ -80,12 +80,15 @@ function render(run: RunView): void {
   if (['queued', 'planning', 'running', 'reviewing'].includes(run.status)) controls.append(button('暂停', () => command('pause')));
   if (run.status === 'paused') controls.append(button('继续', () => command('resume')));
   if (run.status === 'failed') controls.append(button('重试失败步骤', () => command('retry')));
+  if (run.status === 'failed') controls.append(button('重新规划', () => command('replan', { reason: '根据审核或失败信息生成新的计划版本' })));
   if (!['succeeded', 'cancelled'].includes(run.status)) controls.append(button('取消运行', () => command('cancel')));
   if (run.status === 'queued') controls.append(button('恢复调度', () => command('dispatch')));
   $('input-panel').hidden = !['needs_input', 'unknown'].includes(run.status);
   $('question').textContent = run.question?.text ?? '上次模型请求结果未知。核查后填写允许重新调用的理由；可能产生重复模型费用。';
   const plan = run.plans.at(-1);
-  $('plan-summary').textContent = plan ? `计划 v${plan.version} · ${plan.summary}` : '正在等待模型生成任务计划';
+  $('plan-summary').textContent = plan
+    ? `计划 v${plan.version} · ${plan.summary}${run.plans.length > 1 ? ` · 历史版本：${run.plans.slice(0, -1).map(item => `v${item.version}`).join('、')}` : ''}`
+    : '正在等待模型生成任务计划';
   const graph = $('graph'); graph.replaceChildren();
   if (plan) {
     const levels = new Map<string, number>();

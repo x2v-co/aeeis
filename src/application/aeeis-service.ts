@@ -43,6 +43,17 @@ export class AeeisService {
     return plan;
   }
 
+  /** Create an immutable successor plan for a goal. Older plan versions remain
+   * addressable so execution receipts and evidence can still point to them. */
+  async createPlanRevision(input: CreatePlanInput, now = new Date().toISOString()): Promise<Plan> {
+    if (!(await this.store.getGoal(input.goalId))) throw new AeeisNotFound(`Unknown goal: ${input.goalId}`);
+    const versions = await this.store.getPlans(input.goalId);
+    const nextVersion = versions.reduce((maximum, plan) => Math.max(maximum, plan.version), 0) + 1;
+    const plan = createPlan(`plan_${randomUUID()}`, input.goalId, nextVersion, input.nodes, now);
+    await this.store.savePlan(plan);
+    return plan;
+  }
+
   async createProjectPulsePlan(goalId: Id, now = new Date().toISOString()): Promise<Plan> {
     const goal = await this.getGoal(goalId);
     return this.createPlan({
@@ -172,9 +183,7 @@ export class AeeisService {
 
   async listPlans(goalId: Id): Promise<Plan[]> {
     if (!(await this.store.getGoal(goalId))) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
-    // Stores intentionally expose a small MVP query through their plan IDs in a later adapter.
-    // The current store contract is extended by this in-memory-compatible scan method.
-    return this.store.getPlans(goalId);
+    return (await this.store.getPlans(goalId)).sort((left, right) => right.version - left.version || right.createdAt.localeCompare(left.createdAt));
   }
 }
 

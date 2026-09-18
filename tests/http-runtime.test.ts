@@ -50,7 +50,7 @@ describe('AEEIS HTTP boundary', () => {
     const engine = new AgentEngine(repo, model); const run = await engine.create({ goal: 'Graph run' });
     const app = buildApp({ repository: repo, engine });
     const response = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/graphs` });
-    expect(response.statusCode).toBe(200); expect(response.json()).toMatchObject({ execution: { kind: 'execution' }, evidence: { kind: 'evidence' } }); expect(response.json().plan).toBeUndefined();
+    expect(response.statusCode).toBe(200); expect(response.json()).toMatchObject({ planHistory: [], execution: { kind: 'execution' }, evidence: { kind: 'evidence' } }); expect(response.json().plan).toBeUndefined();
     await app.close(); await repo.close();
   });
   it('requires the configured bearer token and rejects cross-origin requests', async () => {

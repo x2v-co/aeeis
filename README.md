@@ -51,7 +51,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `POST /api/runs/:id/corrections`（把带证据引用的用户纠正转为受治理 RSI candidate）
 - `GET /api/runs/:id/graphs`
 - `POST /api/runs`
-- `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|dispatch`
+- `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|replan|dispatch`（`replan` 会保留旧计划并生成新的版本）
 - `POST /internal/runs/:id/advance`（仅 Worker token）
 - `GET /api/evolution/candidates`
 - `GET /api/evolution/candidates/:id`

@@ -4,7 +4,7 @@
 
 | 能力 | 当前状态 | 证据 / 限制 |
 |---|---|---|
-| 动态 Planner DAG | 已实现并测试 | `src/runtime/engine.ts`；规划结果需要精确 hash 审批；`/api/runs/:id/graphs` 投影 Plan、Execution、Evidence 三图 |
+| 动态 Planner DAG | 已实现并测试 | `src/runtime/engine.ts`；规划结果需要精确 hash 审批；失败运行可显式 `replan`，旧 Plan 保留并生成新版本；`/api/runs/:id/graphs` 投影最新 Plan、Plan history、Execution、Evidence 视图 |
 | Goal / Plan / Task / Memory 领域服务 | 已接入本地 API 并持久化 | `src/application/aeeis-service.ts`、`src/adapters/json-store.ts`；支持 Goal、Plan、Task transition、Receipt、Memory、Context Manifest；JSON 领域事实源采用临时文件、`fsync`、原子替换和目录同步；`/api/goals/:id/runs` 将 Goal 关联到 Run，Planner 计划和节点执行会同步到领域 Plan/Receipt；两套事实源仍保持明确边界 |
 | 任务执行、证据和 Reviewer | 已实现并测试 | 仅能读取 Run 提供的来源；artifact 引用会校验 |
 | File 持久化 | 已实现并测试 | 原子替换、fsync、单写入者锁 |
