@@ -12,6 +12,7 @@ import type { ModelAdapter } from '../src/runtime/model.js';
 import { JsonFileStore } from '../src/adapters/json-store.js';
 import { AeeisService } from '../src/application/aeeis-service.js';
 import type { RsiEvaluationHarness } from '../src/evaluation.js';
+import { FileProjectionOutbox } from '../src/collaboration-projection.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -123,6 +124,23 @@ describe('AEEIS HTTP boundary', () => {
     expect(response.json().status).toBe('evaluating');
     expect(response.json().evaluations).toHaveLength(3);
     await app.close(); await evolution.close(); await repo.close();
+  });
+
+  it('creates and delivers an idempotent collaboration projection snapshot', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-projection-runs-'))); await repo.init();
+    const collaboration = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-projection-collab-'))); await collaboration.init();
+    const projection = new FileProjectionOutbox(await mkdtemp(join(tmpdir(), 'aeeis-http-projection-outbox-'))); await projection.init();
+    let delivered = 0;
+    const app = buildApp({ repository: repo, collaboration: new CollaborationService(collaboration), projection, projectionSink: { deliver: async () => { delivered += 1; return { externalId: 'feishu.msg.1' }; } } });
+    const debate = await app.inject({ method: 'POST', url: '/api/collaborations/debates', payload: { taskId: 'task.projection', contextVersion: 'ctx.projection', participantAgentIds: ['agent.one'], maxRounds: 1, maxMessagesPerAgent: 1, maxTotalMessages: 1 } });
+    const debateId = (debate.json() as { id: string }).id;
+    const created = await app.inject({ method: 'POST', url: '/api/collaborations/projections', payload: { channel: 'feishu', destination: 'chat.1', aggregateType: 'debate', aggregateId: debateId } });
+    expect(created.statusCode).toBe(200);
+    const eventId = (created.json() as { id: string }).id;
+    expect((await app.inject({ method: 'POST', url: `/api/collaborations/projections/${eventId}/deliver` })).json().status).toBe('delivered');
+    expect(delivered).toBe(1);
+    expect((await app.inject({ method: 'GET', url: '/api/status' })).json().projectionConfigured).toBe(true);
+    await app.close(); await projection.close(); await collaboration.close(); await repo.close();
   });
 
   it('exposes durable competition and debate collaboration endpoints', async () => {

@@ -55,6 +55,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
 - 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。
+- `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`；投影 outbox 以幂等键持久化 Debate/Competition 快照，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道。
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
@@ -62,7 +63,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`。Run 的 `/corrections` 入口会校验纠正引用是否来自该 Run 的真实上下文、产物、Receipt 或模型调用，再创建绑定 correction 引用的 candidate。默认必须分别通过 replay、holdout、safety 三道评测门；失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
 
-竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。当前这些 API 提供可靠的协作状态平面，真正的内部 Agent pool、飞书投影和外部自动调度仍需接入。
+竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。Projection outbox 只发送带 hash 和幂等键的结构化快照，渠道投递失败会保留 failed 状态并可重试；渠道消息不是 canonical 状态。
 
 ## 设计边界
 

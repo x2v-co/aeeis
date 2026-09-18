@@ -16,6 +16,7 @@ import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndepen
 import { JsonFileStore } from './adapters/json-store.js';
 import { AeeisService } from './application/aeeis-service.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
+import { FileProjectionOutbox, HttpProjectionSink } from './collaboration-projection.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -30,6 +31,11 @@ const rsi = new RsiService(evolutionRepository);
 const collaborationRepository = new FileCollaborationRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration`);
 await collaborationRepository.init();
 const collaboration = new CollaborationService(collaborationRepository);
+const projection = new FileProjectionOutbox(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration-projection`);
+await projection.init();
+const projectionSink = process.env.AEEIS_PROJECTION_SINK_URL
+  ? new HttpProjectionSink(process.env.AEEIS_PROJECTION_SINK_URL, process.env.AEEIS_PROJECTION_SINK_TOKEN)
+  : undefined;
 const domainStore = new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
 await domainStore.init();
 const domain = new AeeisService(domainStore);
@@ -117,7 +123,7 @@ try {
     competitionEvaluator = new ModelPoolIndependentEvaluator(process.env.AEEIS_COMPETITION_EVALUATOR_AGENT_ID ?? 'agent.evaluator', new HttpModelAdapter(process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL, process.env.AEEIS_COMPETITION_EVALUATOR_MODEL, process.env.AEEIS_COMPETITION_EVALUATOR_API_KEY ?? ''));
     debateRunner = new ModelPoolDebateOrchestrator(collaboration, agents);
   }
-  const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, domain, brain, brainStore, rsi, ...(rsiHarness ? { rsiHarness } : {}), collaboration, projection, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });
@@ -128,7 +134,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); throw error; }
