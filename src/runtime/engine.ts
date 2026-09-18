@@ -13,6 +13,7 @@ import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
 import { claimDigest, type GovernedBrain } from '../brain.js';
+import type { AeeisService } from '../application/aeeis-service.js';
 
 export interface BrainPersistence { save(brain: GovernedBrain): Promise<void> }
 
@@ -41,9 +42,10 @@ export class AgentEngine {
   private knowledge: KnowledgeProvider | undefined;
   private brain: GovernedBrain | undefined;
   private brainPersistence: BrainPersistence | undefined;
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; brain?: GovernedBrain; brainPersistence?: BrainPersistence }) {
+  private domain: AeeisService | undefined;
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; brain?: GovernedBrain; brainPersistence?: BrainPersistence; domain?: AeeisService }) {
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.domain = modelOrServices.domain; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
@@ -52,6 +54,7 @@ export class AgentEngine {
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);
+    if (request.goalId && this.domain && this.domain.getGoal(request.goalId).status !== 'active') throw new Error('Runs can only be started for active Goals');
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
     const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };
     const selectedModel = resolution.adapter;
@@ -75,6 +78,7 @@ export class AgentEngine {
     const toolApproval: { selected: Array<{ id: string; version: string; capabilities: string[] }>; digest: string } = this.tools ? await this.approveTools(request.allowedTools) : { selected: [], digest: digest([]) };
     const run: AgentRun = {
       schemaVersion: 1, id: id('run'), revision: 0, owner, goal: request.goal,
+      ...(request.goalId ? { goalId: request.goalId } : {}),
       status: 'queued', createdAt: timestamp, updatedAt: timestamp,
       context: { id: id('ctx'), audience: [owner], sources }, privacy: request.privacy,
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
@@ -229,6 +233,20 @@ export class AgentEngine {
       current.approval = { planHash: hash, approved: false }; current.status = 'needs_approval';
       event(current, 'plan.proposed', { version: current.plans.length, hash });
     });
+    if (this.domain) {
+      const planned = await this.repository.get(run.id);
+      if (planned.goalId && !planned.domainPlanId && planned.plans.at(-1)) {
+        const draft = planned.plans.at(-1)!;
+        const domainPlan = this.domain.createPlan({
+          goalId: planned.goalId,
+          nodes: draft.nodes.map(node => ({ id: node.id, title: node.title, ...(node.dependsOn.length ? { dependsOn: node.dependsOn } : {}) })),
+        });
+        await this.repository.mutate(run.id, current => {
+          current.domainPlanId = domainPlan.id;
+          event(current, 'domain.plan.linked', { goalId: current.goalId, domainPlanId: domainPlan.id, planHash: draft.hash });
+        });
+      }
+    }
   }
   private async execute(run: AgentRun, model: ModelAdapter): Promise<void> {
     const plan = run.plans.at(-1);
@@ -245,6 +263,7 @@ export class AgentEngine {
       if (current.status !== 'running') return;
       const live = current.steps.find(s => s.taskId === node.id)!; live.status = 'running'; live.attempts++;
     });
+    await this.transitionDomainTask(run, node.id, 'start');
     await this.call(run, model, 'executor', {
       system: executorPrompt, input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), task: node, sourceCatalog: run.context.sources.map(({ id, title }) => ({ id, title })),
         dependencies, observations: step.observations, answers: run.answers.filter(a => a.taskId === node.id) },
@@ -314,6 +333,24 @@ export class AgentEngine {
         event(current, 'artifact.created', { artifactId: artifact.id, taskId: node.id, evidenceRefs: artifact.evidenceRefs, modelCallId: current.calls.at(-1)!.id, contextId: current.context.id });
       }
     }, node.id);
+    const after = await this.repository.get(run.id);
+    const completed = after.steps.find(step => step.taskId === node.id)?.status === 'succeeded';
+    if (completed) await this.transitionDomainTask(after, node.id, 'succeed');
+  }
+
+  private async transitionDomainTask(run: AgentRun, taskId: string, transition: 'start' | 'succeed'): Promise<void> {
+    if (!this.domain || !run.domainPlanId) return;
+    try {
+      if (!run.goalId) return;
+      const domainPlan = this.domain.listPlans(run.goalId).find(plan => plan.id === run.domainPlanId);
+      const domainNode = domainPlan?.nodes.find(node => node.id === taskId);
+      if (!domainNode || (transition === 'start' && domainNode.status === 'running') || (transition === 'succeed' && domainNode.status === 'succeeded')) return;
+      const receipt = this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition });
+      await this.repository.mutate(run.id, current => event(current, 'domain.task.transitioned', { planId: run.domainPlanId, taskId, transition, receiptId: receipt.id }));
+    } catch (error) {
+      if (transition === 'succeed' && error instanceof Error && error.message.includes('Cannot succeed')) return;
+      throw error;
+    }
   }
   private async executePendingTool(run: AgentRun): Promise<void> {
     const pending = run.pendingTool;

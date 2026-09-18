@@ -1,6 +1,6 @@
-interface RunSummary { id: string; goal: string; status: string }
+interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; status: string }
 interface RunView extends RunSummary {
-  revision: number;
+  revision: number; goalId?: string; domainPlanId?: string;
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[] }> }>;
   steps: Array<{ taskId: string; status: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[] }>;

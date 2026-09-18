@@ -12,6 +12,8 @@ import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
 import type { AgentCard } from '../src/protocol.js';
 import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
 import { GovernedBrain } from '../src/brain.js';
+import { JsonFileStore } from '../src/adapters/json-store.js';
+import { AeeisService } from '../src/application/aeeis-service.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -123,6 +125,29 @@ class DelegationFixture implements ModelAdapter {
 }
 
 describe('AEEIS runtime', () => {
+  it('links a Goal run to a durable domain Plan and task receipts', async () => {
+    const repo = await repository();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-domain-runtime-')), 'domain.json'));
+    await domainStore.init();
+    const domain = new AeeisService(domainStore);
+    const goal = domain.createGoal({ title: 'Assess this release' });
+    const engine = new AgentEngine(repo, { model: new PlanningFixture(), domain });
+    const run = await engine.create({ goal: goal.title, goalId: goal.id, materials: [{ title: 'Brief', source: 'fixture', content: 'The source says to ship safely.' }] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    const proposed = await repo.get(run.id);
+    expect(proposed.domainPlanId).toBeDefined();
+    expect(domain.listPlans(goal.id)[0]?.nodes.map(node => node.id)).toEqual(['research', 'synthesize']);
+    await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+    for (let i = 0; i < 10; i += 1) {
+      const status = await engine.advance(run.id);
+      if (['succeeded', 'failed'].includes(status)) break;
+    }
+    const snapshot = domain.getSnapshot(domain.listPlans(goal.id)[0]!.id);
+    expect(snapshot.receipts.map(receipt => receipt.to)).toEqual(['running', 'succeeded', 'running', 'succeeded']);
+    expect(snapshot.plan.nodes.every(node => node.status === 'succeeded')).toBe(true);
+    await repo.close();
+  });
+
   it('generates a dynamic plan, requires exact approval, executes with evidence, and reviews it', async () => {
     const repo = await repository();
     const model = new PlanningFixture();

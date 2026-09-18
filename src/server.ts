@@ -92,7 +92,7 @@ try {
     modelServices = { resolver };
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, brain, brainPersistence: brainStore, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');

@@ -9,6 +9,7 @@ export const materialSchema = z.object({
 }).strict();
 export const requestSchema = z.object({
   goal: z.string().trim().min(1).max(8000),
+  goalId: z.string().trim().min(1).max(200).optional(),
   materials: z.array(materialSchema).max(20).default([]),
   maxModelCalls: z.number().int().min(3).max(100).default(20),
   allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
@@ -64,7 +65,7 @@ export interface Step {
 }
 export interface AgentRun {
   schemaVersion: 1; id: string; revision: number; owner: string;
-  goal: string; status: RunStatus; createdAt: string; updatedAt: string;
+  goal: string; goalId?: string; domainPlanId?: string; status: RunStatus; createdAt: string; updatedAt: string;
   context: { id: string; audience: string[]; sources: Source[] };
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;

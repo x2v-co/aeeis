@@ -191,7 +191,7 @@ export function buildApp(options: Options) {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
     options.brain.deleteScope(request.params.scope, 'owner'); await options.brainStore.save(options.brain); return { status: 'deleted' };
   });
-  app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, status, updatedAt }) => ({ id, goal, status, updatedAt })));
+  app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, goalId, domainPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), status, updatedAt })));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => options.repository.get(request.params.id));
   app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => projectRunGraphs(await options.repository.get(request.params.id)));
   async function notify(id: string): Promise<void> {
@@ -202,8 +202,16 @@ export function buildApp(options: Options) {
   }
   app.post('/api/runs', async (request, reply) => {
     if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a pinned model or AEEIS_PLANPRICE_URL with provider endpoints before starting an agent run' });
-    const run = await options.engine.create(request.body);
+    const body = z.object({ goal: z.string().trim().min(1).max(8000), goalId: z.string().trim().min(1).max(200).optional(), materials: z.array(z.object({ title: z.string().trim().min(1).max(200), content: z.string().trim().min(1).max(30000), source: z.string().trim().min(1).max(1000) }).strict()).max(20).optional(), maxModelCalls: z.number().int().min(3).max(100).optional(), allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).optional(), allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).optional(), knowledgeQuery: z.string().trim().min(1).max(2000).optional(), knowledgeMaxItems: z.number().int().min(1).max(20).optional(), brainScope: z.string().trim().min(1).max(200).optional(), skillRuntime: z.string().trim().min(1).max(100).optional(), privacy: z.enum(['public', 'internal', 'confidential', 'private']).optional() }).strict().parse(request.body);
+    const run = await options.engine.create(body);
     await notify(run.id); return reply.code(202).send({ id: run.id });
+  });
+  app.post<{ Params: { id: string } }>('/api/goals/:id/runs', async (request, reply) => {
+    if (!options.domain || !options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure the Goal service, model and dispatcher before starting a Goal run' });
+    const goal = options.domain.getGoal(request.params.id);
+    const body = z.object({ materials: z.array(z.object({ title: z.string().trim().min(1).max(200), content: z.string().trim().min(1).max(30000), source: z.string().trim().min(1).max(1000) }).strict()).max(20).optional(), maxModelCalls: z.number().int().min(3).max(100).optional(), allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).optional(), allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).optional(), knowledgeQuery: z.string().trim().min(1).max(2000).optional(), knowledgeMaxItems: z.number().int().min(1).max(20).optional(), brainScope: z.string().trim().min(1).max(200).optional(), skillRuntime: z.string().trim().min(1).max(100).optional(), privacy: z.enum(['public', 'internal', 'confidential', 'private']).optional() }).strict().parse(request.body);
+    const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body });
+    await notify(run.id); return reply.code(202).send({ id: run.id, goalId: goal.id });
   });
   app.post<{ Params: { id: string; action: string } }>('/api/runs/:id/:action', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
