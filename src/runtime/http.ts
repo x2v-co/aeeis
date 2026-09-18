@@ -78,7 +78,7 @@ export function buildApp(options: Options) {
     }
   }
   app.post('/api/runs', async (request, reply) => {
-    if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure AEEIS_MODEL_BASE_URL and AEEIS_MODEL before starting an agent run' });
+    if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a pinned model or AEEIS_PLANPRICE_URL with provider endpoints before starting an agent run' });
     const run = await options.engine.create(request.body);
     await notify(run.id); return reply.code(202).send({ id: run.id });
   });
