@@ -28,11 +28,14 @@ function result(status: 'completed' | 'unknown' = 'completed') {
     claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: 'ctx.external', receiptRef: 'receipt.external',
   };
 }
+function acknowledgement() {
+  return { schemaVersion: 'context-ack/1' as const, taskId: 'task.external', contextVersion: 'ctx.external', understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true };
+}
 
 describe('external Agent gateway', () => {
   it('enforces context/grant boundaries and caches completed idempotent delegation', async () => {
     let calls = 0;
-    const transport: AgentTransport = { submit: async () => { calls++; return { status: 'completed', receiptRef: 'receipt.external', result: result() }; } };
+    const transport: AgentTransport = { submit: async () => { calls++; return { status: 'completed', receiptRef: 'receipt.external', acknowledgement: acknowledgement(), result: result() }; } };
     const directory = new AgentDirectory(); directory.register(card);
     const gateway = new AgentGateway(directory, transport);
     const request: DelegationRequest = { agentId: card.agentId, taskBrief: brief, contextPack: context, grant, mode: 'sync', idempotencyKey: 'delegation-1' };
@@ -47,7 +50,7 @@ describe('external Agent gateway', () => {
     let submits = 0; let reconciles = 0;
     const transport: AgentTransport = {
       submit: async () => { submits++; return { status: 'unknown', receiptRef: 'receipt.unknown' }; },
-      reconcile: async () => { reconciles++; return { status: 'completed', receiptRef: 'receipt.reconciled', result: result() }; },
+      reconcile: async () => { reconciles++; return { status: 'completed', receiptRef: 'receipt.reconciled', acknowledgement: acknowledgement(), result: result() }; },
     };
     const directory = new AgentDirectory(); directory.register(card);
     const gateway = new AgentGateway(directory, transport);
@@ -64,7 +67,7 @@ describe('external Agent gateway', () => {
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const body = Buffer.concat(chunks).toString('utf8'); const timestamp = request.headers['x-aeeis-timestamp']; const signature = request.headers['x-aeeis-signature'];
       expect(typeof timestamp).toBe('string'); expect(signature).toBe(createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex'));
-      const output = JSON.stringify({ status: 'completed', receiptRef: 'receipt.signed', result: result() }); const responseTimestamp = String(Date.now());
+      const output = JSON.stringify({ status: 'completed', receiptRef: 'receipt.signed', acknowledgement: acknowledgement(), result: result() }); const responseTimestamp = String(Date.now());
       response.setHeader('content-type', 'application/json'); response.setHeader('x-aeeis-timestamp', responseTimestamp); response.setHeader('x-aeeis-signature', createHmac('sha256', key).update(`${responseTimestamp}.${output}`).digest('hex')); response.end(output);
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -74,5 +77,18 @@ describe('external Agent gateway', () => {
     const request: DelegationRequest = { agentId: signedCard.agentId, taskBrief: brief, contextPack: context, grant, mode: 'sync', idempotencyKey: 'delegation-signed' };
     expect((await transport.submit(signedCard, request)).status).toBe('completed');
     await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('enforces context expiry, grant budgets and concurrent idempotency', async () => {
+    let calls = 0; let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const transport: AgentTransport = { submit: async (_card, request) => { calls += 1; await gate; return { status: 'completed', receiptRef: 'receipt.budget', acknowledgement: { schemaVersion: 'context-ack/1', taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { ...result(), receiptRef: 'receipt.budget' } }; } };
+    const directory = new AgentDirectory(); directory.register(card);
+    const gateway = new AgentGateway(directory, transport);
+    const request: DelegationRequest = { agentId: card.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 1 } }, mode: 'sync', idempotencyKey: 'same-key' };
+    const first = gateway.delegate(request); const second = gateway.delegate(request); release();
+    await Promise.all([first, second]); expect(calls).toBe(1);
+    await expect(gateway.delegate({ ...request, idempotencyKey: 'second-key' })).rejects.toThrow('budget');
+    await expect(gateway.delegate({ ...request, idempotencyKey: 'expired-context', contextPack: { ...context, expiresAt: '2020-01-01T00:00:00.000Z' } })).rejects.toThrow('expired');
   });
 });

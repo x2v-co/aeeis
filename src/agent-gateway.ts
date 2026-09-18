@@ -99,7 +99,8 @@ export class AgentDirectory {
  * or Task state on behalf of the remote Agent.
  */
 export class AgentGateway {
-  private readonly inFlight = new Map<string, { request: DelegationRequest; card: AgentCard; outcome?: DelegationOutcome }>();
+  private readonly inFlight = new Map<string, { request: DelegationRequest; card: AgentCard; outcome?: DelegationOutcome; promise?: Promise<DelegationOutcome> }>();
+  private readonly grantCalls = new Map<string, number>();
 
   constructor(private readonly directory: AgentDirectory, private readonly transport: AgentTransport) {}
 
@@ -114,11 +115,19 @@ export class AgentGateway {
     if (cached?.outcome && cached.outcome.status !== 'unknown') return cached.outcome;
     if (cached?.outcome?.status === 'unknown') throw new Error('Delegation outcome is unknown; reconcile before submitting again');
     if (cached && !sameRequest(cached.request, request)) throw new Error('Idempotency key is bound to a different delegation request');
-    this.inFlight.set(request.idempotencyKey, { request, card });
-    const response = await this.transport.submit(card, request);
-    const outcome = validateResponse(request, response);
-    this.inFlight.set(request.idempotencyKey, { request, card, outcome });
-    return outcome;
+    if (cached?.promise) return cached.promise;
+    const usedCalls = this.grantCalls.get(request.grant.grantId) ?? 0;
+    if (request.grant.budget.calls !== undefined && usedCalls >= request.grant.budget.calls) throw new Error('Delegation grant call budget is exhausted');
+    this.grantCalls.set(request.grant.grantId, usedCalls + 1);
+    const promise = (async () => {
+      const response = await this.transport.submit(card, request);
+      const outcome = validateResponse(request, response);
+      this.inFlight.set(request.idempotencyKey, { request, card, outcome });
+      return outcome;
+    })();
+    this.inFlight.set(request.idempotencyKey, { request, card, promise });
+    void promise.catch(() => { const current = this.inFlight.get(request.idempotencyKey); if (current?.promise === promise) this.inFlight.delete(request.idempotencyKey); });
+    return promise;
   }
 
   async reconcile(idempotencyKey: string): Promise<DelegationOutcome>;
@@ -220,6 +229,7 @@ function validateRequest(input: DelegationRequest): DelegationRequest {
   if (!grant.actions.includes('return_result')) throw new Error('Delegation grant does not permit a result');
   if (classificationRank(contextPack.classification) > classificationRank(grant.dataScope)) throw new Error('Grant data scope is narrower than the Context Pack');
   if (new Date(grant.expiresAt).getTime() <= Date.now()) throw new Error('Delegation grant has expired');
+  if (new Date(contextPack.expiresAt).getTime() <= Date.now()) throw new Error('Context Pack has expired');
   if (!input.idempotencyKey.trim()) throw new Error('Delegation idempotency key is required');
   return { ...input, taskBrief, contextPack, grant };
 }
@@ -231,11 +241,14 @@ function validateResponse(request: DelegationRequest, response: AgentTransportRe
     idempotencyKey: request.idempotencyKey, status: status.status, contextVersion: request.contextPack.id, acknowledgedAt: new Date().toISOString(),
   };
   if (status.acknowledgement) validateAcknowledgement(request, status.acknowledgement);
+  else if (status.status !== 'unknown') throw new Error('Agent response must include a Context Acknowledgement');
   if (status.result) {
     validateResultForGrant(status.result, request.grant);
     if (status.result.contextVersion !== request.contextPack.id) throw new Error('Agent result context version does not match the delegated Context Pack');
     if (status.result.resultType !== request.taskBrief.expectedOutput) throw new Error('Agent result type does not match the Task Brief');
     if (status.result.status !== status.status) throw new Error('Agent result status does not match transport status');
+    if (request.grant.budget.tokens !== undefined && status.result.cost.tokens !== undefined && status.result.cost.tokens > request.grant.budget.tokens) throw new Error('Agent result exceeds the delegation token budget');
+    if (request.grant.budget.money !== undefined && status.result.cost.money !== undefined && status.result.cost.money > request.grant.budget.money) throw new Error('Agent result exceeds the delegation money budget');
   } else if (status.status === 'completed' || status.status === 'partial' || status.status === 'failed' || status.status === 'rejected') {
     throw new Error('Completed Agent response must include a Result Envelope');
   }
