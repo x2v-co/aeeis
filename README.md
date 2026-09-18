@@ -37,7 +37,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`、`clientId`、`clientSecret` 和可选 `scopes`；`authMethod` 默认 `client_secret_basic`，也可选 `client_secret_post`。token 只在内存缓存，并发申请会合并；按服务商有效期提前刷新，不报告有效期则不缓存。不跟随 token endpoint 重定向，也不在认证失败后自动重发 Agent 任务。用户交互授权、SSO 和生产授权服务器仍未验收。
 
-开发环境可以使用 loopback HTTP；非 loopback endpoint 必须使用 HTTPS。模型调用不会自动重试，传输结果不明会进入 `unknown`，需要显式核查后才能再次调用。服务重启发现未完成的 Tool/Agent 调用时，会恢复为带 Receipt 的 `unknown`，强制走 provider reconcile，不会直接再次发送副作用请求。
+开发环境可以使用 loopback HTTP；非 loopback endpoint 必须使用 HTTPS。模型调用不会自动重试，传输结果不明会进入 `unknown`，需要显式核查后才能再次调用。每次模型调用都会生成稳定的 `model:<runId>:<callId>` provider 幂等键；reconcile 会复用原调用记录和同一个 key，避免把一次不明结果变成重复计费或重复请求。服务重启发现未完成的 Tool/Agent 调用时，会恢复为带 Receipt 的 `unknown`，强制走 provider reconcile，不会直接再次发送副作用请求。
 
 ## 当前 API
 

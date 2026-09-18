@@ -54,6 +54,8 @@ export interface Artifact { id: string; taskId: string; title: string; content: 
 export interface ModelPin { model: string; endpoint: string; promptVersion: string; provider?: string }
 export interface ModelCall {
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
+  /** Provider idempotency key. Unknown calls reuse this key after reconcile. */
+  idempotencyKey?: string;
   state: 'started' | 'completed' | 'failed' | 'unknown' | 'discarded';
   inputHash: string; outputHash?: string; startedAt: string; endedAt?: string;
   usage?: { inputTokens: number; outputTokens: number };
@@ -91,6 +93,7 @@ export interface AgentRun {
   review?: Review;
   error?: string;
   resumeStatus?: RunStatus;
+  resumeModelCallId?: string;
 }
 
 export function validatePlan(value: unknown): PlanDraft {

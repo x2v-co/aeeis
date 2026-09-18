@@ -67,6 +67,17 @@ class DefiniteFailureFixture implements ModelAdapter {
   }
 }
 
+class UnknownPlanningFixture implements ModelAdapter {
+  readonly pin = pin;
+  readonly calls: ModelRequest[] = [];
+  private first = true;
+  async complete(request: ModelRequest) {
+    this.calls.push(request);
+    if (this.first) { this.first = false; throw new ModelOutcomeUnknown('Provider may have completed'); }
+    return { value: { summary: 'Recovered plan', nodes: [{ id: 'one', title: 'One', instruction: 'Produce a result', dependsOn: [] }] } };
+  }
+}
+
 async function repository() {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-runtime-'));
   const repo = new FileRunRepository(directory);
@@ -315,6 +326,27 @@ describe('AEEIS runtime', () => {
     expect(await engine.advance(run.id)).toBe('unknown');
     expect((await repo.get(run.id)).calls).toHaveLength(1);
     expect((await engine.command(run.id, 'reconcile', { reason: 'Checked provider status and authorize another call' })).status).toBe('queued');
+    await repo.close();
+  });
+
+  it('reuses the same model call and provider idempotency key after reconciliation', async () => {
+    const repo = await repository();
+    const model = new UnknownPlanningFixture();
+    const engine = new AgentEngine(repo, model);
+    const run = await engine.create({ goal: 'Recover the planning request' });
+    expect(await engine.advance(run.id)).toBe('unknown');
+    const interrupted = (await repo.get(run.id)).calls[0]!;
+    expect(interrupted.state).toBe('unknown');
+    expect(interrupted.idempotencyKey).toBe(`model:${run.id}:${interrupted.id}`);
+    await engine.command(run.id, 'reconcile', { reason: 'Provider status checked; retry is authorized' });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    const recovered = (await repo.get(run.id)).calls;
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.id).toBe(interrupted.id);
+    expect(recovered[0]?.idempotencyKey).toBe(interrupted.idempotencyKey);
+    expect(recovered[0]?.state).toBe('completed');
+    expect(model.calls).toHaveLength(2);
+    expect(model.calls[0]?.idempotencyKey).toBe(model.calls[1]?.idempotencyKey);
     await repo.close();
   });
 

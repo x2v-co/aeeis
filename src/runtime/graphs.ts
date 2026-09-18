@@ -21,7 +21,7 @@ export function projectRunGraphs(run: AgentRun): RunGraphs {
   const executionEdges: GraphEdge[] = [];
   for (const call of run.calls) {
     const nodeId = `call:${call.id}`;
-    executionNodes.push({ id: nodeId, type: 'model_call', label: call.phase, status: call.state, metadata: { taskId: call.taskId ?? null, startedAt: call.startedAt, endedAt: call.endedAt ?? null } });
+    executionNodes.push({ id: nodeId, type: 'model_call', label: call.phase, status: call.state, metadata: { taskId: call.taskId ?? null, startedAt: call.startedAt, endedAt: call.endedAt ?? null, idempotencyKey: call.idempotencyKey ?? null } });
     if (call.taskId) executionEdges.push({ from: nodeId, to: `step:${call.taskId}`, type: 'attempt_for' });
   }
   for (const event of run.events) {

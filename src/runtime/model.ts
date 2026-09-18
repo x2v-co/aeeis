@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ModelPin } from './contracts.js';
 
-export interface ModelRequest { system: string; input: unknown }
+export interface ModelRequest { system: string; input: unknown; idempotencyKey?: string }
 export interface ModelResponse { value: unknown; usage?: { inputTokens: number; outputTokens: number } }
 export interface ModelAdapter {
   readonly pin: ModelPin;
@@ -29,7 +29,7 @@ export class HttpModelAdapter implements ModelAdapter {
     try {
       response = await fetch(this.pin.endpoint, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.requestTimeoutMs),
-        headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}) },
+        headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}) },
         body: JSON.stringify({ model: this.pin.model, max_tokens: 4096, response_format: { type: 'json_object' },
           messages: [{ role: 'system', content: request.system }, { role: 'user', content: JSON.stringify(request.input) }] }),
       });

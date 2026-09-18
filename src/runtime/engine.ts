@@ -165,10 +165,14 @@ export class AgentEngine {
           if (unknownTool && !this.tools?.reconcile) throw new Conflict('External tool outcome is unknown; configure a provider reconciliation operation before retrying');
           if (run.pendingDelegation && !this.agents) throw new Conflict('External Agent outcome is unknown; configure the Agent gateway before retrying');
           if (run.pendingDelegation) run.pendingDelegation.reconcileRequested = true;
+          const unknownCalls = run.calls.filter(call => call.state === 'unknown');
+          if (unknownCalls.length > 1) throw new Conflict('Multiple unknown model calls require manual run recovery');
+          if (unknownCalls[0]) run.resumeModelCallId = unknownCalls[0].id;
           event(run, 'run.reconciled', { reason, decision: 'retry_model_call', actor: run.owner });
         }
         if (this.active.has(runId)) throw new Conflict('A model request is still in flight');
-        if (run.calls.length >= run.maxModelCalls) throw new Conflict('Call budget exhausted; create a new run with an appropriate budget');
+        const reusingUnknownModelCall = action === 'reconcile' && run.resumeModelCallId !== undefined;
+        if (run.calls.length >= run.maxModelCalls && !reusingUnknownModelCall) throw new Conflict('Call budget exhausted; create a new run with an appropriate budget');
         run.status = run.plans.length === 0 ? 'queued' : run.steps.every(s => s.status === 'succeeded') ? 'reviewing' : 'running';
         delete run.error; event(run, 'run.retry_requested');
       } else if (action === 'replan') {
@@ -224,19 +228,29 @@ export class AgentEngine {
   }
   private async call(run: AgentRun, model: ModelAdapter, phase: ModelCall['phase'], request: ModelRequest, apply: (run: AgentRun, value: unknown) => void, taskId?: string): Promise<void> {
     if (JSON.stringify(request).length > 120000) throw new Error('Context exceeds this runtime limit; reduce supplied materials or split the goal');
-    const callId = id('model');
+    const existingCallId = run.resumeModelCallId;
+    const callId = existingCallId ?? id('model');
+    const idempotencyKey = `model:${run.id}:${callId}`;
+    const requestWithKey = { ...request, idempotencyKey };
     let reserved = false;
     await this.repository.mutate(run.id, current => {
       if (!runnable.has(current.status)) return;
-      if (current.calls.length >= current.maxModelCalls) throw new Error('Model call budget exhausted');
-      if (current.calls.some(c => c.state === 'started')) return;
-      current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), state: 'started', inputHash: digest(request), startedAt: now() });
+      if (current.calls.some(c => c.state === 'started' && c.id !== callId)) return;
+      const existing = current.calls.find(c => c.id === callId);
+      if (existing) {
+        if (existing.state !== 'unknown' || existing.inputHash !== digest(request)) throw new Conflict('Reconciled model request no longer matches the unknown call');
+        existing.state = 'started'; existing.startedAt = now(); delete existing.endedAt; existing.idempotencyKey = idempotencyKey;
+      } else {
+        if (current.calls.length >= current.maxModelCalls) throw new Error('Model call budget exhausted');
+        current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, state: 'started', inputHash: digest(request), startedAt: now() });
+      }
+      delete current.resumeModelCallId;
       if (phase === 'planner') current.status = 'planning';
       event(current, 'model.started', { callId, phase, taskId: taskId ?? null }); reserved = true;
     });
     if (!reserved) return;
     let result: ModelResponse;
-    try { result = await model.complete(request); }
+    try { result = await model.complete(requestWithKey); }
     catch (error) {
       await this.repository.mutate(run.id, current => {
         const call = current.calls.find(c => c.id === callId)!;

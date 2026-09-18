@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { HttpModelAdapter } from '../src/runtime/model.js';
 
 const servers: Server[] = [];
@@ -25,5 +25,21 @@ describe('HttpModelAdapter', () => {
     await expect(new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', '').complete({ system: 's', input: {} })).rejects.toThrow('incomplete');
     expect(() => new HttpModelAdapter('https://example.com?secret=1', 'fixture', '')).toThrow('query');
     expect(() => new HttpModelAdapter('http://example.com', 'fixture', '')).toThrow('HTTPS');
+  });
+
+  it('forwards the durable provider idempotency key', async () => {
+    let request: IncomingMessage | undefined;
+    const port = await new Promise<string>((resolve) => {
+      const server = createServer((_request, response) => {
+        request = _request;
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] }));
+      });
+      servers.push(server);
+      server.listen(0, '127.0.0.1', () => resolve(String((server.address() as { port: number }).port)));
+    });
+    const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', '');
+    await adapter.complete({ system: 's', input: {}, idempotencyKey: 'model:run_1:call_1' });
+    expect(request?.headers['idempotency-key']).toBe('model:run_1:call_1');
   });
 });
