@@ -10,12 +10,13 @@ const projectionEventSchema = z.object({
   schemaVersion: z.literal(1), id: projectionId, idempotencyKey: z.string().min(1).max(500),
   channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500),
   aggregateType: z.enum(['debate', 'competition']), aggregateId, snapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
-  payload: z.unknown(), status: z.enum(['pending', 'failed', 'delivered']), attempts: z.number().int().nonnegative(),
+  payload: z.unknown(), status: z.enum(['pending', 'failed', 'unknown', 'delivered']), attempts: z.number().int().nonnegative(),
   createdAt: isoDate, updatedAt: isoDate, lastError: z.string().max(4000).optional(), deliveredAt: isoDate.optional(), externalId: z.string().max(500).optional(),
 }).strict();
 const stateSchema = z.object({ events: z.array(projectionEventSchema).max(10000) }).strict();
 export type ProjectionEvent = z.infer<typeof projectionEventSchema>;
 export interface ProjectionSink { deliver(event: ProjectionEvent): Promise<{ externalId?: string }> }
+export class ProjectionOutcomeUnknown extends Error {}
 
 export class FileProjectionOutbox {
   private readonly lockPath: string;
@@ -66,7 +67,7 @@ export class FileProjectionOutbox {
   }
   private async deliverOnce(id: string, sink: ProjectionSink): Promise<ProjectionEvent> {
     const current = await this.get(id);
-    if (current.status === 'delivered') return current;
+    if (current.status === 'delivered' || current.status === 'unknown') return current;
     await this.serial(async () => {
       const state = await this.load(); const index = state.events.findIndex(event => event.id === id); if (index < 0) throw new Error('Unknown projection event');
       const event = state.events[index]!; state.events[index] = { ...event, attempts: event.attempts + 1, updatedAt: new Date().toISOString(), lastError: undefined }; await this.save(state);
@@ -81,7 +82,7 @@ export class FileProjectionOutbox {
     } catch (error) {
       await this.serial(async () => {
         const state = await this.load(); const index = state.events.findIndex(event => event.id === id); if (index < 0) return;
-        state.events[index] = { ...state.events[index]!, status: 'failed', updatedAt: new Date().toISOString(), lastError: error instanceof Error ? error.message : 'Projection delivery failed' }; await this.save(state);
+        state.events[index] = { ...state.events[index]!, status: error instanceof ProjectionOutcomeUnknown ? 'unknown' : 'failed', updatedAt: new Date().toISOString(), lastError: error instanceof Error ? error.message : 'Projection delivery failed' }; await this.save(state);
       });
       throw error;
     }
@@ -96,6 +97,17 @@ export class FileProjectionOutbox {
     }
     return { delivered: events.filter(event => event.status === 'delivered').length, failed, events };
   }
+  async reconcile(id: string, outcome: 'completed' | 'failed', reason: string, externalId?: string): Promise<ProjectionEvent> {
+    if (!reason.trim()) throw new Error('Projection reconciliation reason is required');
+    return this.serial(async () => {
+      const state = await this.load(); const index = state.events.findIndex(event => event.id === id); if (index < 0) throw new Error('Unknown projection event');
+      const event = state.events[index]!;
+      if (event.status !== 'unknown') throw new Error(`Projection event is ${event.status}; only unknown events can be reconciled`);
+      const at = new Date().toISOString();
+      state.events[index] = { ...event, status: outcome === 'completed' ? 'delivered' : 'failed', updatedAt: at, ...(outcome === 'completed' ? { deliveredAt: at, ...(externalId ? { externalId } : {}) } : {}), lastError: outcome === 'failed' ? reason : undefined };
+      await this.save(state); return structuredClone(state.events[index]!);
+    });
+  }
   async close(): Promise<void> { await this.queue; await unlink(this.lockPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
 }
 
@@ -108,7 +120,10 @@ export class HttpProjectionSink implements ProjectionSink {
     this.endpoint = url.toString();
   }
   async deliver(event: ProjectionEvent): Promise<{ externalId?: string }> {
-    const response = await fetch(this.endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs), headers: { 'content-type': 'application/json', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) }, body: JSON.stringify({ schemaVersion: 'aeeis-projection-event/1', event }) });
+    let response: Response;
+    try { response = await fetch(this.endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs), headers: { 'content-type': 'application/json', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) }, body: JSON.stringify({ schemaVersion: 'aeeis-projection-event/1', event }) }); }
+    catch { throw new ProjectionOutcomeUnknown('Projection sink transport outcome is unknown; reconcile before sending again'); }
+    if (response.status === 408 || response.status === 429 || response.status >= 500) { await response.body?.cancel(); throw new ProjectionOutcomeUnknown(`Projection sink returned HTTP ${response.status}; delivery outcome requires reconciliation`); }
     if (!response.ok) throw new Error(`Projection sink returned HTTP ${response.status}`);
     const body = z.object({ schemaVersion: z.literal('aeeis-projection-ack/1'), accepted: z.literal(true), externalId: z.string().max(500).optional() }).strict().parse(await response.json());
     return body.externalId === undefined ? {} : { externalId: body.externalId };
@@ -133,11 +148,13 @@ export class FeishuWebhookProjectionSink implements ProjectionSink {
     const classification = projectionClassification(event.payload);
     if (classification === 'private' || (classification === 'confidential' && !this.allowConfidential)) throw new Error('Feishu projection refuses private or confidential context');
     const card = makeFeishuCard(event);
-    const response = await fetch(this.endpoint, {
+    let response: Response;
+    try { response = await fetch(this.endpoint, {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ msg_type: 'interactive', card, uuid: event.idempotencyKey.slice(0, 64) }),
-    });
+    }); } catch { throw new ProjectionOutcomeUnknown('Feishu projection transport outcome is unknown; reconcile before sending again'); }
+    if (response.status === 408 || response.status === 429 || response.status >= 500) { await response.body?.cancel(); throw new ProjectionOutcomeUnknown(`Feishu webhook returned HTTP ${response.status}; delivery outcome requires reconciliation`); }
     if (!response.ok) throw new Error(`Feishu webhook returned HTTP ${response.status}`);
     const body = z.object({ code: z.number().optional(), msg: z.string().optional(), StatusCode: z.number().optional(), StatusMessage: z.string().optional() }).passthrough().parse(await response.json());
     const code = body.code ?? body.StatusCode ?? 0;

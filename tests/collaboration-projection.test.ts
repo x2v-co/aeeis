@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { FeishuWebhookProjectionSink, FileProjectionOutbox, type ProjectionEvent, type ProjectionSink } from '../src/collaboration-projection.js';
+import { FeishuWebhookProjectionSink, FileProjectionOutbox, ProjectionOutcomeUnknown, type ProjectionEvent, type ProjectionSink } from '../src/collaboration-projection.js';
 import { createServer, type Server } from 'node:http';
 
 const servers: Server[] = [];
@@ -26,6 +26,19 @@ describe('collaboration projection outbox', () => {
     expect((await outbox.get(event.id)).status).toBe('failed');
     const delivered = await outbox.deliver(event.id, sink);
     expect(delivered.status).toBe('delivered'); expect(delivered.attempts).toBe(2); expect(delivered.externalId).toBe('msg.1');
+    await outbox.close();
+  });
+
+  it('holds an ambiguous delivery as unknown until an explicit reconciliation', async () => {
+    const outbox = new FileProjectionOutbox(await mkdtemp(join(tmpdir(), 'aeeis-projection-unknown-'))); await outbox.init();
+    const event = await outbox.enqueue({ channel: 'hermes', destination: 'group.unknown', aggregateType: 'competition', aggregateId: 'competition.1', payload: { status: 'active' }, idempotencyKey: 'hermes:competition.1:v1' });
+    const sink: ProjectionSink = { deliver: async () => { throw new ProjectionOutcomeUnknown('response lost'); } };
+    await expect(outbox.deliver(event.id, sink)).rejects.toThrow('response lost');
+    expect((await outbox.get(event.id)).status).toBe('unknown');
+    await expect(outbox.deliver(event.id, sink)).resolves.toMatchObject({ status: 'unknown', attempts: 1 });
+    const reconciled = await outbox.reconcile(event.id, 'completed', 'Provider receipt confirmed', 'msg.confirmed');
+    expect(reconciled.status).toBe('delivered'); expect(reconciled.externalId).toBe('msg.confirmed');
+    await expect(outbox.reconcile(event.id, 'failed', 'duplicate')).rejects.toThrow('only unknown');
     await outbox.close();
   });
 

@@ -251,7 +251,7 @@ export function buildApp(options: Options) {
   });
   app.get<{ Querystring: { status?: string } }>('/api/collaborations/projections', async request => {
     if (!options.projection) return [];
-    const status = request.query.status === undefined ? undefined : z.enum(['pending', 'failed', 'delivered']).parse(request.query.status);
+    const status = request.query.status === undefined ? undefined : z.enum(['pending', 'failed', 'unknown', 'delivered']).parse(request.query.status);
     return options.projection.list(status);
   });
   app.post('/api/collaborations/projections', async request => {
@@ -263,6 +263,11 @@ export function buildApp(options: Options) {
   app.post<{ Params: { id: string } }>('/api/collaborations/projections/:id/deliver', async request => {
     if (!options.projection || !options.projectionSink) throw new Conflict('Projection sink is not configured');
     return options.projection.deliver(request.params.id, options.projectionSink);
+  });
+  app.post<{ Params: { id: string } }>('/api/collaborations/projections/:id/reconcile', async request => {
+    if (!options.projection) throw new Conflict('Collaboration projection is not configured');
+    const body = z.object({ outcome: z.enum(['completed', 'failed']), reason: z.string().trim().min(1).max(2000), externalId: z.string().trim().min(1).max(500).optional() }).strict().parse(request.body);
+    return options.projection.reconcile(request.params.id, body.outcome, body.reason, body.externalId);
   });
   app.post('/api/collaborations/projections/deliver-pending', async request => {
     if (!options.projection || !options.projectionSink) throw new Conflict('Projection sink is not configured');
