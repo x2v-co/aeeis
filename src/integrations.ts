@@ -35,7 +35,7 @@ export interface SkillGovernance {
 }
 
 export interface ModelCatalog {
-  list(query: { capability?: string; minContextTokens?: number }): Promise<Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; inputPricePerMillion?: number; outputPricePerMillion?: number; contextTokens?: number; availability?: string; privateDataAllowed?: boolean }>>;
+  list(query: { capability?: string; minContextTokens?: number }): Promise<Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; inputPricePerMillion?: number; outputPricePerMillion?: number; priceCurrency?: string; contextTokens?: number; availability?: string; privateDataAllowed?: boolean }>>;
 }
 export interface ModelSelectionRequest { capability: string; privacy: 'public' | 'internal' | 'confidential' | 'private'; maxMoney?: number; minContextTokens?: number; }
 export interface ModelDecision {
@@ -43,7 +43,7 @@ export interface ModelDecision {
   candidates: Array<{ model: string; provider: string; reason: string; accepted: boolean }>; reason: string; decidedAt: string;
 }
 
-export function selectModel(catalog: Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; outputPricePerMillion?: number; contextTokens?: number; privateDataAllowed?: boolean; availability?: string }>, request: ModelSelectionRequest): ModelDecision {
+export function selectModel(catalog: Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; outputPricePerMillion?: number; priceCurrency?: string; contextTokens?: number; privateDataAllowed?: boolean; availability?: string }>, request: ModelSelectionRequest): ModelDecision {
   const candidates = catalog.filter(model =>
     model.capabilities.includes(request.capability)
     && Boolean(model.endpoint)
@@ -53,8 +53,13 @@ export function selectModel(catalog: Array<{ model: string; provider: string; en
     && (request.maxMoney === undefined || model.outputPricePerMillion === undefined || model.outputPricePerMillion <= request.maxMoney),
   );
   if (candidates.length === 0) throw new Error('No model satisfies the requested capability and policy');
-  const selected = candidates.slice().sort((a, b) => (a.outputPricePerMillion ?? Number.MAX_SAFE_INTEGER) - (b.outputPricePerMillion ?? Number.MAX_SAFE_INTEGER))[0]!;
-  return { schemaVersion: 'model-decision/1', selected: { model: selected.model, provider: selected.provider, endpoint: selected.endpoint }, candidates: candidates.map(item => ({ model: item.model, provider: item.provider, reason: item === selected ? 'lowest known output price within policy' : 'eligible fallback', accepted: item === selected })), reason: 'Selected ' + selected.model + ' for ' + request.capability + '; privacy=' + request.privacy, decidedAt: new Date().toISOString() };
+  const priced = candidates.filter(item => item.outputPricePerMillion !== undefined && Number.isFinite(item.outputPricePerMillion));
+  const currencies = new Set(priced.map(item => item.priceCurrency ?? 'USD'));
+  const comparable = priced.length > 0 && currencies.size === 1;
+  const ranked = (comparable ? priced : candidates).slice().sort((a, b) => comparable ? (a.outputPricePerMillion! - b.outputPricePerMillion!) : a.model.localeCompare(b.model) || a.provider.localeCompare(b.provider));
+  const selected = ranked[0]!;
+  const selectionReason = comparable ? 'lowest known output price within policy' : priced.length > 0 ? 'deterministic eligible choice; catalog prices use incomparable currencies' : 'deterministic eligible choice; catalog supplied no comparable output price';
+  return { schemaVersion: 'model-decision/1', selected: { model: selected.model, provider: selected.provider, endpoint: selected.endpoint }, candidates: candidates.map(item => ({ model: item.model, provider: item.provider, reason: item === selected ? selectionReason : 'eligible fallback', accepted: item === selected })), reason: 'Selected ' + selected.model + ' for ' + request.capability + '; privacy=' + request.privacy + '; ' + selectionReason, decidedAt: new Date().toISOString() };
 }
 
 export class ConfiguredHttpToolGateway implements ToolGateway {
@@ -274,25 +279,41 @@ export class PlanpriceHttpCatalog implements ModelCatalog {
     if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Planprice URL must use HTTPS except loopback');
   }
   async list(query: { capability?: string; minContextTokens?: number } = {}) {
-    const url = new URL('/api/products', this.baseUrl);
+    const url = new URL('/api/products/grouped', this.baseUrl);
     url.searchParams.set('type', 'llm');
     const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error('Planprice catalog returned HTTP ' + response.status);
-    const rows = z.array(z.record(z.string(), z.unknown())).parse(await response.json());
-    return rows.map(row => {
-      const slug = z.string().parse(row.slug);
-      const providerRecord = row.providers ?? row.provider;
-      const provider = typeof providerRecord === 'object' && providerRecord && 'slug' in providerRecord ? String(providerRecord.slug) : typeof row.provider_slug === 'string' ? row.provider_slug : 'unknown-provider';
-      const rawCapabilities = [
-        ...(Array.isArray(row.capabilities) ? row.capabilities.map(String) : []),
-        ...(Array.isArray(row.features) ? row.features.map(String) : []),
-        ...(typeof row.model_category === 'string' ? [row.model_category] : []),
-        ...(row.type === 'llm' ? ['agent'] : []),
-      ];
-      const capabilities = [...new Set(rawCapabilities.map(value => value.toLocaleLowerCase()))];
+    const rows = z.array(z.object({ slug: z.string().min(1), context_window: z.number().nullable().optional(), versions: z.array(z.record(z.string(), z.unknown())).default([]) }).passthrough()).parse(await response.json());
+    const rates = await this.exchangeRates();
+    const candidates = rows.flatMap(row => row.versions.map(version => {
+      const providerRecord = version.providers;
+      const provider = typeof providerRecord === 'object' && providerRecord && 'slug' in providerRecord ? String(providerRecord.slug) : 'unknown-provider';
+      const model = typeof version.model_slug === 'string' ? version.model_slug : row.slug;
+      const capabilities = ['text', 'agent'];
       const endpoint = this.providerEndpoints[provider] ?? this.providerEndpoints[provider.toLocaleLowerCase()] ?? '';
-      return { model: slug, provider, endpoint, capabilities, ...(typeof row.input_price_per_1m === 'number' ? { inputPricePerMillion: row.input_price_per_1m } : {}), ...(typeof row.output_price_per_1m === 'number' ? { outputPricePerMillion: row.output_price_per_1m } : {}), ...(typeof row.context_window === 'number' ? { contextTokens: row.context_window } : {}), availability: row.is_active === false ? 'unavailable' : 'available' };
-    }).filter(row => (!query.capability || row.capabilities.includes(query.capability.toLocaleLowerCase())) && (!query.minContextTokens || (row.contextTokens !== undefined && row.contextTokens >= query.minContextTokens)) && row.availability !== 'unavailable');
+      const currency = typeof version.currency === 'string' ? version.currency.toUpperCase() : undefined;
+      const inputPrice = normalizedUsd(version.input_price_per_1m, currency, rates);
+      const outputPrice = normalizedUsd(version.output_price_per_1m, currency, rates);
+      return { model, provider, endpoint, capabilities, ...(inputPrice === undefined ? {} : { inputPricePerMillion: inputPrice }), ...(outputPrice === undefined ? {} : { outputPricePerMillion: outputPrice, priceCurrency: 'USD' }), ...(typeof row.context_window === 'number' ? { contextTokens: row.context_window } : {}), availability: version.is_available === false ? 'unavailable' : 'available' };
+    }));
+    return candidates.filter(row => (!query.capability || row.capabilities.includes(query.capability.toLocaleLowerCase())) && (!query.minContextTokens || (row.contextTokens !== undefined && row.contextTokens >= query.minContextTokens)) && row.availability !== 'unavailable');
   }
+
+  private async exchangeRates(): Promise<Record<string, number>> {
+    try {
+      const response = await fetch(new URL('/api/exchange-rates', this.baseUrl), { redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) return {};
+      const body = z.object({ rates: z.record(z.string(), z.number().positive()).optional() }).passthrough().parse(await response.json());
+      return Object.fromEntries(Object.entries(body.rates ?? {}).map(([currency, rate]) => [currency.toUpperCase(), rate]));
+    } catch {
+      return {};
+    }
+  }
+}
+function normalizedUsd(value: unknown, currency: string | undefined, rates: Readonly<Record<string, number>>): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  if (!currency || currency === 'USD') return value;
+  const rate = rates[currency];
+  return rate && Number.isFinite(rate) && rate > 0 ? value / rate : undefined;
 }
 function digest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
