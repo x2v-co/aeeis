@@ -179,6 +179,11 @@ describe('AEEIS HTTP boundary', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().status).toBe('evaluating');
     expect(response.json().evaluations).toHaveLength(3);
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'approval.rollout-runner' } });
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/start-shadow`, payload: {} });
+    const rollout = await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/run-shadow`, payload: { cases: [{ id: 'shadow.http', input: {} }] } });
+    expect(rollout.statusCode).toBe(200);
+    expect(rollout.json().shadowObservations[0].evidenceRefs).toEqual(['shadow.shadow.http']);
     await app.close(); await evolution.close(); await repo.close();
   });
 

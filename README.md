@@ -55,7 +55,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `POST /internal/runs/:id/advance`（仅 Worker token）
 - `GET /api/evolution/candidates`
 - `GET /api/evolution/candidates/:id`
-- `POST /api/evolution/candidates`，以及 `/:id/evaluate|evaluate-suite|approve|start-shadow|record-shadow|start-canary|record-canary|promote|rollback`
+- `POST /api/evolution/candidates`，以及 `/:id/evaluate|evaluate-suite|approve|start-shadow|run-shadow|record-shadow|start-canary|run-canary|record-canary|promote|rollback`
 - 配置 `AEEIS_RSI_EVALUATOR_URL` 后，额外支持 `/:id/evaluate-suite`，按 replay、holdout、safety（以及可选 cost/shadow）套件逐门运行隔离 evaluator
 - `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
 - 配置 `AEEIS_COMPETITION_AGENT_MODELS`、`AEEIS_COMPETITION_EVALUATOR_BASE_URL` 和 `AEEIS_COMPETITION_EVALUATOR_MODEL` 后，额外支持 `POST /api/collaborations/competitions/:id/run`：候选模型并发隔离运行，独立评估器只接收盲化候选，结果持久化回 Competition。

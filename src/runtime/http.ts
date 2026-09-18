@@ -168,8 +168,16 @@ export function buildApp(options: Options) {
     }
     if (action === 'approve') return options.rsi.approve(id, z.object({ approvalRef: z.string().min(1).max(200) }).strict().parse(request.body).approvalRef);
     if (action === 'start-shadow') return options.rsi.startShadow(id);
+    if (action === 'run-shadow') {
+      if (!options.rsiHarness) throw new Conflict('RSI evaluator is not configured');
+      return options.rsi.runRollout(id, 'shadow', request.body, options.rsiHarness);
+    }
     if (action === 'record-shadow') return options.rsi.recordShadow(id, request.body);
     if (action === 'start-canary') return options.rsi.startCanary(id);
+    if (action === 'run-canary') {
+      if (!options.rsiHarness) throw new Conflict('RSI evaluator is not configured');
+      return options.rsi.runRollout(id, 'canary', request.body, options.rsiHarness);
+    }
     if (action === 'record-canary') return options.rsi.recordCanary(id, request.body);
     if (action === 'promote') return options.rsi.promote(id);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);

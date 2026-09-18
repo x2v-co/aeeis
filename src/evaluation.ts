@@ -1,7 +1,8 @@
 import type { EvolutionCandidate, EvolutionEvaluation } from './evolution.js';
 import { z } from 'zod';
 
-export type EvaluationMode = 'replay' | 'holdout' | 'safety' | 'cost' | 'shadow';
+export type EvaluationMode = 'replay' | 'holdout' | 'safety' | 'cost' | 'shadow' | 'canary';
+type EvaluationGateMode = Exclude<EvaluationMode, 'canary'>;
 
 export interface EvaluationCase {
   id: string;
@@ -37,7 +38,7 @@ export const evaluationSuiteSchema = z.object({
 }).strict();
 
 export interface RsiEvaluationPolicy {
-  requiredModes?: EvaluationMode[];
+  requiredModes?: EvaluationGateMode[];
   minimumScore?: number;
 }
 
@@ -68,7 +69,7 @@ export class HttpRsiEvaluationHarness implements RsiEvaluationHarness {
  * emits evidence-backed evaluations that EvolutionEngine can approve.
  */
 export class RsiEvaluator {
-  private readonly requiredModes: EvaluationMode[];
+  private readonly requiredModes: EvaluationGateMode[];
   private readonly minimumScore: number;
 
   constructor(policy: RsiEvaluationPolicy = {}) {
@@ -92,7 +93,7 @@ export class RsiEvaluator {
     return evaluations;
   }
 
-  private async runGate(candidate: EvolutionCandidate, mode: EvaluationMode, cases: EvaluationCase[], harness: RsiEvaluationHarness): Promise<EvolutionEvaluation> {
+  private async runGate(candidate: EvolutionCandidate, mode: EvaluationGateMode, cases: EvaluationCase[], harness: RsiEvaluationHarness): Promise<EvolutionEvaluation> {
     const settled = await Promise.allSettled(cases.map(testCase => harness.evaluate(candidate, mode, testCase)));
     const observations = settled.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
     const scores = observations.map(item => item.score).filter(score => Number.isFinite(score) && score >= 0 && score <= 1);

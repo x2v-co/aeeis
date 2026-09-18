@@ -90,4 +90,26 @@ describe('persistent RSI service', () => {
     expect((await service.rollback(candidate.id, 'shadow regression')).status).toBe('rolled_back');
     await repository.close();
   });
+
+  it('runs bounded rollout batches through the isolated evaluator and preserves evidence', async () => {
+    const repository = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-evolution-rollout-runner-')));
+    await repository.init();
+    const service = new RsiService(repository);
+    const candidate = await service.propose({ ...proposal, risk: 'medium', proposedVersion: 'skill/5' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(candidate.id, { kind, passed: true, score: 0.95, evidenceRefs: [`eval.${kind}`] });
+    await service.approve(candidate.id, 'approval.runner');
+    await service.startShadow(candidate.id);
+    let current = await service.runRollout(candidate.id, 'shadow', { cases: [{ id: 'one', input: {} }, { id: 'two', input: {} }, { id: 'three', input: {} }] }, {
+      evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 0.9, evidenceRefs: [`${mode}:${testCase.id}`] }),
+    });
+    expect(current.status).toBe('shadowing');
+    expect(current.shadowObservations?.map(item => item.id)).toEqual(['shadow:one', 'shadow:two', 'shadow:three']);
+    await service.startCanary(candidate.id);
+    current = await service.runRollout(candidate.id, 'canary', { cases: [{ id: 'one', input: {} }, { id: 'two', input: {} }, { id: 'three', input: {} }] }, {
+      evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 0.9, evidenceRefs: [`${mode}:${testCase.id}`] }),
+    });
+    expect(current.status).toBe('canarying');
+    expect(current.canaryObservations?.every(item => item.evidenceRefs.length > 0)).toBe(true);
+    await repository.close();
+  });
 });

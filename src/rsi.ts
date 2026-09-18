@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
-import { RsiEvaluator, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
+import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationCase, type EvaluationMode, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
 
 export interface EvolutionRepository {
   create(candidate: EvolutionCandidate): Promise<void>;
@@ -65,6 +65,35 @@ export class RsiService {
     const evaluations = await evaluator.evaluate(candidate, body.suite as EvaluationSuite, harness);
     let result = candidate;
     for (const evaluation of evaluations) result = await this.repository.mutate(id, current => this.engine.evaluate(current, evaluation));
+    return result;
+  }
+  /** Run a bounded shadow/canary observation batch through the isolated evaluator.
+   * This records evidence only; explicit phase transitions and promotion remain
+   * separate operations so an evaluator cannot modify production by itself. */
+  async runRollout(id: string, phase: 'shadow' | 'canary', input: unknown, harness: RsiEvaluationHarness): Promise<EvolutionCandidate> {
+    const body = z.object({ cases: z.array(evaluationCaseSchema).min(1).max(100) }).strict().parse(input);
+    const candidate = await this.repository.get(id);
+    const expectedStatus = phase === 'shadow' ? 'shadowing' : 'canarying';
+    if (candidate.status !== expectedStatus) throw new Error(`Candidate must be ${expectedStatus} before rollout observations can run`);
+    const ids = new Set<string>();
+    for (const testCase of body.cases) {
+      if (ids.has(testCase.id)) throw new Error(`Duplicate rollout case: ${testCase.id}`);
+      ids.add(testCase.id);
+    }
+    const mode: EvaluationMode = phase;
+    const settled = await Promise.allSettled(body.cases.map(testCase => harness.evaluate(candidate, mode, testCase)));
+    let result = candidate;
+    for (let index = 0; index < settled.length; index += 1) {
+      const outcome = settled[index]!;
+      const testCase = body.cases[index]!;
+      const observation = outcome.status === 'fulfilled'
+        ? { id: `${phase}:${testCase.id}`, passed: outcome.value.passed, score: outcome.value.score, evidenceRefs: outcome.value.evidenceRefs }
+        : { id: `${phase}:${testCase.id}`, passed: false, score: 0, evidenceRefs: [`rsi:${phase}:${testCase.id}:evaluator_error`] };
+      result = phase === 'shadow'
+        ? await this.recordShadow(id, observation)
+        : await this.recordCanary(id, observation);
+      if (result.status === 'held') break;
+    }
     return result;
   }
   get(id: string): Promise<EvolutionCandidate> { return this.repository.get(id); }
