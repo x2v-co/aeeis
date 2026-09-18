@@ -1,4 +1,6 @@
 interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; status: string }
+interface GoalSummary { id: string; title: string; status: string; createdAt: string }
+interface EvolutionSummary { id: string; target: string; proposedVersion: string; risk: string; status: string; evaluations: Array<{ kind: string; passed: boolean }> }
 interface RunView extends RunSummary {
   revision: number; goalId?: string; domainPlanId?: string;
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[] }> }>;
@@ -33,7 +35,10 @@ function button(label: string, action: () => Promise<void>): HTMLButtonElement {
   b.onclick = () => { b.disabled = true; void action().catch(e => message(String(e.message))).finally(() => { b.disabled = false; }); }; return b;
 }
 async function refresh(): Promise<void> {
-  const runs = await api<RunSummary[]>('/runs');
+  const [runs, goals, candidates] = await Promise.all([
+    api<RunSummary[]>('/runs'), api<GoalSummary[]>('/goals'), api<EvolutionSummary[]>('/evolution/candidates'),
+  ]);
+  renderGoals(goals); renderCandidates(candidates);
   const list = $('runs'); list.replaceChildren();
   for (const run of runs) {
     const item = button(`${run.goal.slice(0, 60)} · ${run.status}`, async () => { currentId = run.id; localStorage.setItem('aeeis.run', run.id); current = undefined; await refresh(); });
@@ -43,6 +48,21 @@ async function refresh(): Promise<void> {
   const run = await api<RunView>(`/runs/${currentId}`);
   if (current?.id === run.id && current.revision === run.revision) return;
   current = run; render(run);
+}
+function renderGoals(goals: GoalSummary[]): void {
+  const list = $('goals'); list.replaceChildren(); $('goals-empty').hidden = goals.length > 0;
+  for (const goal of goals) {
+    const item = element('div', '', 'fact-row');
+    item.append(element('strong', goal.title), element('small', `${goal.status} · ${new Date(goal.createdAt).toLocaleDateString()}`)); list.append(item);
+  }
+}
+function renderCandidates(candidates: EvolutionSummary[]): void {
+  const list = $('candidates'); list.replaceChildren(); $('candidates-empty').hidden = candidates.length > 0;
+  for (const candidate of candidates) {
+    const passed = candidate.evaluations.filter(item => item.passed).length;
+    const item = element('div', '', `fact-row candidate-${candidate.status}`);
+    item.append(element('strong', `${candidate.target} · ${candidate.proposedVersion}`), element('small', `${candidate.status} · ${candidate.risk} · ${passed}/${candidate.evaluations.length} gates`)); list.append(item);
+  }
 }
 async function command(action: string, body: unknown = {}): Promise<void> {
   await api(`/runs/${currentId}/${action}`, body); await refresh();
