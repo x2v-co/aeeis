@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 
 export const knowledgeRecordSchema = z.object({
@@ -57,6 +58,18 @@ export class HttpKnowledgeProvider implements KnowledgeProvider {
     if (!response.ok) throw new Error('Knowledge service returned HTTP ' + response.status);
     const body = z.object({ schemaVersion: z.literal('knowledge-results/1'), hits: z.array(z.object({ record: knowledgeRecordSchema, score: z.number().min(0).max(1), matchedTerms: z.array(z.string()) }).strict()) }).strict().parse(await response.json());
     return body.hits;
+  }
+}
+
+/** File-backed source for local development and single-machine deployments. */
+export class FileKnowledgeProvider implements KnowledgeProvider {
+  constructor(private readonly path: string) {}
+
+  async search(request: KnowledgeSearchRequest): Promise<KnowledgeHit[]> {
+    const parsed: unknown = JSON.parse(await readFile(this.path, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error('Knowledge file must contain an array of records');
+    const records = parsed.map(record => knowledgeRecordSchema.parse(record));
+    return new InMemoryKnowledgeProvider(records).search(request);
   }
 }
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { FileKnowledgeProvider, InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
 
 describe('knowledge provider boundary', () => {
   it('filters by classification and returns deterministic evidence hits', async () => {
@@ -12,4 +15,13 @@ describe('knowledge provider boundary', () => {
     expect(hits[0]?.record.id).toBe('knowledge.temporal');
     expect(hits[0]?.record.contentHash).toHaveLength(64);
   });
+});
+
+it('loads and validates a file-backed knowledge index', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aeeis-knowledge-file-'));
+  const record = makeKnowledgeRecord({ id: 'knowledge.file', title: 'Durable execution', content: 'Use checkpoints', source: 'local-file', classification: 'internal', tags: ['runtime'], updatedAt: '2026-09-18T00:00:00.000Z' });
+  const provider = new FileKnowledgeProvider(join(directory, 'records.json'));
+  await writeFile(join(directory, 'records.json'), JSON.stringify([record]));
+  const hits = await provider.search({ query: 'checkpoints', maxItems: 3, allowedClassifications: ['public', 'internal'], audience: 'owner' });
+  expect(hits[0]?.record.id).toBe('knowledge.file');
 });

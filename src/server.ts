@@ -9,7 +9,7 @@ import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog } 
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport } from './agent-gateway.js';
 import { agentCardSchema } from './protocol.js';
-import { HttpKnowledgeProvider } from './knowledge.js';
+import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
 
@@ -42,7 +42,9 @@ try {
     for (const card of cards) directory.register(agentCardSchema.parse(card));
     agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN));
   }
-  const knowledge = process.env.AEEIS_KNOWLEDGE_URL ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN) : undefined;
+  const knowledge = process.env.AEEIS_KNOWLEDGE_URL
+    ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN)
+    : process.env.AEEIS_KNOWLEDGE_FILE ? new FileKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_FILE) : undefined;
   let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
     modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '') };
