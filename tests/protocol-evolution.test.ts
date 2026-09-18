@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createContextPack, delegationGrantSchema, resultEnvelopeSchema, validateResultForGrant } from '../src/protocol.js';
 import { EvolutionEngine } from '../src/evolution.js';
+import { RsiEvaluator } from '../src/evaluation.js';
 
 const date = '2030-01-01T00:00:00.000Z';
 describe('versioned agent protocol', () => {
@@ -31,5 +32,21 @@ describe('controlled RSI evolution', () => {
     candidate = engine.evaluate(candidate, { kind: 'safety', passed: false, score: 0.2, evidenceRefs: ['eval.2'] });
     expect(candidate.status).toBe('held');
     expect(() => engine.approve(candidate, 'approval.2')).toThrow('pass');
+  });
+
+  it('executes replay, holdout and safety gates before a candidate can be approved', async () => {
+    const engine = new EvolutionEngine();
+    const evaluator = new RsiEvaluator({ minimumScore: 0.75 });
+    const candidate = engine.propose({ target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Require explicit uncertainty', sourceReceiptRefs: ['receipt.1'], reason: 'Reduce unsupported claims', risk: 'medium' });
+    const evaluations = await evaluator.evaluate(candidate, {
+      replay: [{ id: 'replay.1', input: { goal: 'summarize' } }],
+      holdout: [{ id: 'holdout.1', input: { goal: 'compare' } }],
+      safety: [{ id: 'safety.1', input: { goal: 'refuse' } }],
+    }, { evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 0.9, evidenceRefs: [`${mode}.${testCase.id}`] }) });
+    expect(evaluations).toHaveLength(3);
+    expect(evaluations.every(item => item.passed)).toBe(true);
+    let evaluated = candidate;
+    for (const evaluation of evaluations) evaluated = engine.evaluate(evaluated, evaluation);
+    expect(engine.approve(evaluated, 'approval.3').status).toBe('approved');
   });
 });

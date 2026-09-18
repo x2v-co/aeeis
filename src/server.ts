@@ -5,6 +5,8 @@ import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
 import { buildApp } from './runtime/http.js';
 import { FileBrainStore } from './brain.js';
+import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog } from './integrations.js';
+import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -15,9 +17,40 @@ await brainStore.init();
 const brain = await brainStore.load();
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 try {
+  const toolkit = process.env.AEEIS_TOOLKIT_MANIFEST_URL && process.env.AEEIS_TOOLKIT_INVOKE_URL
+    ? new ConfiguredHttpToolGateway(process.env.AEEIS_TOOLKIT_MANIFEST_URL, process.env.AEEIS_TOOLKIT_INVOKE_URL, process.env.AEEIS_TOOLKIT_TOKEN, process.env.AEEIS_TOOLKIT_RECONCILE_URL)
+    : undefined;
+  const skills = process.env.AEEIS_OWNHOW_ENABLED === '1'
+    ? new OwnHowCliGovernance(process.env.AEEIS_OWNHOW_BIN ?? 'ownhow', process.env.AEEIS_OWNHOW_STATE_DIR)
+    : undefined;
+  let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
-    const model = new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '');
-    engine = new AgentEngine(repository, model);
+    modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '') };
+  } else if (process.env.AEEIS_PLANPRICE_URL) {
+    let endpoints: Record<string, string> = {};
+    if (process.env.AEEIS_MODEL_PROVIDER_ENDPOINTS) {
+      const parsed: unknown = JSON.parse(process.env.AEEIS_MODEL_PROVIDER_ENDPOINTS);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AEEIS_MODEL_PROVIDER_ENDPOINTS must be a JSON object');
+      endpoints = Object.fromEntries(Object.entries(parsed).map(([key, value]) => {
+        if (typeof value !== 'string') throw new Error('Model provider endpoint must be a string');
+        return [key, value];
+      }));
+    }
+    const catalog = new PlanpriceHttpCatalog(process.env.AEEIS_PLANPRICE_URL, endpoints);
+    let providerKeys: Record<string, string> = {};
+    if (process.env.AEEIS_MODEL_PROVIDER_KEYS) {
+      const parsed: unknown = JSON.parse(process.env.AEEIS_MODEL_PROVIDER_KEYS);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AEEIS_MODEL_PROVIDER_KEYS must be a JSON object');
+      providerKeys = Object.fromEntries(Object.entries(parsed).map(([key, value]) => {
+        if (typeof value !== 'string') throw new Error('Model provider key must be a string');
+        return [key, value];
+      }));
+    }
+    const resolver = new CatalogModelResolver(catalog, new HttpCatalogModelFactory(providerKeys));
+    modelServices = { resolver };
+  }
+  if (modelServices) {
+    engine = new AgentEngine(repository, { ...modelServices, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');

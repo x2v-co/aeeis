@@ -7,6 +7,7 @@ import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ModelPin } from '../src/runtime/contracts.js';
+import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '../src/integrations.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -45,6 +46,66 @@ function deferred<T>() {
 }
 
 const oneTaskPlan = { summary: 'Specific fixture task', nodes: [{ id: 'one', title: 'One', instruction: 'Produce a result', dependsOn: [] }] };
+
+class CapabilityFixture implements ModelAdapter {
+  readonly pin = pin;
+  calls = 0;
+  async complete(request: ModelRequest) {
+    this.calls++;
+    if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Use a registered capability', nodes: [{ id: 'operate', title: 'Operate', instruction: 'Call the approved tool and report', dependsOn: [] }] } };
+    if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Receipt-backed result accepted', issues: [] } };
+    const input = request.input as { observations: Array<unknown> };
+    if (input.observations.length === 0) return { value: { type: 'capability', toolId: 'fixture.lookup', toolVersion: '1', input: { key: 'status' }, purpose: 'Read the approved fixture status' } };
+    return { value: { type: 'finish', title: 'Tool-backed report', content: 'The approved tool returned a verified status.', evidenceRefs: [] } };
+  }
+}
+
+class CapabilityGateway implements ToolGateway {
+  requests: ToolInvocation[] = [];
+  async listTools() { return [{ id: 'fixture.lookup', version: '1', capabilities: ['read'], inputSchema: {}, outputSchema: {} }]; }
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    this.requests.push(request);
+    return {
+      status: 'completed',
+      output: { status: 'green' },
+      outputRefs: ['tool-output-1'],
+      receipt: {
+        schemaVersion: 'receipt/1', receiptId: 'receipt_00000000-0000-0000-0000-000000000001',
+        provider: 'fixture-toolkit', operation: request.toolId, requestHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        inputRefs: [request.taskId], outputRefs: ['tool-output-1'], capabilitiesUsed: ['read'],
+        startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), status: 'completed',
+      },
+    };
+  }
+}
+
+class ReconcileGateway extends CapabilityGateway {
+  invokes = 0;
+  reconciles = 0;
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    this.invokes++;
+    return { status: 'unknown', receipt: {
+      schemaVersion: 'receipt/1', receiptId: 'receipt_00000000-0000-0000-0000-000000000002',
+      provider: 'fixture-toolkit', operation: request.toolId, requestHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      inputRefs: [request.taskId], outputRefs: [], capabilitiesUsed: ['read'],
+      startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), status: 'unknown',
+    } };
+  }
+  async reconcile(request: ToolInvocation, receipt: ToolResult['receipt']): Promise<ToolResult> {
+    this.reconciles++;
+    return { status: 'completed', output: { status: 'green' }, outputRefs: ['tool-output-reconciled'], receipt: { ...receipt, status: 'completed', responseHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', outputRefs: ['tool-output-reconciled'] } };
+  }
+}
+
+class SkillFixture implements SkillGovernance {
+  readonly resolved = { methodId: 'project-pulse', version: '2', plan: { steps: ['inspect', 'synthesize'] }, receiptRef: 'skill-receipt-1' };
+  readonly records: Array<{ outcome: string; evidence: string[] }> = [];
+  async resolve() { return this.resolved; }
+  async record(input: { task: string; outcome: 'success' | 'failure'; correction?: string; summary: string; evidence: string[]; runtime?: string }) { this.records.push({ outcome: input.outcome, evidence: input.evidence }); return { receiptRef: 'skill-record-1' }; }
+  async propose() { return []; }
+  async apply() { return { methodId: 'project-pulse', version: '2' }; }
+  async rollback() { return { methodId: 'project-pulse', version: '1' }; }
+}
 
 describe('AEEIS runtime', () => {
   it('generates a dynamic plan, requires exact approval, executes with evidence, and reviews it', async () => {
@@ -158,6 +219,83 @@ describe('AEEIS runtime', () => {
     await engine.recover();
     expect(await engine.advance(run.id)).toBe('unknown');
     expect(model.calls).toEqual([]);
+    await repo.close();
+  });
+
+  it('runs an approved external capability and persists its receipt before finishing', async () => {
+    const repo = await repository();
+    const model = new CapabilityFixture();
+    const tools = new CapabilityGateway();
+    const engine = new AgentEngine(repo, { model, tools });
+    const run = await engine.create({ goal: 'Check service status', allowedTools: ['fixture.lookup'], materials: [] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    for (let i = 0; i < 20; i++) {
+      const status = await engine.advance(run.id);
+      if (status === 'succeeded' || status === 'failed') break;
+    }
+    current = await repo.get(run.id);
+    expect(current.status).toBe('succeeded');
+    expect(tools.requests[0]?.idempotencyKey).toContain(run.id);
+    expect(current.toolReceipts).toHaveLength(1);
+    expect(current.events.map(item => item.type)).toContain('tool.requested');
+    await repo.close();
+  });
+
+  it('denies a capability that was not approved for the run', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools: new CapabilityGateway() });
+    const run = await engine.create({ goal: 'Denied capability' });
+    await engine.advance(run.id);
+    const current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    expect(await engine.advance(run.id)).toBe('failed');
+    expect((await repo.get(run.id)).error).toContain('allowedTools');
+    await repo.close();
+  });
+
+  it('reconciles an unknown external tool outcome without invoking it twice', async () => {
+    const repo = await repository();
+    const model = new CapabilityFixture();
+    const tools = new ReconcileGateway();
+    const engine = new AgentEngine(repo, { model, tools });
+    const run = await engine.create({ goal: 'Reconcile tool status', allowedTools: ['fixture.lookup@1'] });
+    expect((await repo.get(run.id)).approvedTools?.[0]?.version).toBe('1');
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    expect(await engine.advance(run.id)).toBe('running');
+    expect(await engine.advance(run.id)).toBe('unknown');
+    expect(tools.invokes).toBe(1);
+    await expect(engine.command(run.id, 'retry', {})).rejects.toThrow('reconciliation');
+    expect((await engine.command(run.id, 'reconcile', { reason: 'Checked provider idempotency record' })).status).toBe('running');
+    expect(await engine.advance(run.id)).toBe('running');
+    expect(tools.reconciles).toBe(1);
+    for (let i = 0; i < 10; i++) { const status = await engine.advance(run.id); if (status === 'succeeded' || status === 'failed') break; }
+    current = await repo.get(run.id);
+    expect(current.status).toBe('succeeded');
+    expect(current.events.some(event => event.type === 'tool.reconciled')).toBe(true);
+    await repo.close();
+  });
+
+  it('passes the governed Skill plan into model context and records the final outcome', async () => {
+    const repo = await repository();
+    const skills = new SkillFixture();
+    const model = new PlanningFixture();
+    const engine = new AgentEngine(repo, { model, skills });
+    const run = await engine.create({ goal: 'Use the governed method', skillRuntime: 'aeeis-test', materials: [{ title: 'Brief', source: 'fixture', content: 'Ship safely.' }] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    for (let i = 0; i < 20; i++) { const status = await engine.advance(run.id); if (status === 'succeeded' || status === 'failed') break; }
+    current = await repo.get(run.id);
+    expect(current.status).toBe('succeeded');
+    expect(current.skillSelection?.version).toBe('2');
+    expect(current.skillOutcome?.receiptRef).toBe('skill-record-1');
+    expect(skills.records).toEqual([{ outcome: 'success', evidence: current.artifacts.map(item => item.id) }]);
+    const plannerInput = model.calls.find(call => call.system.includes('Plan a real deliverable'))?.input as { skill?: { methodId: string; version: string } };
+    expect(plannerInput.skill).toMatchObject({ methodId: 'project-pulse', version: '2' });
     await repo.close();
   });
 });

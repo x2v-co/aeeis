@@ -23,6 +23,7 @@ export interface ToolResult { status: 'completed' | 'failed' | 'unknown'; output
 export interface ToolGateway {
   listTools(): Promise<Array<{ id: string; version: string; capabilities: string[]; inputSchema: unknown; outputSchema: unknown }>>;
   invoke(request: ToolInvocation): Promise<ToolResult>;
+  reconcile?(request: ToolInvocation, receipt: Receipt): Promise<ToolResult>;
 }
 
 export interface SkillGovernance {
@@ -34,7 +35,7 @@ export interface SkillGovernance {
 }
 
 export interface ModelCatalog {
-  list(query: { capability?: string; maxInputTokens?: number }): Promise<Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; inputPricePerMillion?: number; outputPricePerMillion?: number; contextTokens?: number; availability?: string; privateDataAllowed?: boolean }>>;
+  list(query: { capability?: string; minContextTokens?: number }): Promise<Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; inputPricePerMillion?: number; outputPricePerMillion?: number; contextTokens?: number; availability?: string; privateDataAllowed?: boolean }>>;
 }
 export interface ModelSelectionRequest { capability: string; privacy: 'public' | 'internal' | 'confidential' | 'private'; maxMoney?: number; minContextTokens?: number; }
 export interface ModelDecision {
@@ -42,9 +43,11 @@ export interface ModelDecision {
   candidates: Array<{ model: string; provider: string; reason: string; accepted: boolean }>; reason: string; decidedAt: string;
 }
 
-export function selectModel(catalog: Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; outputPricePerMillion?: number; contextTokens?: number; privateDataAllowed?: boolean }>, request: ModelSelectionRequest): ModelDecision {
+export function selectModel(catalog: Array<{ model: string; provider: string; endpoint: string; capabilities: string[]; outputPricePerMillion?: number; contextTokens?: number; privateDataAllowed?: boolean; availability?: string }>, request: ModelSelectionRequest): ModelDecision {
   const candidates = catalog.filter(model =>
     model.capabilities.includes(request.capability)
+    && Boolean(model.endpoint)
+    && model.availability !== 'unavailable'
     && (!request.minContextTokens || (model.contextTokens !== undefined && model.contextTokens >= request.minContextTokens))
     && (request.privacy !== 'private' || model.privateDataAllowed === true)
     && (request.maxMoney === undefined || model.outputPricePerMillion === undefined || model.outputPricePerMillion <= request.maxMoney),
@@ -55,8 +58,8 @@ export function selectModel(catalog: Array<{ model: string; provider: string; en
 }
 
 export class ConfiguredHttpToolGateway implements ToolGateway {
-  constructor(private readonly manifestUrl: string, private readonly invokeUrl: string, private readonly token?: string) {
-    for (const value of [manifestUrl, invokeUrl]) {
+  constructor(private readonly manifestUrl: string, private readonly invokeUrl: string, private readonly token?: string, private readonly reconcileUrl?: string) {
+    for (const value of [manifestUrl, invokeUrl, reconcileUrl].filter((item): item is string => Boolean(item))) {
       const url = new URL(value);
       if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Tool gateway URLs must use HTTPS except loopback');
       if (url.username || url.password || url.hash) throw new Error('Tool gateway URL must not contain credentials or fragments');
@@ -79,6 +82,13 @@ export class ConfiguredHttpToolGateway implements ToolGateway {
       const receipt = receiptSchema.parse({ schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'tool-gateway', operation: request.toolId, requestHash, inputRefs: [request.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: started.toISOString(), completedAt: new Date().toISOString(), status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' });
       return { status: 'unknown', receipt };
     }
+  }
+  async reconcile(request: ToolInvocation, receipt: Receipt): Promise<ToolResult> {
+    if (!this.reconcileUrl) throw new Error('Toolkit reconciliation endpoint is not configured');
+    const response = await fetch(this.reconcileUrl, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(request.timeoutMs), headers: { 'content-type': 'application/json', ...(this.token ? { authorization: 'Bearer ' + this.token } : {}) }, body: JSON.stringify({ schemaVersion: 'tool-reconcile/1', request, receipt }) });
+    if (!response.ok) throw new Error('Tool reconciliation returned HTTP ' + response.status);
+    const parsed = z.object({ schemaVersion: z.literal('tool-result/1'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown().optional(), outputRefs: z.array(z.string()).optional(), receipt: receiptSchema }).strict().parse(await response.json());
+    return { status: parsed.status, receipt: parsed.receipt, ...(parsed.output === undefined ? {} : { output: parsed.output }), ...(parsed.outputRefs === undefined ? {} : { outputRefs: parsed.outputRefs }) };
   }
 }
 
@@ -134,7 +144,7 @@ export class PlanpriceHttpCatalog implements ModelCatalog {
     if (url.username || url.password || url.search || url.hash) throw new Error('Planprice URL must not contain credentials, query or fragment');
     if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Planprice URL must use HTTPS except loopback');
   }
-  async list(query: { capability?: string; maxInputTokens?: number } = {}) {
+  async list(query: { capability?: string; minContextTokens?: number } = {}) {
     const url = new URL('/api/products', this.baseUrl);
     url.searchParams.set('type', 'llm');
     const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15_000) });
@@ -142,10 +152,18 @@ export class PlanpriceHttpCatalog implements ModelCatalog {
     const rows = z.array(z.record(z.string(), z.unknown())).parse(await response.json());
     return rows.map(row => {
       const slug = z.string().parse(row.slug);
-      const provider = typeof row.provider === 'object' && row.provider && 'slug' in row.provider ? String(row.provider.slug) : typeof row.provider_slug === 'string' ? row.provider_slug : 'unknown-provider';
-      const capabilities = Array.isArray(row.capabilities) ? row.capabilities.map(String) : [];
-      return { model: slug, provider, endpoint: this.providerEndpoints[provider] ?? '', capabilities, ...(typeof row.input_price_per_1m === 'number' ? { inputPricePerMillion: row.input_price_per_1m } : {}), ...(typeof row.output_price_per_1m === 'number' ? { outputPricePerMillion: row.output_price_per_1m } : {}), ...(typeof row.context_window === 'number' ? { contextTokens: row.context_window } : {}) };
-    }).filter(row => (!query.capability || row.capabilities.includes(query.capability)) && (!query.maxInputTokens || ('contextTokens' in row && Number(row.contextTokens) >= query.maxInputTokens)));
+      const providerRecord = row.providers ?? row.provider;
+      const provider = typeof providerRecord === 'object' && providerRecord && 'slug' in providerRecord ? String(providerRecord.slug) : typeof row.provider_slug === 'string' ? row.provider_slug : 'unknown-provider';
+      const rawCapabilities = [
+        ...(Array.isArray(row.capabilities) ? row.capabilities.map(String) : []),
+        ...(Array.isArray(row.features) ? row.features.map(String) : []),
+        ...(typeof row.model_category === 'string' ? [row.model_category] : []),
+        ...(row.type === 'llm' ? ['agent'] : []),
+      ];
+      const capabilities = [...new Set(rawCapabilities.map(value => value.toLocaleLowerCase()))];
+      const endpoint = this.providerEndpoints[provider] ?? this.providerEndpoints[provider.toLocaleLowerCase()] ?? '';
+      return { model: slug, provider, endpoint, capabilities, ...(typeof row.input_price_per_1m === 'number' ? { inputPricePerMillion: row.input_price_per_1m } : {}), ...(typeof row.output_price_per_1m === 'number' ? { outputPricePerMillion: row.output_price_per_1m } : {}), ...(typeof row.context_window === 'number' ? { contextTokens: row.context_window } : {}), availability: row.is_active === false ? 'unavailable' : 'available' };
+    }).filter(row => (!query.capability || row.capabilities.includes(query.capability.toLocaleLowerCase())) && (!query.minContextTokens || (row.contextTokens !== undefined && row.contextTokens >= query.minContextTokens)) && row.availability !== 'unavailable');
   }
 }
 function digest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }

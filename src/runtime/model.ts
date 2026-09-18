@@ -16,13 +16,13 @@ const envelope = z.object({
 // OpenAI-compatible chat transport; no credentials or provider response bodies enter public errors.
 export class HttpModelAdapter implements ModelAdapter {
   readonly pin: ModelPin;
-  constructor(baseUrl: string, model: string, private apiKey: string, private requestTimeoutMs = 60000) {
+  constructor(baseUrl: string, model: string, private apiKey: string, provider?: string, private requestTimeoutMs = 60000) {
     const url = new URL(baseUrl);
     if (url.username || url.password || url.search || url.hash) throw new Error('Model endpoint must not contain credentials, query or fragment');
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
       throw new Error('Model endpoint must use HTTPS (except loopback development servers)');
     }
-    this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1' };
+    this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}) };
   }
   async complete(request: ModelRequest): Promise<ModelResponse> {
     let response: Response;

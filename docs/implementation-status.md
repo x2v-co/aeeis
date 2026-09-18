@@ -12,10 +12,10 @@
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现 | `FileBrainStore` 已提供原子持久化、审计、导出和 scope 删除；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |
-| toolkit_new | 端口与 HTTPS HTTP adapter 已实现 | 尚未绑定 toolkit_new 的部署实例和真实工具调用 |
-| ownhow | CLI governance adapter 已实现 | 尚未在 AEEIS Run 中自动选择 / 记录；Apply 仍需显式授权 |
-| planprice | HTTP catalog adapter 已实现 | 目录数据不等于调用凭证；provider endpoint 仍需配置 |
-| RSI | candidate/evaluation/approval/promotion/rollback 状态机已实现 | 尚未接入真实 replay、holdout、shadow evaluator |
+| toolkit_new | manifest、版本冻结、allowlist、幂等 invoke、Receipt、unknown/reconcile HTTP 端口已实现 | 尚未绑定 toolkit_new 的部署实例和真实工具调用；生产凭证与 ACL 未验收 |
+| ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record | Apply 仍需显式授权；真实 CLI 版本和治理闭环未验收 |
+| planprice | HTTP catalog adapter 已实现；按 capability/隐私筛选并锁定 provider/model/endpoint/价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实服务未验收 |
+| RSI | candidate/evaluation/approval/promotion/rollback 状态机和 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据 |
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现 | 尚未接入真实内部 Agent pool 或外部 Agent endpoint |
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现 | 飞书渠道和 Hermes skill 尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |

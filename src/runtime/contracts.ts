@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Receipt, ToolInvocation } from '../integrations.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -9,6 +10,9 @@ export const requestSchema = z.object({
   goal: z.string().trim().min(1).max(8000),
   materials: z.array(materialSchema).max(20).default([]),
   maxModelCalls: z.number().int().min(3).max(100).default(20),
+  allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
+  skillRuntime: z.string().trim().min(1).max(100).optional(),
+  privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -22,6 +26,7 @@ export const planSchema = z.object({
 }).strict();
 export const decisionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strict(),
+  z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strict(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strict(),
   z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100) }).strict(),
 ]);
@@ -34,10 +39,11 @@ export type TaskRequest = z.infer<typeof requestSchema>;
 export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
+export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export interface Source { id: string; title: string; content: string; source: string; hash: string }
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; hash: string; createdAt: string }
-export interface ModelPin { model: string; endpoint: string; promptVersion: string }
+export interface ModelPin { model: string; endpoint: string; promptVersion: string; provider?: string }
 export interface ModelCall {
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
   state: 'started' | 'completed' | 'failed' | 'unknown' | 'discarded';
@@ -53,7 +59,15 @@ export interface AgentRun {
   schemaVersion: 1; id: string; revision: number; owner: string;
   goal: string; status: RunStatus; createdAt: string; updatedAt: string;
   context: { id: string; audience: string[]; sources: Source[] };
-  model: ModelPin; maxModelCalls: number; calls: ModelCall[];
+  privacy: TaskRequest['privacy'];
+  skillRuntime?: string;
+  model: ModelPin; modelDecision?: Record<string, unknown>; maxModelCalls: number; calls: ModelCall[];
+  allowedTools: string[];
+  approvedTools?: Array<{ id: string; version: string; capabilities: string[] }>;
+  toolManifestDigest?: string;
+  skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string };
+  skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string };
+  toolReceipts: Receipt[]; pendingTool?: ExternalToolInvocation;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };

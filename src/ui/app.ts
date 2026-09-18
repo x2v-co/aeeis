@@ -125,8 +125,10 @@ $('connect').onclick = () => {
 };
 async function initialize(): Promise<void> {
   try {
-    const status = await api<{ modelConfigured: boolean; model: { model: string; endpoint: string } | null; runner: string }>('/status');
-    $('configuration').textContent = status.modelConfigured ? `${status.model!.model} · ${status.runner}。提交后，目标和本次提供的资料将发送至 ${status.model!.endpoint}` : '尚未配置模型。请在服务端设置 AEEIS_MODEL_BASE_URL、AEEIS_MODEL 和 API key 后重启；当前不会生成模拟结果。';
+    const status = await api<{ modelConfigured: boolean; model: { model: string; endpoint: string } | null; modelRouting: string; runner: string }>('/status');
+    $('configuration').textContent = status.modelConfigured
+      ? (status.model ? `${status.model.model} · ${status.runner}。提交后，目标和本次提供的资料将发送至 ${status.model.endpoint}` : `已启用模型目录路由 · ${status.runner}。每个 Run 会根据能力、隐私和预算选择并锁定模型`)
+      : '尚未配置模型。请在服务端设置 AEEIS_MODEL_BASE_URL、AEEIS_MODEL，或配置 AEEIS_PLANPRICE_URL 后重启；当前不会生成模拟结果。';
     ($('submit') as HTMLButtonElement).disabled = !status.modelConfigured; await refresh(); message('');
   } catch (e) { message((e as Error).message); }
 }
