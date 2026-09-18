@@ -501,6 +501,28 @@ describe('AEEIS runtime', () => {
     await repo.close();
   });
 
+  it('persists an asynchronously accepted Agent delegation until reconciliation', async () => {
+    const repo = await repository();
+    const card: AgentCard = { schemaVersion: 'agent-card/1', agentId: 'agent.partner', name: 'Partner', owner: 'partner', protocols: ['aeeis-task/1'], capabilities: ['research'], inputSchemas: ['task-brief/1'], outputSchemas: ['result-envelope/1'], auth: ['local'], privacy: { dataRetention: 'session', regions: ['local'] }, pricing: { unit: 'run' }, cardVersion: '1' };
+    const directory = new AgentDirectory(); directory.register(card);
+    const agents = new AgentGateway(directory, {
+      submit: async (_card, request) => ({ status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: { schemaVersion: 'context-ack/1' as const, taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true } }),
+      reconcile: async (_card, request) => ({ status: 'completed' as const, receiptRef: 'receipt.async-complete', acknowledgement: { schemaVersion: 'context-ack/1' as const, taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { schemaVersion: 'result-envelope/1' as const, taskId: request.taskBrief.taskId, agentId: request.agentId, status: 'completed' as const, resultType: 'research/1', summary: 'async complete', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.async-complete' } }),
+    });
+    const run = await new AgentEngine(repo, { model: new DelegationFixture(), agents }).create({ goal: 'Use an asynchronous partner Agent', allowedAgents: ['agent.partner'] });
+    const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
+    await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.advance(run.id);
+    expect(await engine.advance(run.id)).toBe('waiting_external');
+    current = await repo.get(run.id);
+    expect(current.pendingDelegation?.receiptRef).toBe('receipt.accepted');
+    expect(current.delegationOutcomes?.at(-1)?.status).toBe('accepted');
+    await engine.command(run.id, 'reconcile', { reason: 'Provider reports the asynchronous task is complete' });
+    expect(await engine.advance(run.id)).toBe('running');
+    expect((await repo.get(run.id)).pendingDelegation).toBeUndefined();
+    await repo.close();
+  });
+
   it('reconciles a pending external Agent after a Runtime restart', async () => {
     const repo = await repository();
     const card: AgentCard = { schemaVersion: 'agent-card/1', agentId: 'agent.partner', name: 'Partner', owner: 'partner', protocols: ['aeeis-task/1'], capabilities: ['research'], inputSchemas: ['task-brief/1'], outputSchemas: ['result-envelope/1'], auth: ['local'], privacy: { dataRetention: 'session', regions: ['local'] }, pricing: { unit: 'run' }, cardVersion: '1' };

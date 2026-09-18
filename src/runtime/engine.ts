@@ -179,7 +179,7 @@ export class AgentEngine {
       } else if (action === 'retry' || action === 'reconcile') {
         if (action === 'retry' && run.status !== 'failed') throw new Conflict('Only failed runs can be retried; unknown requires reconciliation');
         if (action === 'reconcile') {
-          if (run.status !== 'unknown') throw new Conflict('Run is not unknown');
+          if (run.status !== 'unknown' && run.status !== 'waiting_external') throw new Conflict('Run is not waiting for external reconciliation');
           const { reason } = z.object({ reason: z.string().trim().min(1).max(2000) }).strict().parse(body);
           const unknownTool = run.toolReceipts?.find(receipt => receipt.status === 'unknown');
           if (unknownTool && !this.tools?.reconcile) throw new Conflict('External tool outcome is unknown; configure a provider reconciliation operation before retrying');
@@ -438,6 +438,7 @@ export class AgentEngine {
     if (!node) return;
     if (run.status === 'needs_input') await this.transitionDomainTask(run, taskId, 'wait');
     else if (run.status === 'unknown') await this.transitionDomainTask(run, taskId, 'mark_unknown', run.error);
+    else if (run.status === 'waiting_external') await this.transitionDomainTask(run, taskId, 'wait', run.error);
     else if (run.status === 'failed') await this.transitionDomainTask(run, taskId, 'fail', run.error);
     else if (run.status === 'running') {
       if (node.status === 'failed' || node.status === 'unknown') {
@@ -512,6 +513,13 @@ export class AgentEngine {
         current.pendingDelegation = { ...pending, receiptRef: outcome.receipt.receiptRef, reconcileRequested: false };
         current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External Agent outcome is unknown; reconcile the provider before retrying.';
         event(current, pending.reconcileRequested ? 'agent.reconciled' : 'agent.unknown', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef, outcome: 'unknown' });
+        return;
+      }
+      if (outcome.status === 'accepted') {
+        current.pendingDelegation = { ...pending, receiptRef: outcome.receipt.receiptRef, reconcileRequested: false };
+        current.status = 'waiting_external'; current.resumeStatus = 'running';
+        current.error = 'External Agent accepted the task; reconcile its result before continuing.';
+        event(current, 'agent.accepted', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef });
         return;
       }
       delete current.pendingDelegation;

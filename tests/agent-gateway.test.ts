@@ -63,6 +63,20 @@ describe('external Agent gateway', () => {
     expect(submits).toBe(1); expect(reconciles).toBe(1);
   });
 
+  it('keeps asynchronously accepted work until explicit reconciliation', async () => {
+    let submits = 0; let reconciles = 0;
+    const transport: AgentTransport = {
+      submit: async () => { submits++; return { status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: acknowledgement() }; },
+      reconcile: async (_card, request) => { reconciles++; return { status: 'completed', receiptRef: 'receipt.async-complete', acknowledgement: acknowledgement(), result: { ...result(), receiptRef: 'receipt.async-complete', taskId: request.taskBrief.taskId } }; },
+    };
+    const directory = new AgentDirectory(); directory.register(card);
+    const gateway = new AgentGateway(directory, transport);
+    const request: DelegationRequest = { agentId: card.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 1 } }, mode: 'async', idempotencyKey: 'delegation-accepted' };
+    expect((await gateway.delegate(request)).status).toBe('accepted');
+    expect((await gateway.reconcile(request, { receiptRef: 'receipt.accepted', agentId: card.agentId, taskId: brief.taskId, idempotencyKey: request.idempotencyKey, status: 'accepted', contextVersion: context.id, acknowledgedAt: new Date().toISOString() })).status).toBe('completed');
+    expect(submits).toBe(1); expect(reconciles).toBe(1);
+  });
+
   it('signs requests and verifies signed responses for signed Agent Cards', async () => {
     const key = 'test-signing-secret-0123456789';
     const server = createServer(async (request, response) => {

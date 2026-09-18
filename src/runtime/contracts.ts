@@ -49,7 +49,7 @@ export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string };
 export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean; receiptRef?: string };
-export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'waiting_external' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export interface Source { id: string; title: string; content: string; source: string; hash: string }
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; hash: string; createdAt: string }
 export interface ModelPin { model: string; endpoint: string; promptVersion: string; provider?: string }

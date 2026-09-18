@@ -147,7 +147,7 @@ export class AgentGateway {
     const card = typeof input === 'string' ? entry?.card : this.directory.get(request.agentId);
     if (!card) throw new Error('Agent is not admitted');
     const receipt = persistedReceipt ?? entry?.outcome?.receipt;
-    if (!receipt || receipt.status !== 'unknown') throw new Error('Delegation does not require reconciliation');
+    if (!receipt || !['unknown', 'accepted'].includes(receipt.status)) throw new Error('Delegation does not require reconciliation');
     if (!this.transport.reconcile) throw new Error('Agent transport does not support reconciliation');
     await this.ledger.ensureUnknown(request.grant.grantId, request.idempotencyKey, request.grant.budget);
     const response = await this.transport.reconcile(card, request, receipt);

@@ -155,6 +155,10 @@ function render(run: RunView): void {
   }
   if (['queued', 'planning', 'running', 'reviewing'].includes(run.status)) controls.append(button('暂停', () => command('pause')));
   if (run.status === 'paused') controls.append(button('继续', () => command('resume')));
+  if (run.status === 'waiting_external') controls.append(button('核查外部 Agent 结果', async () => {
+    const reason = window.prompt('核查说明（必填）')?.trim();
+    if (reason) await command('reconcile', { reason });
+  }));
   if (run.status === 'failed') controls.append(button('重试失败步骤', () => command('retry')));
   if (run.status === 'failed') controls.append(button('重新规划', () => command('replan', { reason: '根据审核或失败信息生成新的计划版本' })));
   if (!['succeeded', 'cancelled'].includes(run.status)) controls.append(button('取消运行', () => command('cancel')));
