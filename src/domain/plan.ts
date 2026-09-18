@@ -42,6 +42,7 @@ export function createPlan(
   inputs: PlanNodeInput[],
   now = new Date().toISOString(),
 ): Plan {
+  if (inputs.length === 0) throw new Error("Plan must contain at least one task");
   validateGraph(inputs);
   const ids = new Set(inputs.map((node) => node.id));
   const nodes: PlanNode[] = inputs.map((input) => {

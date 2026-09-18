@@ -1,10 +1,16 @@
+import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { AeeisService } from "./application/aeeis-service.js";
-import { InMemoryStore } from "./adapters/in-memory-store.js";
-import type { CreateGoalInput, CreatePlanInput, TaskTransition } from "./contracts.js";
+import { JsonFileStore } from "./adapters/json-store.js";
+import type { CreateContextInput, CreateGoalInput, CreateMemoryInput, CreatePlanInput, TaskTransition } from "./contracts.js";
 
-const service = new AeeisService(new InMemoryStore());
+const store = new JsonFileStore(process.env.AEEIS_DATA_FILE ?? "data/aeeis.json");
+await store.init();
+const service = new AeeisService(store);
 const port = Number(process.env.PORT ?? 3000);
+const publicDir = join(dirname(fileURLToPath(import.meta.url)), "../public");
 
 const server = createServer(async (request, response) => {
   try {
@@ -24,6 +30,16 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const parts = url.pathname.split("/").filter(Boolean);
 
+  if (method === "GET" && parts.length === 0) {
+    serveFile(response, join(publicDir, "index.html"), "text/html; charset=utf-8");
+    return;
+  }
+
+  if (method === "GET" && parts.length === 1 && parts[0] === "app.js") {
+    serveFile(response, join(publicDir, "app.js"), "text/javascript; charset=utf-8");
+    return;
+  }
+
   if (method === "GET" && parts[0] === "health") {
     writeJson(response, 200, { status: "ok", service: "aeeis" });
     return;
@@ -35,6 +51,27 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
 
+  if (method === "GET" && parts[0] === "goals" && parts.length === 2) {
+    const goalId = segment(parts, 1);
+    writeJson(response, 200, {
+      goal: service.getGoal(goalId),
+      plans: service.listPlans(goalId),
+      memories: service.listMemories(goalId),
+    });
+    return;
+  }
+
+  if (method === "POST" && parts[0] === "goals" && parts[2] === "memories") {
+    const memory = service.addMemory(segment(parts, 1), await readJson<CreateMemoryInput>(request));
+    writeJson(response, 201, memory);
+    return;
+  }
+
+  if (method === "GET" && parts[0] === "goals" && parts[2] === "memories") {
+    writeJson(response, 200, service.listMemories(segment(parts, 1)));
+    return;
+  }
+
   if (method === "POST" && parts[0] === "goals" && parts[2] === "plans") {
     const input = await readJson<Omit<CreatePlanInput, "goalId">>(request);
     const plan = service.createPlan({ ...input, goalId: segment(parts, 1) });
@@ -42,8 +79,22 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
 
+  if (method === "POST" && parts[0] === "goals" && parts[2] === "project-pulse") {
+    writeJson(response, 201, service.createProjectPulsePlan(segment(parts, 1)));
+    return;
+  }
+
   if (method === "GET" && parts[0] === "plans" && parts.length === 2) {
     writeJson(response, 200, service.getSnapshot(segment(parts, 1)));
+    return;
+  }
+
+  if (method === "POST" && parts[0] === "plans" && parts[2] === "context") {
+    const manifest = service.createContextManifest(
+      service.getSnapshot(segment(parts, 1)).goal.id,
+      await readJson<CreateContextInput>(request),
+    );
+    writeJson(response, 201, manifest);
     return;
   }
 
@@ -87,4 +138,12 @@ function readJson<T>(request: IncomingMessage): Promise<T> {
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function serveFile(response: ServerResponse, path: string, contentType: string): void {
+  response.writeHead(200, { "content-type": contentType });
+  createReadStream(path).on("error", () => {
+    if (!response.headersSent) writeJson(response, 404, { error: "Not found" });
+    else response.end();
+  }).pipe(response);
 }

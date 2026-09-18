@@ -29,7 +29,18 @@ npm run typecheck
 npm run dev
 ```
 
-The development API listens on `http://localhost:3000`. It currently exposes `GET /health`, goal and plan creation, plan snapshots, and task transitions. Persistence, authentication, Brain, Temporal, and external integrations are intentionally next steps.
+The development API listens on `http://localhost:3000` and serves the Project Pulse workbench at `/`. It currently exposes:
+
+- `GET /health`
+- `POST /goals`
+- `POST /goals/:goalId/project-pulse`
+- `GET /goals/:goalId`
+- `POST /goals/:goalId/memories`
+- `POST /plans/:planId/context`
+- `GET /plans/:planId`
+- `POST /plans/:planId/tasks/:taskId/transitions`
+
+Data is persisted to `data/aeeis.json` by default. Authentication, Temporal workers, model calls, Toolkit/ownhow/planprice adapters, and production Brain storage are the next integration layer; the current MVP deliberately keeps the domain loop local and deterministic.
 
 ## Architecture in one view
 

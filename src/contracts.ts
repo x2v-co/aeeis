@@ -33,6 +33,31 @@ export interface Goal {
   createdAt: string;
 }
 
+export type MemoryKind = "fact" | "decision" | "preference" | "note";
+export type MemoryScope = "private" | "project" | "session";
+
+export interface MemoryEntry {
+  id: Id;
+  goalId?: Id;
+  kind: MemoryKind;
+  scope: MemoryScope;
+  content: string;
+  source: string;
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContextManifest {
+  id: Id;
+  purpose: string;
+  audience: string[];
+  memoryRefs: Id[];
+  included: Array<Pick<MemoryEntry, "id" | "kind" | "content" | "source" | "confidence">>;
+  excluded: string[];
+  createdAt: string;
+}
+
 export interface PlanNodeInput {
   id: Id;
   title: string;
@@ -75,6 +100,21 @@ export interface CreateGoalInput {
   description?: string;
 }
 
+export interface CreateMemoryInput {
+  kind: MemoryKind;
+  scope?: MemoryScope;
+  content: string;
+  source?: string;
+  confidence?: number;
+}
+
+export interface CreateContextInput {
+  purpose: string;
+  query?: string;
+  audience?: string[];
+  maxItems?: number;
+}
+
 export interface CreatePlanInput {
   goalId: Id;
   nodes: PlanNodeInput[];
@@ -91,4 +131,5 @@ export interface AeeisSnapshot {
   goal: Goal;
   plan: Plan;
   receipts: RunReceipt[];
+  memories: MemoryEntry[];
 }
