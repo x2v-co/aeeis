@@ -1,26 +1,14 @@
 # AEEIS
 
-> A user-owned, long-running agent with a durable Brain, a single identity, and verifiable personal self-improvement.
+> 一个由用户拥有 Brain、可持续推进任务、并以证据约束自我改进的 RSI Agent。
 
-AEEIS is being redesigned as an independent RSI agent. It is not a continuation of `ai-chat-system`, and this repository is not a generic ChatGPT clone.
+AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也不是聊天界面。当前运行时已经能把真实目标交给模型：生成动态 DAG、等待用户批准、按任务读取本次授权资料、产生产物、独立审核，并在暂停、取消、重启和模型结果不明时保持可解释状态。
 
-The first design target is a project continuity agent that can read project context, decompose and execute long-running work, coordinate internal and external agents, preserve evidence, request approval, and gradually adapt to the user's working style.
+当前版本是开发中的可验证纵向切片，尚未宣称生产可用。工具网关、OwnHow Skill 治理、planprice 模型目录、Brain 持久化、多 Agent 协作和 RSI 自动评测仍在逐步接入。
 
-## Status
+## 本地运行
 
-The first TypeScript implementation now contains the core Plan DAG state machine, a durable local AEEIS service, a small HTTP API, and Run Receipt objects. It is an early development scaffold, not production-ready.
-
-## Design documents
-
-- [Design baseline](docs/design/2026-09-18-aeeis-design-baseline.md)
-- [Agent protocol and domain model](docs/design/2026-09-18-agent-protocol-domain-model.md)
-- [Task DAG and Temporal execution](docs/design/2026-09-18-task-dag-temporal-design.md)
-- [Multi-agent collaboration, competition, and open world](docs/design/2026-09-18-multi-agent-open-world-design.md)
-- [External project contracts](docs/design/2026-09-18-external-project-contracts.md)
-- [Commercialization, operations, community, and open source](docs/design/2026-09-18-commercial-community-open-source-strategy.md)
-- [TypeScript-first implementation decision](docs/design/2026-09-18-typescript-first-implementation.md)
-
-## Quick start
+需要 Node.js 22 或更新版本。
 
 ```bash
 npm install
@@ -29,46 +17,54 @@ npm run typecheck
 npm run dev
 ```
 
-The development API listens on `http://localhost:3000` and serves the Project Pulse workbench at `/`. It currently exposes:
+服务默认监听 `http://127.0.0.1:4323`，工作台位于 `/`。没有模型配置时，页面只显示配置状态，创建运行会返回 `503`，不会生成模拟成功结果。
 
-- `GET /health`
-- `POST /goals`
-- `POST /goals/:goalId/project-pulse`
-- `GET /goals/:goalId`
-- `POST /goals/:goalId/memories`
-- `POST /plans/:planId/context`
-- `GET /plans/:planId`
-- `POST /plans/:planId/tasks/:taskId/transitions`
+复制 `.env.example` 后配置一个 OpenAI-compatible endpoint：
 
-Data is persisted to `data/aeeis.json` by default. Authentication, Temporal workers, model calls, Toolkit/ownhow/planprice adapters, and production Brain storage are the next integration layer; the current MVP deliberately keeps the domain loop local and deterministic.
-
-## Architecture in one view
-
-```text
-User-owned Brain
-        ↓
-AEEIS semantic control plane
-  Identity · Policy · Goal · Plan · Run · Receipt · RSI
-        ↓
-Execution and capability planes
-  toolkit_new · ownhow · planprice · Temporal · Connectors
-        ↓
-Channels and projections
-  Web · Feishu · CLI · external task systems · external agents
+```bash
+cp .env.example .env
+set -a; source .env; set +a
+npm run dev
 ```
 
-AEEIS keeps ownership of task meaning, authorization, context, evidence, durable business state, and evolution decisions. External projects provide infrastructure and capability planes through versioned contracts.
+开发环境可以使用 loopback HTTP；非 loopback endpoint 必须使用 HTTPS。模型调用不会自动重试，传输结果不明会进入 `unknown`，需要显式核查后才能再次调用。
 
-## Open-source direction
+## 当前 API
 
-AEEIS follows a protocol-first, progressive Open Core direction. Protocol schemas, receipts, export formats, local tooling, SDKs, evaluation harnesses, and compatibility tests are intended to be open. Hosted control plane, enterprise governance, managed relay, advanced routing, reputation, billing, and operations are potential commercial capabilities.
+- `GET /health`
+- `GET /api/status`
+- `GET /api/runs`
+- `GET /api/runs/:id`
+- `POST /api/runs`
+- `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|dispatch`
+- `POST /internal/runs/:id/advance`（仅 Worker token）
 
-The public repository is intended for design review, RFCs, protocol examples, evaluation cases, and future Connector/Skill contributions. Do not submit private Brain data, customer tasks, credentials, or unsanitized run logs.
+运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
-## Contributing
+## 设计边界
 
-Start with an Issue or RFC for protocol and domain changes. Contributions should explain the problem, affected boundary, compatibility impact, security and privacy implications, and how the change can be evaluated and rolled back.
+AEEIS 自己持有 Goal、Plan Graph、Execution Graph、Evidence Graph、权限、Context Manifest、Receipt 和 RSI Candidate 的语义。Temporal 只负责耐久执行；toolkit_new 提供工具能力；ownhow 提供 Skill 治理；planprice 提供模型目录和价格数据。所有外部结果先经过版本、授权、证据和 Receipt 校验。
+
+- [设计基线](docs/design/2026-09-18-aeeis-design-baseline.md)
+- [Agent 协议与领域模型](docs/design/2026-09-18-agent-protocol-domain-model.md)
+- [任务 DAG 与 Temporal](docs/design/2026-09-18-task-dag-temporal-design.md)
+- [多 Agent 与开放世界](docs/design/2026-09-18-multi-agent-open-world-design.md)
+- [外部项目接口契约](docs/design/2026-09-18-external-project-contracts.md)
+- [商业化、社区与开源](docs/design/2026-09-18-commercial-community-open-source-strategy.md)
+- [当前实现状态](docs/implementation-status.md)
+
+## 安全与数据边界
+
+模型来源资料被当作不可信数据处理。外部 Agent 默认只能收到最小化 Context Pack，只能返回候选 Result Envelope，不能直接写 Brain、修改任务或代表 AEEIS 发言。个人 Brain、客户任务、凭证和未经脱敏的运行日志不能提交到公开仓库。
+
+## 开源方向
+
+项目采用协议优先、逐步开放核心运行时的 Open Core 路线。协议 schema、Receipt、导出格式、本地运行器、评测工具和 Connector SDK 适合开放；托管控制面、企业治理、托管连接器和高级运营能力可以商业化。
+
+## 贡献
+
+协议、权限、任务状态、证据和进化变更请先提交 RFC 或 Issue，并说明兼容性、安全边界、评测方式和回滚策略。
 
 ## License
 
-Apache-2.0. Product names and trademarks remain with their respective owners.
+Apache-2.0。产品名称和商标归其所有者所有。
