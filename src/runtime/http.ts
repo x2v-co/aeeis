@@ -118,6 +118,11 @@ export function buildApp(options: Options) {
     const body = z.object({ nodes: z.array(z.object({ id: z.string().min(1).max(128), title: z.string().trim().min(1).max(500), kind: z.enum(['task', 'review', 'approval', 'deliverable']).optional(), dependsOn: z.array(z.string().min(1).max(128)).optional() }).strict()).min(1).max(100) }).strict().parse(request.body);
     return options.domain.createPlan({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) });
   });
+  app.post<{ Params: { id: string } }>('/api/goals/:id/plans/revise', async request => {
+    if (!options.domain) throw new Error('Goal service is not configured');
+    const body = z.object({ nodes: z.array(z.object({ id: z.string().min(1).max(128), title: z.string().trim().min(1).max(500), kind: z.enum(['task', 'review', 'approval', 'deliverable']).optional(), dependsOn: z.array(z.string().min(1).max(128)).optional() }).strict()).min(1).max(100) }).strict().parse(request.body);
+    return options.domain.createPlanRevision({ goalId: request.params.id, nodes: body.nodes.map(node => ({ id: node.id, title: node.title, ...(node.kind === undefined ? {} : { kind: node.kind }), ...(node.dependsOn === undefined ? {} : { dependsOn: node.dependsOn }) })) });
+  });
   app.get<{ Params: { id: string } }>('/api/goals/:id/memories', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
     return options.domain.listMemories(request.params.id);

@@ -88,6 +88,9 @@ describe('AEEIS HTTP boundary', () => {
     const planResponse = await app.inject({ method: 'POST', url: `/api/goals/${goal.id}/plans`, payload: { nodes: [{ id: 'draft', title: 'Draft', dependsOn: [] }, { id: 'review', title: 'Review', dependsOn: ['draft'] }] } });
     expect(planResponse.statusCode).toBe(200);
     const plan = planResponse.json() as { id: string };
+    const revision = await app.inject({ method: 'POST', url: `/api/goals/${goal.id}/plans/revise`, payload: { nodes: [{ id: 'draft-v2', title: 'Draft v2', dependsOn: [] }] } });
+    expect(revision.statusCode).toBe(200);
+    expect(revision.json().version).toBe(2);
     expect((await app.inject({ method: 'POST', url: `/api/plans/${plan.id}/tasks/draft/transition`, payload: { transition: 'start' } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: `/api/plans/${plan.id}/tasks/draft/transition`, payload: { transition: 'succeed' } })).statusCode).toBe(200);
     const snapshot = await app.inject({ method: 'GET', url: `/api/plans/${plan.id}/snapshot` });
