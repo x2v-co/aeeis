@@ -1,6 +1,7 @@
 interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; status: string }
 interface GoalSummary { id: string; title: string; status: string; createdAt: string }
-interface EvolutionSummary { id: string; target: string; proposedVersion: string; risk: string; status: string; evaluations: Array<{ kind: string; passed: boolean }> }
+interface EvolutionSummary { id: string; target: string; proposedVersion: string; risk: string; status: string; evaluations: Array<{ kind: string; passed: boolean }>; shadowObservations?: Array<{ id: string; passed: boolean; score: number }>; canaryObservations?: Array<{ id: string; passed: boolean; score: number }>; rolloutAttempts?: Array<{ id: string; phase: string; caseId: string; state: string; error?: string }> }
+interface EvolutionView extends EvolutionSummary { baseVersion: string; change: string; reason: string; sourceReceiptRefs: string[]; approvalRef?: string; shadowStartedAt?: string; canaryStartedAt?: string; promotedAt?: string; rolledBackAt?: string }
 interface RunView extends RunSummary {
   revision: number; goalId?: string; domainPlanId?: string;
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[] }> }>;
@@ -9,10 +10,15 @@ interface RunView extends RunSummary {
   events: Array<{ seq: number; type: string; at: string }>;
   calls: Array<{ phase: string; state: string; usage?: { inputTokens: number; outputTokens: number } }>;
   question?: { text: string }; error?: string;
+  toolReceipts?: Array<{ receiptId: string; operation: string; provider: string; status: string; errorCode?: string }>;
+  pendingTool?: { taskId: string; toolId: string; receiptId?: string };
+  pendingDelegation?: { agentId: string; taskBrief: { taskId: string }; receiptRef?: string };
+  delegationOutcomes?: Array<{ agentId?: string; status: string; receiptRef: string }>;
   review?: { verdict: string; summary: string; issues: string[] };
 }
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 let currentId = localStorage.getItem('aeeis.run') ?? '';
+let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 let polling = false;
 async function api<T>(path: string, body?: unknown): Promise<T> {
@@ -39,6 +45,7 @@ async function refresh(): Promise<void> {
     api<RunSummary[]>('/runs'), api<GoalSummary[]>('/goals'), api<EvolutionSummary[]>('/evolution/candidates'),
   ]);
   renderGoals(goals); renderCandidates(candidates);
+  if (selectedCandidateId) await renderCandidateDetail().catch(e => message(String(e.message)));
   const list = $('runs'); list.replaceChildren();
   for (const run of runs) {
     const item = button(`${run.goal.slice(0, 60)} · ${run.status}`, async () => { currentId = run.id; localStorage.setItem('aeeis.run', run.id); current = undefined; await refresh(); });
@@ -77,9 +84,54 @@ function renderCandidates(candidates: EvolutionSummary[]): void {
   const list = $('candidates'); list.replaceChildren(); $('candidates-empty').hidden = candidates.length > 0;
   for (const candidate of candidates) {
     const passed = candidate.evaluations.filter(item => item.passed).length;
-    const item = element('div', '', `fact-row candidate-${candidate.status}`);
+    const item = button('', async () => { selectedCandidateId = candidate.id; localStorage.setItem('aeeis.candidate', candidate.id); await renderCandidateDetail(); });
+    item.className = `fact-row candidate-${candidate.status}${candidate.id === selectedCandidateId ? ' selected' : ''}`;
     item.append(element('strong', `${candidate.target} · ${candidate.proposedVersion}`), element('small', `${candidate.status} · ${candidate.risk} · ${passed}/${candidate.evaluations.length} gates`)); list.append(item);
   }
+}
+async function candidateCommand(id: string, action: string, body: unknown = {}): Promise<void> {
+  await api(`/evolution/candidates/${id}/${action}`, body); await refresh();
+}
+async function renderCandidateDetail(): Promise<void> {
+  if (!selectedCandidateId) { $('candidate-detail').hidden = true; return; }
+  const candidate = await api<EvolutionView>(`/evolution/candidates/${selectedCandidateId}`);
+  $('candidate-detail').hidden = false;
+  $('candidate-title').textContent = `${candidate.target} · ${candidate.proposedVersion}`;
+  $('candidate-status').textContent = `${candidate.status} · ${candidate.risk}`;
+  $('candidate-change').textContent = `${candidate.change}\n\n原因：${candidate.reason}\n基线：${candidate.baseVersion}`;
+  const gates = $('candidate-gates'); gates.replaceChildren();
+  for (const gate of candidate.evaluations) gates.append(element('li', `${gate.kind} · ${gate.passed ? '通过' : '未通过'}`));
+  if (!candidate.evaluations.length) gates.append(element('li', '尚未运行评估门', 'muted'));
+  const rollout = $('candidate-rollout'); rollout.replaceChildren();
+  for (const observation of [...(candidate.shadowObservations ?? []).map(item => ({ ...item, phase: 'shadow' })), ...(candidate.canaryObservations ?? []).map(item => ({ ...item, phase: 'canary' }))]) {
+    rollout.append(element('li', `${observation.phase} · ${observation.id} · ${observation.passed ? '通过' : '未通过'} · ${observation.score}`));
+  }
+  for (const attempt of candidate.rolloutAttempts ?? []) {
+    const row = element('li', `${attempt.phase} · ${attempt.caseId} · ${attempt.state}${attempt.error ? ` · ${attempt.error}` : ''}`, attempt.state === 'failed' ? 'failure' : '');
+    rollout.append(row);
+    if (attempt.state === 'started') {
+      const reconcile = button('Reconcile this attempt', async () => {
+        const reason = window.prompt('核查原因（必填）')?.trim(); if (!reason) return;
+        const passed = window.confirm('外部 evaluator 是否确认通过？');
+        const scoreText = window.prompt('分数（0 到 1）', passed ? '1' : '0')?.trim();
+        const score = Number(scoreText);
+        const evidence = window.prompt('证据引用，逗号分隔', attempt.id)?.split(',').map(value => value.trim()).filter(Boolean);
+        if (!Number.isFinite(score) || score < 0 || score > 1 || !evidence?.length) throw new Error('需要有效分数和至少一个证据引用');
+        await candidateCommand(candidate.id, 'reconcile-rollout', { attemptId: attempt.id, outcome: 'completed', passed, score, evidenceRefs: evidence, reason });
+      });
+      rollout.append(reconcile);
+    }
+  }
+  if (!rollout.children.length) rollout.append(element('li', '尚未有 rollout observation 或 attempt', 'muted'));
+  const controls = $('candidate-controls'); controls.replaceChildren();
+  const allRequiredPassed = ['replay', 'holdout', 'safety'].every(kind => candidate.evaluations.some(item => item.kind === kind && item.passed));
+  if (['evaluating', 'held'].includes(candidate.status) && allRequiredPassed) controls.append(button('批准候选', async () => { const approvalRef = window.prompt('审批引用（必填）')?.trim(); if (approvalRef) await candidateCommand(candidate.id, 'approve', { approvalRef }); }));
+  if (candidate.status === 'approved' && candidate.risk === 'low') controls.append(button('晋升低风险候选', () => candidateCommand(candidate.id, 'promote')));
+  if (candidate.status === 'approved' && candidate.risk !== 'low') controls.append(button('开始 Shadow', () => candidateCommand(candidate.id, 'start-shadow')));
+  const shadowReady = (candidate.shadowObservations?.length ?? 0) >= (candidate.risk === 'high' ? 5 : candidate.risk === 'medium' ? 3 : 1) && (candidate.shadowObservations ?? []).every(item => item.passed);
+  if (candidate.status === 'shadowing' && shadowReady) controls.append(button('开始 Canary', () => candidateCommand(candidate.id, 'start-canary')));
+  if (candidate.status === 'canarying' && (candidate.canaryObservations?.length ?? 0) > 0) controls.append(button('晋升 Canary 候选', () => candidateCommand(candidate.id, 'promote')));
+  if (['approved', 'shadowing', 'canarying', 'held', 'promoted'].includes(candidate.status)) controls.append(button('回滚候选', async () => { const reason = window.prompt('回滚原因（必填）')?.trim(); if (reason) await candidateCommand(candidate.id, 'rollback', { reason }); }));
 }
 async function command(action: string, body: unknown = {}): Promise<void> {
   await api(`/runs/${currentId}/${action}`, body); await refresh();
@@ -90,6 +142,12 @@ function render(run: RunView): void {
   $('run-status').className = `status ${run.status}`;
   $('empty').hidden = true; $('detail').hidden = false;
   $('run-error').textContent = run.error ?? '';
+  const effects = $('external-effects'); effects.replaceChildren();
+  for (const receipt of run.toolReceipts ?? []) effects.append(element('li', `Tool ${receipt.operation} · ${receipt.status} · ${receipt.receiptId}${receipt.errorCode ? ` · ${receipt.errorCode}` : ''}`));
+  for (const outcome of run.delegationOutcomes ?? []) effects.append(element('li', `Agent ${outcome.agentId ?? 'external'} · ${outcome.status} · ${outcome.receiptRef}`));
+  if (run.pendingTool) effects.append(element('li', `等待 Tool reconcile：${run.pendingTool.toolId} · ${run.pendingTool.receiptId ?? '尚未生成 receipt'}`, 'failure'));
+  if (run.pendingDelegation) effects.append(element('li', `等待 Agent reconcile：${run.pendingDelegation.agentId} · ${run.pendingDelegation.receiptRef ?? '尚未生成 receipt'}`, 'failure'));
+  if (!effects.children.length) effects.append(element('li', '本次运行没有外部 Tool 或 Agent 调用记录', 'muted'));
   const controls = $('controls'); controls.replaceChildren();
   if (run.status === 'needs_approval') {
     controls.append(button('批准计划并执行', () => command('approve', { planHash: run.plans.at(-1)!.hash })));

@@ -12,11 +12,11 @@
 <section><h2>可选 Brain 范围</h2><label for="brain-scope">项目或任务 scope</label><input id="brain-scope" maxlength="200" placeholder="例如：project-a"><p class="muted">只有明确填写的 scope 才会读取 Brain；读取会留下审计记录。</p></section>
 <section><h2>领域目标</h2><nav id="goals" aria-label="领域目标"></nav><p id="goals-empty" class="muted">还没有持久化目标。</p></section>
 <section><h2>运行记录</h2><nav id="runs" aria-label="运行记录"></nav></section>
-<section><h2>RSI 候选</h2><nav id="candidates" aria-label="RSI 候选"></nav><p id="candidates-empty" class="muted">还没有进化候选。</p></section>
+<section><h2>RSI 候选</h2><nav id="candidates" aria-label="RSI 候选"></nav><p id="candidates-empty" class="muted">还没有进化候选。</p><div id="candidate-detail" hidden><hr><h3 id="candidate-title"></h3><p id="candidate-status" class="status"></p><pre id="candidate-change"></pre><h4>评估门</h4><ul id="candidate-gates"></ul><h4>Rollout 观察与尝试</h4><ul id="candidate-rollout"></ul><div id="candidate-controls"></div></div></section>
 </aside><div><section id="empty"><h2>从一个真实目标开始</h2><p>Agent 会先提出具体计划。批准后，它将读取你提供的资料、执行任务并交付产物；缺少信息时会向你提问。</p><p class="muted">运行结果、证据、模型回执、知识引用和协作状态都会保留在 AEEIS 的本地事实源中。</p></section>
 <div id="detail" hidden><section><div class="run-heading"><h2 id="run-title"></h2><span id="run-status"></span></div><p id="usage" class="muted"></p><p id="run-error" role="status"></p><div id="controls"></div></section>
 <section id="input-panel" hidden><h2>需要你的信息</h2><p id="question"></p><form id="answer-form"><label for="answer">回复</label><textarea id="answer" required maxlength="8000"></textarea><button>提交并继续</button></form></section>
 <section><h2>执行计划</h2><p id="plan-summary" class="muted"></p><div id="graph" role="region" aria-label="任务依赖图"></div></section>
-<section><h2>产物</h2><div id="artifacts"></div><pre id="review"></pre></section>
+<section><h2>外部调用与回执</h2><ul id="external-effects"></ul></section><section><h2>产物</h2><div id="artifacts"></div><pre id="review"></pre></section>
 <section><h2>执行记录</h2><ol id="events"></ol></section></div></div></div>
 </main><script type="module" src="/app.js"></script></body></html>
