@@ -7,6 +7,8 @@ import { buildApp } from './runtime/http.js';
 import { FileBrainStore } from './brain.js';
 import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog } from './integrations.js';
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
+import { AgentDirectory, AgentGateway, HttpAgentTransport } from './agent-gateway.js';
+import { agentCardSchema } from './protocol.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -23,6 +25,14 @@ try {
   const skills = process.env.AEEIS_OWNHOW_ENABLED === '1'
     ? new OwnHowCliGovernance(process.env.AEEIS_OWNHOW_BIN ?? 'ownhow', process.env.AEEIS_OWNHOW_STATE_DIR)
     : undefined;
+  let agents: AgentGateway | undefined;
+  if (process.env.AEEIS_AGENT_CARDS) {
+    const cards = JSON.parse(process.env.AEEIS_AGENT_CARDS) as unknown;
+    if (!Array.isArray(cards)) throw new Error('AEEIS_AGENT_CARDS must be a JSON array');
+    const directory = new AgentDirectory();
+    for (const card of cards) directory.register(agentCardSchema.parse(card));
+    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN));
+  }
   let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
     modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '') };
@@ -50,7 +60,7 @@ try {
     modelServices = { resolver };
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');

@@ -8,6 +8,8 @@ import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ModelPin } from '../src/runtime/contracts.js';
 import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '../src/integrations.js';
+import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
+import type { AgentCard } from '../src/protocol.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -105,6 +107,17 @@ class SkillFixture implements SkillGovernance {
   async propose() { return []; }
   async apply() { return { methodId: 'project-pulse', version: '2' }; }
   async rollback() { return { methodId: 'project-pulse', version: '1' }; }
+}
+
+class DelegationFixture implements ModelAdapter {
+  readonly pin = pin;
+  async complete(request: ModelRequest) {
+    if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Delegate bounded research', nodes: [{ id: 'delegate', title: 'Delegate research', instruction: 'Ask the admitted Agent for a candidate', dependsOn: [] }] } };
+    if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Delegated result accepted', issues: [] } };
+    const input = request.input as { observations: Array<unknown> };
+    if (input.observations.length === 0) return { value: { type: 'delegate', agentId: 'agent.partner', goal: 'Provide a bounded research candidate', expectedOutput: 'research/1' } };
+    return { value: { type: 'finish', title: 'Delegated report', content: 'The delegated candidate was reviewed.', evidenceRefs: [] } };
+  }
 }
 
 describe('AEEIS runtime', () => {
@@ -296,6 +309,29 @@ describe('AEEIS runtime', () => {
     expect(skills.records).toEqual([{ outcome: 'success', evidence: current.artifacts.map(item => item.id) }]);
     const plannerInput = model.calls.find(call => call.system.includes('Plan a real deliverable'))?.input as { skill?: { methodId: string; version: string } };
     expect(plannerInput.skill).toMatchObject({ methodId: 'project-pulse', version: '2' });
+    await repo.close();
+  });
+
+  it('executes an admitted external Agent through a task-scoped Context Pack and Grant', async () => {
+    const repo = await repository();
+    const card: AgentCard = { schemaVersion: 'agent-card/1', agentId: 'agent.partner', name: 'Partner', owner: 'partner', protocols: ['aeeis-task/1'], capabilities: ['research'], inputSchemas: ['task-brief/1'], outputSchemas: ['result-envelope/1'], auth: ['local'], privacy: { dataRetention: 'session', regions: ['local'] }, pricing: { unit: 'run' }, cardVersion: '1' };
+    const directory = new AgentDirectory(); directory.register(card);
+    let receivedGrant = '';
+    const agents = new AgentGateway(directory, { submit: async (_card, request) => { receivedGrant = request.grant.grantId; return { status: 'completed', receiptRef: 'receipt.partner', result: { schemaVersion: 'result-envelope/1', taskId: request.taskBrief.taskId, agentId: request.agentId, status: 'completed', resultType: 'research/1', summary: 'candidate', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.partner' } }; } });
+    const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
+    const run = await engine.create({ goal: 'Use a partner Agent', allowedAgents: ['agent.partner'] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    expect(await engine.advance(run.id)).toBe('running');
+    current = await repo.get(run.id);
+    expect(current.pendingDelegation?.agentId).toBe('agent.partner');
+    expect(await engine.advance(run.id)).toBe('running');
+    current = await repo.get(run.id);
+    expect(current.pendingDelegation).toBeUndefined();
+    expect(current.delegationOutcomes?.[0]?.status).toBe('completed');
+    expect(receivedGrant).toContain('grant_');
+    for (let i = 0; i < 10; i++) { const status = await engine.advance(run.id); if (status === 'succeeded' || status === 'failed') break; }
+    expect((await repo.get(run.id)).status).toBe('succeeded');
     await repo.close();
   });
 });

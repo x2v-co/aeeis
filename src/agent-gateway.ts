@@ -106,6 +106,9 @@ export class AgentGateway {
   async delegate(input: DelegationRequest): Promise<DelegationOutcome> {
     const request = validateRequest(input);
     const card = this.directory.get(request.agentId);
+    if (!card.protocols.includes('aeeis-task/1')) throw new Error('Agent does not support the AEEIS task protocol');
+    const unsupported = request.taskBrief.allowedCapabilities.filter(capability => !card.capabilities.includes(capability));
+    if (unsupported.length) throw new Error('Agent does not advertise required capabilities: ' + unsupported.join(', '));
     const cached = this.inFlight.get(request.idempotencyKey);
     if (cached?.outcome && cached.outcome.status !== 'unknown') return cached.outcome;
     if (cached && !sameRequest(cached.request, request)) throw new Error('Idempotency key is bound to a different delegation request');

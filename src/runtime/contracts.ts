@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Receipt, ToolInvocation } from '../integrations.js';
+import type { DelegationRequest } from '../agent-gateway.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -11,6 +12,7 @@ export const requestSchema = z.object({
   materials: z.array(materialSchema).max(20).default([]),
   maxModelCalls: z.number().int().min(3).max(100).default(20),
   allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
+  allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
   skillRuntime: z.string().trim().min(1).max(100).optional(),
   privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
 }).strict();
@@ -27,6 +29,7 @@ export const planSchema = z.object({
 export const decisionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strict(),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strict(),
+  z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200) }).strict(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strict(),
   z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100) }).strict(),
 ]);
@@ -40,6 +43,7 @@ export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string };
+export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 export interface Source { id: string; title: string; content: string; source: string; hash: string }
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; hash: string; createdAt: string }
@@ -63,11 +67,13 @@ export interface AgentRun {
   skillRuntime?: string;
   model: ModelPin; modelDecision?: Record<string, unknown>; maxModelCalls: number; calls: ModelCall[];
   allowedTools: string[];
+  allowedAgents: string[];
   approvedTools?: Array<{ id: string; version: string; capabilities: string[] }>;
   toolManifestDigest?: string;
   skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string };
   skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string };
-  toolReceipts: Receipt[]; pendingTool?: ExternalToolInvocation;
+  toolReceipts: Receipt[]; pendingTool?: ExternalToolInvocation; pendingDelegation?: PendingDelegation;
+  delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; result?: unknown }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };
