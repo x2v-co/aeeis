@@ -12,7 +12,7 @@ import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
-import { ModelPoolCandidateRunner, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
+import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 
 const repository = process.env.DATABASE_URL
   ? new PostgresRunRepository(process.env.DATABASE_URL)
@@ -30,6 +30,7 @@ const collaboration = new CollaborationService(collaborationRepository);
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 let competitionRunner: ModelPoolCandidateRunner | undefined;
 let competitionEvaluator: ModelPoolIndependentEvaluator | undefined;
+let debateRunner: ModelPoolDebateOrchestrator | undefined;
 try {
   const toolkit = process.env.AEEIS_TOOLKIT_REGISTRY_URL
     ? new ToolkitRegistryGateway(process.env.AEEIS_TOOLKIT_REGISTRY_URL, process.env.AEEIS_TOOLKIT_TOKEN)
@@ -105,8 +106,9 @@ try {
     }
     competitionRunner = new ModelPoolCandidateRunner(agents);
     competitionEvaluator = new ModelPoolIndependentEvaluator(process.env.AEEIS_COMPETITION_EVALUATOR_AGENT_ID ?? 'agent.evaluator', new HttpModelAdapter(process.env.AEEIS_COMPETITION_EVALUATOR_BASE_URL, process.env.AEEIS_COMPETITION_EVALUATOR_MODEL, process.env.AEEIS_COMPETITION_EVALUATOR_API_KEY ?? ''));
+    debateRunner = new ModelPoolDebateOrchestrator(collaboration, agents);
   }
-  const app = buildApp({ repository, brain, brainStore, rsi, collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
+  const app = buildApp({ repository, brain, brainStore, rsi, collaboration, ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}),
     ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
   });

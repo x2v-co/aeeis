@@ -10,9 +10,10 @@ import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
 import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
 import type { CandidateRunner, IndependentEvaluator } from '../collaboration.js';
+import type { DebateRecord } from '../collaboration-service.js';
 import { projectRunGraphs } from './graphs.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string): Promise<DebateRecord> } }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -116,6 +117,10 @@ export function buildApp(options: Options) {
     const { id, action } = request.params;
     if (action === 'message') return options.collaboration.appendMessage(id, request.body);
     if (action === 'close') return options.collaboration.closeDebate(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
+    if (action === 'run') {
+      if (!options.debateRunner) throw new Conflict('Internal debate model pool is not configured');
+      return options.debateRunner.run(id);
+    }
     throw new Conflict('Unsupported debate action');
   });
   app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {

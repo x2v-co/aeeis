@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelAdapter } from '../src/runtime/model.js';
-import { ModelPoolCandidateRunner, ModelPoolIndependentEvaluator } from '../src/collaboration-pool.js';
+import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from '../src/collaboration-pool.js';
 
 const pin = { model: 'fixture', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' } as const;
 const brief = { schemaVersion: 'competition-brief/1' as const, taskId: 'task.pool', contextVersion: 'ctx.pool', goal: 'Choose a plan', context: { classification: 'internal' as const, claims: [{ id: 'claim.pool', text: 'Use evidence', evidenceRefs: ['source.pool'] }], artifactRefs: [], redactions: [] }, participantAgentIds: ['agent.one', 'agent.two'], expectedResultType: 'plan/1', maxRounds: 1, blindEvaluation: true };
@@ -19,5 +19,20 @@ describe('internal competition model pool', () => {
       return { value: { scores: input.candidates.map((item, index) => ({ agentId: item.agentId, score: index ? 0.9 : 0.4, accepted: true, reasons: ['fit'], evidenceRefs: [] })) } };
     } });
     await expect(evaluator.evaluate({ ...brief, participantAgentIds: ['candidate_1', 'candidate_2'] }, [{ ...first, agentId: 'candidate_1' }, { ...first, agentId: 'candidate_2', summary: 'two', receiptRef: 'receipt_two' }])).resolves.toHaveLength(2);
+  });
+
+  it('drives a bounded debate room and closes after a decision', async () => {
+    let record: any = { id: 'debate.pool', status: 'active', room: { debateId: 'debate.pool', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 2, maxMessagesPerAgent: 2, messages: [] } };
+    const service = {
+      getDebate: async () => record,
+      appendMessage: async (_id: string, message: any) => { record = { ...record, room: { ...record.room, messages: [...record.room.messages, message] } }; return record; },
+      closeDebate: async (_id: string, reason: string) => { record = { ...record, status: 'closed', closeReason: reason }; return record; },
+    };
+    const runner = new ModelPoolDebateOrchestrator(service, new Map([
+      ['agent.one', { pin, complete: async () => ({ value: { type: 'position', content: 'Position', claimRefs: [] } }) } as ModelAdapter],
+      ['agent.two', { pin, complete: async () => ({ value: { type: 'decision', content: 'Decision', claimRefs: [] } }) } as ModelAdapter],
+    ]));
+    const finished = await runner.run('debate.pool');
+    expect(finished.status).toBe('closed'); expect(finished.room.messages).toHaveLength(2); expect(finished.closeReason).toContain('decision');
   });
 });

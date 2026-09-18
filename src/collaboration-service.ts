@@ -35,7 +35,8 @@ const debateRecordSchema = z.object({
 const stateSchema = z.object({ competitions: z.array(competitionRecordSchema).max(1000), debates: z.array(debateRecordSchema).max(1000) }).strict();
 const candidateInputSchema = resultEnvelopeSchema;
 const debateInputSchema = z.object({
-  taskId: id, contextVersion: id, participantAgentIds: z.array(id).min(1).max(12),
+  taskId: id, contextVersion: id, goal: z.string().max(8000).optional(), participantAgentIds: z.array(id).min(1).max(12),
+  context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(z.object({ id, text: z.string().min(1).max(4000), evidenceRefs: z.array(id).max(100) }).strict()).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
   maxRounds: z.number().int().min(1).max(12).default(4), maxMessagesPerAgent: z.number().int().min(1).max(20).default(4),
   maxTotalMessages: z.number().int().min(1).max(100).optional(),
 }).strict();
@@ -257,7 +258,7 @@ export class CollaborationService {
 
   async createDebate(input: unknown): Promise<DebateRecord> {
     const parsed = debateInputSchema.parse(input); const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
-    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, participantAgentIds: parsed.participantAgentIds, maxRounds: parsed.maxRounds, maxMessagesPerAgent: parsed.maxMessagesPerAgent, messages: [] };
+    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), participantAgentIds: parsed.participantAgentIds, maxRounds: parsed.maxRounds, maxMessagesPerAgent: parsed.maxMessagesPerAgent, messages: [] };
     const room: DebateRoom = parsed.maxTotalMessages === undefined
       ? debateRoomSchema.parse(roomBase)
       : debateRoomSchema.parse({ ...roomBase, maxTotalMessages: parsed.maxTotalMessages });

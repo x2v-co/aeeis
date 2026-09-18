@@ -18,7 +18,7 @@
 | planprice | HTTP catalog adapter 已实现并用本地 Planprice 服务验收；读取 grouped 渠道价格与汇率、按 capability/隐私筛选并锁定 provider/model/endpoint/归一化价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实模型调用和价格新鲜度 SLA 未验收 |
 | RSI | candidate/evaluation/approval/promotion/rollback 状态机、默认 replay/holdout/safety 三道审批门、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据；候选不会自动修改生产 Agent |
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现；`blindEvaluation` 会对评测器隐藏真实 Agent ID；候选完整性、成本上限、重复评分防护已加固；新增 File 持久化协作状态、候选提交→独立评测→选定/partial API；Competition Brief 可携带受控 Context Pack；新增可配置内部模型池、并发候选运行、盲评和持久化编排 API；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 仍需接入真实生产模型池、自动触发策略、预算计量和外部 Agent endpoint；当前模型池只负责候选/评估层，不替代主 Runtime 的任务执行 |
-| Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息 | 飞书渠道、Hermes skill、Moderator/Adjudicator 自动运行尚未接入 |
+| Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息；Debate Brief 可携带受控 Context Pack；新增内部模型池的有界回合编排和 `run` API | 飞书渠道、Hermes skill、独立 Moderator/Adjudicator 和 canonical→projection 同步尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |
 | Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引、受 schema 校验的 JSON File adapter 和 HTTPS HTTP adapter；Runtime 可通过 `knowledgeQuery` 检索，并在信任边界再次校验数量、分类、重复 ID 和内容 hash，再把受 privacy 分类策略过滤的知识引用注入 Planner/Executor/Reviewer Context Manifest | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
 | React、生产运维 | 未实现 | 当前 UI 是 TypeScript DOM；生产部署、监控、迁移、备份和安全验收仍缺失 |
