@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { decisionSchema, requestSchema, reviewSchema, validatePlan } from './contracts.js';
 import type { AgentRun, ModelCall, RunStatus } from './contracts.js';
+import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
 import { ModelOutcomeUnknown } from './model.js';
 import type { RunRepository } from './repository.js';
@@ -109,7 +110,7 @@ export class AgentEngine {
     }
   }
   async command(runId: string, action: string, body: unknown): Promise<AgentRun> {
-    return this.repository.mutate(runId, run => {
+    const result = await this.repository.mutate(runId, run => {
       if (action === 'approve') {
         const { planHash } = z.object({ planHash: z.string() }).strict().parse(body);
         if (run.status !== 'needs_approval' || run.approval?.planHash !== planHash) throw new Conflict('Approval must match the current plan');
@@ -154,6 +155,8 @@ export class AgentEngine {
         event(run, 'plan.revision_requested', { reason: reason ?? 'Owner requested a revised plan' });
       } else { throw new Conflict('Unsupported run command'); }
     });
+    await this.syncDomainState(result);
+    return result;
   }
   // One bounded operation per tick. The caller (Temporal or local driver) schedules subsequent ticks.
   async advance(runId: string): Promise<RunStatus> {
@@ -161,17 +164,17 @@ export class AgentEngine {
     this.active.add(runId);
     try {
       const run = await this.repository.get(runId);
-      if (!runnable.has(run.status)) return run.status;
-      if (run.calls.some(c => c.state === 'started')) return run.status;
-      const model = this.adapters.get(runId) ?? this.resolver?.forPin(run.model) ?? this.defaultModel;
-      if (!model) throw new Error('Pinned model is unavailable; restore the configured model resolver');
-      this.adapters.set(runId, model);
-      if (digest(run.model) !== digest(model.pin)) throw new Error('Pinned model configuration changed; restore it to resume this run');
-      if (run.pendingTool) await this.executePendingTool(run);
-      else if (run.pendingDelegation) await this.executePendingDelegation(run);
-      else if (run.status === 'queued' || run.status === 'planning') await this.plan(run, model);
-      else if (run.status === 'reviewing') await this.review(run, model);
-      else await this.execute(run, model);
+      if (runnable.has(run.status) && !run.calls.some(c => c.state === 'started')) {
+        const model = this.adapters.get(runId) ?? this.resolver?.forPin(run.model) ?? this.defaultModel;
+        if (!model) throw new Error('Pinned model is unavailable; restore the configured model resolver');
+        this.adapters.set(runId, model);
+        if (digest(run.model) !== digest(model.pin)) throw new Error('Pinned model configuration changed; restore it to resume this run');
+        if (run.pendingTool) await this.executePendingTool(run);
+        else if (run.pendingDelegation) await this.executePendingDelegation(run);
+        else if (run.status === 'queued' || run.status === 'planning') await this.plan(run, model);
+        else if (run.status === 'reviewing') await this.review(run, model);
+        else await this.execute(run, model);
+      }
     } catch (error) {
       await this.repository.mutate(runId, run => {
         if (['cancelled', 'unknown'].includes(run.status)) return;
@@ -179,6 +182,13 @@ export class AgentEngine {
         else run.status = 'failed';
         run.error = error instanceof z.ZodError ? 'Model output failed schema validation' : error instanceof Error ? error.message : 'Execution failed';
         event(run, 'run.failed', { reason: run.error });
+      });
+    }
+    try {
+      await this.syncDomainState(await this.repository.get(runId));
+    } catch (error) {
+      await this.repository.mutate(runId, run => {
+        event(run, 'domain.sync_failed', { reason: error instanceof Error ? error.message : 'Domain task synchronization failed' });
       });
     } finally {
       this.active.delete(runId);
@@ -350,17 +360,44 @@ export class AgentEngine {
     if (completed) await this.transitionDomainTask(after, node.id, 'succeed');
   }
 
-  private async transitionDomainTask(run: AgentRun, taskId: string, transition: 'start' | 'succeed'): Promise<void> {
+  private async syncDomainState(run: AgentRun): Promise<void> {
+    if (!this.domain || !run.goalId || !run.domainPlanId) return;
+    let domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId);
+    if (!domainPlan) return;
+    if (run.status === 'cancelled') {
+      for (const node of domainPlan.nodes) {
+        if (['succeeded', 'failed', 'cancelled', 'unknown'].includes(node.status)) continue;
+        await this.transitionDomainTask(run, node.id, 'cancel');
+        domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId) ?? domainPlan;
+      }
+      return;
+    }
+    const taskId = run.question?.taskId ?? run.steps.find(step => step.status === 'running')?.taskId;
+    if (!taskId) return;
+    const node = domainPlan.nodes.find(candidate => candidate.id === taskId);
+    if (!node) return;
+    if (run.status === 'needs_input') await this.transitionDomainTask(run, taskId, 'wait');
+    else if (run.status === 'unknown') await this.transitionDomainTask(run, taskId, 'mark_unknown', run.error);
+    else if (run.status === 'failed') await this.transitionDomainTask(run, taskId, 'fail', run.error);
+    else if (run.status === 'running') {
+      if (node.status === 'failed' || node.status === 'unknown') {
+        await this.transitionDomainTask(run, taskId, 'retry', run.error);
+        await this.transitionDomainTask(run, taskId, 'start');
+      } else await this.transitionDomainTask(run, taskId, 'start');
+    }
+  }
+
+  private async transitionDomainTask(run: AgentRun, taskId: string, transition: TaskTransition, reason?: string): Promise<void> {
     if (!this.domain || !run.domainPlanId) return;
     try {
       if (!run.goalId) return;
       const domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId);
       const domainNode = domainPlan?.nodes.find(node => node.id === taskId);
-      if (!domainNode || (transition === 'start' && domainNode.status === 'running') || (transition === 'succeed' && domainNode.status === 'succeeded')) return;
-      const receipt = await this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition });
+      if (!domainNode || (transition === 'start' && domainNode.status === 'running') || (transition === 'succeed' && domainNode.status === 'succeeded') || (transition === 'wait' && domainNode.status === 'waiting') || (transition === 'fail' && domainNode.status === 'failed') || (transition === 'cancel' && domainNode.status === 'cancelled') || (transition === 'mark_unknown' && domainNode.status === 'unknown')) return;
+      const receipt = await this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition, ...(reason === undefined ? {} : { reason }) });
       await this.repository.mutate(run.id, current => event(current, 'domain.task.transitioned', { planId: run.domainPlanId, taskId, transition, receiptId: receipt.id }));
     } catch (error) {
-      if (transition === 'succeed' && error instanceof Error && error.message.includes('Cannot succeed')) return;
+      if (['succeed', 'fail', 'cancel', 'mark_unknown'].includes(transition) && error instanceof Error && error.message.includes('Cannot ')) return;
       throw error;
     }
   }

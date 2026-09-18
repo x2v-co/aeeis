@@ -59,6 +59,14 @@ class RevisionFixture implements ModelAdapter {
   }
 }
 
+class DefiniteFailureFixture implements ModelAdapter {
+  readonly pin = pin;
+  async complete(request: ModelRequest) {
+    if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Failure plan', nodes: [{ id: 'operate', title: 'Operate', instruction: 'Operate', dependsOn: [] }] } };
+    throw new Error('Provider rejected the executor request');
+  }
+}
+
 async function repository() {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-runtime-'));
   const repo = new FileRunRepository(directory);
@@ -201,6 +209,25 @@ describe('AEEIS runtime', () => {
     expect(current.events.map(item => item.type)).toContain('plan.revision_requested');
     expect((await domain.listPlans(goal.id)).map(plan => plan.version)).toEqual([2, 1]);
     expect(model.plannerCalls).toBe(2);
+    await repo.close();
+  });
+
+  it('synchronizes failed executor state into the domain Task receipt', async () => {
+    const repo = await repository();
+    const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-domain-failure-')), 'domain.json'));
+    await domainStore.init();
+    const domain = new AeeisService(domainStore);
+    const goal = await domain.createGoal({ title: 'Keep domain state aligned' });
+    const engine = new AgentEngine(repo, { model: new DefiniteFailureFixture(), domain });
+    const run = await engine.create({ goal: goal.title, goalId: goal.id });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    expect(await engine.advance(run.id)).toBe('failed');
+    current = await repo.get(run.id);
+    const plan = (await domain.listPlans(goal.id)).find(item => item.id === current.domainPlanId)!;
+    expect(plan.nodes[0]?.status).toBe('failed');
+    expect((await domain.getSnapshot(plan.id)).receipts.map(receipt => receipt.to)).toEqual(['running', 'failed']);
     await repo.close();
   });
 
