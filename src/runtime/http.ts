@@ -314,7 +314,7 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/goals/:id/runs', async (request, reply) => {
     if (!options.domain || !options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure the Goal service, model and dispatcher before starting a Goal run' });
-    const goal = options.domain.getGoal(request.params.id);
+    const goal = await options.domain.getGoal(request.params.id);
     const body = z.object({ materials: z.array(z.object({ title: z.string().trim().min(1).max(200), content: z.string().trim().min(1).max(30000), source: z.string().trim().min(1).max(1000) }).strict()).max(20).optional(), maxModelCalls: z.number().int().min(3).max(100).optional(), allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).optional(), allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).optional(), knowledgeQuery: z.string().trim().min(1).max(2000).optional(), knowledgeMaxItems: z.number().int().min(1).max(20).optional(), brainScope: z.string().trim().min(1).max(200).optional(), skillRuntime: z.string().trim().min(1).max(100).optional(), privacy: z.enum(['public', 'internal', 'confidential', 'private']).optional() }).strict().parse(request.body);
     const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body });
     await notify(run.id); return reply.code(202).send({ id: run.id, goalId: goal.id });

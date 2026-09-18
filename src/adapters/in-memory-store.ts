@@ -1,18 +1,19 @@
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, RunReceipt } from "../contracts.js";
 
 export interface AeeisStore {
-  saveGoal(goal: Goal): void;
-  getGoal(id: Id): Goal | undefined;
-  getGoals(): Goal[];
-  savePlan(plan: Plan): void;
-  getPlan(id: Id): Plan | undefined;
-  getPlans(goalId?: Id): Plan[];
-  appendReceipt(receipt: RunReceipt): void;
-  getReceipts(planId: Id): RunReceipt[];
-  saveMemory(memory: MemoryEntry): void;
-  getMemories(goalId?: Id): MemoryEntry[];
-  saveContextManifest(manifest: ContextManifest): void;
-  getContextManifest(id: Id): ContextManifest | undefined;
+  saveGoal(goal: Goal): Promise<void>;
+  getGoal(id: Id): Promise<Goal | undefined>;
+  getGoals(): Promise<Goal[]>;
+  savePlan(plan: Plan): Promise<void>;
+  getPlan(id: Id): Promise<Plan | undefined>;
+  getPlans(goalId?: Id): Promise<Plan[]>;
+  appendReceipt(receipt: RunReceipt): Promise<void>;
+  getReceipts(planId: Id): Promise<RunReceipt[]>;
+  saveMemory(memory: MemoryEntry): Promise<void>;
+  getMemories(goalId?: Id): Promise<MemoryEntry[]>;
+  saveContextManifest(manifest: ContextManifest): Promise<void>;
+  getContextManifest(id: Id): Promise<ContextManifest | undefined>;
+  close(): Promise<void>;
 }
 
 export class InMemoryStore implements AeeisStore {
@@ -22,58 +23,60 @@ export class InMemoryStore implements AeeisStore {
   private readonly memories = new Map<Id, MemoryEntry>();
   private readonly manifests = new Map<Id, ContextManifest>();
 
-  saveGoal(goal: Goal): void {
+  async saveGoal(goal: Goal): Promise<void> {
     this.goals.set(goal.id, structuredClone(goal));
   }
 
-  getGoal(id: Id): Goal | undefined {
+  async getGoal(id: Id): Promise<Goal | undefined> {
     const goal = this.goals.get(id);
     return goal ? structuredClone(goal) : undefined;
   }
 
-  getGoals(): Goal[] {
+  async getGoals(): Promise<Goal[]> {
     return structuredClone([...this.goals.values()]);
   }
 
-  savePlan(plan: Plan): void {
+  async savePlan(plan: Plan): Promise<void> {
     this.plans.set(plan.id, structuredClone(plan));
   }
 
-  getPlan(id: Id): Plan | undefined {
+  async getPlan(id: Id): Promise<Plan | undefined> {
     const plan = this.plans.get(id);
     return plan ? structuredClone(plan) : undefined;
   }
 
-  getPlans(goalId?: Id): Plan[] {
+  async getPlans(goalId?: Id): Promise<Plan[]> {
     return structuredClone([...this.plans.values()].filter((plan) => goalId === undefined || plan.goalId === goalId));
   }
 
-  appendReceipt(receipt: RunReceipt): void {
+  async appendReceipt(receipt: RunReceipt): Promise<void> {
     const existing = this.receipts.get(receipt.planId) ?? [];
     existing.push(structuredClone(receipt));
     this.receipts.set(receipt.planId, existing);
   }
 
-  getReceipts(planId: Id): RunReceipt[] {
+  async getReceipts(planId: Id): Promise<RunReceipt[]> {
     return structuredClone(this.receipts.get(planId) ?? []);
   }
 
-  saveMemory(memory: MemoryEntry): void {
+  async saveMemory(memory: MemoryEntry): Promise<void> {
     this.memories.set(memory.id, structuredClone(memory));
   }
 
-  getMemories(goalId?: Id): MemoryEntry[] {
+  async getMemories(goalId?: Id): Promise<MemoryEntry[]> {
     return structuredClone(
       [...this.memories.values()].filter((memory) => goalId === undefined || memory.goalId === goalId),
     );
   }
 
-  saveContextManifest(manifest: ContextManifest): void {
+  async saveContextManifest(manifest: ContextManifest): Promise<void> {
     this.manifests.set(manifest.id, structuredClone(manifest));
   }
 
-  getContextManifest(id: Id): ContextManifest | undefined {
+  async getContextManifest(id: Id): Promise<ContextManifest | undefined> {
     const manifest = this.manifests.get(id);
     return manifest ? structuredClone(manifest) : undefined;
   }
+
+  async close(): Promise<void> {}
 }

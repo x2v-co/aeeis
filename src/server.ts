@@ -14,6 +14,7 @@ import { FileEvolutionRepository, RsiService } from './rsi.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
 import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 import { JsonFileStore } from './adapters/json-store.js';
+import { PostgresAeeisStore } from './adapters/postgres-store.js';
 import { AeeisService } from './application/aeeis-service.js';
 import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness } from './evaluation.js';
@@ -39,7 +40,9 @@ const projectionSink = process.env.AEEIS_FEISHU_WEBHOOK_URL
   : process.env.AEEIS_PROJECTION_SINK_URL
   ? new HttpProjectionSink(process.env.AEEIS_PROJECTION_SINK_URL, process.env.AEEIS_PROJECTION_SINK_TOKEN)
   : undefined;
-const domainStore = new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
+const domainStore = process.env.DATABASE_URL
+  ? new PostgresAeeisStore(process.env.DATABASE_URL)
+  : new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
 await domainStore.init();
 const domain = new AeeisService(domainStore);
 const rsiHarness = process.env.AEEIS_RSI_EVALUATOR_URL
@@ -142,7 +145,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); throw error; }

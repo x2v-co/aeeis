@@ -23,7 +23,7 @@ export class AeeisConflict extends Error {}
 export class AeeisService {
   public constructor(private readonly store: AeeisStore) {}
 
-  createGoal(input: CreateGoalInput, now = new Date().toISOString()): Goal {
+  async createGoal(input: CreateGoalInput, now = new Date().toISOString()): Promise<Goal> {
     if (!input.title.trim()) throw new Error("Goal title is required");
     const goal: Goal = {
       id: `goal_${randomUUID()}`,
@@ -32,19 +32,19 @@ export class AeeisService {
       status: "active",
       createdAt: now,
     };
-    this.store.saveGoal(goal);
+    await this.store.saveGoal(goal);
     return goal;
   }
 
-  createPlan(input: CreatePlanInput, now = new Date().toISOString()): Plan {
-    if (!this.store.getGoal(input.goalId)) throw new AeeisNotFound(`Unknown goal: ${input.goalId}`);
+  async createPlan(input: CreatePlanInput, now = new Date().toISOString()): Promise<Plan> {
+    if (!(await this.store.getGoal(input.goalId))) throw new AeeisNotFound(`Unknown goal: ${input.goalId}`);
     const plan = createPlan(`plan_${randomUUID()}`, input.goalId, 1, input.nodes, now);
-    this.store.savePlan(plan);
+    await this.store.savePlan(plan);
     return plan;
   }
 
-  createProjectPulsePlan(goalId: Id, now = new Date().toISOString()): Plan {
-    const goal = this.getGoal(goalId);
+  async createProjectPulsePlan(goalId: Id, now = new Date().toISOString()): Promise<Plan> {
+    const goal = await this.getGoal(goalId);
     return this.createPlan({
       goalId,
       nodes: [
@@ -55,15 +55,15 @@ export class AeeisService {
     }, now);
   }
 
-  transitionTask(input: TransitionTaskInput, now = new Date().toISOString()): RunReceipt {
-    const current = this.store.getPlan(input.planId);
+  async transitionTask(input: TransitionTaskInput, now = new Date().toISOString()): Promise<RunReceipt> {
+    const current = await this.store.getPlan(input.planId);
     if (!current) throw new AeeisNotFound(`Unknown plan: ${input.planId}`);
     const result = transitionTask(current, input.taskId, input.transition, input.reason, now);
     const next = refreshReadyTasks(result.plan);
-    this.store.savePlan(next);
+    await this.store.savePlan(next);
     if (next.nodes.every((node) => node.status === "succeeded")) {
-      const goal = this.store.getGoal(next.goalId);
-      if (goal) this.store.saveGoal({ ...goal, status: "completed" });
+      const goal = await this.store.getGoal(next.goalId);
+      if (goal) await this.store.saveGoal({ ...goal, status: "completed" });
     }
     const receipt: RunReceipt = {
       id: `receipt_${randomUUID()}`,
@@ -76,12 +76,12 @@ export class AeeisService {
       attempt: result.attempt,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
     };
-    this.store.appendReceipt(receipt);
+    await this.store.appendReceipt(receipt);
     return receipt;
   }
 
-  addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString()): MemoryEntry {
-    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+  async addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString()): Promise<MemoryEntry> {
+    if (!(await this.store.getGoal(goalId))) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     if (!input.content.trim()) throw new Error("Memory content is required");
     const memory: MemoryEntry = {
       id: `memory_${randomUUID()}`,
@@ -94,30 +94,28 @@ export class AeeisService {
       createdAt: now,
       updatedAt: now,
     };
-    this.store.saveMemory(memory);
+    await this.store.saveMemory(memory);
     return memory;
   }
 
-  listMemories(goalId: Id): MemoryEntry[] {
-    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+  async listMemories(goalId: Id): Promise<MemoryEntry[]> {
+    if (!(await this.store.getGoal(goalId))) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     return this.store.getMemories(goalId);
   }
 
-  createContextManifest(goalId: Id, input: CreateContextInput, now = new Date().toISOString()): ContextManifest {
-    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+  async createContextManifest(goalId: Id, input: CreateContextInput, now = new Date().toISOString()): Promise<ContextManifest> {
+    if (!(await this.store.getGoal(goalId))) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     if (!input.purpose.trim()) throw new Error("Context purpose is required");
     const queryTerms = tokenize(input.query ?? "");
     const maxItems = Math.max(1, Math.min(input.maxItems ?? 8, 50));
-    const memories = this.store
-      .getMemories(goalId)
+    const memories = (await this.store.getMemories(goalId))
       .filter((memory) => memory.scope !== "private")
       .map((memory) => ({ memory, score: scoreMemory(memory.content, queryTerms) }))
       .filter(({ score }) => queryTerms.length === 0 || score > 0)
       .sort((left, right) => right.score - left.score || right.memory.updatedAt.localeCompare(left.memory.updatedAt))
       .slice(0, maxItems)
       .map(({ memory }) => memory);
-    const privateMemoryCount = this.store
-      .getMemories(goalId)
+    const privateMemoryCount = (await this.store.getMemories(goalId))
       .filter((memory) => memory.scope === "private").length;
     const manifest: ContextManifest = {
       id: `ctx_${randomUUID()}`,
@@ -128,52 +126,52 @@ export class AeeisService {
       excluded: privateMemoryCount > 0 ? ["private memories omitted by scope policy"] : [],
       createdAt: now,
     };
-    this.store.saveContextManifest(manifest);
+    await this.store.saveContextManifest(manifest);
     return manifest;
   }
 
   async createContextManifestWithKnowledge(goalId: Id, input: CreateContextInput, knowledge: KnowledgeProvider, now = new Date().toISOString()): Promise<ContextManifest> {
-    const manifest = this.createContextManifest(goalId, input, now);
+    const manifest = await this.createContextManifest(goalId, input, now);
     const hits = await knowledge.search({
       query: input.query ?? '', maxItems: Math.max(1, Math.min(input.maxItems ?? 8, 50)),
       allowedClassifications: input.knowledgeClassifications ?? ['public', 'internal'], audience: input.audience?.[0] ?? 'owner',
     });
     const includedKnowledge = hits.map(({ record, score }) => ({ id: record.id, title: record.title, content: record.content.slice(0, 4000), source: record.source, classification: record.classification, contentHash: record.contentHash, score }));
     const next: ContextManifest = { ...manifest, knowledgeRefs: includedKnowledge.map(item => item.id), includedKnowledge };
-    this.store.saveContextManifest(next);
+    await this.store.saveContextManifest(next);
     return next;
   }
 
-  getSnapshot(planId: Id): AeeisSnapshot {
-    const plan = this.store.getPlan(planId);
+  async getSnapshot(planId: Id): Promise<AeeisSnapshot> {
+    const plan = await this.store.getPlan(planId);
     if (!plan) throw new AeeisNotFound(`Unknown plan: ${planId}`);
-    const goal = this.store.getGoal(plan.goalId);
+    const goal = await this.store.getGoal(plan.goalId);
     if (!goal) throw new AeeisNotFound(`Plan ${planId} references missing goal ${plan.goalId}`);
-    return { goal, plan, receipts: this.store.getReceipts(planId), memories: this.store.getMemories(plan.goalId) };
+    return { goal, plan, receipts: await this.store.getReceipts(planId), memories: await this.store.getMemories(plan.goalId) };
   }
 
-  getSnapshotForGoal(goalId: Id): AeeisSnapshot {
-    const plan = this.listPlans(goalId)[0];
+  async getSnapshotForGoal(goalId: Id): Promise<AeeisSnapshot> {
+    const plan = (await this.listPlans(goalId))[0];
     if (!plan) {
-      const goal = this.store.getGoal(goalId);
+      const goal = await this.store.getGoal(goalId);
       if (!goal) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
       throw new Error(`Goal ${goalId} has no plan`);
     }
     return this.getSnapshot(plan.id);
   }
 
-  getGoal(goalId: Id): Goal {
-    const goal = this.store.getGoal(goalId);
+  async getGoal(goalId: Id): Promise<Goal> {
+    const goal = await this.store.getGoal(goalId);
     if (!goal) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     return goal;
   }
 
-  listGoals(): Goal[] {
-    return this.store.getGoals().sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  async listGoals(): Promise<Goal[]> {
+    return (await this.store.getGoals()).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
-  listPlans(goalId: Id): Plan[] {
-    if (!this.store.getGoal(goalId)) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+  async listPlans(goalId: Id): Promise<Plan[]> {
+    if (!(await this.store.getGoal(goalId))) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
     // Stores intentionally expose a small MVP query through their plan IDs in a later adapter.
     // The current store contract is extended by this in-memory-compatible scan method.
     return this.store.getPlans(goalId);

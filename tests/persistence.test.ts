@@ -12,18 +12,19 @@ describe("JsonFileStore", () => {
     const first = new JsonFileStore(filePath);
     return first.init().then(() => {
       const service = new AeeisService(first);
-      const goal = service.createGoal({ title: "Persist this" });
-      service.addMemory(goal.id, { kind: "decision", content: "Keep the receipt" });
-      const plan = service.createProjectPulsePlan(goal.id);
-      service.transitionTask({ planId: plan.id, taskId: "understand", transition: "start" });
+      return service.createGoal({ title: "Persist this" }).then(async goal => {
+        await service.addMemory(goal.id, { kind: "decision", content: "Keep the receipt" });
+        const plan = await service.createProjectPulsePlan(goal.id);
+        await service.transitionTask({ planId: plan.id, taskId: "understand", transition: "start" });
 
-      const second = new JsonFileStore(filePath);
-      return second.init().then(() => {
-        const restored = new AeeisService(second).getSnapshot(plan.id);
+        const second = new JsonFileStore(filePath);
+        return second.init().then(async () => {
+        const restored = await new AeeisService(second).getSnapshot(plan.id);
         expect(restored.goal.title).toBe("Persist this");
         expect(restored.memories).toHaveLength(1);
         expect(restored.receipts).toHaveLength(1);
         expect(readFileSync(filePath, "utf8")).toContain("understand");
+        });
       });
     });
   });

@@ -55,7 +55,7 @@ export class AgentEngine {
   async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);
     if (request.goalId && !this.domain) throw new Error('goalId was provided but the Goal domain service is not configured');
-    if (request.goalId && this.domain && this.domain.getGoal(request.goalId).status !== 'active') throw new Error('Runs can only be started for active Goals');
+    if (request.goalId && this.domain && (await this.domain.getGoal(request.goalId)).status !== 'active') throw new Error('Runs can only be started for active Goals');
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
     const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };
     const selectedModel = resolution.adapter;
@@ -238,7 +238,7 @@ export class AgentEngine {
       const planned = await this.repository.get(run.id);
       if (planned.goalId && !planned.domainPlanId && planned.plans.at(-1)) {
         const draft = planned.plans.at(-1)!;
-        const domainPlan = this.domain.createPlan({
+        const domainPlan = await this.domain.createPlan({
           goalId: planned.goalId,
           nodes: draft.nodes.map(node => ({ id: node.id, title: node.title, ...(node.dependsOn.length ? { dependsOn: node.dependsOn } : {}) })),
         });
@@ -343,10 +343,10 @@ export class AgentEngine {
     if (!this.domain || !run.domainPlanId) return;
     try {
       if (!run.goalId) return;
-      const domainPlan = this.domain.listPlans(run.goalId).find(plan => plan.id === run.domainPlanId);
+      const domainPlan = (await this.domain.listPlans(run.goalId)).find(plan => plan.id === run.domainPlanId);
       const domainNode = domainPlan?.nodes.find(node => node.id === taskId);
       if (!domainNode || (transition === 'start' && domainNode.status === 'running') || (transition === 'succeed' && domainNode.status === 'succeeded')) return;
-      const receipt = this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition });
+      const receipt = await this.domain.transitionTask({ planId: run.domainPlanId, taskId, transition });
       await this.repository.mutate(run.id, current => event(current, 'domain.task.transitioned', { planId: run.domainPlanId, taskId, transition, receiptId: receipt.id }));
     } catch (error) {
       if (transition === 'succeed' && error instanceof Error && error.message.includes('Cannot succeed')) return;

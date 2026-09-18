@@ -6,7 +6,7 @@ AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也�
 
 当前版本是开发中的可验证纵向切片，尚未宣称生产可用。核心运行时、Brain 读取、Knowledge、协作状态平面和受治理 RSI 候选已经接入；真实外部部署、生产观测和多用户控制面仍在建设。
 
-Goal、Plan、Task、Memory 也由 AEEIS 自己持有，并通过 `/api/goals`、`/api/goals/:id/plans`、`/api/plans/:id/tasks/:taskId/transition` 和 `/api/goals/:id/memories` 暴露；这些领域对象保存在 `data/runs/domain.json`，与 Run 的执行事实源分开。使用 `/api/goals/:id/runs` 启动时，Run 会保存 `goalId`，Planner 产出的计划会创建对应领域 Plan，节点执行会写入领域 Receipt。
+Goal、Plan、Task、Memory 也由 AEEIS 自己持有，并通过 `/api/goals`、`/api/goals/:id/plans`、`/api/plans/:id/tasks/:taskId/transition` 和 `/api/goals/:id/memories` 暴露；本地模式使用 `data/runs/domain.json`，配置 `DATABASE_URL` 后领域对象和 Run 一起写入 PostgreSQL。使用 `/api/goals/:id/runs` 启动时，Run 会保存 `goalId`，Planner 产出的计划会创建对应领域 Plan，节点执行会写入领域 Receipt。
 
 ## 本地运行
 
@@ -62,7 +62,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。
 - `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate/Competition 快照，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道；也可配置 `AEEIS_FEISHU_WEBHOOK_URL` 使用内置飞书 Incoming Webhook 卡片适配器，私有内容会被拒绝。
 
-运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
+运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Goal、Plan、Receipt、Memory 和 Context Manifest 到 PostgreSQL，启动时会创建所需表和索引。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。
 

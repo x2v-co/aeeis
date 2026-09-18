@@ -37,58 +37,60 @@ export class JsonFileStore implements AeeisStore {
     this.loaded = true;
   }
 
-  saveGoal(goal: Goal): void {
+  async saveGoal(goal: Goal): Promise<void> {
     this.state.goals = replace(this.state.goals, goal);
     this.persist();
   }
 
-  getGoal(id: Id): Goal | undefined {
+  async getGoal(id: Id): Promise<Goal | undefined> {
     return clone(this.state.goals.find((goal) => goal.id === id));
   }
 
-  getGoals(): Goal[] {
+  async getGoals(): Promise<Goal[]> {
     return structuredClone(this.state.goals);
   }
 
-  savePlan(plan: Plan): void {
+  async savePlan(plan: Plan): Promise<void> {
     this.state.plans = replace(this.state.plans, plan);
     this.persist();
   }
 
-  getPlan(id: Id): Plan | undefined {
+  async getPlan(id: Id): Promise<Plan | undefined> {
     return clone(this.state.plans.find((plan) => plan.id === id));
   }
 
-  getPlans(goalId?: Id): Plan[] {
+  async getPlans(goalId?: Id): Promise<Plan[]> {
     return structuredClone(this.state.plans.filter((plan) => goalId === undefined || plan.goalId === goalId));
   }
 
-  appendReceipt(receipt: RunReceipt): void {
+  async appendReceipt(receipt: RunReceipt): Promise<void> {
     this.state.receipts.push(structuredClone(receipt));
     this.persist();
   }
 
-  getReceipts(planId: Id): RunReceipt[] {
+  async getReceipts(planId: Id): Promise<RunReceipt[]> {
     return structuredClone(this.state.receipts.filter((receipt) => receipt.planId === planId));
   }
 
-  saveMemory(memory: MemoryEntry): void {
+  async saveMemory(memory: MemoryEntry): Promise<void> {
     this.state.memories = replace(this.state.memories, memory);
     this.persist();
   }
 
-  getMemories(goalId?: Id): MemoryEntry[] {
+  async getMemories(goalId?: Id): Promise<MemoryEntry[]> {
     return structuredClone(this.state.memories.filter((memory) => goalId === undefined || memory.goalId === goalId));
   }
 
-  saveContextManifest(manifest: ContextManifest): void {
+  async saveContextManifest(manifest: ContextManifest): Promise<void> {
     this.state.manifests = replace(this.state.manifests, manifest);
     this.persist();
   }
 
-  getContextManifest(id: Id): ContextManifest | undefined {
+  async getContextManifest(id: Id): Promise<ContextManifest | undefined> {
     return clone(this.state.manifests.find((manifest) => manifest.id === id));
   }
+
+  async close(): Promise<void> {}
 
   private persist(): void {
     const directory = dirname(this.filePath);
