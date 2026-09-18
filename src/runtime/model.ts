@@ -3,9 +3,11 @@ import type { ModelPin } from './contracts.js';
 
 export interface ModelRequest { system: string; input: unknown; idempotencyKey?: string }
 export interface ModelResponse { value: unknown; usage?: { inputTokens: number; outputTokens: number } }
+export interface ModelHealth { ready: boolean; detail: string; checkedAt: string }
 export interface ModelAdapter {
   readonly pin: ModelPin;
   complete(request: ModelRequest): Promise<ModelResponse>;
+  health?(): Promise<ModelHealth>;
 }
 export class ModelOutcomeUnknown extends Error {}
 const envelope = z.object({
@@ -16,13 +18,29 @@ const envelope = z.object({
 // OpenAI-compatible chat transport; no credentials or provider response bodies enter public errors.
 export class HttpModelAdapter implements ModelAdapter {
   readonly pin: ModelPin;
-  constructor(baseUrl: string, model: string, private apiKey: string, provider?: string, private requestTimeoutMs = 60000) {
+  private readonly healthEndpoint?: string;
+  constructor(baseUrl: string, model: string, private apiKey: string, provider?: string, private requestTimeoutMs = 60000, healthUrl?: string) {
     const url = new URL(baseUrl);
     if (url.username || url.password || url.search || url.hash) throw new Error('Model endpoint must not contain credentials, query or fragment');
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
       throw new Error('Model endpoint must use HTTPS (except loopback development servers)');
     }
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}) };
+    if (healthUrl) {
+      const health = new URL(healthUrl);
+      if (health.username || health.password || health.search || health.hash) throw new Error('Model health endpoint must not contain credentials, query or fragment');
+      if (health.protocol !== 'https:' && !(health.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(health.hostname))) throw new Error('Model health endpoint must use HTTPS (except loopback development servers)');
+      this.healthEndpoint = health.href;
+    }
+  }
+  async health(): Promise<ModelHealth> {
+    const checkedAt = new Date().toISOString();
+    if (!this.healthEndpoint) return { ready: true, detail: 'model configured; provider health probe not configured', checkedAt };
+    try {
+      const response = await fetch(this.healthEndpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 10_000)), headers: this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {} });
+      await response.body?.cancel();
+      return { ready: response.ok, detail: response.ok ? 'provider health probe passed' : `provider health probe returned HTTP ${response.status}`, checkedAt };
+    } catch { return { ready: false, detail: 'provider health probe failed or timed out', checkedAt }; }
   }
   async complete(request: ModelRequest): Promise<ModelResponse> {
     let response: Response;

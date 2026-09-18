@@ -94,7 +94,7 @@ try {
     : process.env.AEEIS_KNOWLEDGE_FILE ? new FileKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_FILE) : undefined;
   let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
-    modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '') };
+    modelServices = { model: new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '', undefined, 60_000, process.env.AEEIS_MODEL_HEALTH_URL) };
   } else if (process.env.AEEIS_PLANPRICE_URL) {
     let endpoints: Record<string, string> = {};
     if (process.env.AEEIS_MODEL_PROVIDER_ENDPOINTS) {

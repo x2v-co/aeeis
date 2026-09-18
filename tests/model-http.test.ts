@@ -42,4 +42,16 @@ describe('HttpModelAdapter', () => {
     await adapter.complete({ system: 's', input: {}, idempotencyKey: 'model:run_1:call_1' });
     expect(request?.headers['idempotency-key']).toBe('model:run_1:call_1');
   });
+
+  it('probes a configured provider health endpoint without exposing credentials', async () => {
+    const port = await new Promise<string>((resolve) => {
+      const server = createServer((request, response) => {
+        expect(request.headers.authorization).toBe('Bearer secret');
+        response.statusCode = 200; response.end('ok');
+      });
+      servers.push(server); server.listen(0, '127.0.0.1', () => resolve(String((server.address() as { port: number }).port)));
+    });
+    const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', 'secret', undefined, 2000, `http://127.0.0.1:${port}/health`);
+    await expect(adapter.health?.()).resolves.toMatchObject({ ready: true, detail: 'provider health probe passed' });
+  });
 });

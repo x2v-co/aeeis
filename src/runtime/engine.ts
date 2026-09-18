@@ -55,6 +55,11 @@ export class AgentEngine {
   get modelPin() { return this.defaultModel?.pin; }
   get knowledgeConfigured() { return Boolean(this.knowledge); }
   get modelConfigured(): boolean { return Boolean(this.defaultModel || this.resolver); }
+  async modelHealth(): Promise<{ ready: boolean; detail: string; checkedAt: string }> {
+    if (this.defaultModel?.health) return this.defaultModel.health();
+    if (this.resolver) return { ready: true, detail: 'model catalog resolver configured; provider probe occurs when a Run selects a model', checkedAt: now() };
+    return { ready: false, detail: 'model configuration required', checkedAt: now() };
+  }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);

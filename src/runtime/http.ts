@@ -60,7 +60,10 @@ export function buildApp(options: Options) {
       catch { checks.push({ name, ready: false, required, detail: 'dependency check failed' }); }
     };
     await check('repository', true, async () => { await options.repository.list(); }, 'run repository reachable');
-    checks.push({ name: 'model', ready: Boolean(options.engine?.modelConfigured), required: true, detail: options.engine?.modelConfigured ? 'model configured' : 'model configuration required' });
+    if (options.engine) {
+      const model = await options.engine.modelHealth();
+      checks.push({ name: 'model', ready: model.ready, required: true, detail: model.detail });
+    } else checks.push({ name: 'model', ready: false, required: true, detail: 'model configuration required' });
     checks.push({ name: 'dispatcher', ready: Boolean(options.engine && options.dispatcher), required: true, detail: options.dispatcher?.constructor.name ?? 'dispatcher unavailable' });
     checks.push({ name: 'domain', ready: Boolean(options.domain), required: true, detail: options.domain ? 'Goal/Plan domain configured' : 'domain unavailable' });
     checks.push({ name: 'brain', ready: Boolean(options.brain), required: false, detail: options.brain ? 'Brain configured' : 'Brain unavailable' });
@@ -98,7 +101,7 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
-  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), skillGovernanceConfigured: Boolean(options.skills), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
+  app.get('/api/status', async () => ({ modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: options.engine ? await options.engine.modelHealth() : { ready: false, detail: 'model configuration required' }, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, runner: options.dispatcher?.constructor.name ?? 'unconfigured', knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), skillGovernanceConfigured: Boolean(options.skills), collaborationConfigured: Boolean(options.collaboration), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), domainConfigured: Boolean(options.domain), mode: 'single-owner-local' }));
   app.get('/api/goals', async () => options.domain ? options.domain.listGoals() : []);
   app.post('/api/goals', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
