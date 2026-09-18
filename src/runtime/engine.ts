@@ -16,7 +16,7 @@ import type { PendingDelegation } from './contracts.js';
 import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
 import { claimDigest, type GovernedBrain } from '../brain.js';
 import type { AeeisService } from '../application/aeeis-service.js';
-import type { EvolutionSnapshotProvider } from '../evolution-activation.js';
+import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 
 export interface BrainPersistence { save(brain: GovernedBrain): Promise<void> }
 
@@ -73,9 +73,23 @@ export class AgentEngine {
     const request = requestSchema.parse(input);
     if (request.goalId && !this.domain) throw new Error('goalId was provided but the Goal domain service is not configured');
     if (request.goalId && this.domain && (await this.domain.getGoal(request.goalId)).status !== 'active') throw new Error('Runs can only be started for active Goals');
+    // Snapshot active evolution before choosing a model. Operational targets
+    // are parsed at the runtime boundary so activation cannot widen policy by
+    // smuggling arbitrary text into a prompt.
+    const activeEvolution = this.evolution ? await this.evolution.listActive() : [];
+    const workflowPolicy = typedEvolution(activeEvolution, 'workflow') as { maxModelCalls?: number; maxTaskCount?: number } | undefined;
+    const toolPolicy = typedEvolution(activeEvolution, 'tool-policy') as { allow: string[]; deny: string[]; requireApproval: string[] } | undefined;
+    const modelPolicy = typedEvolution(activeEvolution, 'model-policy') as { providers: string[]; models: string[]; maxOutputPricePerMillion?: number; requireHealthProbe: boolean } | undefined;
+    for (const requested of request.allowedTools) {
+      const at = requested.lastIndexOf('@');
+      const toolId = at > 0 ? requested.slice(0, at) : requested;
+      if (toolPolicy?.deny.includes(toolId) || (toolPolicy?.allow.length && !toolPolicy.allow.includes(toolId))) throw new Error(`Active tool policy denies requested capability ${toolId}`);
+    }
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
     const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };
     const selectedModel = resolution.adapter;
+    if (modelPolicy && ((modelPolicy.providers.length > 0 && !modelPolicy.providers.includes(selectedModel.pin.provider ?? '')) || (modelPolicy.models.length > 0 && !modelPolicy.models.includes(selectedModel.pin.model)))) throw new Error('Active model policy denies the selected model provider');
+    if (modelPolicy?.requireHealthProbe && !selectedModel.health) throw new Error('Active model policy requires a provider health probe');
     const timestamp = now();
     const sources = request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m) }));
     if (request.brainScope && !this.brain) throw new Error('brainScope was requested but Brain is not configured');
@@ -91,9 +105,8 @@ export class AgentEngine {
       for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash });
     }
     const skillSelection = this.skills ? await this.skills.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) }) : undefined;
-    // Snapshot active, explicitly promoted evolution at Run creation. A later
-    // activation must never change the semantics of an already running task.
-    const activeEvolution = this.evolution ? await this.evolution.listActive() : [];
+    const skillPolicy = typedEvolution(activeEvolution, 'skill') as { methodId: string; version: string; runtime?: string } | undefined;
+    if (skillPolicy && (!skillSelection || skillSelection.methodId !== skillPolicy.methodId || skillSelection.version !== skillPolicy.version)) throw new Error('Active Skill policy does not match the governed Skill resolution');
     if (request.allowedTools.length && !this.tools) throw new Error('allowedTools were requested but no toolkit gateway is configured');
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
     const toolApproval: { selected: Array<{ id: string; version: string; capabilities: string[] }>; digest: string } = this.tools ? await this.approveTools(request.allowedTools) : { selected: [], digest: digest([]) };
@@ -105,7 +118,7 @@ export class AgentEngine {
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
-      maxModelCalls: request.maxModelCalls, calls: [], plans: [], steps: [], artifacts: [], events: [], answers: [],
+      maxModelCalls: workflowPolicy?.maxModelCalls === undefined ? request.maxModelCalls : Math.min(request.maxModelCalls, workflowPolicy.maxModelCalls), calls: [], plans: [], steps: [], artifacts: [], events: [], answers: [],
       allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.brainScope ? { brainScope: request.brainScope } : {}), ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
       ...(skillSelection ? { skillSelection } : {}),
     };
@@ -324,6 +337,8 @@ export class AgentEngine {
       system: this.governedPrompt(plannerPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), sources: run.context.sources.map(({ id, title, source }) => ({ id, title, source })), previousPlan: run.plans.at(-1) ?? null, previousReview: run.review ?? null, existingArtifacts: run.artifacts.map(({ id, taskId, title, evidenceRefs }) => ({ id, taskId, title, evidenceRefs })) },
     }, (current, value) => {
       const draft = validatePlan(value); const hash = digest(draft);
+      const workflowPolicy = typedEvolution(current.evolution ?? [], 'workflow') as { maxTaskCount?: number } | undefined;
+      if (workflowPolicy?.maxTaskCount !== undefined && draft.nodes.length > workflowPolicy.maxTaskCount) throw new Error(`Active workflow policy limits plans to ${workflowPolicy.maxTaskCount} tasks`);
       current.plans.push({ ...draft, version: current.plans.length + 1, hash, createdAt: now() });
       current.steps = draft.nodes.map(n => ({ taskId: n.id, status: 'pending', attempts: 0, observations: [] }));
       current.approval = { planHash: hash, approved: false }; current.status = 'needs_approval';
@@ -626,4 +641,9 @@ function allowedKnowledgeClassifications(privacy: AgentRun['privacy']): Array<'p
   if (privacy === 'confidential') return ['public', 'internal', 'confidential'];
   if (privacy === 'internal') return ['public', 'internal'];
   return ['public'];
+}
+
+function typedEvolution(active: ActiveEvolution[], target: ActiveEvolution['target']): unknown | undefined {
+  const release = active.find(item => item.target === target);
+  return release ? parseActivationChange(target, release.change) : undefined;
 }

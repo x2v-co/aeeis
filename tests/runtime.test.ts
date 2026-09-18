@@ -590,4 +590,20 @@ describe('AEEIS runtime', () => {
     expect(brain.auditLog().some(entry => entry.action === 'read' && entry.scopeRef === 'project.runtime')).toBe(true);
     await repo.close();
   });
+
+  it('applies an active workflow policy when snapshotting a new Run', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-runtime-policy-runs-'))); await repo.init();
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-runtime-policy-evolution-'));
+    const evolution = new FileEvolutionRepository(directory); await evolution.init();
+    const activation = new FileEvolutionActivationStore(directory); await activation.init();
+    const rsi = new RsiService(evolution, activation);
+    const candidate = await rsi.propose({ target: 'workflow', baseVersion: 'workflow/1', proposedVersion: 'workflow/2', change: JSON.stringify({ maxModelCalls: 3, maxTaskCount: 4, retry: { maxAttempts: 2, backoffSeconds: 5 } }), sourceReceiptRefs: ['receipt.workflow'], reason: 'Bound long-running execution cost', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await rsi.evaluate(candidate.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.workflow`] });
+    await rsi.approve(candidate.id, 'approval.workflow'); await rsi.promote(candidate.id); await rsi.activate(candidate.id, 'activation.workflow');
+    const engine = new AgentEngine(repo, { model: new PlanningFixture(), evolution: rsi });
+    const run = await engine.create({ goal: 'Use governed workflow policy', maxModelCalls: 20 });
+    expect(run.maxModelCalls).toBe(3);
+    expect(run.evolution?.[0]).toMatchObject({ target: 'workflow', version: 'workflow/2' });
+    await activation.close(); await evolution.close(); await repo.close();
+  });
 });

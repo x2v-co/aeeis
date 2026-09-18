@@ -51,6 +51,23 @@ describe('persistent RSI service', () => {
     await activation.close(); await repository.close();
   });
 
+  it('requires typed JSON payloads before activating operational RSI targets', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-evolution-typed-'));
+    const repository = new FileEvolutionRepository(directory); await repository.init();
+    const activation = new FileEvolutionActivationStore(directory); await activation.init();
+    const service = new RsiService(repository, activation);
+    const invalid = await service.propose({ target: 'tool-policy', baseVersion: 'tool-policy/1', proposedVersion: 'tool-policy/2', change: 'deny everything', sourceReceiptRefs: ['receipt.tool-policy.invalid'], reason: 'Unsafe policy candidate', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(invalid.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.invalid`] });
+    await service.approve(invalid.id, 'approval.invalid'); await service.promote(invalid.id);
+    await expect(service.activate(invalid.id, 'activation.invalid')).rejects.toThrow('valid JSON');
+    const valid = await service.propose({ target: 'tool-policy', baseVersion: 'tool-policy/1', proposedVersion: 'tool-policy/2', change: JSON.stringify({ allow: ['sources.read'], deny: ['send_message'], requireApproval: ['write_file'] }), sourceReceiptRefs: ['receipt.tool-policy.valid'], reason: 'Restrict side effects', risk: 'low' });
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(valid.id, { kind, passed: true, score: 1, evidenceRefs: [`${kind}.valid`] });
+    await service.approve(valid.id, 'approval.valid'); await service.promote(valid.id);
+    expect((await service.activate(valid.id, 'activation.valid')).target).toBe('tool-policy');
+    expect((await service.listActive())[0]).toMatchObject({ target: 'tool-policy', version: 'tool-policy/2' });
+    await activation.close(); await repository.close();
+  });
+
   it('holds a failed evaluation and keeps it non-promotable', async () => {
     const repository = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-evolution-held-')));
     await repository.init();

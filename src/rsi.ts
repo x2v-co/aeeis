@@ -5,7 +5,7 @@ import { z } from 'zod';
 import pg from 'pg';
 import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
 import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
-import { activationTargetSchema, baselineVersions, evolutionContentHash, type EvolutionActivationStore, type ActiveEvolution } from './evolution-activation.js';
+import { activationTargetSchema, baselineVersions, evolutionContentHash, parseActivationChange, type EvolutionActivationStore, type ActiveEvolution } from './evolution-activation.js';
 
 export interface EvolutionRepository {
   create(candidate: EvolutionCandidate): Promise<void>;
@@ -195,6 +195,7 @@ export class RsiService {
     if (!this.activation) return [];
     const active = await this.activation.list();
     for (const release of active) {
+      parseActivationChange(release.target, release.change);
       const candidate = await this.repository.get(release.candidateId);
       if (candidate.status !== 'promoted' || candidate.target !== release.target || candidate.baseVersion !== release.baseVersion || candidate.proposedVersion !== release.version || candidate.change !== release.change || release.contentHash !== evolutionContentHash(release)) {
         throw new Error('Active evolution no longer matches its promoted candidate; reconcile activation before creating new Runs');
@@ -211,6 +212,7 @@ export class RsiService {
     if (candidate.status !== 'promoted') throw new Error('Only a promoted candidate can be activated');
     const target = activationTargetSchema.safeParse(candidate.target);
     if (!target.success) throw new Error(`No runtime activation adapter exists for ${candidate.target}`);
+    parseActivationChange(target.data, candidate.change);
     return this.activation.activate({ target: target.data, candidateId: candidate.id, baseVersion: candidate.baseVersion, version: candidate.proposedVersion, change: candidate.change, activationRef: z.string().trim().min(1).max(200).parse(activationRef) });
   }
   evaluate(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.evaluate(candidate, evaluationInputSchema.parse(input) as EvolutionEvaluation)); }

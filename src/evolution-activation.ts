@@ -4,11 +4,28 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import pg from 'pg';
 
-// These are text supplements to the shipped planner/executor prompts. Workflow
-// code, skill deployments, model routing and capability grants need typed adapters.
-export const activationTargetSchema = z.enum(['profile', 'prompt']);
+// Every target has a versioned activation boundary. Text is acceptable for
+// profile/prompt supplements; operational targets must contain a typed JSON
+// payload before they can become active.
+export const activationTargetSchema = z.enum(['profile', 'skill', 'prompt', 'workflow', 'tool-policy', 'model-policy']);
 export type ActivationTarget = z.infer<typeof activationTargetSchema>;
-export const baselineVersions = { profile: 'profile/1', prompt: 'prompt/1' } as const;
+export const baselineVersions: Record<ActivationTarget, string> = {
+  profile: 'profile/1', skill: 'skill/1', prompt: 'prompt/1', workflow: 'workflow/1', 'tool-policy': 'tool-policy/1', 'model-policy': 'model-policy/1',
+};
+const identifier = z.string().trim().min(1).max(200);
+const typedChangeSchemas: Partial<Record<ActivationTarget, z.ZodTypeAny>> = {
+  skill: z.object({ methodId: identifier, version: identifier, runtime: identifier.optional() }).strict(),
+  workflow: z.object({ maxModelCalls: z.number().int().min(3).max(100).optional(), maxTaskCount: z.number().int().min(1).max(100).optional(), retry: z.object({ maxAttempts: z.number().int().min(1).max(10), backoffSeconds: z.number().int().min(0).max(3600) }).strict().optional() }).strict(),
+  'tool-policy': z.object({ allow: z.array(identifier).max(200), deny: z.array(identifier).max(200), requireApproval: z.array(identifier).max(200) }).strict(),
+  'model-policy': z.object({ providers: z.array(identifier).max(100), models: z.array(identifier).max(100), maxOutputPricePerMillion: z.number().nonnegative().optional(), requireHealthProbe: z.boolean() }).strict(),
+};
+export type TypedEvolutionChange = z.infer<NonNullable<(typeof typedChangeSchemas)['skill']>> | z.infer<NonNullable<(typeof typedChangeSchemas)['workflow']>> | z.infer<NonNullable<(typeof typedChangeSchemas)['tool-policy']>> | z.infer<NonNullable<(typeof typedChangeSchemas)['model-policy']>>;
+export function parseActivationChange(target: ActivationTarget, change: string): unknown {
+  if (target === 'profile' || target === 'prompt') return change;
+  let parsed: unknown;
+  try { parsed = JSON.parse(change); } catch { throw new Error(`Evolution ${target} change must be valid JSON for typed activation`); }
+  return typedChangeSchemas[target]!.parse(parsed);
+}
 const candidateId = z.string().regex(/^evo_[a-f0-9-]{36}$/);
 const version = z.string().trim().min(1).max(200);
 const activationSchema = z.object({
