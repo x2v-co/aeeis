@@ -17,8 +17,8 @@
 | ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record | Apply 仍需显式授权；真实 CLI 版本和治理闭环未验收 |
 | planprice | HTTP catalog adapter 已实现；按 capability/隐私筛选并锁定 provider/model/endpoint/价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实服务未验收 |
 | RSI | candidate/evaluation/approval/promotion/rollback 状态机和 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据 |
-| 多 Agent 竞争 | 隔离运行与独立评估接口已实现；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 尚未接入真实内部 Agent pool、竞争 Workflow 持久化编排或外部 Agent endpoint |
-| Debate / 飞书投影 | 有界 Debate 领域模型已实现 | 飞书渠道和 Hermes skill 尚未接入 |
+| 多 Agent 竞争 | 隔离运行与独立评估接口已实现；候选完整性、成本上限、重复评分防护已加固；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 尚未接入真实内部 Agent pool、竞争 Workflow 持久化编排或外部 Agent endpoint |
+| Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限 | 飞书渠道和 Hermes skill 尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |
 | Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引和 HTTPS HTTP adapter；Context Manifest 可绑定受分类策略过滤的知识引用 | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
 | React、生产运维 | 未实现 | 当前 UI 是 TypeScript DOM；生产部署、监控、迁移、备份和安全验收仍缺失 |

@@ -12,13 +12,21 @@ describe('multi-agent competition', () => {
     expect(output.selected?.agentId).toBe('agent.2');
     expect(seen).toEqual([['agent.2'], ['agent.1']]);
   });
+
+  it('rejects malformed candidates and enforces the competition cost ceiling', async () => {
+    const output = await runCompetition({ ...brief, maxCost: 1 }, { run: async (_current, isolation) => ({ ...result(isolation.candidateId, 'candidate'), cost: { money: 0.75 } }) }, { evaluate: async (_brief, candidates) => candidates.map(candidate => ({ agentId: candidate.agentId, score: 0.9, accepted: true, reasons: [], evidenceRefs: [] })) });
+    expect(output.status).toBe('partial');
+    expect(output.selected).toBeUndefined();
+    await expect(runCompetition({ ...brief, participantAgentIds: ['agent.1', 'agent.1'] }, { run: async () => result('agent.1', 'candidate') }, { evaluate: async () => [] })).rejects.toThrow('unique');
+  });
 });
 
 describe('bounded debate', () => {
   it('enforces participant and round limits', () => {
-    const room: DebateRoom = { debateId: 'debate.1', taskId: 'task.1', contextVersion: 'ctx.1', participantAgentIds: ['agent.1'], maxRounds: 1, maxMessagesPerAgent: 1, messages: [] };
+    const room: DebateRoom = { debateId: 'debate.1', taskId: 'task.1', contextVersion: 'ctx.1', participantAgentIds: ['agent.1'], maxRounds: 1, maxMessagesPerAgent: 1, maxTotalMessages: 1, messages: [] };
     const message = { schemaVersion: 'debate-message/1' as const, messageId: 'message.1', debateId: 'debate.1', round: 1, speakerAgentId: 'agent.1', type: 'position' as const, content: 'Position', claimRefs: [], contextVersion: 'ctx.1' };
     expect(appendDebateMessage(room, message).messages).toHaveLength(1);
     expect(() => appendDebateMessage(appendDebateMessage(room, message), message)).toThrow('message limit');
+    expect(() => appendDebateMessage({ ...room, messages: [message] }, { ...message, messageId: 'message.2' })).toThrow('total message');
   });
 });
