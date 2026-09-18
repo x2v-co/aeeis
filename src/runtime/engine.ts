@@ -11,7 +11,7 @@ import type { ModelResolver } from './model-router.js';
 import { AgentGateway } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
-import type { KnowledgeProvider } from '../knowledge.js';
+import { validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
 import { claimDigest, type GovernedBrain } from '../brain.js';
 
 export interface BrainPersistence { save(brain: GovernedBrain): Promise<void> }
@@ -65,7 +65,8 @@ export class AgentEngine {
     }
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
     if (request.knowledgeQuery && this.knowledge) {
-      const hits = await this.knowledge.search({ query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience: owner });
+      const knowledgeRequest = { query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience: owner };
+      const hits = validateKnowledgeHits(knowledgeRequest, await this.knowledge.search(knowledgeRequest));
       for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash });
     }
     const skillSelection = this.skills ? await this.skills.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) }) : undefined;

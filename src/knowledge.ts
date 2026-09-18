@@ -25,6 +25,22 @@ export interface KnowledgeProvider {
   search(request: KnowledgeSearchRequest): Promise<KnowledgeHit[]>;
 }
 
+/** Re-checks provider output at the AEEIS trust boundary. */
+export function validateKnowledgeHits(request: KnowledgeSearchRequest, hits: KnowledgeHit[]): KnowledgeHit[] {
+  if (hits.length > request.maxItems) throw new Error('Knowledge provider returned more items than requested');
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    knowledgeHitSchema.parse(hit);
+    if (!request.allowedClassifications.includes(hit.record.classification)) throw new Error('Knowledge provider returned a record outside the allowed classification');
+    if (seen.has(hit.record.id)) throw new Error('Knowledge provider returned duplicate record IDs');
+    seen.add(hit.record.id);
+    if (digest(hit.record.content) !== hit.record.contentHash) throw new Error('Knowledge record content hash does not match its content');
+  }
+  return hits.map(hit => structuredClone(hit));
+}
+
+const knowledgeHitSchema = z.object({ record: knowledgeRecordSchema, score: z.number().finite().min(0).max(1), matchedTerms: z.array(z.string()).max(200) }).strict();
+
 /** Deterministic local adapter used for development and as a contract fixture. */
 export class InMemoryKnowledgeProvider implements KnowledgeProvider {
   constructor(private readonly records: KnowledgeRecord[]) {}
@@ -57,7 +73,7 @@ export class HttpKnowledgeProvider implements KnowledgeProvider {
     const response = await fetch(this.endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs), headers: { 'content-type': 'application/json', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) }, body: JSON.stringify({ schemaVersion: 'knowledge-search/1', ...request }) });
     if (!response.ok) throw new Error('Knowledge service returned HTTP ' + response.status);
     const body = z.object({ schemaVersion: z.literal('knowledge-results/1'), hits: z.array(z.object({ record: knowledgeRecordSchema, score: z.number().min(0).max(1), matchedTerms: z.array(z.string()) }).strict()) }).strict().parse(await response.json());
-    return body.hits;
+    return validateKnowledgeHits(request, body.hits);
   }
 }
 

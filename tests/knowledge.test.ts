@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { FileKnowledgeProvider, InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
+import { FileKnowledgeProvider, InMemoryKnowledgeProvider, makeKnowledgeRecord, validateKnowledgeHits } from '../src/knowledge.js';
 
 describe('knowledge provider boundary', () => {
   it('filters by classification and returns deterministic evidence hits', async () => {
@@ -24,4 +24,11 @@ it('loads and validates a file-backed knowledge index', async () => {
   await writeFile(join(directory, 'records.json'), JSON.stringify([record]));
   const hits = await provider.search({ query: 'checkpoints', maxItems: 3, allowedClassifications: ['public', 'internal'], audience: 'owner' });
   expect(hits[0]?.record.id).toBe('knowledge.file');
+});
+
+it('rejects provider results outside the requested classification or with a bad content hash', () => {
+  const record = makeKnowledgeRecord({ id: 'knowledge.boundary', title: 'Boundary', content: 'Safe', source: 'fixture', classification: 'internal', tags: [], updatedAt: '2026-09-18T00:00:00.000Z' });
+  const request = { query: 'safe', maxItems: 2, allowedClassifications: ['public'] as const, audience: 'owner' };
+  expect(() => validateKnowledgeHits(request, [{ record, score: 1, matchedTerms: ['safe'] }])).toThrow('classification');
+  expect(() => validateKnowledgeHits({ ...request, allowedClassifications: ['internal'] }, [{ record: { ...record, contentHash: 'a'.repeat(64) }, score: 1, matchedTerms: ['safe'] }])).toThrow('hash');
 });

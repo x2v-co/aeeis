@@ -29,7 +29,7 @@ npm run dev
 
 也可以配置 `AEEIS_PLANPRICE_URL` 启用按能力、隐私策略和目录价格的模型选择；必须额外为选中的 provider 配置 `AEEIS_MODEL_PROVIDER_ENDPOINTS` 和 `AEEIS_MODEL_PROVIDER_KEYS`。工具和 Personal Method 治理分别通过 `AEEIS_TOOLKIT_*`、`AEEIS_OWNHOW_*` 接入。外部工具版本在 Run 创建时冻结，未知结果只能通过 provider reconcile 恢复。
 
-Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，也可以用 `AEEIS_KNOWLEDGE_FILE` 指向本地 JSON 数组。两种方式都必须返回或包含完整的 Knowledge Record（分类、来源、更新时间和内容 hash），Runtime 会在注入上下文前再次按 privacy 过滤。
+Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，也可以用 `AEEIS_KNOWLEDGE_FILE` 指向本地 JSON 数组。两种方式都必须返回或包含完整的 Knowledge Record（分类、来源、更新时间和内容 hash），Runtime 会在注入上下文前再次按 privacy 过滤，并校验数量、分类、重复 ID 和内容 hash。
 
 外部 Agent 通过 `AEEIS_AGENT_CARDS` 注册（JSON 数组），Run 请求仍需显式提供 `allowedAgents`；Agent Card 只描述能力，真正的任务级权限由 AEEIS 生成的 Context Pack 和 Delegation Grant 决定。`signed_request` Agent 可在 `AEEIS_AGENT_SIGNING_KEYS` 中按 Agent ID 配置共享密钥，HTTP 传输会签名请求并验证带时间戳的响应；OAuth Agent 仍需要专用适配器。
 
