@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
-import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationCase, type EvaluationMode, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
+import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
 
 export interface EvolutionRepository {
   create(candidate: EvolutionCandidate): Promise<void>;
@@ -71,31 +71,89 @@ export class RsiService {
    * This records evidence only; explicit phase transitions and promotion remain
    * separate operations so an evaluator cannot modify production by itself. */
   async runRollout(id: string, phase: 'shadow' | 'canary', input: unknown, harness: RsiEvaluationHarness): Promise<EvolutionCandidate> {
-    const body = z.object({ cases: z.array(evaluationCaseSchema).min(1).max(100) }).strict().parse(input);
-    const candidate = await this.repository.get(id);
+    const body = z.object({ cases: z.array(evaluationCaseSchema.extend({ id: z.string().trim().min(1).max(193) })).min(1).max(100) }).strict().parse(input);
     const expectedStatus = phase === 'shadow' ? 'shadowing' : 'canarying';
-    if (candidate.status !== expectedStatus) throw new Error(`Candidate must be ${expectedStatus} before rollout observations can run`);
-    const ids = new Set<string>();
-    for (const testCase of body.cases) {
-      if (ids.has(testCase.id)) throw new Error(`Duplicate rollout case: ${testCase.id}`);
-      ids.add(testCase.id);
-    }
-    const mode: EvaluationMode = phase;
-    const settled = await Promise.allSettled(body.cases.map(testCase => harness.evaluate(candidate, mode, testCase)));
-    let result = candidate;
-    for (let index = 0; index < settled.length; index += 1) {
-      const outcome = settled[index]!;
-      const testCase = body.cases[index]!;
-      const observation = outcome.status === 'fulfilled'
-        ? { id: `${phase}:${testCase.id}`, passed: outcome.value.passed, score: outcome.value.score, evidenceRefs: outcome.value.evidenceRefs }
-        : { id: `${phase}:${testCase.id}`, passed: false, score: 0, evidenceRefs: [`rsi:${phase}:${testCase.id}:evaluator_error`] };
-      result = phase === 'shadow'
-        ? await this.recordShadow(id, observation)
-        : await this.recordCanary(id, observation);
-      if (result.status === 'held') break;
+    const assertBatch = (candidate: EvolutionCandidate): void => {
+      if (candidate.status !== expectedStatus) throw new Error(`Candidate must be ${expectedStatus} before rollout observations can run`);
+      if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new Error('An evaluator request is in flight or interrupted; inspect it before further rollout');
+      const observations = (phase === 'shadow' ? candidate.shadowObservations : candidate.canaryObservations) ?? [];
+      if (observations.length + body.cases.length > 100 || (candidate.rolloutAttempts?.length ?? 0) + body.cases.length > 200) throw new Error('Rollout capacity exceeded');
+      const ids = new Set<string>();
+      for (const testCase of body.cases) {
+        if (ids.has(testCase.id) || observations.some(item => item.id === `${phase}:${testCase.id}`) || candidate.rolloutAttempts?.some(attempt => attempt.phase === phase && attempt.caseId === testCase.id)) throw new Error(`Duplicate rollout case: ${testCase.id}`);
+        ids.add(testCase.id);
+      }
+    };
+    assertBatch(await this.repository.get(id));
+    let result = await this.repository.get(id);
+    for (const [index, testCase] of body.cases.entries()) {
+      const attemptId = `rollout_${randomUUID()}`;
+      const reserved = await this.repository.mutate(id, current => {
+        if (index === 0) assertBatch(current);
+        if (current.status !== expectedStatus) throw new Error('Rollout phase changed');
+        current.rolloutAttempts ??= [];
+        if (current.rolloutAttempts.some(attempt => attempt.state === 'started' || (attempt.phase === phase && attempt.caseId === testCase.id))) throw new Error('Rollout case already reserved');
+        if (current.rolloutAttempts.length >= 200) throw new Error('Rollout capacity exceeded');
+        current.rolloutAttempts.push({ id: attemptId, phase, caseId: testCase.id, inputHash: createHash('sha256').update(JSON.stringify(testCase)).digest('hex'), state: 'started', startedAt: new Date().toISOString() });
+        return current;
+      });
+      let observation: z.infer<typeof rolloutObservationSchema>;
+      let failed = false;
+      try {
+        const output = await harness.evaluate(reserved, phase, testCase);
+        observation = rolloutObservationSchema.parse({ id: `${phase}:${testCase.id}`, passed: output.passed, score: output.score, evidenceRefs: output.evidenceRefs, recordedAt: new Date().toISOString() });
+      } catch {
+        failed = true;
+        // The reference names the durable local attempt receipt, not invented evaluator evidence.
+        observation = { id: `${phase}:${testCase.id}`, passed: false, score: 0, evidenceRefs: [attemptId], recordedAt: new Date().toISOString() };
+      }
+      result = await this.repository.mutate(id, current => {
+        const attempt = current.rolloutAttempts!.find(item => item.id === attemptId)!;
+        if (attempt.state !== 'started') return current;
+        attempt.state = failed ? 'failed' : 'completed';
+        attempt.endedAt = new Date().toISOString();
+        attempt.observation = observation;
+        if (failed) attempt.error = 'Evaluator request failed or returned an invalid observation; outcome may be unknown';
+        // Keep the receipt even if an owner rolled back while the evaluator was running.
+        if (current.status !== expectedStatus) return current;
+        return phase === 'shadow' ? this.engine.recordShadow(current, observation) : this.engine.recordCanary(current, observation);
+      });
+      if (result.status !== expectedStatus) break;
     }
     return result;
   }
+  /** Resolve a durable rollout attempt after its evaluator response was
+   * ambiguous or the worker restarted. The caller must supply the provider's
+   * observed result; this operation never calls the evaluator again. */
+  async reconcileRollout(id: string, input: unknown): Promise<EvolutionCandidate> {
+    const body = z.object({
+      attemptId: z.string().min(1).max(200), outcome: z.enum(['completed', 'failed']),
+      passed: z.boolean().optional(), score: z.number().min(0).max(1).optional(),
+      evidenceRefs: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
+      reason: z.string().trim().min(1).max(2000),
+    }).strict().parse(input);
+    return this.repository.mutate(id, current => {
+      const attempt = current.rolloutAttempts?.find(item => item.id === body.attemptId);
+      if (!attempt) throw new Error(`Unknown rollout attempt: ${body.attemptId}`);
+      if (attempt.state !== 'started') throw new Error(`Rollout attempt is already ${attempt.state}`);
+      const passed = body.outcome === 'completed' ? body.passed : false;
+      const evidenceRefs = body.evidenceRefs ?? [attempt.id];
+      if (body.outcome === 'completed' && (body.passed === undefined || body.score === undefined || !body.evidenceRefs?.length)) {
+        throw new Error('Completed rollout reconciliation requires passed, score, and evidenceRefs');
+      }
+      const observation = rolloutObservationSchema.parse({
+        id: `${attempt.phase}:${attempt.caseId}`, passed, score: body.score ?? 0,
+        evidenceRefs, recordedAt: new Date().toISOString(),
+      });
+      attempt.state = 'reconciled'; attempt.endedAt = new Date().toISOString(); attempt.observation = observation;
+      attempt.reconciliationReason = body.reason;
+      if (current.status === (attempt.phase === 'shadow' ? 'shadowing' : 'canarying')) {
+        return attempt.phase === 'shadow' ? this.engine.recordShadow(current, observation) : this.engine.recordCanary(current, observation);
+      }
+      return current;
+    });
+  }
+
   get(id: string): Promise<EvolutionCandidate> { return this.repository.get(id); }
   list(): Promise<EvolutionCandidate[]> { return this.repository.list(); }
   evaluate(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.evaluate(candidate, evaluationInputSchema.parse(input) as EvolutionEvaluation)); }

@@ -17,6 +17,13 @@ export const evolutionCandidateSchema = z.object({
   createdAt: isoDate, evaluations: z.array(z.object({ id: z.string().min(1).max(200), kind: z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow']), passed: z.boolean(), score: z.number().min(0).max(1), evidenceRefs: z.array(z.string().max(200)).max(100), completedAt: isoDate }).strict()).max(100),
   shadowStartedAt: isoDate.optional(), shadowObservations: z.array(rolloutObservationSchema).max(100).optional(),
   canaryStartedAt: isoDate.optional(), canaryObservations: z.array(rolloutObservationSchema).max(100).optional(),
+  rolloutAttempts: z.array(z.object({
+    id: z.string().min(1).max(200), phase: z.enum(['shadow', 'canary']), caseId: z.string().min(1).max(193),
+    inputHash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['started', 'completed', 'failed', 'reconciled']),
+    startedAt: isoDate, endedAt: isoDate.optional(), error: z.string().max(200).optional(),
+    reconciliationReason: z.string().min(1).max(2000).optional(),
+    observation: rolloutObservationSchema.optional(),
+  }).strict()).max(200).optional(),
   promotedAt: isoDate.optional(), rolledBackAt: isoDate.optional(), approvalRef: z.string().max(200).optional(),
 }).strict();
 export type EvolutionCandidate = z.infer<typeof evolutionCandidateSchema>;
@@ -59,6 +66,7 @@ export class EvolutionEngine {
     return evolutionCandidateSchema.parse(next);
   }
   startCanary(candidate: EvolutionCandidate): EvolutionCandidate {
+    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new Error('Pending rollout attempt requires completion or reconciliation');
     if (candidate.status !== 'shadowing') throw new Error('Candidate must be in shadow rollout before canary rollout');
     if (!rolloutReady(candidate.shadowObservations, candidate.risk, 'shadow')) throw new Error('Shadow rollout has not met its observation gate');
     const next = structuredClone(candidate); next.status = 'canarying'; next.canaryStartedAt = new Date().toISOString(); next.canaryObservations = [];
@@ -73,6 +81,7 @@ export class EvolutionEngine {
     return evolutionCandidateSchema.parse(next);
   }
   promote(candidate: EvolutionCandidate): EvolutionCandidate {
+    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new Error('Pending rollout attempt requires completion or reconciliation');
     const direct = candidate.status === 'approved' && candidate.risk === 'low';
     const canary = candidate.status === 'canarying' && rolloutReady(candidate.canaryObservations, candidate.risk, 'canary');
     if (!direct && !canary) throw new Error(candidate.status === 'approved' ? 'Medium and high risk candidates require shadow and canary rollout before promotion' : 'Candidate requires explicit approval and a completed rollout before promotion');

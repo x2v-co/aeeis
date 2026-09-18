@@ -172,6 +172,7 @@ export function buildApp(options: Options) {
       if (!options.rsiHarness) throw new Conflict('RSI evaluator is not configured');
       return options.rsi.runRollout(id, 'shadow', request.body, options.rsiHarness);
     }
+    if (action === 'reconcile-rollout') return options.rsi.reconcileRollout(id, request.body);
     if (action === 'record-shadow') return options.rsi.recordShadow(id, request.body);
     if (action === 'start-canary') return options.rsi.startCanary(id);
     if (action === 'run-canary') {

@@ -112,4 +112,85 @@ describe('persistent RSI service', () => {
     expect(current.canaryObservations?.every(item => item.evidenceRefs.length > 0)).toBe(true);
     await repository.close();
   });
+  it('reserves evaluator work durably, rejects duplicate calls, and stops on invalid evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-rollout-reservation-'));
+    const repository = new FileEvolutionRepository(directory); await repository.init();
+    try {
+      const service = new RsiService(repository);
+      const candidate = await service.propose({ ...proposal, risk: 'medium' });
+      for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(candidate.id, { kind, passed: true, score: 1, evidenceRefs: ['eval.receipt'] });
+      await service.approve(candidate.id, 'approval'); await service.startShadow(candidate.id);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      let calls = 0;
+      const harness = { evaluate: async () => { calls++; entered(); await gate; return { passed: true, score: 1, evidenceRefs: ['actual.receipt'] }; } };
+      const batch = { cases: [{ id: 'one', input: { goal: 'Observe' } }] };
+      const work = service.runRollout(candidate.id, 'shadow', batch, harness);
+      await started;
+      const reserved = await service.get(candidate.id);
+      expect(reserved.rolloutAttempts?.[0]).toMatchObject({ state: 'started', phase: 'shadow', caseId: 'one' });
+      await expect(new RsiService(repository).runRollout(candidate.id, 'shadow', batch, harness)).rejects.toThrow('in flight or interrupted');
+      release(); await work;
+      await expect(service.runRollout(candidate.id, 'shadow', batch, harness)).rejects.toThrow('Duplicate');
+      expect(calls).toBe(1);
+      const failed = await service.runRollout(candidate.id, 'shadow', { cases: [{ id: 'bad', input: {} }, { id: 'never', input: {} }] }, {
+        evaluate: async () => { calls++; return { passed: true, score: 1, evidenceRefs: [] }; },
+      });
+      expect(calls).toBe(2);
+      expect(failed.status).toBe('held');
+      const attempt = failed.rolloutAttempts!.at(-1)!;
+      expect(attempt.state).toBe('failed');
+      expect(failed.shadowObservations!.at(-1)!.evidenceRefs).toEqual([attempt.id]);
+      expect(attempt.observation?.passed).toBe(false);
+      expect((await new RsiService(repository).get(candidate.id)).rolloutAttempts).toEqual(failed.rolloutAttempts);
+    } finally { await repository.close(); }
+  });
+
+  it('retains the evaluator receipt without reviving a candidate rolled back during evaluation', async () => {
+    const repository = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-rollout-rollback-'))); await repository.init();
+    try {
+      const service = new RsiService(repository);
+      const candidate = await service.propose(proposal);
+      for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(candidate.id, { kind, passed: true, score: 1, evidenceRefs: ['eval.receipt'] });
+      await service.approve(candidate.id, 'approval'); await service.startShadow(candidate.id);
+      const result = await service.runRollout(candidate.id, 'shadow', { cases: [{ id: 'one', input: {} }, { id: 'never', input: {} }] }, {
+        evaluate: async () => {
+          await service.rollback(candidate.id, 'Owner halted the rollout');
+          return { passed: true, score: 1, evidenceRefs: ['actual.receipt'] };
+        },
+      });
+      expect(result.status).toBe('rolled_back');
+      expect(result.shadowObservations).toEqual([]);
+      expect(result.rolloutAttempts).toHaveLength(1);
+      expect(result.rolloutAttempts?.[0]?.observation?.evidenceRefs).toEqual(['actual.receipt']);
+    } finally { await repository.close(); }
+  });
+
+  it('reconciles an interrupted rollout attempt without issuing a second evaluator call', async () => {
+    const repository = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-rollout-reconcile-'))); await repository.init();
+    try {
+      const service = new RsiService(repository);
+      const candidate = await service.propose(proposal);
+      for (const kind of ['replay', 'holdout', 'safety'] as const) await service.evaluate(candidate.id, { kind, passed: true, score: 1, evidenceRefs: ['eval.receipt'] });
+      await service.approve(candidate.id, 'approval'); await service.startShadow(candidate.id);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      let calls = 0;
+      const work = service.runRollout(candidate.id, 'shadow', { cases: [{ id: 'one', input: {} }] }, { evaluate: async () => { calls++; entered(); await gate; return { passed: true, score: 1, evidenceRefs: ['late.evidence'] }; } });
+      await started;
+      const attemptId = (await service.get(candidate.id)).rolloutAttempts![0]!.id;
+      const reconciled = await service.reconcileRollout(candidate.id, { attemptId, outcome: 'completed', passed: true, score: 0.8, evidenceRefs: ['provider.receipt'], reason: 'Provider status query confirmed completion' });
+      expect(reconciled.shadowObservations?.[0]?.evidenceRefs).toEqual(['provider.receipt']);
+      release();
+      const finished = await work;
+      expect(finished.shadowObservations?.[0]?.evidenceRefs).toEqual(['provider.receipt']);
+      expect(finished.rolloutAttempts?.[0]?.state).toBe('reconciled');
+      expect(calls).toBe(1);
+    } finally { await repository.close(); }
+  });
+
 });
