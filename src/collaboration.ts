@@ -9,6 +9,10 @@ export const competitionBriefSchema = z.object({
 }).strict();
 export type CompetitionBrief = z.infer<typeof competitionBriefSchema>;
 export interface CandidateScore { agentId: string; score: number; accepted: boolean; reasons: string[]; evidenceRefs: string[] }
+export const candidateScoreSchema = z.object({
+  agentId: id, score: z.number().min(0).max(1), accepted: z.boolean(),
+  reasons: z.array(z.string().max(2000)).max(50), evidenceRefs: z.array(id).max(100),
+}).strict();
 export interface CompetitionResult { brief: CompetitionBrief; candidates: ResultEnvelope[]; scores: CandidateScore[]; selected?: ResultEnvelope; status: 'completed' | 'partial' | 'failed'; }
 export interface CandidateRunner { run(brief: CompetitionBrief, isolation: { candidateId: string; cannotSeeCandidateIds: string[] }): Promise<ResultEnvelope>; }
 export interface IndependentEvaluator { evaluate(brief: CompetitionBrief, candidates: ReadonlyArray<ResultEnvelope>): Promise<CandidateScore[]>; }
@@ -47,7 +51,12 @@ export const debateMessageSchema = z.object({
   content: z.string().min(1).max(8000), claimRefs: z.array(id).max(100), contextVersion: id,
 }).strict();
 export type DebateMessage = z.infer<typeof debateMessageSchema>;
-export interface DebateRoom { debateId: string; taskId: string; contextVersion: string; participantAgentIds: string[]; maxRounds: number; maxMessagesPerAgent: number; maxTotalMessages?: number; messages: DebateMessage[]; }
+export const debateRoomSchema = z.object({
+  debateId: id, taskId: id, contextVersion: id, participantAgentIds: z.array(id).min(1).max(12),
+  maxRounds: z.number().int().min(1).max(12), maxMessagesPerAgent: z.number().int().min(1).max(100),
+  maxTotalMessages: z.number().int().min(1).max(1000).optional(), messages: z.array(debateMessageSchema).max(1000),
+}).strict();
+export interface DebateRoom { debateId: string; taskId: string; contextVersion: string; participantAgentIds: string[]; maxRounds: number; maxMessagesPerAgent: number; maxTotalMessages?: number | undefined; messages: DebateMessage[]; }
 
 export function appendDebateMessage(room: DebateRoom, messageInput: DebateMessage): DebateRoom {
   const message = debateMessageSchema.parse(messageInput);
@@ -57,6 +66,7 @@ export function appendDebateMessage(room: DebateRoom, messageInput: DebateMessag
   if (message.round > room.maxRounds) throw new Error('Debate round limit reached');
   if (room.maxTotalMessages !== undefined && room.messages.length >= room.maxTotalMessages) throw new Error('Debate total message limit reached');
   if (room.messages.filter(item => item.speakerAgentId === message.speakerAgentId).length >= room.maxMessagesPerAgent) throw new Error('Agent message limit reached');
+  if (room.messages.some(item => item.messageId === message.messageId)) throw new Error('Debate message already exists');
   if (message.replyTo && !room.messages.some(item => item.messageId === message.replyTo)) throw new Error('Debate reply target is missing');
   return { ...room, messages: [...room.messages, message] };
 }

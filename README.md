@@ -45,12 +45,16 @@ npm run dev
 - `GET /api/evolution/candidates`
 - `GET /api/evolution/candidates/:id`
 - `POST /api/evolution/candidates`，以及 `/:id/evaluate|approve|promote|rollback`
+- `GET|POST /api/collaborations/competitions`，以及 `/:id/candidate|begin-evaluation|score`
+- `GET|POST /api/collaborations/debates`，以及 `/:id/message|close`
 
 运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换到 PostgreSQL。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
 创建 Run 时可以提供 `knowledgeQuery` 和 `knowledgeMaxItems`。配置 `AEEIS_KNOWLEDGE_URL` 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；没有配置 Provider 时，提交 `knowledgeQuery` 会明确失败。
 
 RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`，失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
+
+竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。当前这些 API 提供可靠的协作状态平面，真正的内部 Agent pool、飞书投影和外部自动调度仍需接入。
 
 ## 设计边界
 

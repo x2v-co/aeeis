@@ -8,8 +8,9 @@ import type { Dispatcher } from './dispatcher.js';
 import { brainClaimInputSchema, type BrainGrant, type GovernedBrain } from '../brain.js';
 import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
+import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
 
-interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService }
+interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -34,6 +35,7 @@ export function buildApp(options: Options) {
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'Invalid request', issues: error.issues.map(i => ({ path: i.path, message: i.message })) });
     if (error instanceof NotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof CollaborationNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof Conflict) return reply.code(409).send({ error: error.message });
     const e = error as { statusCode?: number };
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send({ error: 'Invalid HTTP request' });
@@ -68,6 +70,42 @@ export function buildApp(options: Options) {
     if (action === 'promote') return options.rsi.promote(id);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
     throw new Conflict('Unsupported evolution action');
+  });
+  app.get('/api/collaborations/competitions', async () => options.collaboration ? options.collaboration.listCompetitions() : []);
+  app.get<{ Params: { id: string } }>('/api/collaborations/competitions/:id', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    return options.collaboration.getCompetition(request.params.id);
+  });
+  app.post('/api/collaborations/competitions', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    return options.collaboration.createCompetition(request.body);
+  });
+  app.post<{ Params: { id: string; action: string } }>('/api/collaborations/competitions/:id/:action', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    const { id, action } = request.params;
+    if (action === 'candidate') return options.collaboration.submitCandidate(id, request.body);
+    if (action === 'begin-evaluation') return options.collaboration.beginEvaluation(id, z.object({ evaluatorAgentId: z.string().min(1).max(128) }).strict().parse(request.body).evaluatorAgentId);
+    if (action === 'score') {
+      const body = z.object({ evaluatorAgentId: z.string().min(1).max(128), score: z.unknown() }).strict().parse(request.body);
+      return options.collaboration.submitScore(id, body.evaluatorAgentId, body.score);
+    }
+    throw new Conflict('Unsupported competition action');
+  });
+  app.get('/api/collaborations/debates', async () => options.collaboration ? options.collaboration.listDebates() : []);
+  app.get<{ Params: { id: string } }>('/api/collaborations/debates/:id', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    return options.collaboration.getDebate(request.params.id);
+  });
+  app.post('/api/collaborations/debates', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    return options.collaboration.createDebate(request.body);
+  });
+  app.post<{ Params: { id: string; action: string } }>('/api/collaborations/debates/:id/:action', async request => {
+    if (!options.collaboration) throw new Error('Collaboration service is not configured');
+    const { id, action } = request.params;
+    if (action === 'message') return options.collaboration.appendMessage(id, request.body);
+    if (action === 'close') return options.collaboration.closeDebate(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
+    throw new Conflict('Unsupported debate action');
   });
   app.get<{ Params: { scope: string }; Querystring: { classification?: 'public' | 'internal' | 'confidential' | 'private' } }>('/api/brain/:scope', async request => {
     if (!options.brain) return { error: 'Brain is not configured' };
