@@ -20,7 +20,7 @@
 | RSI | candidate/evaluation/approval 状态机、低风险直接晋升以及中高风险 shadow→canary→promotion rollout 闸门、带证据观察和 rollback、默认 replay/holdout/safety 三道审批门、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现；新增 Run correction→evidence-bound candidate 入口和可选隔离 HTTP evaluator | 真实 evaluator、生产观测采集、shadow/canary 执行器和自动晋升策略仍需部署与验收；候选不会自动修改生产 Agent |
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现；`blindEvaluation` 会对评测器隐藏真实 Agent ID；候选完整性、成本上限、重复评分防护已加固；新增 File 持久化协作状态、候选提交→独立评测→选定/partial API；Competition Brief 可携带受控 Context Pack；新增可配置内部模型池、并发候选运行、盲评和持久化编排 API；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 仍需接入真实生产模型池、自动触发策略、预算计量和外部 Agent endpoint；当前模型池只负责候选/评估层，不替代主 Runtime 的任务执行 |
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息；Debate Brief 可携带受控 Context Pack；新增内部模型池的有界回合编排和 `run` API；新增带 hash/幂等键、失败重试状态的渠道无关 Projection outbox 与 HTTP sink，并支持并发去重和有界批量 drain；新增 Feishu Incoming Webhook 卡片适配器，拒绝 private 内容并默认拒绝 confidential 内容 | 飞书应用级 Bot、Hermes 具体 adapter、独立 Moderator/Adjudicator 和生产投影权限仍需接入验收 |
-| Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |
+| Web 工作台 | 开发版已实现 | 单用户本地模式；支持创建领域 Goal、将 Run 绑定到 Goal、查看 DAG/历史计划和 RSI 候选；没有多租户、SSO 或完整 ACL |
 | Knowledge Provider | 已实现可替换 Provider 端口、本地确定性索引、受 schema 校验的 JSON File adapter 和 HTTPS HTTP adapter；Runtime 可通过 `knowledgeQuery` 检索，并在信任边界再次校验数量、分类、重复 ID 和内容 hash，再把受 privacy 分类策略过滤的知识引用注入 Planner/Executor/Reviewer Context Manifest | 尚未接入真实知识库部署、pgvector、增量索引和生产 ACL |
 | React、生产运维 | 开发版可观测性已实现 | 当前 UI 是 TypeScript DOM；`/readyz` 区分存活与依赖就绪，`/metrics` 暴露 Prometheus 文本指标；生产部署、迁移、备份和安全验收仍缺失 |
 
