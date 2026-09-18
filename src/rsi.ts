@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { EvolutionEngine, evolutionCandidateSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
+import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
 import { RsiEvaluator, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
 
 export interface EvolutionRepository {
@@ -71,6 +71,18 @@ export class RsiService {
   list(): Promise<EvolutionCandidate[]> { return this.repository.list(); }
   evaluate(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.evaluate(candidate, evaluationInputSchema.parse(input) as EvolutionEvaluation)); }
   approve(id: string, approvalRef: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.approve(candidate, z.string().min(1).max(200).parse(approvalRef))); }
+  startShadow(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.startShadow(candidate)); }
+  recordShadow(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.recordShadow(candidate, parseRolloutObservation(input))); }
+  startCanary(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.startCanary(candidate)); }
+  recordCanary(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.recordCanary(candidate, parseRolloutObservation(input))); }
   promote(id: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.promote(candidate)); }
   rollback(id: string, reason: string): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.rollback(candidate, z.string().min(1).max(4000).parse(reason))); }
+}
+
+function parseRolloutObservation(input: unknown) {
+  const value = z.object({
+    id: z.string().min(1).max(200), passed: z.boolean(), score: z.number().min(0).max(1),
+    evidenceRefs: z.array(z.string().min(1).max(200)).min(1).max(100), recordedAt: z.string().datetime({ offset: true }).optional(),
+  }).strict().parse(input);
+  return rolloutObservationSchema.parse({ ...value, recordedAt: value.recordedAt ?? new Date().toISOString() });
 }

@@ -96,6 +96,22 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await evolution.close(); await repo.close();
   });
 
+  it('exposes shadow and canary rollout gates for a medium-risk candidate', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-rollout-runs-'))); await repo.init();
+    const evolution = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-rsi-rollout-'))); await evolution.init();
+    const app = buildApp({ repository: repo, rsi: new RsiService(evolution) });
+    const created = await app.inject({ method: 'POST', url: '/api/evolution/candidates', payload: { target: 'skill', baseVersion: 'skill/1', proposedVersion: 'skill/2', change: 'Require rollout evidence', sourceReceiptRefs: ['receipt.1'], reason: 'Safe rollout', risk: 'medium' } });
+    const candidate = created.json() as { id: string };
+    for (const kind of ['replay', 'holdout', 'safety'] as const) await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/evaluate`, payload: { kind, passed: true, score: 0.9, evidenceRefs: [`eval.${kind}`] } });
+    await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/approve`, payload: { approvalRef: 'owner.approval' } });
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/start-shadow`, payload: {} })).json().status).toBe('shadowing');
+    for (let index = 1; index <= 3; index++) await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/record-shadow`, payload: { id: `shadow.${index}`, passed: true, score: 0.9, evidenceRefs: [`shadow.${index}`] } });
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/start-canary`, payload: {} })).json().status).toBe('canarying');
+    for (let index = 1; index <= 3; index++) await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/record-canary`, payload: { id: `canary.${index}`, passed: true, score: 0.9, evidenceRefs: [`canary.${index}`] } });
+    expect((await app.inject({ method: 'POST', url: `/api/evolution/candidates/${candidate.id}/promote`, payload: {} })).json().status).toBe('promoted');
+    await app.close(); await evolution.close(); await repo.close();
+  });
+
   it('exposes explicit Skill governance proposal, apply and rollback operations', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-skills-runs-'))); await repo.init();
     const calls: string[] = [];

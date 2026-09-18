@@ -123,6 +123,10 @@ export function buildApp(options: Options) {
       return options.rsi.evaluateSuite(id, request.body, options.rsiHarness);
     }
     if (action === 'approve') return options.rsi.approve(id, z.object({ approvalRef: z.string().min(1).max(200) }).strict().parse(request.body).approvalRef);
+    if (action === 'start-shadow') return options.rsi.startShadow(id);
+    if (action === 'record-shadow') return options.rsi.recordShadow(id, request.body);
+    if (action === 'start-canary') return options.rsi.startCanary(id);
+    if (action === 'record-canary') return options.rsi.recordCanary(id, request.body);
     if (action === 'promote') return options.rsi.promote(id);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason);
     throw new Conflict('Unsupported evolution action');
