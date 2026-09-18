@@ -4,7 +4,7 @@
 
 | 能力 | 当前状态 | 证据 / 限制 |
 |---|---|---|
-| 动态 Planner DAG | 已实现并测试 | `src/runtime/engine.ts`；规划结果需要精确 hash 审批 |
+| 动态 Planner DAG | 已实现并测试 | `src/runtime/engine.ts`；规划结果需要精确 hash 审批；`/api/runs/:id/graphs` 投影 Plan、Execution、Evidence 三图 |
 | 任务执行、证据和 Reviewer | 已实现并测试 | 仅能读取 Run 提供的来源；artifact 引用会校验 |
 | File 持久化 | 已实现并测试 | 原子替换、fsync、单写入者锁 |
 | PostgreSQL 持久化 | 已实现适配器 | 当前环境没有 PostgreSQL 服务，未做真实数据库验收 |

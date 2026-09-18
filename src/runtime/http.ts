@@ -9,6 +9,7 @@ import { brainClaimInputSchema, type BrainGrant, type GovernedBrain } from '../b
 import type { FileBrainStore } from '../brain.js';
 import type { RsiService } from '../rsi.js';
 import { CollaborationNotFound, type CollaborationService } from '../collaboration-service.js';
+import { projectRunGraphs } from './graphs.js';
 
 interface Options { repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; brain?: GovernedBrain; brainStore?: FileBrainStore; rsi?: RsiService; collaboration?: CollaborationService }
 function matches(expected: string | undefined, received: string | undefined): boolean {
@@ -136,6 +137,7 @@ export function buildApp(options: Options) {
   });
   app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, status, updatedAt }) => ({ id, goal, status, updatedAt })));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => options.repository.get(request.params.id));
+  app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => projectRunGraphs(await options.repository.get(request.params.id)));
   async function notify(id: string): Promise<void> {
     try { await options.dispatcher?.notify(id); }
     catch {

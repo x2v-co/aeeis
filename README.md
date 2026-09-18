@@ -41,6 +41,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 - `GET /api/status`
 - `GET /api/runs`
 - `GET /api/runs/:id`
+- `GET /api/runs/:id/graphs`
 - `POST /api/runs`
 - `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|dispatch`
 - `POST /internal/runs/:id/advance`（仅 Worker token）

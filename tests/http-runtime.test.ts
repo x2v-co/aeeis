@@ -7,6 +7,8 @@ import { FileRunRepository } from '../src/runtime/repository.js';
 import { FileBrainStore } from '../src/brain.js';
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
+import { AgentEngine } from '../src/runtime/engine.js';
+import type { ModelAdapter } from '../src/runtime/model.js';
 
 describe('AEEIS HTTP boundary', () => {
   it('does not pretend to execute when no model is configured', async () => {
@@ -18,6 +20,16 @@ describe('AEEIS HTTP boundary', () => {
     expect(response.json().error).toContain('Configure');
     expect((await app.inject({ method: 'GET', url: '/api/status' })).json()).toMatchObject({ modelConfigured: false });
     expect((await app.inject({ method: 'POST', url: '/api/runs/run_bad/finish', payload: {} })).statusCode).toBe(503);
+    await app.close(); await repo.close();
+  });
+
+  it('exposes the three graph projections for a persisted run', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-graphs-'))); await repo.init();
+    const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1/chat/completions', promptVersion: 'fixture/1' }, complete: async () => ({ value: { summary: 'Plan', nodes: [{ id: 'one', title: 'One', instruction: 'One', dependsOn: [] }] } }) };
+    const engine = new AgentEngine(repo, model); const run = await engine.create({ goal: 'Graph run' });
+    const app = buildApp({ repository: repo, engine });
+    const response = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/graphs` });
+    expect(response.statusCode).toBe(200); expect(response.json()).toMatchObject({ execution: { kind: 'execution' }, evidence: { kind: 'evidence' } }); expect(response.json().plan).toBeUndefined();
     await app.close(); await repo.close();
   });
   it('requires the configured bearer token and rejects cross-origin requests', async () => {
