@@ -5,7 +5,7 @@ import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
 import { buildApp } from './runtime/http.js';
 import { FileBrainStore } from './brain.js';
-import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog } from './integrations.js';
+import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitRegistryGateway } from './integrations.js';
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport } from './agent-gateway.js';
 import { agentCardSchema } from './protocol.js';
@@ -28,7 +28,9 @@ await collaborationRepository.init();
 const collaboration = new CollaborationService(collaborationRepository);
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined;
 try {
-  const toolkit = process.env.AEEIS_TOOLKIT_MANIFEST_URL && process.env.AEEIS_TOOLKIT_INVOKE_URL
+  const toolkit = process.env.AEEIS_TOOLKIT_REGISTRY_URL
+    ? new ToolkitRegistryGateway(process.env.AEEIS_TOOLKIT_REGISTRY_URL, process.env.AEEIS_TOOLKIT_TOKEN)
+    : process.env.AEEIS_TOOLKIT_MANIFEST_URL && process.env.AEEIS_TOOLKIT_INVOKE_URL
     ? new ConfiguredHttpToolGateway(process.env.AEEIS_TOOLKIT_MANIFEST_URL, process.env.AEEIS_TOOLKIT_INVOKE_URL, process.env.AEEIS_TOOLKIT_TOKEN, process.env.AEEIS_TOOLKIT_RECONCILE_URL)
     : undefined;
   const skills = process.env.AEEIS_OWNHOW_ENABLED === '1'

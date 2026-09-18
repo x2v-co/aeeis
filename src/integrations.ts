@@ -92,6 +92,129 @@ export class ConfiguredHttpToolGateway implements ToolGateway {
   }
 }
 
+/**
+ * Adapter for toolkit_new's public Registry and published-tool REST contract.
+ *
+ * AEEIS keeps its own allowlist, idempotency and Receipt semantics. The
+ * toolkit registry is only used to resolve an immutable tool version and its
+ * execution endpoint; the toolkit response is translated at this boundary.
+ */
+export class ToolkitRegistryGateway implements ToolGateway {
+  private manifestCache = new Map<string, { id: string; version: string; capabilities: string[]; inputSchema: unknown; outputSchema: unknown; endpoint: string }>();
+
+  constructor(private readonly registryUrl: string, private readonly token?: string) {
+    const url = new URL(registryUrl);
+    if (url.username || url.password || url.search || url.hash) throw new Error('Toolkit Registry URL must not contain credentials, query or fragment');
+    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Toolkit Registry URL must use HTTPS except loopback');
+  }
+
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    return { ...extra, ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) };
+  }
+
+  private registryPath(path: string): string {
+    return new URL(path.replace(/^\//, ''), this.registryUrl.replace(/\/$/, '') + '/').toString();
+  }
+
+  private endpointFor(value: string): string {
+    const endpoint = new URL(value, this.registryUrl);
+    const base = new URL(this.registryUrl);
+    if (endpoint.origin !== base.origin) throw new Error('Toolkit endpoint must share the Registry origin');
+    if (endpoint.username || endpoint.password || endpoint.hash) throw new Error('Toolkit endpoint must not contain credentials or fragments');
+    return endpoint.toString();
+  }
+
+  async listTools() {
+    const response = await fetch(this.registryPath('/manifest'), { headers: this.headers(), redirect: 'error', signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error('Toolkit Registry manifest returned HTTP ' + response.status);
+    const index = z.object({
+      schemaVersion: z.literal('toolkit.registry.index.v1'),
+      tools: z.array(z.object({ slug: z.string().min(1), version: z.union([z.string(), z.number()]), manifestUrl: z.string().url() }).passthrough()),
+    }).passthrough().parse(await response.json());
+    const resolved: Array<{ id: string; version: string; capabilities: string[]; inputSchema: unknown; outputSchema: unknown }> = [];
+    for (const entry of index.tools) {
+      const manifestResponse = await fetch(this.endpointFor(entry.manifestUrl), { headers: this.headers(), redirect: 'error', signal: AbortSignal.timeout(15_000) });
+      if (!manifestResponse.ok) throw new Error(`Toolkit manifest ${entry.slug} returned HTTP ${manifestResponse.status}`);
+      const manifest = z.object({
+        schemaVersion: z.literal('toolkit.registry.tool.v1'), slug: z.string().min(1), version: z.union([z.string(), z.number()]),
+        inputSchema: z.unknown().optional(), endpoints: z.object({ rest: z.string().url() }).passthrough(), runtime: z.object({ sandbox: z.unknown().optional() }).passthrough().optional(),
+      }).passthrough().parse(await manifestResponse.json());
+      if (manifest.slug !== entry.slug || String(manifest.version) !== String(entry.version)) throw new Error(`Toolkit manifest ${entry.slug} disagrees with Registry index`);
+      const tool = {
+        id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: {}, endpoint: this.endpointFor(manifest.endpoints.rest),
+      };
+      this.manifestCache.set(`${tool.id}@${tool.version}`, tool);
+      resolved.push({ id: tool.id, version: tool.version, capabilities: tool.capabilities, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema });
+    }
+    return resolved;
+  }
+
+  private async tool(request: ToolInvocation): Promise<{ id: string; version: string; endpoint: string }> {
+    const cached = this.manifestCache.get(`${request.toolId}@${request.toolVersion}`);
+    if (cached) return cached;
+    await this.listTools();
+    const resolved = this.manifestCache.get(`${request.toolId}@${request.toolVersion}`);
+    if (!resolved) throw new Error(`Toolkit tool ${request.toolId}@${request.toolVersion} is not in the Registry manifest`);
+    return resolved;
+  }
+
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    const started = new Date();
+    const requestHash = digest(request);
+    try {
+      const tool = await this.tool(request);
+      const payload = normalizeToolkitInput(request.input);
+      const response = await fetch(tool.endpoint, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(request.timeoutMs),
+        headers: this.headers({ 'content-type': 'application/json' }), body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error('Toolkit execution returned HTTP ' + response.status);
+      const body = z.object({ ok: z.boolean(), output: z.unknown().optional(), error: z.string().optional(), structuredContent: z.unknown().optional(), receipt: z.object({ id: z.union([z.string(), z.number()]).optional() }).passthrough().optional() }).passthrough().parse(await response.json());
+      const status: ToolResult['status'] = body.ok ? 'completed' : 'failed';
+      const providerReceipt = body.receipt?.id === undefined ? undefined : String(body.receipt.id);
+      const result = body.ok ? (body.output ?? body.structuredContent ?? null) : { error: body.error ?? 'Toolkit execution failed' };
+      const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(providerReceipt ? { providerReceipt } : {}) });
+      return { status, output: result, ...(providerReceipt ? { outputRefs: [`toolkit-receipt:${providerReceipt}`] } : {}), receipt };
+    } catch (error) {
+      return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
+    }
+  }
+
+  async reconcile(request: ToolInvocation, receipt: Receipt): Promise<ToolResult> {
+    const reference = receipt.outputRefs.find(value => value.startsWith('toolkit-receipt:'));
+    if (!reference) throw new Error('Toolkit receipt does not contain a provider receipt reference');
+    const providerReceipt = reference.slice('toolkit-receipt:'.length);
+    const response = await fetch(this.registryPath(`/../run/receipts/${encodeURIComponent(providerReceipt)}`), { headers: this.headers(), redirect: 'error', signal: AbortSignal.timeout(request.timeoutMs) });
+    if (!response.ok) throw new Error('Toolkit receipt reconciliation returned HTTP ' + response.status);
+    const body = z.object({ receipt: z.object({ ok: z.boolean(), output: z.unknown().optional(), error: z.string().optional() }).passthrough() }).passthrough().parse(await response.json()).receipt;
+    const status: ToolResult['status'] = body.ok ? 'completed' : 'failed';
+    const responseHash = digest(body);
+    const updated = receiptSchema.parse({ ...receipt, responseHash, completedAt: new Date().toISOString(), status, outputRefs: [`toolkit-receipt:${providerReceipt}`], errorCode: body.ok ? undefined : 'tool_failed' });
+    return { status, output: body.ok ? (body.output ?? null) : { error: body.error ?? 'Toolkit execution failed' }, outputRefs: [`toolkit-receipt:${providerReceipt}`], receipt: updated };
+  }
+}
+
+function normalizeToolkitInput(input: unknown): { input: string; params?: Record<string, unknown> } {
+  if (typeof input === 'string') return { input };
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const record = input as Record<string, unknown>;
+    if (typeof record.input === 'string') {
+      const { input: value, ...params } = record;
+      return Object.keys(params).length ? { input: value, params } : { input: value };
+    }
+  }
+  return { input: JSON.stringify(input) };
+}
+
+function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
+  return receiptSchema.parse({
+    schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_new', operation: input.request.toolId,
+    requestHash: input.requestHash, ...(input.response === undefined ? {} : { responseHash: digest(input.response) }),
+    inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: ['execute'],
+    startedAt: input.started.toISOString(), completedAt: new Date().toISOString(), status: input.status, ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+  });
+}
+
 export class OwnHowCliGovernance implements SkillGovernance {
   constructor(private readonly executable = 'ownhow', private readonly stateDirectory?: string) {}
   private async run(args: string[]): Promise<unknown> {
