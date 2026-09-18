@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileKnowledgeProvider, InMemoryKnowledgeProvider, makeKnowledgeRecord, validateKnowledgeHits } from '../src/knowledge.js';
@@ -31,4 +31,30 @@ it('rejects provider results outside the requested classification or with a bad 
   const request = { query: 'safe', maxItems: 2, allowedClassifications: ['public'] as const, audience: 'owner' };
   expect(() => validateKnowledgeHits(request, [{ record, score: 1, matchedTerms: ['safe'] }])).toThrow('classification');
   expect(() => validateKnowledgeHits({ ...request, allowedClassifications: ['internal'] }, [{ record: { ...record, contentHash: 'a'.repeat(64) }, score: 1, matchedTerms: ['safe'] }])).toThrow('hash');
+});
+
+it('enforces record audience ACLs before returning a hit', async () => {
+  const provider = new InMemoryKnowledgeProvider([
+    makeKnowledgeRecord({ id: 'knowledge.team', title: 'Team', content: 'Team-only plan', source: 'wiki', classification: 'internal', tags: ['plan'], audiences: ['team-a'], updatedAt: '2026-09-18T00:00:00.000Z' }),
+    makeKnowledgeRecord({ id: 'knowledge.public', title: 'Public', content: 'Shared plan', source: 'wiki', classification: 'internal', tags: ['plan'], audiences: ['*'], updatedAt: '2026-09-18T00:00:00.000Z' }),
+  ]);
+  const hits = await provider.search({ query: 'plan', maxItems: 5, allowedClassifications: ['internal'], audience: 'team-b' });
+  expect(hits.map(hit => hit.record.id)).toEqual(['knowledge.public']);
+});
+
+it('reloads a file source when its source signature changes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aeeis-knowledge-cache-'));
+  const path = join(directory, 'records.json');
+  const first = makeKnowledgeRecord({ id: 'knowledge.first', title: 'First', content: 'first', source: 'file', classification: 'internal', tags: [], updatedAt: '2026-09-18T00:00:00.000Z' });
+  const second = makeKnowledgeRecord({ id: 'knowledge.second', title: 'Second', content: 'second', source: 'file', classification: 'internal', tags: [], updatedAt: '2026-09-18T00:00:01.000Z' });
+  try {
+    await writeFile(path, JSON.stringify([first]));
+    const provider = new FileKnowledgeProvider(path);
+    const request = { query: 'first', maxItems: 5, allowedClassifications: ['internal'] as const, audience: 'owner' };
+    await expect(provider.search(request)).resolves.toHaveLength(1);
+    await writeFile(path, JSON.stringify([second]));
+    await expect(provider.search({ ...request, query: 'second' })).resolves.toHaveLength(1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

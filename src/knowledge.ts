@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { z } from 'zod';
 
 export const knowledgeRecordSchema = z.object({
@@ -9,6 +9,8 @@ export const knowledgeRecordSchema = z.object({
   source: z.string().min(1).max(2000),
   classification: z.enum(['public', 'internal', 'confidential', 'private']),
   tags: z.array(z.string().max(100)).max(100),
+  /** Optional audience ACL. `*` makes the record visible to every admitted audience. */
+  audiences: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
   updatedAt: z.string().datetime({ offset: true }),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
@@ -32,6 +34,7 @@ export function validateKnowledgeHits(request: KnowledgeSearchRequest, hits: Kno
   for (const hit of hits) {
     knowledgeHitSchema.parse(hit);
     if (!request.allowedClassifications.includes(hit.record.classification)) throw new Error('Knowledge provider returned a record outside the allowed classification');
+    if (!isAudienceAllowed(hit.record, request.audience)) throw new Error('Knowledge provider returned a record outside the requested audience');
     if (seen.has(hit.record.id)) throw new Error('Knowledge provider returned duplicate record IDs');
     seen.add(hit.record.id);
     if (digest(hit.record.content) !== hit.record.contentHash) throw new Error('Knowledge record content hash does not match its content');
@@ -48,7 +51,7 @@ export class InMemoryKnowledgeProvider implements KnowledgeProvider {
   async search(request: KnowledgeSearchRequest): Promise<KnowledgeHit[]> {
     const terms = tokenize(request.query);
     return this.records
-      .filter(record => request.allowedClassifications.includes(record.classification))
+      .filter(record => request.allowedClassifications.includes(record.classification) && isAudienceAllowed(record, request.audience))
       .map(record => {
         const haystack = tokenize(`${record.title} ${record.content} ${record.tags.join(' ')}`);
         const matchedTerms = terms.filter(term => haystack.includes(term));
@@ -80,12 +83,17 @@ export class HttpKnowledgeProvider implements KnowledgeProvider {
 /** File-backed source for local development and single-machine deployments. */
 export class FileKnowledgeProvider implements KnowledgeProvider {
   constructor(private readonly path: string) {}
+  private cached?: { signature: string; records: KnowledgeRecord[] };
 
   async search(request: KnowledgeSearchRequest): Promise<KnowledgeHit[]> {
-    const parsed: unknown = JSON.parse(await readFile(this.path, 'utf8'));
-    if (!Array.isArray(parsed)) throw new Error('Knowledge file must contain an array of records');
-    const records = parsed.map(record => knowledgeRecordSchema.parse(record));
-    return new InMemoryKnowledgeProvider(records).search(request);
+    const metadata = await stat(this.path);
+    const signature = `${metadata.mtimeMs}:${metadata.size}`;
+    if (!this.cached || this.cached.signature !== signature) {
+      const parsed: unknown = JSON.parse(await readFile(this.path, 'utf8'));
+      if (!Array.isArray(parsed)) throw new Error('Knowledge file must contain an array of records');
+      this.cached = { signature, records: parsed.map(record => knowledgeRecordSchema.parse(record)) };
+    }
+    return new InMemoryKnowledgeProvider(this.cached.records).search(request);
   }
 }
 
@@ -97,3 +105,7 @@ function tokenize(value: string): string[] {
   return [...new Set(value.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term.length > 1))];
 }
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+
+function isAudienceAllowed(record: KnowledgeRecord, audience: string): boolean {
+  return record.audiences === undefined || record.audiences.includes('*') || record.audiences.includes(audience);
+}
