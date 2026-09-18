@@ -1,6 +1,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import type { OAuthTokenProvider } from './oauth.js';
+import { InMemoryGrantLedger } from './agent-ledger.js';
+import type { GrantLedger } from './agent-ledger.js';
 export { OAuthClientCredentialsProvider } from './oauth.js';
 import {
   acknowledgementSchema,
@@ -102,9 +104,8 @@ export class AgentDirectory {
  */
 export class AgentGateway {
   private readonly inFlight = new Map<string, { request: DelegationRequest; card: AgentCard; outcome?: DelegationOutcome; promise?: Promise<DelegationOutcome> }>();
-  private readonly grantCalls = new Map<string, number>();
 
-  constructor(private readonly directory: AgentDirectory, private readonly transport: AgentTransport) {}
+  constructor(private readonly directory: AgentDirectory, private readonly transport: AgentTransport, private readonly ledger: GrantLedger = new InMemoryGrantLedger()) {}
 
   async delegate(input: DelegationRequest): Promise<DelegationOutcome> {
     const request = validateRequest(input);
@@ -118,14 +119,19 @@ export class AgentGateway {
     if (cached?.outcome?.status === 'unknown') throw new Error('Delegation outcome is unknown; reconcile before submitting again');
     if (cached && !sameRequest(cached.request, request)) throw new Error('Idempotency key is bound to a different delegation request');
     if (cached?.promise) return cached.promise;
-    const usedCalls = this.grantCalls.get(request.grant.grantId) ?? 0;
-    if (request.grant.budget.calls !== undefined && usedCalls >= request.grant.budget.calls) throw new Error('Delegation grant call budget is exhausted');
-    this.grantCalls.set(request.grant.grantId, usedCalls + 1);
     const promise = (async () => {
-      const response = await this.transport.submit(card, request);
-      const outcome = validateResponse(request, response);
-      this.inFlight.set(request.idempotencyKey, { request, card, outcome });
-      return outcome;
+      try {
+        await this.ledger.reserve(request.grant.grantId, request.idempotencyKey, request.grant.budget);
+        const response = await this.transport.submit(card, request);
+        const outcome = validateResponse(request, response);
+        if (outcome.status === 'unknown') await this.ledger.markUnknown(request.grant.grantId, request.idempotencyKey);
+        else await this.ledger.settle(request.grant.grantId, request.idempotencyKey, outcome.result?.cost);
+        this.inFlight.set(request.idempotencyKey, { request, card, outcome });
+        return outcome;
+      } catch (error) {
+        await this.ledger.markUnknown(request.grant.grantId, request.idempotencyKey).catch(() => undefined);
+        throw error;
+      }
     })();
     this.inFlight.set(request.idempotencyKey, { request, card, promise });
     void promise.catch(() => { const current = this.inFlight.get(request.idempotencyKey); if (current?.promise === promise) this.inFlight.delete(request.idempotencyKey); });
@@ -143,8 +149,11 @@ export class AgentGateway {
     const receipt = persistedReceipt ?? entry?.outcome?.receipt;
     if (!receipt || receipt.status !== 'unknown') throw new Error('Delegation does not require reconciliation');
     if (!this.transport.reconcile) throw new Error('Agent transport does not support reconciliation');
+    await this.ledger.ensureUnknown(request.grant.grantId, request.idempotencyKey, request.grant.budget);
     const response = await this.transport.reconcile(card, request, receipt);
     const outcome = validateResponse(request, response);
+    if (outcome.status === 'unknown') await this.ledger.markUnknown(request.grant.grantId, request.idempotencyKey);
+    else await this.ledger.settle(request.grant.grantId, request.idempotencyKey, outcome.result?.cost);
     this.inFlight.set(request.idempotencyKey, { request, card, outcome });
     return outcome;
   }

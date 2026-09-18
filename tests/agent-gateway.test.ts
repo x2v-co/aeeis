@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider } from '../src/agent-gateway.js';
+import { FileGrantLedger } from '../src/agent-ledger.js';
 import { createContextPack, type AgentCard, type DelegationGrant, type TaskBrief } from '../src/protocol.js';
 import type { AgentTransport, AgentTransportResponse, DelegationRequest } from '../src/agent-gateway.js';
 
@@ -120,5 +123,53 @@ describe('external Agent gateway', () => {
       await new Promise<void>(resolve => tokenServer.close(() => resolve()));
       await new Promise<void>(resolve => agentServer.close(() => resolve()));
     }
+  });
+
+  it('persists grant reservations across gateway restart and reconciles without a second submit', async () => {
+    const directoryPath = await mkdtemp(join('/tmp', 'aeeis-agent-ledger-'));
+    const ledgerPath = join(directoryPath, 'ledger.json');
+    let submits = 0; let reconciles = 0;
+    const transport: AgentTransport = {
+      submit: async () => { submits++; return { status: 'unknown', receiptRef: 'receipt.persisted-unknown' }; },
+      reconcile: async (_card, request) => {
+        reconciles++;
+        return { status: 'completed', receiptRef: 'receipt.persisted-complete', acknowledgement: { ...acknowledgement(), taskId: request.taskBrief.taskId }, result: { ...result(), receiptRef: 'receipt.persisted-complete', cost: { tokens: 40 } } };
+      },
+    };
+    try {
+      const ledger1 = new FileGrantLedger(ledgerPath); await ledger1.init();
+      const directory = new AgentDirectory(); directory.register(card);
+      const request: DelegationRequest = { agentId: card.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 1, tokens: 100 } }, mode: 'async', idempotencyKey: 'persisted-delegation' };
+      const first = await new AgentGateway(directory, transport, ledger1).delegate(request);
+      expect(first.status).toBe('unknown');
+      await ledger1.close();
+
+      const ledger2 = new FileGrantLedger(ledgerPath); await ledger2.init();
+      const recovered = new AgentGateway(directory, transport, ledger2);
+      await expect(recovered.delegate(request)).rejects.toThrow('reconcile');
+      expect((await recovered.reconcile(request, first.receipt)).status).toBe('completed');
+      expect(submits).toBe(1); expect(reconciles).toBe(1);
+      await expect(recovered.delegate({ ...request, idempotencyKey: 'second-delegation' })).rejects.toThrow('budget');
+      await ledger2.close();
+    } finally { await rm(directoryPath, { recursive: true, force: true }); }
+  });
+
+  it('settles cumulative token usage atomically against a durable grant budget', async () => {
+    const directoryPath = await mkdtemp(join('/tmp', 'aeeis-agent-ledger-'));
+    const ledger = new FileGrantLedger(join(directoryPath, 'ledger.json')); await ledger.init();
+    let calls = 0;
+    const transport: AgentTransport = { submit: async (_card, request) => {
+      calls++;
+      const tokens = calls === 1 ? 60 : 50;
+      return { status: 'completed', receiptRef: `receipt.cost-${calls}`, acknowledgement: acknowledgement(), result: { ...result(), receiptRef: `receipt.cost-${calls}`, cost: { tokens } } };
+    } };
+    const directory = new AgentDirectory(); directory.register(card);
+    const gateway = new AgentGateway(directory, transport, ledger);
+    const baseRequest: DelegationRequest = { agentId: card.agentId, taskBrief: brief, contextPack: context, grant: { ...grant, budget: { calls: 2, tokens: 100 } }, mode: 'sync', idempotencyKey: 'cost-1' };
+    try {
+      await gateway.delegate(baseRequest);
+      await expect(gateway.delegate({ ...baseRequest, idempotencyKey: 'cost-2' })).rejects.toThrow('token budget');
+      expect(calls).toBe(2);
+    } finally { await ledger.close(); await rm(directoryPath, { recursive: true, force: true }); }
   });
 });

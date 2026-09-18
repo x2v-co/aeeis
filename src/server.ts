@@ -8,6 +8,7 @@ import { FileBrainStore } from './brain.js';
 import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitRegistryGateway } from './integrations.js';
 import { CatalogModelResolver, HttpCatalogModelFactory } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider } from './agent-gateway.js';
+import { FileGrantLedger } from './agent-ledger.js';
 import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
 import { FileEvolutionRepository, RsiService } from './rsi.js';
@@ -32,6 +33,8 @@ await evolutionRepository.init();
 const rsi = new RsiService(evolutionRepository);
 const collaborationRepository = new FileCollaborationRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration`);
 await collaborationRepository.init();
+const grantLedger = new FileGrantLedger(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/agent-grants.json`);
+await grantLedger.init();
 const collaboration = new CollaborationService(collaborationRepository);
 const projection = new FileProjectionOutbox(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration-projection`);
 await projection.init();
@@ -81,7 +84,7 @@ try {
       const configs = oauthClientConfigsSchema.parse(JSON.parse(process.env.AEEIS_AGENT_OAUTH_CONFIG));
       oauthProvider = new OAuthClientCredentialsProvider(configs);
     }
-    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider));
+    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider), grantLedger);
   }
   const knowledge = process.env.AEEIS_KNOWLEDGE_URL
     ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN)
@@ -145,7 +148,7 @@ try {
   let closing = false;
   const close = async () => {
     if (closing) return; closing = true;
-    await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close();
+    await app.close(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await brainStore.close(); await evolutionRepository.close(); await collaborationRepository.close(); await projection.close(); await grantLedger.close(); throw error; }
