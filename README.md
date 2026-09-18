@@ -66,7 +66,7 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 - `GET|POST /api/collaborations/debates`，以及 `/:id/message|close|run`；配置内部模型池后，`run` 按轮次驱动 Debate 并在达到边界或形成 decision 时关闭房间。
 - `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/:id/reconcile`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate/Competition 快照，传输结果不明会进入 `unknown`，只能通过 provider 核查恢复，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes 等渠道；也可配置 `AEEIS_FEISHU_WEBHOOK_URL` 使用内置飞书 Incoming Webhook 卡片适配器，私有内容会被拒绝。
 
-运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Goal、Plan、Receipt、Memory 和 Context Manifest 到 PostgreSQL，启动时会创建所需表和索引。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
+运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Goal、Plan、Receipt、Memory、Context Manifest 和 RSI candidate/activation registry 到 PostgreSQL，启动时会创建所需表和索引。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，Worker 使用 `npm run worker` 启动。
 
 领域 Task 转移以一次存储提交更新 Plan、Goal 完成状态和 Receipt。并发分支按最新 Plan 快照重新校验，避免状态覆盖和缺失回执；JSON 存储限制单个活动写入者，PostgreSQL 使用行锁与事务。Plan 的 `version` 仍表示 DAG 版本，不作为执行状态的修订号。
 

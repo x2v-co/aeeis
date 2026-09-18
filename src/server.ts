@@ -11,8 +11,8 @@ import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredential
 import { FileGrantLedger } from './agent-ledger.js';
 import { agentCardSchema } from './protocol.js';
 import { FileKnowledgeProvider, HttpKnowledgeProvider } from './knowledge.js';
-import { FileEvolutionRepository, RsiService } from './rsi.js';
-import { FileEvolutionActivationStore } from './evolution-activation.js';
+import { FileEvolutionRepository, PostgresEvolutionRepository, RsiService } from './rsi.js';
+import { FileEvolutionActivationStore, PostgresEvolutionActivationStore } from './evolution-activation.js';
 import { CollaborationService, FileCollaborationRepository } from './collaboration-service.js';
 import { ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from './collaboration-pool.js';
 import { JsonFileStore } from './adapters/json-store.js';
@@ -29,9 +29,13 @@ await repository.init();
 const brainStore = new FileBrainStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/brain`);
 await brainStore.init();
 const brain = await brainStore.load();
-const evolutionRepository = new FileEvolutionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
+const evolutionRepository = process.env.DATABASE_URL
+  ? new PostgresEvolutionRepository(process.env.DATABASE_URL)
+  : new FileEvolutionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
 await evolutionRepository.init();
-const evolutionActivation = new FileEvolutionActivationStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
+const evolutionActivation = process.env.DATABASE_URL
+  ? new PostgresEvolutionActivationStore(process.env.DATABASE_URL)
+  : new FileEvolutionActivationStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/evolution`);
 await evolutionActivation.init();
 const rsi = new RsiService(evolutionRepository, evolutionActivation);
 const collaborationRepository = new FileCollaborationRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration`);

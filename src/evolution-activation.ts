@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import pg from 'pg';
 
 // These are text supplements to the shipped planner/executor prompts. Workflow
 // code, skill deployments, model routing and capability grants need typed adapters.
@@ -24,7 +25,7 @@ const historySchema = z.object({
   restoredCandidateId: candidateId.optional(),
   reason: z.string().trim().min(1).max(4000), at: z.string().datetime({ offset: true }),
 }).strict();
-const stateSchema = z.object({
+export const evolutionActivationStateSchema = z.object({
   releases: z.array(activationSchema).max(10000),
   active: z.array(candidateId).max(2),
   revoked: z.array(candidateId).max(10000),
@@ -84,12 +85,12 @@ export class FileEvolutionActivationStore implements EvolutionActivationStore {
     if (!this.opened) return Promise.reject(new Error('Activation store is closed'));
     const next = this.queue.then(operation); this.queue = next.catch(() => {}); return next;
   }
-  private async load(): Promise<z.infer<typeof stateSchema>> {
+  private async load(): Promise<z.infer<typeof evolutionActivationStateSchema>> {
     if (!this.opened) throw new Error('Activation store is closed');
-    return stateSchema.parse(JSON.parse(await readFile(this.path, 'utf8')));
+    return evolutionActivationStateSchema.parse(JSON.parse(await readFile(this.path, 'utf8')));
   }
-  private async save(input: z.infer<typeof stateSchema>): Promise<void> {
-    const state = stateSchema.parse(input);
+  private async save(input: z.infer<typeof evolutionActivationStateSchema>): Promise<void> {
+    const state = evolutionActivationStateSchema.parse(input);
     const temporary = `${this.path}.${randomUUID()}.tmp`;
     try {
       const file = await open(temporary, 'wx', 0o600);
@@ -155,4 +156,71 @@ export class FileEvolutionActivationStore implements EvolutionActivationStore {
     if (!this.opened) return;
     this.opened = false; await unlink(this.lockPath);
   }
+}
+
+/** PostgreSQL counterpart used when AEEIS runs with DATABASE_URL. The single
+ * locked row makes activation pointer changes atomic across API instances. */
+export class PostgresEvolutionActivationStore implements EvolutionActivationStore {
+  private readonly pool: pg.Pool;
+  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  async init(): Promise<void> {
+    await this.pool.query('CREATE TABLE IF NOT EXISTS aeeis_evolution_activation (id text PRIMARY KEY, state jsonb NOT NULL)');
+    await this.pool.query(`INSERT INTO aeeis_evolution_activation(id,state) VALUES('singleton',$1) ON CONFLICT(id) DO NOTHING`, [{ releases: [], active: [], revoked: [], history: [] }]);
+  }
+  private async read(client: pg.Pool | pg.PoolClient): Promise<z.infer<typeof evolutionActivationStateSchema>> {
+    const result = await client.query<{ state: unknown }>('SELECT state FROM aeeis_evolution_activation WHERE id=$1', ['singleton']);
+    if (!result.rows[0]) throw new Error('Evolution activation state is missing');
+    return evolutionActivationStateSchema.parse(result.rows[0].state);
+  }
+  async list(): Promise<ActiveEvolution[]> {
+    const state = await this.read(this.pool);
+    return state.active.map(id => {
+      const release = state.releases.find(item => item.candidateId === id);
+      if (!release || state.revoked.includes(id) || release.contentHash !== evolutionContentHash(release)) throw new Error('Invalid active evolution pointer');
+      return release;
+    }).sort((a, b) => a.target.localeCompare(b.target));
+  }
+  async history(): Promise<EvolutionActivationHistory[]> { return (await this.read(this.pool)).history; }
+  async activate(input: Pick<ActiveEvolution, 'target' | 'candidateId' | 'baseVersion' | 'version' | 'change' | 'activationRef'>): Promise<ActiveEvolution> {
+    return this.transaction(async (client, state) => {
+      let release: ActiveEvolution = activationSchema.parse({ schemaVersion: 1 as const, ...input, contentHash: evolutionContentHash(input), activatedAt: new Date().toISOString() });
+      const existing = state.releases.find(item => item.candidateId === input.candidateId);
+      if (state.revoked.includes(input.candidateId)) throw new Error('Revoked candidate cannot be reactivated');
+      if (existing) {
+        if (state.active.includes(existing.candidateId) && existing.contentHash === release.contentHash && existing.baseVersion === release.baseVersion) return existing;
+        throw new Error('Candidate has already been activated; create a new version');
+      }
+      const previous = state.releases.find(item => state.active.includes(item.candidateId) && item.target === input.target);
+      const expected = previous?.version ?? baselineVersions[input.target];
+      if (input.baseVersion !== expected) throw new Error(`Activation base version conflict: expected ${expected}`);
+      if (input.version === baselineVersions[input.target] || state.releases.some(item => item.target === input.target && item.version === input.version)) throw new Error('Evolution version must be new and immutable');
+      if (previous) release.parentCandidateId = previous.candidateId;
+      const parsed = activationSchema.parse(release); state.releases.push(parsed); state.active = [...state.active.filter(id => id !== previous?.candidateId), parsed.candidateId];
+      state.history.push({ id: randomUUID(), action: 'activated', target: parsed.target, candidateId: parsed.candidateId, version: parsed.version, reason: parsed.activationRef, at: parsed.activatedAt });
+      return parsed;
+    });
+  }
+  async revoke(id: string, reason: string): Promise<void> {
+    await this.transaction(async (_client, state) => {
+      candidateId.parse(id); z.string().trim().min(1).max(4000).parse(reason);
+      if (state.revoked.includes(id)) return undefined;
+      state.revoked.push(id); const release = state.releases.find(item => item.candidateId === id); if (!release) return undefined;
+      let parent = release.parentCandidateId ? state.releases.find(item => item.candidateId === release.parentCandidateId) : undefined;
+      while (parent && state.revoked.includes(parent.candidateId)) parent = parent.parentCandidateId ? state.releases.find(item => item.candidateId === parent!.parentCandidateId) : undefined;
+      if (state.active.includes(id)) { state.active = state.active.filter(value => value !== id); if (parent) state.active.push(parent.candidateId); }
+      state.history.push({ id: randomUUID(), action: 'rolled_back', target: release.target, candidateId: id, version: release.version, ...(parent && state.active.includes(parent.candidateId) ? { restoredCandidateId: parent.candidateId } : {}), reason, at: new Date().toISOString() });
+      return undefined;
+    });
+  }
+  private async transaction<T>(operation: (client: pg.PoolClient, state: z.infer<typeof evolutionActivationStateSchema>) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN'); await client.query('SELECT id FROM aeeis_evolution_activation WHERE id=$1 FOR UPDATE', ['singleton']);
+      const state = await this.read(client); const result = await operation(client, state);
+      await client.query('UPDATE aeeis_evolution_activation SET state=$2 WHERE id=$1', ['singleton', evolutionActivationStateSchema.parse(state)]);
+      await client.query('COMMIT'); return result;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async close(): Promise<void> { await this.pool.end(); }
 }

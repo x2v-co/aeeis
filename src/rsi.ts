@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import pg from 'pg';
 import { EvolutionEngine, evolutionCandidateSchema, rolloutObservationSchema, type EvolutionCandidate, type EvolutionEvaluation } from './evolution.js';
 import { RsiEvaluator, evaluationCaseSchema, evaluationSuiteSchema, type EvaluationSuite, type RsiEvaluationHarness, type RsiEvaluationPolicy } from './evaluation.js';
 import { activationTargetSchema, baselineVersions, evolutionContentHash, type EvolutionActivationStore, type ActiveEvolution } from './evolution-activation.js';
@@ -44,6 +45,39 @@ export class FileEvolutionRepository implements EvolutionRepository {
   async list(): Promise<EvolutionCandidate[]> { const { readdir } = await import('node:fs/promises'); const files = (await readdir(this.directory)).filter(name => /^evo_[a-f0-9-]{36}\.json$/.test(name)); return Promise.all(files.map(file => this.get(file.slice(0, -5)))); }
   mutate(id: string, change: (candidate: EvolutionCandidate) => EvolutionCandidate): Promise<EvolutionCandidate> { return this.serial(async () => { const current = await this.get(id); const next = evolutionCandidateSchema.parse(change(structuredClone(current))); await this.save(next); return next; }); }
   async close(): Promise<void> { await this.queue; await unlink(this.lockPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
+}
+
+/** PostgreSQL candidate store for multi-process deployments. Candidate state is
+ * validated JSONB, while row locks serialize each lifecycle transition. */
+export class PostgresEvolutionRepository implements EvolutionRepository {
+  private readonly pool: pg.Pool;
+  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  async init(): Promise<void> {
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS aeeis_evolution_candidates (id text PRIMARY KEY, state jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS aeeis_evolution_status_idx ON aeeis_evolution_candidates ((state->>'status'));`);
+  }
+  async create(candidate: EvolutionCandidate): Promise<void> { await this.pool.query('INSERT INTO aeeis_evolution_candidates(id,state) VALUES($1,$2)', [candidate.id, candidate]); }
+  async get(id: string): Promise<EvolutionCandidate> {
+    const result = await this.pool.query<{ state: unknown }>('SELECT state FROM aeeis_evolution_candidates WHERE id=$1', [id]);
+    const row = result.rows[0]; if (!row) throw new EvolutionNotFound('Unknown evolution candidate');
+    return evolutionCandidateSchema.parse(row.state);
+  }
+  async list(): Promise<EvolutionCandidate[]> {
+    const result = await this.pool.query<{ state: unknown }>(`SELECT state FROM aeeis_evolution_candidates ORDER BY updated_at DESC, id`);
+    return result.rows.map(row => evolutionCandidateSchema.parse(row.state));
+  }
+  async mutate(id: string, change: (candidate: EvolutionCandidate) => EvolutionCandidate): Promise<EvolutionCandidate> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{ state: unknown }>('SELECT state FROM aeeis_evolution_candidates WHERE id=$1 FOR UPDATE', [id]);
+      if (!result.rows[0]) throw new EvolutionNotFound('Unknown evolution candidate');
+      const next = evolutionCandidateSchema.parse(change(structuredClone(evolutionCandidateSchema.parse(result.rows[0].state))));
+      await client.query('UPDATE aeeis_evolution_candidates SET state=$2, updated_at=now() WHERE id=$1', [id, next]);
+      await client.query('COMMIT'); return next;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async close(): Promise<void> { await this.pool.end(); }
 }
 
 const proposalInputSchema = z.object({
