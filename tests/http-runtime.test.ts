@@ -93,6 +93,23 @@ describe('AEEIS HTTP boundary', () => {
     await app.close(); await evolution.close(); await repo.close();
   });
 
+  it('turns a Run correction into an evidence-bound RSI candidate', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-correction-runs-'))); await repo.init();
+    const evolution = new FileEvolutionRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-correction-rsi-'))); await evolution.init();
+    const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1/chat/completions', promptVersion: 'fixture/1' }, complete: async () => ({ value: {} }) };
+    const engine = new AgentEngine(repo, model);
+    const app = buildApp({ repository: repo, engine, rsi: new RsiService(evolution) });
+    const withMaterial = await engine.create({ goal: 'Correction source with evidence', materials: [{ title: 'Brief', source: 'test', content: 'Evidence' }] });
+    const materialRun = await app.inject({ method: 'GET', url: `/api/runs/${withMaterial.id}` });
+    const evidenceId = (materialRun.json() as { context: { sources: Array<{ id: string }> } }).context.sources[0]!.id;
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${withMaterial.id}/corrections`, payload: { target: 'prompt', baseVersion: 'prompt/1', proposedVersion: 'prompt/2', change: 'Require explicit evidence', reason: 'The report omitted its source', risk: 'low', sourceReceiptRefs: [evidenceId] } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().candidate.status).toBe('proposed');
+    expect(response.json().correction.sourceRefs).toEqual([evidenceId]);
+    expect((await app.inject({ method: 'GET', url: `/api/runs/${withMaterial.id}` })).json().corrections).toHaveLength(1);
+    await app.close(); await evolution.close(); await repo.close();
+  });
+
   it('exposes durable competition and debate collaboration endpoints', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-collab-runs-'))); await repo.init();
     const collaboration = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-collab-'))); await collaboration.init();

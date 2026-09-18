@@ -17,7 +17,7 @@
 | toolkit_new | manifest、版本冻结、allowlist、幂等 invoke、Receipt、unknown/reconcile HTTP 端口已实现；新增对 toolkit_new Registry index/Manifest 与 `/api/v1/t/:slug` 的协议转换适配器，并用本地 HTTP fixture 验证 | 尚未绑定 toolkit_new 的部署实例和真实工具调用；生产凭证与 ACL 未验收 |
 | ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record；已用本地 OwnHow CLI 验证 resolve/record/status，并要求明确 runtime | Apply 仍需显式授权；真实外部生产部署和治理闭环未验收 |
 | planprice | HTTP catalog adapter 已实现并用本地 Planprice 服务验收；读取 grouped 渠道价格与汇率、按 capability/隐私筛选并锁定 provider/model/endpoint/归一化价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实模型调用和价格新鲜度 SLA 未验收 |
-| RSI | candidate/evaluation/approval/promotion/rollback 状态机、默认 replay/holdout/safety 三道审批门、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据；候选不会自动修改生产 Agent |
+| RSI | candidate/evaluation/approval/promotion/rollback 状态机、默认 replay/holdout/safety 三道审批门、File 持久化 Repository、HTTP API，以及 replay/holdout/safety/cost/shadow 有界评测编排已实现；新增 Run correction→evidence-bound candidate 入口 | 尚未绑定真实 replay、holdout、shadow evaluator 和生产观测数据；候选不会自动修改生产 Agent |
 | 多 Agent 竞争 | 隔离运行与独立评估接口已实现；`blindEvaluation` 会对评测器隐藏真实 Agent ID；候选完整性、成本上限、重复评分防护已加固；新增 File 持久化协作状态、候选提交→独立评测→选定/partial API；Competition Brief 可携带受控 Context Pack；新增可配置内部模型池、并发候选运行、盲评和持久化编排 API；Gateway 可承载外部委托，Executor 可按 allowlist 委派并收回结果 | 仍需接入真实生产模型池、自动触发策略、预算计量和外部 Agent endpoint；当前模型池只负责候选/评估层，不替代主 Runtime 的任务执行 |
 | Debate / 飞书投影 | 有界 Debate 领域模型已实现，含轮次、单 Agent 和总消息上限；新增持久化房间、消息和关闭 API，并校验上下文版本与重复消息；Debate Brief 可携带受控 Context Pack；新增内部模型池的有界回合编排和 `run` API | 飞书渠道、Hermes skill、独立 Moderator/Adjudicator 和 canonical→projection 同步尚未接入 |
 | Web 工作台 | 开发版已实现 | 单用户本地模式；没有多租户、SSO 或完整 ACL |

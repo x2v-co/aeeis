@@ -53,6 +53,9 @@ export class RsiService {
   private readonly engine = new EvolutionEngine();
   constructor(private readonly repository: EvolutionRepository) {}
   async propose(input: unknown): Promise<EvolutionCandidate> { const candidate = this.engine.propose(proposalInputSchema.parse(input)); await this.repository.create(candidate); return candidate; }
+  async proposeFromCorrection(input: { target: EvolutionCandidate['target']; baseVersion: string; proposedVersion: string; change: string; reason: string; risk: EvolutionCandidate['risk']; correctionRef: string; sourceReceiptRefs: string[] }): Promise<EvolutionCandidate> {
+    return this.propose({ target: input.target, baseVersion: input.baseVersion, proposedVersion: input.proposedVersion, change: input.change, reason: `${input.reason} (correction: ${input.correctionRef})`, risk: input.risk, sourceReceiptRefs: [...new Set([...input.sourceReceiptRefs, input.correctionRef])] });
+  }
   get(id: string): Promise<EvolutionCandidate> { return this.repository.get(id); }
   list(): Promise<EvolutionCandidate[]> { return this.repository.list(); }
   evaluate(id: string, input: unknown): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.evaluate(candidate, evaluationInputSchema.parse(input) as EvolutionEvaluation)); }

@@ -43,6 +43,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 - `GET /api/status`
 - `GET /api/runs`
 - `GET /api/runs/:id`
+- `POST /api/runs/:id/corrections`（把带证据引用的用户纠正转为受治理 RSI candidate）
 - `GET /api/runs/:id/graphs`
 - `POST /api/runs`
 - `POST /api/runs/:id/approve|pause|resume|cancel|answer|retry|reconcile|dispatch`
@@ -58,7 +59,7 @@ Knowledge 可以通过 `AEEIS_KNOWLEDGE_URL` 接入受 HTTPS 保护的服务，�
 
 创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems` 和 `brainScope`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；没有配置对应 Provider 时会明确失败。
 
-RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`。默认必须分别通过 replay、holdout、safety 三道评测门；失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
+RSI candidate API 只管理有证据的变更候选：`proposed → evaluating → approved → promoted`。Run 的 `/corrections` 入口会校验纠正引用是否来自该 Run 的真实上下文、产物、Receipt 或模型调用，再创建绑定 correction 引用的 candidate。默认必须分别通过 replay、holdout、safety 三道评测门；失败评测会进入 `held`，也可以显式 rollback。它目前是受治理的候选生命周期，不会自动修改生产 Agent。
 
 竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。当前这些 API 提供可靠的协作状态平面，真正的内部 Agent pool、飞书投影和外部自动调度仍需接入。
 

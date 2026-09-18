@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { AgentEngine, Conflict, event } from './engine.js';
@@ -193,6 +194,27 @@ export function buildApp(options: Options) {
   });
   app.get('/api/runs', async () => (await options.repository.list()).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, goal, goalId, domainPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), status, updatedAt })));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => options.repository.get(request.params.id));
+  app.post<{ Params: { id: string } }>('/api/runs/:id/corrections', async request => {
+    if (!options.rsi) throw new Error('RSI service is not configured');
+    const run = await options.repository.get(request.params.id);
+    const body = z.object({ target: z.enum(['profile', 'skill', 'prompt', 'workflow', 'tool-policy', 'model-policy']), baseVersion: z.string().min(1).max(200), proposedVersion: z.string().min(1).max(200), change: z.string().min(1).max(8000), reason: z.string().min(1).max(4000), risk: z.enum(['low', 'medium', 'high']), sourceReceiptRefs: z.array(z.string().min(1).max(200)).min(1).max(100) }).strict().parse(request.body);
+    const evidenceRefs = new Set<string>([
+      ...run.context.sources.map(source => source.id),
+      ...run.artifacts.map(artifact => artifact.id),
+      ...(run.toolReceipts ?? []).map(receipt => receipt.receiptId),
+      ...(run.delegationOutcomes ?? []).map(outcome => outcome.receiptRef),
+      ...run.calls.map(call => call.id),
+    ]);
+    if (body.sourceReceiptRefs.some(ref => !evidenceRefs.has(ref))) throw new Conflict('Correction references evidence that this Run did not receive');
+    const correctionId = `correction_${randomUUID()}`;
+    const candidate = await options.rsi.proposeFromCorrection({ ...body, correctionRef: correctionId });
+    const updated = await options.repository.mutate(run.id, current => {
+      current.corrections ??= [];
+      current.corrections.push({ id: correctionId, text: body.reason, candidateId: candidate.id, sourceRefs: body.sourceReceiptRefs, createdAt: new Date().toISOString() });
+      event(current, 'rsi.correction.recorded', { correctionId, candidateId: candidate.id, sourceReceiptRefs: body.sourceReceiptRefs });
+    });
+    return { correction: updated.corrections?.at(-1), candidate };
+  });
   app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => projectRunGraphs(await options.repository.get(request.params.id)));
   async function notify(id: string): Promise<void> {
     try { await options.dispatcher?.notify(id); }

@@ -59,6 +59,7 @@ export interface ModelCall {
   usage?: { inputTokens: number; outputTokens: number };
 }
 export interface Event { id: string; seq: number; type: string; at: string; data: Record<string, unknown> }
+export interface RunCorrection { id: string; text: string; candidateId?: string; sourceRefs: string[]; createdAt: string }
 export interface Step {
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
@@ -83,6 +84,7 @@ export interface AgentRun {
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
   steps: Step[]; artifacts: Artifact[]; events: Event[];
+  corrections?: RunCorrection[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };
   question?: { taskId: string; text: string };
   answers: Array<{ taskId: string; question: string; answer: string }>;
