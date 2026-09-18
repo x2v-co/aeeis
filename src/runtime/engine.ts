@@ -54,6 +54,7 @@ export class AgentEngine {
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   async create(input: unknown, owner = 'owner'): Promise<AgentRun> {
     const request = requestSchema.parse(input);
+    if (request.goalId && !this.domain) throw new Error('goalId was provided but the Goal domain service is not configured');
     if (request.goalId && this.domain && this.domain.getGoal(request.goalId).status !== 'active') throw new Error('Runs can only be started for active Goals');
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy };
     const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };

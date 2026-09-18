@@ -125,6 +125,13 @@ class DelegationFixture implements ModelAdapter {
 }
 
 describe('AEEIS runtime', () => {
+  it('does not accept a Goal reference without the Goal domain service', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, new PlanningFixture());
+    await expect(engine.create({ goal: 'Detached', goalId: 'goal_missing' })).rejects.toThrow('domain service');
+    await repo.close();
+  });
+
   it('links a Goal run to a durable domain Plan and task receipts', async () => {
     const repo = await repository();
     const domainStore = new JsonFileStore(join(await mkdtemp(join(tmpdir(), 'aeeis-domain-runtime-')), 'domain.json'));
