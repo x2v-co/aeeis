@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
+import { createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
+import { AgentDirectory, AgentGateway, HttpAgentTransport } from '../src/agent-gateway.js';
 import { createContextPack, type AgentCard, type DelegationGrant, type TaskBrief } from '../src/protocol.js';
 import type { AgentTransport, AgentTransportResponse, DelegationRequest } from '../src/agent-gateway.js';
 
@@ -53,5 +55,24 @@ describe('external Agent gateway', () => {
     expect((await gateway.delegate(request)).status).toBe('unknown');
     expect((await gateway.reconcile(request.idempotencyKey)).status).toBe('completed');
     expect(submits).toBe(1); expect(reconciles).toBe(1);
+  });
+
+  it('signs requests and verifies signed responses for signed Agent Cards', async () => {
+    const key = 'test-signing-secret-0123456789';
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString('utf8'); const timestamp = request.headers['x-aeeis-timestamp']; const signature = request.headers['x-aeeis-signature'];
+      expect(typeof timestamp).toBe('string'); expect(signature).toBe(createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex'));
+      const output = JSON.stringify({ status: 'completed', receiptRef: 'receipt.signed', result: result() }); const responseTimestamp = String(Date.now());
+      response.setHeader('content-type', 'application/json'); response.setHeader('x-aeeis-timestamp', responseTimestamp); response.setHeader('x-aeeis-signature', createHmac('sha256', key).update(`${responseTimestamp}.${output}`).digest('hex')); response.end(output);
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('Server did not bind');
+    const signedCard: AgentCard = { ...card, auth: ['signed_request'], endpoint: `http://127.0.0.1:${address.port}` };
+    const transport = new HttpAgentTransport(5_000, undefined, { [signedCard.agentId]: key });
+    const request: DelegationRequest = { agentId: signedCard.agentId, taskBrief: brief, contextPack: context, grant, mode: 'sync', idempotencyKey: 'delegation-signed' };
+    expect((await transport.submit(signedCard, request)).status).toBe('completed');
+    await new Promise<void>(resolve => server.close(() => resolve()));
   });
 });

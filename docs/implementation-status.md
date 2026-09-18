@@ -12,7 +12,7 @@
 | unknown / pause / cancel / restart | 已实现并测试 | 不明模型结果需要显式 reconcile，避免盲重试 |
 | Brain claim、provenance、grant、撤销 | 核心语义已实现 | `FileBrainStore` 已提供原子持久化、审计、导出和 scope 删除；尚未接入向量检索 |
 | Agent 协议 | schema 与校验已实现 | Agent Card、Task Brief、Context Pack、Grant、Result Envelope |
-| 外部 Agent Gateway | 已实现本地目录、HTTP sync/async/stream 委托端口、上下文/Grant 校验、幂等、unknown/reconcile、Result Envelope 验证，并接入 Runtime Executor；delegation receipt 持久化支持重启恢复 | 尚未接入 Web 工作台、生产签名/OAuth 适配器和真实外部 Agent |
+| 外部 Agent Gateway | 已实现本地目录、HTTP sync/async/stream 委托端口、上下文/Grant 校验、幂等、unknown/reconcile、Result Envelope 验证，并接入 Runtime Executor；delegation receipt 持久化支持重启恢复；新增按 Agent ID 配置的 HMAC signed request/response 验证 | 尚未接入 Web 工作台、OAuth 适配器和真实外部 Agent 的生产验收 |
 | toolkit_new | manifest、版本冻结、allowlist、幂等 invoke、Receipt、unknown/reconcile HTTP 端口已实现 | 尚未绑定 toolkit_new 的部署实例和真实工具调用；生产凭证与 ACL 未验收 |
 | ownhow | CLI governance adapter 已实现；Run 创建时 resolve，结果进入 Planner/Executor/Reviewer 上下文，结束后 record | Apply 仍需显式授权；真实 CLI 版本和治理闭环未验收 |
 | planprice | HTTP catalog adapter 已实现；按 capability/隐私筛选并锁定 provider/model/endpoint/价格决策 | 目录数据不等于调用凭证；provider endpoint/key 仍需配置，真实服务未验收 |

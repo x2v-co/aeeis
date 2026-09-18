@@ -40,7 +40,16 @@ try {
     if (!Array.isArray(cards)) throw new Error('AEEIS_AGENT_CARDS must be a JSON array');
     const directory = new AgentDirectory();
     for (const card of cards) directory.register(agentCardSchema.parse(card));
-    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN));
+    let signingKeys: Record<string, string> = {};
+    if (process.env.AEEIS_AGENT_SIGNING_KEYS) {
+      const parsed: unknown = JSON.parse(process.env.AEEIS_AGENT_SIGNING_KEYS);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AEEIS_AGENT_SIGNING_KEYS must be a JSON object');
+      signingKeys = Object.fromEntries(Object.entries(parsed).map(([key, value]) => {
+        if (typeof value !== 'string' || value.length < 16) throw new Error('Agent signing keys must be strings of at least 16 characters');
+        return [key, value];
+      }));
+    }
+    agents = new AgentGateway(directory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys));
   }
   const knowledge = process.env.AEEIS_KNOWLEDGE_URL
     ? new HttpKnowledgeProvider(process.env.AEEIS_KNOWLEDGE_URL, process.env.AEEIS_KNOWLEDGE_TOKEN)

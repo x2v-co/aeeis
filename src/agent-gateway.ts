@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
   acknowledgementSchema,
@@ -140,32 +140,43 @@ export class AgentGateway {
 }
 
 export class HttpAgentTransport implements AgentTransport {
-  constructor(private readonly timeoutMs = 60_000, private readonly bearerToken?: string) {}
+  constructor(private readonly timeoutMs = 60_000, private readonly bearerToken?: string, private readonly signingKeys: Readonly<Record<string, string>> = {}) {}
 
   async submit(card: AgentCard, request: DelegationRequest): Promise<AgentTransportResponse> {
     if (!card.endpoint) throw new Error('Agent Card has no endpoint');
     this.checkAuth(card);
-    return this.send(card.endpoint, { schemaVersion: 'agent-task/1', ...request });
+    return this.send(card, { schemaVersion: 'agent-task/1', ...request });
   }
 
   async reconcile(card: AgentCard, request: DelegationRequest, receipt: DelegationReceipt): Promise<AgentTransportResponse> {
     if (!card.endpoint) throw new Error('Agent Card has no endpoint');
     this.checkAuth(card);
-    return this.send(card.endpoint, { schemaVersion: 'agent-reconcile/1', ...request, receipt });
+    return this.send(card, { schemaVersion: 'agent-reconcile/1', ...request, receipt });
   }
 
   private checkAuth(card: AgentCard): void {
-    if (card.auth.includes('signed_request') || card.auth.includes('oauth')) throw new Error('HTTP Agent transport requires a dedicated signed/OAuth adapter for this Agent Card');
+    if (card.auth.includes('signed_request') && !this.signingKeys[card.agentId]) throw new Error('Agent Card requires a signing key');
+    if (card.auth.includes('oauth')) throw new Error('HTTP Agent transport requires a dedicated OAuth adapter for this Agent Card');
     if (card.auth.includes('bearer') && !this.bearerToken) throw new Error('Agent Card requires a bearer token');
   }
 
-  private async send(endpoint: string, body: unknown): Promise<AgentTransportResponse> {
-    const url = new URL(endpoint);
+  private async send(card: AgentCard, body: unknown): Promise<AgentTransportResponse> {
+    if (!card.endpoint) throw new Error('Agent Card has no endpoint');
+    const url = new URL(card.endpoint);
     if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('External Agent endpoint must use HTTPS except loopback');
     if (url.username || url.password || url.hash) throw new Error('External Agent endpoint must not contain credentials or fragments');
+    const serialized = JSON.stringify(body);
+    const timestamp = String(Date.now());
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
+    if (card.auth.includes('signed_request')) {
+      const key = this.signingKeys[card.agentId]!;
+      headers['x-aeeis-timestamp'] = timestamp;
+      headers['x-aeeis-signature'] = sign(key, timestamp, serialized);
+    }
     let response: Response;
     try {
-      response = await fetch(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs), headers: { 'content-type': 'application/json', ...(this.bearerToken ? { authorization: `Bearer ${this.bearerToken}` } : {}) }, body: JSON.stringify(body) });
+      response = await fetch(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs), headers, body: serialized });
     } catch {
       return { status: 'unknown', receiptRef: 'receipt_' + randomUUID() };
     }
@@ -173,9 +184,22 @@ export class HttpAgentTransport implements AgentTransport {
       if (response.status >= 500 || response.status === 408 || response.status === 429) return { status: 'unknown', receiptRef: 'receipt_' + randomUUID() };
       throw new Error('External Agent rejected the delegation with HTTP ' + response.status);
     }
-    const parsed = responseSchema.parse(await response.json());
+    const raw = await response.text();
+    if (card.auth.includes('signed_request')) verifySignature(this.signingKeys[card.agentId]!, response.headers, raw);
+    const parsed = responseSchema.parse(JSON.parse(raw));
     return { status: parsed.status, receiptRef: parsed.receiptRef, ...(parsed.acknowledgement ? { acknowledgement: parsed.acknowledgement } : {}), ...(parsed.result ? { result: parsed.result } : {}) };
   }
+}
+
+function sign(key: string, timestamp: string, body: string): string {
+  return createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex');
+}
+
+function verifySignature(key: string, headers: Headers, body: string): void {
+  const timestamp = headers.get('x-aeeis-timestamp'); const received = headers.get('x-aeeis-signature');
+  if (!timestamp || !received || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000 || !/^\d+$/.test(timestamp)) throw new Error('Signed Agent response is missing or expired');
+  const expected = sign(key, timestamp, body); const left = Buffer.from(expected); const right = Buffer.from(received);
+  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new Error('Signed Agent response failed verification');
 }
 
 const responseSchema = z.object({
