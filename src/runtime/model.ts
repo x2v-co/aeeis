@@ -29,7 +29,7 @@ export class AgentpayModelAdapter implements ModelAdapter {
   readonly pin: ModelPin;
   private requestId = 0;
   private initialized?: Promise<void>;
-  constructor(private readonly mcpUrl: string, private readonly token: string, model: string, private readonly maxCredits: number, private readonly timeoutMs = 120_000) {
+  constructor(private readonly mcpUrl: string, private readonly token: string, model: string, private readonly maxCredits: number, private readonly timeoutMs = 120_000, private readonly catalogUrl?: string, private readonly catalogToken?: string) {
     const url = new URL(mcpUrl);
     if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Agentpay MCP URL must use HTTPS except loopback');
     if (!token || !Number.isFinite(maxCredits) || maxCredits <= 0 || maxCredits > 100) throw new Error('Agentpay credentials and max credits are required');
@@ -47,6 +47,14 @@ export class AgentpayModelAdapter implements ModelAdapter {
   async health() { const checkedAt = new Date().toISOString(); try { await this.init(); return { ready: true, detail: 'Agentpay MCP reachable', checkedAt }; } catch { return { ready: false, detail: 'Agentpay MCP unavailable', checkedAt }; } }
   async complete(request: ModelRequest): Promise<ModelResponse> {
     await this.init();
+    if (this.catalogUrl) {
+      const catalog = new URL('/v1/catalog/models', this.catalogUrl);
+      const response = await fetch(catalog, { redirect: 'error', signal: AbortSignal.timeout(10_000), headers: this.catalogToken ? { authorization: `Bearer ${this.catalogToken}` } : {} });
+      if (!response.ok) throw new ModelOutcomeUnknown(`Planprice catalog returned HTTP ${response.status}; reconcile before purchasing`);
+      const body = await response.json() as any;
+      const offering = (body.offerings || []).find((item: any) => item.modelId === this.pin.model || item.slug === this.pin.model);
+      if (!offering || offering.catalogStatus === 'unavailable') throw new Error(`Planprice has no available offering for ${this.pin.model}`);
+    }
     const purchaseId = `aeeis_${createHash('sha256').update(request.idempotencyKey ?? randomUUID()).digest('hex').slice(0, 48)}`;
     const prompt = `${request.system}\n\n${JSON.stringify(request.input)}`;
     const result = await this.rpc('tools/call', { name: 'agentpay_credit_purchase', arguments: { request: { purchaseId, paymentMethod: 'toolkit_credits', prompt, outputCap: 4096, model: this.pin.model, maxCredits: this.maxCredits } } }, this.timeoutMs);

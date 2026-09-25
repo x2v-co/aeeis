@@ -361,7 +361,7 @@ try {
   if (process.env.AEEIS_AGENTPAY_MCP_URL && process.env.AEEIS_AGENTPAY_TOKEN && process.env.AEEIS_MODEL) {
     const maxCredits = Number(process.env.AEEIS_AGENTPAY_MAX_CREDITS ?? '1');
     if (!Number.isFinite(maxCredits) || maxCredits <= 0 || maxCredits > 100) throw new Error('AEEIS_AGENTPAY_MAX_CREDITS must be between 0 and 100');
-    const model = new AgentpayModelAdapter(process.env.AEEIS_AGENTPAY_MCP_URL, process.env.AEEIS_AGENTPAY_TOKEN, process.env.AEEIS_MODEL, maxCredits);
+    const model = new AgentpayModelAdapter(process.env.AEEIS_AGENTPAY_MCP_URL, process.env.AEEIS_AGENTPAY_TOKEN, process.env.AEEIS_MODEL, maxCredits, 120_000, process.env.AEEIS_PLANPRICE_URL, process.env.AEEIS_PLANPRICE_BEARER_TOKEN);
     modelServices = { model }; rsiModelResolver = new StaticModelResolver(model);
   } else if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
     const model = new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '', undefined, 60_000, process.env.AEEIS_MODEL_HEALTH_URL, process.env.AEEIS_MODEL_ALLOW_INSECURE_HTTP === '1');
