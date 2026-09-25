@@ -1,0 +1,940 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Planprice Catalog — G2 draft
+  version: 1.0.0-draft.1
+  description: MRD v0.4 design, not frozen or implemented. Production requires
+    catalog:read Bearer. Explicit sandbox-only anonymous profile described in
+    x-sandbox-profile. Any query parameter returns 400; Accept absent, */*, or
+    application/json is supported; other Accept returns 406. Unknown paths/URL
+    versions return 404 resource_not_found. Error responses use
+    planprice-error/1; ready 503 is planprice-health/1.
+servers:
+  - url: https://catalog.planprice.example
+    description: Placeholder; production origin pending Planprice confirmation.
+security:
+  - bearerCatalogRead: []
+paths:
+  /v1/catalog/models:
+    get:
+      operationId: getCurrentCatalog
+      description: Full snapshot only; any query parameter returns 400. No pagination,
+        filtering or content truncation. Authenticate before ETag handling.
+      security:
+        - bearerCatalogRead: []
+      parameters:
+        - &a7
+          name: X-Request-Id
+          in: header
+          required: false
+          description: Invalid or absent value is replaced; not a 400.
+          schema:
+            type: string
+        - &a8
+          name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Evaluate after authentication and (for current catalog) freshness.
+            304 does not extend payload expiry.
+      responses:
+        "200":
+          description: Full immutable snapshot.
+          headers:
+            X-Request-Id: &a1
+              description: Echo a valid caller ID or generate UUID.
+              schema:
+                type: string
+                pattern: ^[A-Za-z0-9_-]{1,64}$
+            Cache-Control: &a2
+              description: Authorization-scoped application storage; HTTP must revalidate.
+              schema:
+                const: private, no-cache, must-revalidate
+            ETag: &a3
+              description: Weak ETag of complete JCS snapshot digest.
+              schema:
+                type: string
+                pattern: ^W/"sha256:[a-f0-9]{64}"$
+            Vary: &a4
+              description: Representation access depends on authorization.
+              schema:
+                const: Authorization, Accept
+          content:
+            application/json:
+              schema:
+                $ref: ../schemas/catalog-1.schema.json
+        "304":
+          description: Unchanged full snapshot. No body; expiry is NOT extended.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a2
+            ETag: *a3
+            Vary: *a4
+        "400":
+          description: invalid_query
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: &a5
+              description: Never cache this response.
+              schema:
+                const: no-store
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: invalid_query
+        "401":
+          description: unauthorized
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: unauthorized
+        "403":
+          description: forbidden
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: forbidden
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+        "406":
+          description: not_acceptable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: not_acceptable
+        "429":
+          description: rate_limited
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: &a6
+              description: Positive integer seconds. Required on 429; optional on 502/503 only
+                with known recovery estimate.
+              schema:
+                type: string
+                pattern: ^[1-9][0-9]*$
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: rate_limited
+        "500":
+          description: internal_error
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: internal_error
+        "502":
+          description: upstream_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: upstream_unavailable
+        "503":
+          description: catalog_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: catalog_unavailable
+    post: &rejectReadOnlyMethod
+      security: []
+      description: Read origin is read-only; write methods never forward credentials.
+      responses:
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+    put: *rejectReadOnlyMethod
+    patch: *rejectReadOnlyMethod
+    delete: *rejectReadOnlyMethod
+  /v1/catalog/snapshots/{catalogVersion}:
+    parameters:
+      - name: catalogVersion
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$
+    get:
+      operationId: getCatalogSnapshot
+      description: Full snapshot only; any query parameter returns 400. No pagination,
+        filtering or content truncation. Authenticate before ETag handling.
+      security:
+        - bearerCatalogRead: []
+      parameters:
+        - *a7
+        - *a8
+      responses:
+        "200":
+          description: Full immutable snapshot.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a2
+            ETag: *a3
+            Vary: *a4
+          content:
+            application/json:
+              schema:
+                $ref: ../schemas/catalog-1.schema.json
+        "304":
+          description: Unchanged full snapshot. No body; expiry is NOT extended.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a2
+            ETag: *a3
+            Vary: *a4
+        "400":
+          description: invalid_query
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: invalid_query
+        "401":
+          description: unauthorized
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: unauthorized
+        "403":
+          description: forbidden
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: forbidden
+        "404":
+          description: snapshot_not_found
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: snapshot_not_found
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+        "406":
+          description: not_acceptable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: not_acceptable
+        "429":
+          description: rate_limited
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: rate_limited
+        "500":
+          description: internal_error
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: internal_error
+        "502":
+          description: upstream_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: upstream_unavailable
+        "503":
+          description: catalog_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: catalog_unavailable
+    post: *rejectReadOnlyMethod
+    put: *rejectReadOnlyMethod
+    patch: *rejectReadOnlyMethod
+    delete: *rejectReadOnlyMethod
+  /v1/exchange-rates:
+    get:
+      operationId: getExchangeRates
+      security:
+        - bearerCatalogRead: []
+      parameters: &a9
+        - *a7
+      responses:
+        "200":
+          description: Valid USD quotes. No-store; immutable selected FX is embedded in
+            catalog.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                $ref: ../schemas/fx-1.schema.json
+        "400":
+          description: invalid_query
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: invalid_query
+        "401":
+          description: unauthorized
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: unauthorized
+        "403":
+          description: forbidden
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: forbidden
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+        "406":
+          description: not_acceptable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: not_acceptable
+        "429":
+          description: rate_limited
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: rate_limited
+        "500":
+          description: internal_error
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: internal_error
+        "502":
+          description: upstream_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: upstream_unavailable
+        "503":
+          description: catalog_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: catalog_unavailable
+    post:
+      operationId: rejectExchangeRatespost
+      security: []
+      responses:
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+      description: Read origin never forwards write requests or credentials to
+        management origin.
+    put:
+      operationId: rejectExchangeRatesput
+      security: []
+      responses:
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+      description: Read origin never forwards write requests or credentials to
+        management origin.
+    patch:
+      operationId: rejectExchangeRatespatch
+      security: []
+      responses:
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+      description: Read origin never forwards write requests or credentials to
+        management origin.
+    delete:
+      operationId: rejectExchangeRatesdelete
+      security: []
+      responses:
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+      description: Read origin never forwards write requests or credentials to
+        management origin.
+  /v1/health/live:
+    get:
+      operationId: healthLive
+      security: []
+      parameters: *a9
+      responses:
+        "200":
+          description: Process alive; minimum anonymous response.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/health-1.schema.json
+                  - type: object
+                    properties:
+                      status:
+                        const: alive
+        "400":
+          description: invalid_query
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: invalid_query
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+        "406":
+          description: not_acceptable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: not_acceptable
+      description: No database or model calls. Connection failures and proxy 502/503
+        are not application health bodies.
+    post: *rejectReadOnlyMethod
+    put: *rejectReadOnlyMethod
+    patch: *rejectReadOnlyMethod
+    delete: *rejectReadOnlyMethod
+  /v1/health/ready:
+    get:
+      operationId: healthReady
+      security:
+        - bearerCatalogRead: []
+      parameters: *a9
+      responses:
+        "200":
+          description: Database and current catalog ready; valid empty catalog is ready.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/health-1.schema.json
+                  - type: object
+                    properties:
+                      status:
+                        const: ready
+        "400":
+          description: invalid_query
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: invalid_query
+        "401":
+          description: unauthorized
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: unauthorized
+        "403":
+          description: forbidden
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: forbidden
+        "405":
+          description: method_not_allowed
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Allow:
+              description: Read-only endpoint
+              schema:
+                const: GET
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: method_not_allowed
+        "406":
+          description: not_acceptable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: not_acceptable
+        "429":
+          description: rate_limited
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: rate_limited
+        "500":
+          description: internal_error
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: internal_error
+        "502":
+          description: upstream_unavailable
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/error-1.schema.json
+                  - type: object
+                    properties:
+                      code:
+                        const: upstream_unavailable
+        "503":
+          description: Database unavailable or catalog missing/not-effective/expired.
+            Health envelope exception.
+          headers:
+            X-Request-Id: *a1
+            Cache-Control: *a5
+            Retry-After: *a6
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: ../schemas/health-1.schema.json
+                  - type: object
+                    properties:
+                      status:
+                        const: not_ready
+    post: *rejectReadOnlyMethod
+    put: *rejectReadOnlyMethod
+    patch: *rejectReadOnlyMethod
+    delete: *rejectReadOnlyMethod
+components:
+  securitySchemes:
+    bearerCatalogRead:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: scope catalog:read; historical snapshots also require audience
+        permission. Not a management credential.
+x-sandbox-profile:
+  description: Explicit development/sandbox deployment may remove bearer
+    requirements for read endpoints. Production intranet is not exempt. This
+    requires an environment-specific spec overlay; no anonymous fallback in
+    production.
+x-management-origin:
+  url: https://manage.planprice.example
+  path: /admin/v1/exchange-rates
+  status: pending-provider-confirmation
+  description: Separate HTTPS host, separate management credential. Management API
+    schema is a G3 implementation item; this read spec grants no management
+    route.

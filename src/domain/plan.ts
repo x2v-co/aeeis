@@ -50,10 +50,13 @@ export function createPlan(
     return {
       id: input.id,
       title: input.title,
+      ...(input.instruction ? { instruction: input.instruction } : {}),
       kind: input.kind ?? "task",
       dependsOn,
       status: dependsOn.length === 0 ? "ready" : "planned",
       attempt: 0,
+      ...(input.evidenceRefs?.length ? { evidenceRefs: [...new Set(input.evidenceRefs)] } : {}),
+      ...(input.evidenceRunId ? { evidenceRunId: input.evidenceRunId } : {}),
     };
   });
 

@@ -3,33 +3,45 @@ import type { ModelPin } from './contracts.js';
 
 export interface ModelRequest { system: string; input: unknown; idempotencyKey?: string }
 export interface ModelResponse { value: unknown; usage?: { inputTokens: number; outputTokens: number } }
-export interface ModelHealth { ready: boolean; detail: string; checkedAt: string }
+export interface ModelHealth {
+  ready: boolean;
+  detail: string;
+  checkedAt: string;
+  /** When dynamic routing is enabled, preserve the catalog dependency result separately. */
+  catalog?: { ready: boolean; detail: string; checkedAt?: string };
+  /** When dynamic routing is enabled, preserve the selected provider result separately. */
+  provider?: { ready: boolean; detail: string; checkedAt?: string };
+}
 export interface ModelAdapter {
   readonly pin: ModelPin;
   complete(request: ModelRequest): Promise<ModelResponse>;
   health?(): Promise<ModelHealth>;
 }
 export class ModelOutcomeUnknown extends Error {}
+/** A completed provider response may be billable even if its output is unusable. */
+export class ModelResponseRejected extends Error {
+  constructor(message: string, readonly usage?: ModelResponse['usage']) { super(message); }
+}
 const envelope = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().min(1) }), finish_reason: z.string().nullable() })).min(1),
-  usage: z.object({ prompt_tokens: z.number().nonnegative(), completion_tokens: z.number().nonnegative() }).optional(),
+  usage: z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative() }).optional(),
 });
 
 // OpenAI-compatible chat transport; no credentials or provider response bodies enter public errors.
 export class HttpModelAdapter implements ModelAdapter {
   readonly pin: ModelPin;
   private readonly healthEndpoint?: string;
-  constructor(baseUrl: string, model: string, private apiKey: string, provider?: string, private requestTimeoutMs = 60000, healthUrl?: string) {
+  constructor(baseUrl: string, model: string, private apiKey: string, provider?: string, private requestTimeoutMs = 60000, healthUrl?: string, allowInsecureHttp = false, pinOverrides?: Partial<ModelPin>) {
     const url = new URL(baseUrl);
     if (url.username || url.password || url.search || url.hash) throw new Error('Model endpoint must not contain credentials, query or fragment');
-    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+    if (url.protocol !== 'https:' && !(allowInsecureHttp || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) {
       throw new Error('Model endpoint must use HTTPS (except loopback development servers)');
     }
-    this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}) };
+    this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
     if (healthUrl) {
       const health = new URL(healthUrl);
       if (health.username || health.password || health.search || health.hash) throw new Error('Model health endpoint must not contain credentials, query or fragment');
-      if (health.protocol !== 'https:' && !(health.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(health.hostname))) throw new Error('Model health endpoint must use HTTPS (except loopback development servers)');
+      if (health.protocol !== 'https:' && !(allowInsecureHttp || (health.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(health.hostname)))) throw new Error('Model health endpoint must use HTTPS (except loopback development servers)');
       this.healthEndpoint = health.href;
     }
   }
@@ -70,8 +82,11 @@ export class HttpModelAdapter implements ModelAdapter {
       chunks.push(value);
     }
     const raw = envelope.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    if (raw.choices[0]!.finish_reason !== 'stop') throw new Error('Model response is incomplete');
-    return { value: JSON.parse(raw.choices[0]!.message.content),
-      ...(raw.usage ? { usage: { inputTokens: raw.usage.prompt_tokens, outputTokens: raw.usage.completion_tokens } } : {}) };
+    const usage = raw.usage ? { inputTokens: raw.usage.prompt_tokens, outputTokens: raw.usage.completion_tokens } : undefined;
+    if (raw.choices[0]!.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage);
+    let value: unknown;
+    try { value = JSON.parse(raw.choices[0]!.message.content); }
+    catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage); }
+    return { value, ...(usage ? { usage } : {}) };
   }
 }

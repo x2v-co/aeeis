@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/error-1.schema.json",
+  "title": "error-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "planprice-error/1"
+    },
+    "code": {
+      "type": "string",
+      "enum": [
+        "invalid_query",
+        "unauthorized",
+        "forbidden",
+        "snapshot_not_found",
+        "resource_not_found",
+        "method_not_allowed",
+        "not_acceptable",
+        "rate_limited",
+        "upstream_unavailable",
+        "catalog_unavailable",
+        "internal_error"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "code",
+    "message",
+    "retryable",
+    "requestId"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "rate_limited",
+              "upstream_unavailable",
+              "catalog_unavailable"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "retryable": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "retryable": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

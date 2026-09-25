@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/aeeis-model-pin-1.schema.json",
+  "title": "aeeis-model-pin-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "endpoint": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "schemaVersion": {
+      "const": "aeeis-model-pin/1"
+    },
+    "routingMode": {
+      "type": "string",
+      "enum": [
+        "catalog",
+        "compatibility",
+        "static"
+      ]
+    },
+    "offeringId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modelId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modelVersion": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "versionStatus": {
+      "type": "string",
+      "enum": [
+        "pinned",
+        "rolling",
+        "unknown"
+      ]
+    },
+    "providerId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "channelId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "regionSetId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pricingVariantId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "catalogVersion": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "catalogDigest": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "catalogHash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "candidateOfferings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "offeringId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+          },
+          "offeringHash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": ["offeringId", "offeringHash"]
+      }
+    },
+    "catalogRetrievedAt": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "catalogArtifactRef": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "endpointRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "requestModel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "mappingVersion": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "resolvedEndpointHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "promptVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "routingPolicyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "selectedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "pricingSnapshot": {
+      "$ref": "https://contracts.aeeis.dev/planprice/1/schemas/pricing-1.schema.json"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "routingMode",
+    "offeringId",
+    "modelId",
+    "modelVersion",
+    "versionStatus",
+    "providerId",
+    "channelId",
+    "regionSetId",
+    "pricingVariantId",
+    "catalogVersion",
+    "catalogDigest",
+    "catalogHash",
+    "candidateOfferings",
+    "catalogRetrievedAt",
+    "catalogArtifactRef",
+    "endpointRef",
+    "requestModel",
+    "mappingVersion",
+    "resolvedEndpointHash",
+    "promptVersion",
+    "routingPolicyVersion",
+    "selectedAt",
+    "pricingSnapshot"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "versionStatus": {
+            "const": "pinned"
+          }
+        },
+        "required": [
+          "versionStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "modelVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "modelVersion": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "routingMode": {
+            "const": "catalog"
+          }
+        },
+        "required": [
+          "routingMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "offeringId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "modelId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "providerId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "channelId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "regionSetId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "pricingVariantId": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "catalogVersion": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "catalogDigest": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "catalogHash": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "candidateOfferings": {
+            "minItems": 1
+          },
+          "catalogRetrievedAt": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "catalogArtifactRef": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "offeringId": {
+            "type": "null"
+          },
+          "modelId": {
+            "type": "null"
+          },
+          "providerId": {
+            "type": "null"
+          },
+          "channelId": {
+            "type": "null"
+          },
+          "regionSetId": {
+            "type": "null"
+          },
+          "pricingVariantId": {
+            "type": "null"
+          },
+          "catalogVersion": {
+            "type": "null"
+          },
+          "catalogDigest": {
+            "type": "null"
+          },
+          "catalogHash": {
+            "type": "null"
+          },
+          "catalogRetrievedAt": {
+            "type": "null"
+          },
+          "catalogArtifactRef": {
+            "type": "null"
+          },
+          "candidateOfferings": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}

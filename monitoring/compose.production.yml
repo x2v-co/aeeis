@@ -1,0 +1,27 @@
+# Standalone monitoring deployment for an already configured HTTPS AEEIS host.
+# This does not start the development fixtures or configure the AEEIS server.
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ${AEEIS_PROMETHEUS_CONFIG_FILE:?Set the absolute path of your configured production YAML}:/etc/prometheus/prometheus.yml:ro
+      - ./alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    secrets:
+      - source: metrics-token
+        target: /etc/prometheus/secrets/aeeis-metrics.token
+      - source: metrics-ca
+        target: /etc/prometheus/tls/aeeis-ca.crt
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+secrets:
+  metrics-token:
+    file: ${AEEIS_METRICS_TOKEN_FILE:?Set the absolute path of the operator token file}
+  metrics-ca:
+    file: ${AEEIS_METRICS_CA_FILE:?Set the absolute path of the trusted CA PEM file}
+volumes:
+  prometheus-data:

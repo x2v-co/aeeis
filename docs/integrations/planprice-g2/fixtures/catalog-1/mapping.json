@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "aeeis-model-mapping/1",
+  "mappingVersion": "mapping-example-1",
+  "mappings": [
+    {
+      "offeringId": "off_example_001",
+      "endpointRef": "provider:sample-provider/channel:standard",
+      "requestModel": "vendor-real-model-2026-05",
+      "credentialRef": "secret://aeeis/provider/sample"
+    }
+  ]
+}

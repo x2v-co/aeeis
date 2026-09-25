@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { projectRunGraphs } from '../src/runtime/graphs.js';
+import { comparePlans, projectRunGraphs } from '../src/runtime/graphs.js';
 import type { AgentRun } from '../src/runtime/contracts.js';
 
 const run = {
@@ -16,5 +16,72 @@ describe('run graph projections', () => {
       { from: 'source.graph', to: 'artifact.graph', type: 'supports' },
       { from: 'model.graph', to: 'artifact.graph', type: 'generated' },
     ]));
+  });
+
+  it('keeps adjacent plan versions available for a diff view', () => {
+    const revised = structuredClone(run) as AgentRun;
+    revised.plans = [
+      ...run.plans,
+      {
+        ...run.plans[0]!,
+        version: 2,
+        hash: 'f'.repeat(64),
+        nodes: [
+          { ...run.plans[0]!.nodes[0]!, title: 'Research sources' },
+          { id: 'review', title: 'Review', instruction: 'Check', dependsOn: ['research'] },
+          { ...run.plans[0]!.nodes[1]!, dependsOn: ['review'] },
+        ],
+      },
+    ];
+    const graphs = projectRunGraphs(revised);
+    expect(graphs.planHistory).toHaveLength(2);
+    expect(graphs.planHistory[1]?.nodes.map(node => node.id)).toEqual(['research', 'review', 'final']);
+    expect(graphs.planComparisons).toHaveLength(1);
+    expect(graphs.planComparisons[0]?.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'research', kind: 'modified', fields: ['title'] }),
+      expect.objectContaining({ taskId: 'review', kind: 'added' }),
+      expect.objectContaining({ taskId: 'final', kind: 'modified', fields: ['dependsOn'] }),
+    ]));
+    // A reused task ID in v2 must not assign its current status to v1.
+    expect(graphs.planHistory[0]?.nodes.every(node => node.status === undefined)).toBe(true);
+    expect(graphs.plan?.nodes[0]?.status).toBe('succeeded');
+  });
+
+  it('treats dependency order as equivalent and reports instruction changes', () => {
+    const before = { ...run.plans[0]!, nodes: [
+      run.plans[0]!.nodes[0]!,
+      { id: 'check', title: 'Check', instruction: 'Verify', dependsOn: [] },
+      { ...run.plans[0]!.nodes[1]!, dependsOn: ['research', 'check'] },
+    ] };
+    const after = { ...before, version: 2, hash: 'f'.repeat(64), nodes: before.nodes.map(node => node.id === 'final' ? { ...node, instruction: 'Write with citations', dependsOn: ['check', 'research'] } : node) };
+    const snapshot = structuredClone({ before, after });
+    const comparison = comparePlans(before, after);
+    expect(comparison.changes).toEqual([expect.objectContaining({ taskId: 'final', fields: ['instruction'] })]);
+    expect({ before, after }).toEqual(snapshot);
+    comparison.changes[0]!.before!.dependsOn.push('mutation');
+    expect({ before, after }).toEqual(snapshot);
+  });
+
+  it('reports removed tasks and summary-only revisions without invented changes', () => {
+    const before = run.plans[0]!;
+    const after = { ...before, version: 2, hash: 'f'.repeat(64), summary: 'Revised explanation' };
+    expect(comparePlans(before, after)).toMatchObject({
+      fromVersion: 1, toVersion: 2, fromHash: before.hash, toHash: after.hash,
+      summary: { before: before.summary, after: after.summary }, changes: [],
+    });
+    expect(comparePlans(before, { ...after, nodes: [before.nodes[0]!] }).changes).toEqual([
+      { taskId: 'final', kind: 'removed', fields: [], before: before.nodes[1] },
+    ]);
+    expect(comparePlans(before, { ...before, nodes: [...before.nodes].reverse() }).changes).toEqual([]);
+    expect(projectRunGraphs({ ...run, plans: [] }).planComparisons).toEqual([]);
+  });
+
+  it('excludes an isolated Tool receipt from the Evidence Graph', () => {
+    const isolated = structuredClone(run) as AgentRun;
+    isolated.toolReceipts = [{
+      schemaVersion: 'receipt/1', receiptId: 'receipt_00000000-0000-4000-8000-000000000001', provider: 'fixture', operation: 'lookup', requestHash: 'a'.repeat(64), inputRefs: ['research'], outputRefs: [], capabilitiesUsed: [], startedAt: '2026-09-18T00:00:00.000Z', status: 'completed',
+      authorization: { toolId: 'lookup', toolVersion: '1', taskId: 'research', capabilityGrant: 'run:graph:lookup', idempotencyKey: 'graph:lookup', decision: 'isolated', reason: 'cancelled', settledAt: '2026-09-18T00:00:01.000Z' },
+    }];
+    expect(projectRunGraphs(isolated).evidence.nodes.some(node => node.id === isolated.toolReceipts[0]!.receiptId)).toBe(false);
   });
 });

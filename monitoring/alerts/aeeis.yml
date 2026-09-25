@@ -1,0 +1,97 @@
+groups:
+  - name: aeeis-runtime
+    rules:
+      - alert: AeeisNotReady
+        expr: aeeis_readiness{job="aeeis"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: control-plane
+        annotations:
+          summary: AEEIS is not ready to execute work
+          description: AEEIS is reachable, but one or more required dependencies are unavailable.
+
+      - alert: AeeisTargetDown
+        expr: up{job="aeeis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: control-plane
+        annotations:
+          summary: AEEIS control plane is unreachable
+          description: Prometheus cannot scrape the AEEIS metrics endpoint for two minutes.
+
+      - alert: AeeisHttpServerErrors
+        expr: |
+          sum by (job, instance) (rate(aeeis_http_requests_total{job="aeeis",status=~"5.."}[5m]))
+            /
+          sum by (job, instance) (rate(aeeis_http_requests_total{job="aeeis"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: control-plane
+        annotations:
+          summary: AEEIS HTTP server error rate is elevated
+          description: More than five percent of HTTP responses returned 5xx for ten minutes.
+
+      - alert: AeeisHttpLatencyP95High
+        expr: |
+          histogram_quantile(0.95,
+            sum by (job, instance, le) (rate(aeeis_http_request_duration_seconds_bucket{job="aeeis"}[10m]))) > 2
+        for: 10m
+        labels:
+          severity: warning
+          component: control-plane
+        annotations:
+          summary: AEEIS HTTP p95 latency is high
+          description: The instance HTTP p95 latency has exceeded two seconds for ten minutes.
+
+      - alert: AeeisUnknownRunsNeedReconcile
+        expr: max by (job) (aeeis_runs_total{job="aeeis",status="unknown"}) > 0
+        for: 15m
+        labels:
+          severity: critical
+          component: runtime
+        annotations:
+          summary: AEEIS has runs waiting for reconciliation
+          description: One or more durable Runs are unknown and require provider reconciliation.
+
+      - alert: AeeisUnknownTaskDispatchesNeedReconcile
+        expr: max by (job) (aeeis_task_dispatches_total{job="aeeis",status="unknown"}) > 0
+        for: 15m
+        labels:
+          severity: critical
+          component: scheduler
+        annotations:
+          summary: AEEIS task dispatches are unknown
+          description: One or more DAG dispatch reservations require explicit reconciliation.
+
+      - alert: AeeisProjectionOutboxUnknown
+        expr: max by (job) (aeeis_projection_events_total{job="aeeis",status="unknown"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: projection
+        annotations:
+          summary: AEEIS projection outbox contains unknown deliveries
+          description: An external sink delivery may have happened without a durable acknowledgement.
+
+      - alert: AeeisEmbeddingReindexFailing
+        expr: max by (job) (aeeis_knowledge_embedding_reindex_consecutive_failures{job="aeeis"}) >= 3
+        for: 15m
+        labels:
+          severity: warning
+          component: knowledge
+        annotations:
+          summary: AEEIS knowledge embedding reindex is repeatedly failing
+          description: The embedding index has failed at least three consecutive batches.
+
+      - alert: AeeisMetricsCollectorFailing
+        expr: aeeis_metrics_collection_success{job="aeeis"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: observability
+        annotations:
+          summary: AEEIS durable metrics collector is failing
+          description: AEEIS could not read one or more durable state collectors; related metrics are intentionally omitted.

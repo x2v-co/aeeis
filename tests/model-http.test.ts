@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { HttpModelAdapter } from '../src/runtime/model.js';
+import { HttpModelAdapter, ModelResponseRejected } from '../src/runtime/model.js';
 
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
@@ -15,6 +15,15 @@ function fixture(body: unknown, status = 200): Promise<string> {
 }
 
 describe('HttpModelAdapter', () => {
+  it.each([
+    { content: '{"partial":', finish_reason: 'length' },
+    { content: 'not-json', finish_reason: 'stop' },
+  ])('preserves billable usage when provider output is unusable: %j', async choice => {
+    const port = await fixture({ choices: [{ message: { content: choice.content }, finish_reason: choice.finish_reason }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    const request = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', '').complete({ system: 's', input: {} });
+    await expect(request).rejects.toBeInstanceOf(ModelResponseRejected);
+    await expect(request).rejects.toMatchObject({ usage: { inputTokens: 10, outputTokens: 5 } });
+  });
   it('parses an OpenAI-compatible JSON response and reports usage', async () => {
     const port = await fixture({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 5 } });
     const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', 'secret');
@@ -25,6 +34,7 @@ describe('HttpModelAdapter', () => {
     await expect(new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', '').complete({ system: 's', input: {} })).rejects.toThrow('incomplete');
     expect(() => new HttpModelAdapter('https://example.com?secret=1', 'fixture', '')).toThrow('query');
     expect(() => new HttpModelAdapter('http://example.com', 'fixture', '')).toThrow('HTTPS');
+    expect(() => new HttpModelAdapter('http://example.com', 'fixture', '', undefined, 60000, undefined, true)).not.toThrow();
   });
 
   it('forwards the durable provider idempotency key', async () => {

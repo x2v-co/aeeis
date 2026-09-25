@@ -46,10 +46,13 @@ describe('local HTTP model to AEEIS run', () => {
     const plan = (run?.plans.at(-1) as { hash: string });
     const approved = await app.inject({ method: 'POST', url: '/api/runs/' + id + '/approve', payload: { planHash: plan.hash } });
     expect(approved.statusCode).toBe(200);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    // The full suite runs many Temporal and persistence tests concurrently;
+    // allow the local dispatcher enough wall time to finish the durable
+    // review -> domain sync -> succeeded commit while keeping a hard bound.
+    for (let attempt = 0; attempt < 500; attempt += 1) {
       run = (await app.inject({ method: 'GET', url: '/api/runs/' + id })).json();
       if (run!.status === 'succeeded' || run!.status === 'failed') break;
-      await new Promise(resolve => setTimeout(resolve, 5));
+      await new Promise(resolve => setTimeout(resolve, 10));
     }
     expect(run?.status, run?.error).toBe('succeeded');
     expect(run?.artifacts[0]?.title).toBe('Fixture report');

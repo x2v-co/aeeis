@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendDebateMessage, runCompetition } from '../src/collaboration.js';
+import { adjudicateDebate, appendDebateMessage, runCompetition } from '../src/collaboration.js';
 import type { CompetitionBrief, DebateRoom } from '../src/collaboration.js';
 
 const brief: CompetitionBrief = { schemaVersion: 'competition-brief/1', taskId: 'task.1', contextVersion: 'ctx.1', goal: 'Choose a supported plan', participantAgentIds: ['agent.1', 'agent.2'], expectedResultType: 'plan/1', maxRounds: 2, blindEvaluation: true };
@@ -28,5 +28,18 @@ describe('bounded debate', () => {
     expect(appendDebateMessage(room, message).messages).toHaveLength(1);
     expect(() => appendDebateMessage(appendDebateMessage(room, message), message)).toThrow('message limit');
     expect(() => appendDebateMessage({ ...room, messages: [message] }, { ...message, messageId: 'message.2' })).toThrow('total message');
+  });
+
+  it('records Moderator evidence violations and holds unsupported decisions', () => {
+    const room: DebateRoom = {
+      debateId: 'debate.evidence', taskId: 'task.1', contextVersion: 'ctx.1', participantAgentIds: ['agent.1'],
+      maxRounds: 1, maxMessagesPerAgent: 2, messages: [], moderation: [],
+      context: { classification: 'internal', claims: [{ id: 'claim.one', text: 'Supported fact', evidenceRefs: ['claim.one'] }], artifactRefs: ['artifact.one'], redactions: [], },
+    };
+    const flagged = appendDebateMessage(room, { schemaVersion: 'debate-message/1', messageId: 'message.bad', debateId: 'debate.evidence', round: 1, speakerAgentId: 'agent.1', type: 'decision', content: 'Unsupported decision', claimRefs: ['claim.missing'], contextVersion: 'ctx.1' });
+    expect(flagged.moderation?.at(-1)).toMatchObject({ status: 'flagged', missingClaimRefs: ['claim.missing'] });
+    expect(adjudicateDebate(flagged).status).toBe('held');
+    const supported = appendDebateMessage(room, { schemaVersion: 'debate-message/1', messageId: 'message.good', debateId: 'debate.evidence', round: 1, speakerAgentId: 'agent.1', type: 'decision', content: 'Supported decision', claimRefs: ['claim.one'], contextVersion: 'ctx.1' });
+    expect(adjudicateDebate(supported)).toMatchObject({ status: 'decided', selectedMessageId: 'message.good', evidenceRefs: ['claim.one'] });
   });
 });

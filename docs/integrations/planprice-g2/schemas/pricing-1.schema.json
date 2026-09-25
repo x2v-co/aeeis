@@ -1,0 +1,485 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/pricing-1.schema.json",
+  "title": "pricing-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "effectiveAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "normalization": {
+      "$ref": "#/$defs/normalization"
+    }
+  },
+  "required": [
+    "currency",
+    "effectiveAt",
+    "expiresAt",
+    "components",
+    "provenance",
+    "normalization"
+  ],
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+      "maxLength": 64
+    },
+    "fx": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "const": "USD"
+        },
+        "quote": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "rate": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+          "maxLength": 64,
+          "not": {
+            "const": "0"
+          }
+        },
+        "direction": {
+          "const": "quote_per_base"
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        "evidenceDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "base",
+        "quote",
+        "rate",
+        "direction",
+        "asOf",
+        "expiresAt",
+        "sourceId",
+        "evidenceDigest"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        "sourceUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "evidenceDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "sourceId",
+        "sourceUrl",
+        "observedAt",
+        "evidenceDigest"
+      ]
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "componentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "input",
+            "output",
+            "cached_input",
+            "cache_write",
+            "reasoning",
+            "tool",
+            "subscription",
+            "other"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "enum": [
+            "token",
+            "request",
+            "image",
+            "second",
+            "minute",
+            "subscription",
+            "other"
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "priceStatus": {
+          "type": "string",
+          "enum": [
+            "known",
+            "unknown"
+          ]
+        },
+        "pricePerMillion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unitPrice": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conditions": {
+          "$ref": "#/$defs/conditions"
+        }
+      },
+      "required": [
+        "componentId",
+        "kind",
+        "unit",
+        "currency",
+        "priceStatus",
+        "conditions"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "unit": {
+                "const": "token"
+              }
+            },
+            "required": [
+              "unit"
+            ]
+          },
+          "then": {
+            "required": [
+              "pricePerMillion"
+            ],
+            "properties": { "pricePerMillion": {}, "unitPrice": false }
+          },
+          "else": {
+            "required": [
+              "unitPrice"
+            ],
+            "properties": { "unitPrice": {}, "pricePerMillion": false }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "priceStatus": {
+                "const": "known"
+              }
+            },
+            "required": [
+              "priceStatus"
+            ]
+          },
+          "then": {
+            "properties": {
+              "pricePerMillion": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+                "maxLength": 64
+              },
+              "unitPrice": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+                "maxLength": 64
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "pricePerMillion": {
+                "type": "null"
+              },
+              "unitPrice": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "currency": {
+          "const": "USD"
+        },
+        "componentPrices": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "fx": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/fx"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scale": {
+              "const": 8
+            },
+            "mode": {
+              "const": "half_even"
+            },
+            "stage": {
+              "const": "converted_unit_price"
+            }
+          },
+          "required": [
+            "scale",
+            "mode",
+            "stage"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "currency",
+        "componentPrices",
+        "fx",
+        "rounding"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "fx": {
+                "$ref": "#/$defs/fx"
+              },
+              "componentPrices": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$",
+                  "maxLength": 64
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "conditions": {
+      "oneOf": [
+        { "$ref": "#/$defs/conditionStandard" },
+        { "$ref": "#/$defs/conditionTier" },
+        { "$ref": "#/$defs/conditionCache" },
+        { "$ref": "#/$defs/conditionReasoning" },
+        { "$ref": "#/$defs/conditionMinimumSpend" },
+        { "$ref": "#/$defs/conditionBatch" },
+        { "$ref": "#/$defs/conditionComposite" }
+      ]
+    },
+    "conditionBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": {
+          "enum": ["standard", "tier", "cache", "reasoning", "minimum_spend", "batch", "composite"]
+        }
+      },
+      "required": ["schemaVersion", "kind"]
+    },
+    "conditionStandard": {
+      "allOf": [
+        { "$ref": "#/$defs/conditionBase" },
+        {
+          "properties": { "kind": { "const": "standard" } },
+          "required": ["kind"]
+        }
+      ]
+    },
+    "conditionTier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "tier" },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "upToUnits": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+              "unitPrice": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$", "maxLength": 64 }
+            },
+            "required": ["upToUnits", "unitPrice"]
+          }
+        }
+      },
+      "required": ["schemaVersion", "kind", "tiers"]
+    },
+    "conditionCache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "cache" },
+        "operation": { "enum": ["read", "write"] },
+        "ttlSeconds": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["schemaVersion", "kind", "operation", "ttlSeconds"]
+    },
+    "conditionReasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "reasoning" },
+        "mode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "multiplier": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$", "maxLength": 64 }
+      },
+      "required": ["schemaVersion", "kind", "mode", "multiplier"]
+    },
+    "conditionMinimumSpend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "minimum_spend" },
+        "amount": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$", "maxLength": 64 },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+      },
+      "required": ["schemaVersion", "kind", "amount", "currency"]
+    },
+    "conditionBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "batch" },
+        "mode": { "enum": ["batch", "async"] },
+        "discountMultiplier": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,17}[1-9])?$", "maxLength": 64 }
+      },
+      "required": ["schemaVersion", "kind", "mode", "discountMultiplier"]
+    },
+    "conditionComposite": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": { "const": "pricing-conditions/1" },
+        "kind": { "const": "composite" },
+        "conditions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/conditions" } }
+      },
+      "required": ["schemaVersion", "kind", "conditions"]
+    }
+  }
+}

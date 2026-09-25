@@ -1,0 +1,11 @@
+{
+  "vectorVersion": "planprice-fx-vector/1",
+  "rule": "1 base = rate * quote; base=USD; USD unit price = source unit price / rate; decimal half_even once at scale 8",
+  "cases": [
+    { "id": "cny-standard", "base": "USD", "quote": "CNY", "rate": "7.2", "sourceInputPerMillion": "1", "sourceOutputPerMillion": "2", "expectedInputUsd": "0.13888889", "expectedOutputUsd": "0.27777778", "rounding": { "scale": 8, "mode": "half_even" } },
+    { "id": "usd-identity", "base": "USD", "quote": "USD", "rate": "1", "sourceInputPerMillion": "1", "sourceOutputPerMillion": "2", "expectedInputUsd": "1", "expectedOutputUsd": "2", "rounding": { "scale": 8, "mode": "half_even" } },
+    { "id": "missing-output", "base": "USD", "quote": "CNY", "rate": "7.2", "sourceInputPerMillion": "1", "sourceOutputPerMillion": null, "expectedInputUsd": "0.13888889", "expectedOutputUsd": null, "budgetDecision": "reject_money_budget" },
+    { "id": "half-even-zero", "base": "USD", "quote": "CNY", "rate": "200000000", "sourceInputPerMillion": "1", "sourceOutputPerMillion": "1", "expectedInputUsd": "0", "expectedOutputUsd": "0", "rounding": { "scale": 8, "mode": "half_even" } },
+    { "id": "half-even-odd-up", "base": "USD", "quote": "CNY", "rate": "200000000", "sourceInputPerMillion": "3", "sourceOutputPerMillion": "3", "expectedInputUsd": "0.00000002", "expectedOutputUsd": "0.00000002", "rounding": { "scale": 8, "mode": "half_even" } }
+  ]
+}

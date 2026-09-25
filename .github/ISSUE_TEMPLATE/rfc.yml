@@ -1,0 +1,34 @@
+name: RFC
+description: Propose a substantial protocol or architecture change
+title: "[RFC] "
+labels:
+  - rfc
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and goals
+      description: State the problem, goals, non-goals, and affected design documents.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: Describe domain objects, protocol/schema changes, source of truth, and compatibility strategy.
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: Failure and rollout plan
+      description: Describe authorization, privacy, unknown/reconcile, migration, observability, canary, and rollback behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence plan
+      description: List tests, fixtures, replay checks, benchmarks, or operator drills that would validate the proposal.
+    validations:
+      required: true

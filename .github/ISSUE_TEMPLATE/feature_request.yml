@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a user or operator capability
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who has this problem, and what outcome is currently missing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the boundary, inputs, outputs, and user-visible behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and operations
+      description: Explain authorization, privacy, persistence, unknown-result, rollback, and compatibility considerations.
+    validations:
+      required: true

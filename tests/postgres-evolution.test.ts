@@ -94,4 +94,24 @@ describe('Postgres RSI persistence', () => {
       expect(await activation.history()).toHaveLength(2);
     } finally { await inspection.end(); await repo.close(); await activation.close(); await db.close(); }
   });
+
+  it.skipIf(!databaseUrl)('persists production traffic observations with idempotent route state', async () => {
+    const db = await isolatedPostgres(databaseUrl!);
+    const repo = new PostgresEvolutionRepository(db.url), activation = new PostgresEvolutionActivationStore(db.url);
+    try {
+      await repo.init(); await activation.init();
+      const service = new RsiService(repo, activation);
+      const base = await promote(service, 'prompt/traffic-pg-base');
+      await service.activate(base.id, 'activation.traffic.pg.base');
+      const candidate = await promote(service, 'prompt/traffic-pg-candidate', 'prompt/traffic-pg-base');
+      const route = await service.startTraffic(candidate.id, 1500, 'traffic.pg.start');
+      const observation = await service.recordTraffic(candidate.id, { id: 'traffic.pg.observation', passed: true, score: 0.94, evidenceRefs: ['metric.pg'], recordedAt: new Date().toISOString() });
+      expect(observation).toMatchObject({ id: route.id, observations: [{ id: 'traffic.pg.observation', score: 0.94 }] });
+      await expect(service.recordTraffic(candidate.id, { id: 'traffic.pg.observation', passed: true, score: 1, evidenceRefs: ['duplicate'], recordedAt: new Date().toISOString() })).rejects.toThrow('already exists');
+      await activation.close();
+      const restored = new PostgresEvolutionActivationStore(db.url); await restored.init();
+      expect((await restored.listTraffic())[0]).toMatchObject({ id: route.id, observations: [{ id: 'traffic.pg.observation' }] });
+      await restored.close();
+    } finally { await Promise.allSettled([repo.close(), activation.close(), db.close()]); }
+  });
 });

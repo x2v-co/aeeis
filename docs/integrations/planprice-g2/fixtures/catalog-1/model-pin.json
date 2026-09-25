@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "aeeis-model-pin/1",
+  "routingMode": "catalog",
+  "offeringId": "off_example_001",
+  "catalogVersion": "cat_example_001",
+  "catalogDigest": "sha256:4b078e25320aa02a9aefed840c38ca60ce9ed1200a8ffdea32cdb45d76c11fa8",
+  "catalogHash": "sha256:1f207e25978d90b3b557155c29c1620d7ddec898fc5033a5e84122ca5adb9163",
+  "endpointRef": "provider:sample-provider/channel:standard",
+  "requestModel": "vendor-real-model-2026-05",
+  "mappingVersion": "mapping-example-1",
+  "resolvedEndpointHash": "sha256:ebcd93ca6f177cf940def36d04b24abddd12d02500b1240228f7ea94e6223dd7",
+  "promptVersion": "agent-default/3",
+  "routingPolicyVersion": "aeeis-routing/1",
+  "selectedAt": "2026-09-23T00:00:01Z",
+  "pricingSnapshot": {
+    "currency": "CNY",
+    "effectiveAt": "2026-09-23T00:00:00Z",
+    "expiresAt": "2026-09-30T00:00:00Z",
+    "components": [
+      {
+        "componentId": "input",
+        "kind": "input",
+        "unit": "token",
+        "currency": "CNY",
+        "priceStatus": "known",
+        "pricePerMillion": "1",
+        "conditions": {
+          "schemaVersion": "pricing-conditions/1",
+          "kind": "standard"
+        }
+      },
+      {
+        "componentId": "output",
+        "kind": "output",
+        "unit": "token",
+        "currency": "CNY",
+        "priceStatus": "known",
+        "pricePerMillion": "2",
+        "conditions": {
+          "schemaVersion": "pricing-conditions/1",
+          "kind": "standard"
+        }
+      }
+    ],
+    "provenance": {
+      "sourceId": "source_example",
+      "sourceUrl": "https://provider.example/pricing",
+      "observedAt": "2026-09-23T00:00:00Z",
+      "evidenceDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "normalization": {
+      "status": "available",
+      "currency": "USD",
+      "componentPrices": {
+        "input": "0.13888889",
+        "output": "0.27777778"
+      },
+      "fx": {
+        "base": "USD",
+        "quote": "CNY",
+        "rate": "7.2",
+        "direction": "quote_per_base",
+        "asOf": "2026-09-23T00:00:00Z",
+        "expiresAt": "2026-09-24T00:00:00Z",
+        "sourceId": "fx_source_example",
+        "evidenceDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "rounding": {
+        "scale": 8,
+        "mode": "half_even",
+        "stage": "converted_unit_price"
+      }
+    }
+  },
+  "modelId": "mdl_example",
+  "modelVersion": "2026-05",
+  "versionStatus": "pinned",
+  "providerId": "prv_example",
+  "channelId": "chn_standard",
+  "regionSetId": "rgn_cn",
+  "pricingVariantId": "price_example_001",
+  "catalogRetrievedAt": "2026-09-23T00:00:00Z",
+  "catalogArtifactRef": "artifact://catalog/cat_example_001",
+  "candidateOfferings": [
+    {
+      "offeringId": "off_example_001",
+      "offeringHash": "sha256:ba7d68bd3f644aba808bfad5abeb3780677f8fcdd1fc91fdfe81cb12678ebc16"
+    }
+  ]
+}

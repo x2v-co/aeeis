@@ -1,0 +1,7 @@
+{
+  "vectorVersion": "planprice-digest-vector/1",
+  "algorithm": "RFC8785-JCS-UTF8-SHA256",
+  "payload": { "a": "é", "n": "1.20", "offerings": [{ "offeringId": "off_example_001", "catalogStatus": "available" }] },
+  "canonicalJson": "{\"a\":\"é\",\"n\":\"1.20\",\"offerings\":[{\"catalogStatus\":\"available\",\"offeringId\":\"off_example_001\"}]}",
+  "digest": "sha256:3af29e9ebf2a7fbfcdade3c0f54d4474f64db822b2f3ff0f84546e7920a3f45a"
+}

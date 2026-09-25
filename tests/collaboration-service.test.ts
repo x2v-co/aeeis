@@ -3,6 +3,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
+import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 
 const brief = {
   schemaVersion: 'competition-brief/1' as const, taskId: 'task.collab', contextVersion: 'ctx.collab', goal: 'Pick a plan',
@@ -13,6 +14,27 @@ function candidate(agentId: string) {
 }
 
 describe('durable collaboration service', () => {
+  it('shares a tenant budget across candidate and evaluator roles', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-global-collab-'))); await repository.init();
+    const ledger = new InMemoryGlobalBudgetLedger(); await ledger.init();
+    try {
+      const select = createGlobalBudgetSelector([{ tenantId: 'local', window: 'day', budget: { calls: 2, tokens: 20 } }]);
+      const service = new CollaborationService(repository, { ledger, select });
+      const created = await service.createCompetition(brief);
+      let candidateCalls = 0; let evaluatorCalls = 0;
+      const finished = await service.runCompetition(created.id, 'agent.evaluator', {
+        run: async (_brief, isolation, accounting) => { candidateCalls++; await accounting?.recordUsage({ tokens: 3 }); return candidate(isolation.candidateId); },
+      }, {
+        evaluate: async () => { evaluatorCalls++; return []; },
+      });
+      expect(finished.status).toBe('failed');
+      expect(candidateCalls).toBe(2); expect(evaluatorCalls).toBe(0);
+      const account = await ledger.get(select(undefined, new Date().toISOString())!.accountKey);
+      expect(account).toMatchObject({ usedCalls: 2, usedTokens: 6 });
+      await ledger.close();
+    } finally { await repository.close(); }
+  });
+
   it('orchestrates isolated candidates and independent blind scoring into durable state', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collab-run-'))); await repository.init();
     const service = new CollaborationService(repository);
@@ -114,5 +136,20 @@ describe('durable collaboration service', () => {
     await expect(service.appendMessage(created.id, { schemaVersion: 'debate-message/1', messageId: 'message.one', debateId: created.id, round: 1, speakerAgentId: 'agent.one', type: 'position', content: 'Duplicate', claimRefs: [], contextVersion: 'ctx.debate' })).rejects.toThrow('already exists');
     expect((await service.closeDebate(created.id, 'adjudication complete')).status).toBe('closed');
     await repository.close();
+  });
+
+  it('pins independent debate roles and keeps unfinished attempts from becoming a decision', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-attempts-'))); await repository.init();
+    try {
+      const service = new CollaborationService(repository);
+      const created = await service.createDebate({ taskId: 'task.attempt', contextVersion: 'ctx.attempt', participantAgentIds: ['agent.one'], maxRounds: 1, maxMessagesPerAgent: 1 });
+      await service.bindDebateRoles(created.id, { moderatorAgentId: 'agent.moderator', adjudicatorAgentId: 'agent.adjudicator' });
+      const reserved = await service.reserveDebateAttempt(created.id, 'participant:1:agent.one', 'agent.one', 'a'.repeat(64));
+      expect(reserved.reserved).toBe(true);
+      await service.settleDebateAttempt(created.id, reserved.attempt!.id, { output: { type: 'decision' } });
+      const held = await service.closeDebate(created.id, 'awaiting independent adjudication');
+      expect(held.room.adjudication?.status).toBe('held');
+      expect(held.room.adjudication?.rationale).toContain('Independent adjudication');
+    } finally { await repository.close(); }
   });
 });

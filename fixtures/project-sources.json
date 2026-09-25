@@ -1,0 +1,35 @@
+[
+  {
+    "id": "project.release.status",
+    "title": "Release readiness snapshot",
+    "content": "The September release candidate is in validation. The API migration has completed in staging, while production rollout remains pending the final verification window.",
+    "source": "compose-project-fixture",
+    "kind": "document",
+    "classification": "internal",
+    "tenantId": "local",
+    "updatedAt": "2026-09-21T00:00:00.000Z",
+    "contentHash": "0b87ec99d969a4fa585487964c1f40bf7b1e02edd7dc2a1ff98e58b164c3967a"
+  },
+  {
+    "id": "project.release.blocker",
+    "title": "Release blocker",
+    "content": "Production release is blocked until the API migration verification report is reviewed by the release owner.",
+    "source": "compose-project-fixture",
+    "kind": "task",
+    "classification": "internal",
+    "tenantId": "local",
+    "updatedAt": "2026-09-21T00:01:00.000Z",
+    "contentHash": "5c8a3c7145065a8e8496fedc4292fbb888b7cf1704a60dc61f698b6d38f25a16"
+  },
+  {
+    "id": "project.release.next-step",
+    "title": "Release verification next step",
+    "content": "Run the production migration rehearsal, attach the verification report, and request release approval after the rehearsal passes.",
+    "source": "compose-project-fixture",
+    "kind": "message",
+    "classification": "internal",
+    "tenantId": "local",
+    "updatedAt": "2026-09-21T00:02:00.000Z",
+    "contentHash": "d134651e028c1f1465a6d4c0a0249704f493312b3ea426d0f023a7bb625cb104"
+  }
+]

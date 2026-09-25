@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/fx-1.schema.json",
+  "title": "fx-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "planprice-exchange-rates/1"
+    },
+    "base": {
+      "const": "USD"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "quotes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "https://contracts.aeeis.dev/planprice/1/schemas/pricing-1.schema.json#/$defs/fx"
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "base",
+    "generatedAt",
+    "quotes"
+  ]
+}

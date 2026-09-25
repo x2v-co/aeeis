@@ -8,16 +8,29 @@ export const rolloutObservationSchema = z.object({
   evidenceRefs: z.array(z.string().min(1).max(200)).min(1).max(100), recordedAt: isoDate,
 }).strict();
 export type RolloutObservation = z.infer<typeof rolloutObservationSchema>;
+export const evaluationAttemptSchema = z.object({
+  globalBudgetAccountKey: z.string().max(1000).optional(),
+  usage: z.object({ tokens: z.number().int().nonnegative().optional(), moneyUsd: z.number().nonnegative().optional() }).strict().optional(),
+  id: z.string().min(1).max(200), mode: z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow']),
+  suiteHash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['started', 'completed', 'failed', 'reconciled']),
+  startedAt: isoDate, endedAt: isoDate.optional(), error: z.string().max(2000).optional(),
+  reconciliationReason: z.string().min(1).max(2000).optional(),
+  evaluation: z.object({ kind: z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow']), passed: z.boolean(), score: z.number().min(0).max(1), evidenceRefs: z.array(z.string().max(200)).max(100), completedAt: isoDate }).strict().optional(),
+}).strict();
+export type EvaluationAttempt = z.infer<typeof evaluationAttemptSchema>;
 
 export const evolutionCandidateSchema = z.object({
-  schemaVersion: z.literal(1), id, target: z.enum(['profile', 'skill', 'prompt', 'workflow', 'tool-policy', 'model-policy']),
+  schemaVersion: z.literal(1), id, owner: z.string().min(1).max(200).default('owner'), tenantId: z.string().min(1).max(200).default('local'), proposalSignalId: z.string().trim().min(1).max(200).optional(),
+  target: z.enum(['profile', 'skill', 'prompt', 'workflow', 'tool-policy', 'model-policy']),
   baseVersion: z.string().min(1).max(200), proposedVersion: z.string().min(1).max(200), change: z.string().min(1).max(8000),
   sourceReceiptRefs: z.array(z.string().min(1).max(200)).min(1).max(100), reason: z.string().min(1).max(4000),
   risk: z.enum(['low', 'medium', 'high']), status: z.enum(['proposed', 'evaluating', 'held', 'approved', 'shadowing', 'canarying', 'promoted', 'rejected', 'rolled_back']),
-  createdAt: isoDate, evaluations: z.array(z.object({ id: z.string().min(1).max(200), kind: z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow']), passed: z.boolean(), score: z.number().min(0).max(1), evidenceRefs: z.array(z.string().max(200)).max(100), completedAt: isoDate }).strict()).max(100),
+  createdAt: isoDate, updatedAt: isoDate.optional(), evaluations: z.array(z.object({ id: z.string().min(1).max(200), kind: z.enum(['replay', 'holdout', 'safety', 'cost', 'shadow']), passed: z.boolean(), score: z.number().min(0).max(1), evidenceRefs: z.array(z.string().max(200)).max(100), completedAt: isoDate }).strict()).max(100),
+  evaluationAttempts: z.array(evaluationAttemptSchema).max(100).optional(),
   shadowStartedAt: isoDate.optional(), shadowObservations: z.array(rolloutObservationSchema).max(100).optional(),
   canaryStartedAt: isoDate.optional(), canaryObservations: z.array(rolloutObservationSchema).max(100).optional(),
   rolloutAttempts: z.array(z.object({
+    globalBudgetAccountKey: z.string().max(1000).optional(),
     id: z.string().min(1).max(200), phase: z.enum(['shadow', 'canary']), caseId: z.string().min(1).max(193),
     inputHash: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['started', 'completed', 'failed', 'reconciled']),
     startedAt: isoDate, endedAt: isoDate.optional(), error: z.string().max(200).optional(),
@@ -34,12 +47,14 @@ export class EvolutionEngine {
     if (requiredEvaluationKinds.length === 0) throw new Error('At least one RSI evaluation gate is required');
   }
 
-  propose(input: Pick<EvolutionCandidate, 'target' | 'baseVersion' | 'proposedVersion' | 'change' | 'sourceReceiptRefs' | 'reason' | 'risk'>): EvolutionCandidate {
-    return evolutionCandidateSchema.parse({ schemaVersion: 1, ...input, id: 'evo_' + randomUUID(), status: 'proposed', createdAt: new Date().toISOString(), evaluations: [] });
+  propose(input: Pick<EvolutionCandidate, 'target' | 'baseVersion' | 'proposedVersion' | 'change' | 'sourceReceiptRefs' | 'reason' | 'risk'> & Partial<Pick<EvolutionCandidate, 'owner' | 'tenantId' | 'proposalSignalId'>> & { id?: EvolutionCandidate['id'] }): EvolutionCandidate {
+    const now = new Date().toISOString();
+    return evolutionCandidateSchema.parse({ schemaVersion: 1, ...input, id: input.id ?? 'evo_' + randomUUID(), status: 'proposed', createdAt: now, updatedAt: now, evaluations: [] });
   }
   evaluate(candidate: EvolutionCandidate, evaluation: EvolutionEvaluation): EvolutionCandidate {
     if (!['proposed', 'evaluating', 'held'].includes(candidate.status)) throw new Error('Candidate cannot accept evaluations in its current state');
     const next = structuredClone(candidate); next.status = 'evaluating';
+    if (next.evaluations.some(item => item.kind === evaluation.kind)) throw new Error(`Evaluation gate already recorded: ${evaluation.kind}`);
     next.evaluations.push({ id: evaluation.id ?? 'evaluation_' + randomUUID(), kind: evaluation.kind, passed: evaluation.passed, score: evaluation.score, evidenceRefs: evaluation.evidenceRefs, completedAt: evaluation.completedAt ?? new Date().toISOString() });
     if (next.evaluations.some(item => !item.passed)) next.status = 'held';
     return evolutionCandidateSchema.parse(next);

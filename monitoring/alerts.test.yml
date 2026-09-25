@@ -1,0 +1,231 @@
+# Regression scenarios for promtool; no live services or waiting required.
+rule_files:
+- alerts/aeeis.yml
+evaluation_interval: 1m
+tests:
+- name: AeeisNotReady pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_readiness{job="aeeis",instance="api-a:4323"}
+    values: 0+0x20 1+0x20
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: AeeisNotReady
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: AeeisNotReady
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        component: control-plane
+        job: aeeis
+        instance: api-a:4323
+      exp_annotations:
+        summary: AEEIS is not ready to execute work
+        description: AEEIS is reachable, but one or more required dependencies are unavailable.
+  - eval_time: 30m
+    alertname: AeeisNotReady
+    exp_alerts: []
+- name: AeeisTargetDown pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: up{job="aeeis",instance="api-a:4323"}
+    values: 0+0x20 1+0x20
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: AeeisTargetDown
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: AeeisTargetDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        component: control-plane
+        job: aeeis
+        instance: api-a:4323
+      exp_annotations:
+        summary: AEEIS control plane is unreachable
+        description: Prometheus cannot scrape the AEEIS metrics endpoint for two minutes.
+  - eval_time: 30m
+    alertname: AeeisTargetDown
+    exp_alerts: []
+- name: AeeisHttpServerErrors pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_http_requests_total{job="aeeis",instance="api-a:4323",route="/api/runs",status="200"}
+    values: 0+9x20 189+10x20
+  - series: aeeis_http_requests_total{job="aeeis",instance="api-a:4323",route="/api/runs",status="500"}
+    values: 0+1x20 20+0x20
+  - series: aeeis_http_requests_total{job="aeeis",instance="api-b:4323",route="/api/runs",status="200"}
+    values: 0+1000x41
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: AeeisHttpServerErrors
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisHttpServerErrors
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        component: control-plane
+        job: aeeis
+        instance: api-a:4323
+      exp_annotations:
+        summary: AEEIS HTTP server error rate is elevated
+        description: More than five percent of HTTP responses returned 5xx for ten
+          minutes.
+  - eval_time: 35m
+    alertname: AeeisHttpServerErrors
+    exp_alerts: []
+- name: AeeisHttpLatencyP95High pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_http_request_duration_seconds_bucket{job="aeeis",instance="api-a:4323",le="1"}
+    values: 0+0x20 10+10x20
+  - series: aeeis_http_request_duration_seconds_bucket{job="aeeis",instance="api-a:4323",le="5"}
+    values: 0+10x41
+  - series: aeeis_http_request_duration_seconds_bucket{job="aeeis",instance="api-a:4323",le="+Inf"}
+    values: 0+10x41
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: AeeisHttpLatencyP95High
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisHttpLatencyP95High
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        component: control-plane
+        job: aeeis
+        instance: api-a:4323
+      exp_annotations:
+        summary: AEEIS HTTP p95 latency is high
+        description: The instance HTTP p95 latency has exceeded two seconds for ten
+          minutes.
+  - eval_time: 35m
+    alertname: AeeisHttpLatencyP95High
+    exp_alerts: []
+- name: AeeisUnknownRunsNeedReconcile pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_runs_total{job="aeeis",instance="api-a:4323",status="unknown"}
+    values: 1+0x20 0+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: AeeisUnknownRunsNeedReconcile
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisUnknownRunsNeedReconcile
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        component: runtime
+        job: aeeis
+      exp_annotations:
+        summary: AEEIS has runs waiting for reconciliation
+        description: One or more durable Runs are unknown and require provider reconciliation.
+  - eval_time: 30m
+    alertname: AeeisUnknownRunsNeedReconcile
+    exp_alerts: []
+- name: AeeisUnknownTaskDispatchesNeedReconcile pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_task_dispatches_total{job="aeeis",instance="api-a:4323",status="unknown"}
+    values: 1+0x20 0+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: AeeisUnknownTaskDispatchesNeedReconcile
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisUnknownTaskDispatchesNeedReconcile
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        component: scheduler
+        job: aeeis
+      exp_annotations:
+        summary: AEEIS task dispatches are unknown
+        description: One or more DAG dispatch reservations require explicit reconciliation.
+  - eval_time: 30m
+    alertname: AeeisUnknownTaskDispatchesNeedReconcile
+    exp_alerts: []
+- name: AeeisProjectionOutboxUnknown pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_projection_events_total{job="aeeis",instance="api-a:4323",status="unknown"}
+    values: 1+0x20 0+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: AeeisProjectionOutboxUnknown
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisProjectionOutboxUnknown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        component: projection
+        job: aeeis
+      exp_annotations:
+        summary: AEEIS projection outbox contains unknown deliveries
+        description: An external sink delivery may have happened without a durable
+          acknowledgement.
+  - eval_time: 30m
+    alertname: AeeisProjectionOutboxUnknown
+    exp_alerts: []
+- name: AeeisEmbeddingReindexFailing pending, firing and resolved
+  interval: 1m
+  input_series:
+  - series: aeeis_knowledge_embedding_reindex_consecutive_failures{job="aeeis",instance="api-a:4323"}
+    values: 3+0x20 0+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: AeeisEmbeddingReindexFailing
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: AeeisEmbeddingReindexFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        component: knowledge
+        job: aeeis
+      exp_annotations:
+        summary: AEEIS knowledge embedding reindex is repeatedly failing
+        description: The embedding index has failed at least three consecutive batches.
+  - eval_time: 30m
+    alertname: AeeisEmbeddingReindexFailing
+    exp_alerts: []
+- name: Healthy and idle services do not alert
+  interval: 1m
+  input_series:
+  - series: up{job="aeeis",instance="api-a:4323"}
+    values: 1+0x40
+  - series: aeeis_http_requests_total{job="aeeis",instance="api-a:4323",status="200"}
+    values: 0+0x40
+  - series: aeeis_http_requests_total{job="aeeis",instance="api-a:4323",status="500"}
+    values: 0+0x40
+  - series: aeeis_runs_total{job="aeeis",status="succeeded"}
+    values: 10+0x40
+  - series: aeeis_knowledge_embedding_reindex_consecutive_failures{job="aeeis"}
+    values: 2+0x40
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: AeeisTargetDown
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisHttpServerErrors
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisHttpLatencyP95High
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisUnknownRunsNeedReconcile
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisUnknownTaskDispatchesNeedReconcile
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisProjectionOutboxUnknown
+    exp_alerts: []
+  - eval_time: 30m
+    alertname: AeeisEmbeddingReindexFailing
+    exp_alerts: []

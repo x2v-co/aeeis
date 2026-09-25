@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "planprice-error/1",
+  "code": "unauthorized",
+  "message": "Bearer token required",
+  "retryable": false,
+  "requestId": "req_unauthorized"
+}

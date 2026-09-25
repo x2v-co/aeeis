@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "planprice-health/1",
+  "status": "not_ready",
+  "reason": "catalog_expired",
+  "checkedAt": "2026-09-23T00:06:00Z",
+  "database": {
+    "ready": true
+  },
+  "catalog": {
+    "ready": false,
+    "catalogVersion": "cat_example_001",
+    "expiresAt": "2026-09-23T00:05:00Z"
+  }
+}

@@ -1,0 +1,200 @@
+{
+  "schemaVersion": "planprice-g2-release-manifest/1",
+  "contractVersion": "planprice-catalog/1.0.0-draft.1",
+  "mrdVersion": "0.4",
+  "gate": "G2-technical-review-passed",
+  "generatedAt": "2026-09-23T00:00:00Z",
+  "manifestSelfHash": null,
+  "hashAlgorithm": "SHA-256",
+  "owners": {
+    "planprice": "Planprice team",
+    "aeeis": "AEEIS team",
+    "joint": "Planprice + AEEIS"
+  },
+  "files": [
+    {
+      "path": "attachment-inventory.md",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "0f4288d10cabd239e5c7bdc9e2be4cfca0f6dc84c9626b4335b033aa10620524"
+    },
+    {
+      "path": "fixtures/catalog-1/catalog-rolling.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "1571d5cb11909148b47db46cc1be09a4d3f6fa16eefa978f47f091f3cdd61f02"
+    },
+    {
+      "path": "fixtures/catalog-1/catalog.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "276a568566ba3887469c6a8ede293ba73d89c6291cb52e95a2d2f5618f6b76a3"
+    },
+    {
+      "path": "fixtures/catalog-1/conditions-invalid.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "694ddbd38d5e5b6f05124a8057ca65bc9c033f7a181305397a1578e13d2b6202"
+    },
+    {
+      "path": "fixtures/catalog-1/conditions-valid.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "f4c195a50ac1681813822d5c2f25b4268e13e5ddd93775c73c110138152823f7"
+    },
+    {
+      "path": "fixtures/catalog-1/error-catalog-unavailable.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "1e6765452fba0d00837eba9a385c4c24f037540bc5afa0805cf9f71f9d2eb911"
+    },
+    {
+      "path": "fixtures/catalog-1/error-unauthorized.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "52dab255a51e97445ee7c20e9de13f17c9f68ae95fe284debf1911917cf779ef"
+    },
+    {
+      "path": "fixtures/catalog-1/exchange-rates.json",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "c282625e170ae25fefd489350b37ef298b8cfb6c2f1f7ba9bfc3611b4f92e89a"
+    },
+    {
+      "path": "fixtures/catalog-1/health-expired.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "78370817b5fdabda670d8759d5173d249c87b22e7c9b9760a8448a2de28c85e6"
+    },
+    {
+      "path": "fixtures/catalog-1/health-ready.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "e3f0bfd8bd6868769f9693e77bc5718a175b440e8ba113b4203e88eaca84d7a5"
+    },
+    {
+      "path": "fixtures/catalog-1/http-304-headers.txt",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "6ccae803028e9ed6f2ca5a878190c83e064235b6f094f3eafcca4cd482621f05"
+    },
+    {
+      "path": "fixtures/catalog-1/mapping.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "95edbf42ee9489cf7be4807908274da5b8e9cf80b45221f517442c80b08fc594"
+    },
+    {
+      "path": "fixtures/catalog-1/model-pin.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "bd6b3557f1cbc751cb296f7fef045921f84d4537053b26fe722dd5c778a071c4"
+    },
+    {
+      "path": "fixtures/compatibility/exchange-rates.json",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "0f446990c5ff11b8b3c1297f7dc214445aa7c9021d103ff60a40978d095986b6"
+    },
+    {
+      "path": "fixtures/compatibility/grouped-llm.json",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "e24474adcb0a39e56508c0971dbed788f010b2e5c122d8fcf1a261f1ee3f2bc1"
+    },
+    {
+      "path": "migration-1.md",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "1827bdafd43ee02d7b1425e3d0b24c18bd4a342e7af00991e29847e5dd912385"
+    },
+    {
+      "path": "openapi/planprice-catalog-1.0.0.yaml",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "03af0953a59db1556cbe7f7c5b9e6bd5ed8956dba4eb9412795a24215ec412c6"
+    },
+    {
+      "path": "schemas/aeeis-model-pin-1.schema.json",
+      "owner": "aeeis",
+      "status": "draft",
+      "sha256": "9bcbf92b5df08a1ef5156da8822538f4d9134e8d906a5a7c7273d63f066cae9f"
+    },
+    {
+      "path": "schemas/catalog-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "33542c46d6338540cd1bf3bf343cc8416b741fef7106e413e306b7d8653523f1"
+    },
+    {
+      "path": "schemas/error-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "ae9981ee8b26f875f8ceee089665efe634fed9440a6991f227e81ccb115f7b7d"
+    },
+    {
+      "path": "schemas/fx-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "2fc17149c10358dbfa57915e531c7a93365ecad3d0855c3e5f0d76bb0880ee9a"
+    },
+    {
+      "path": "schemas/health-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "d10b26d839b38196ccb72237527d056ad382a16aaeff2725d8ad9e8748ebb89a"
+    },
+    {
+      "path": "schemas/mapping-1.schema.json",
+      "owner": "aeeis",
+      "status": "draft",
+      "sha256": "df5afcee796dd331b0ad0a94b9bfb31783170ef849948008d64a11d50ebd19c4"
+    },
+    {
+      "path": "schemas/offering-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "5886947a5657069acf09202285fcd0c55b90a8e6628c7493692175c8ee74cd78"
+    },
+    {
+      "path": "schemas/pricing-1.schema.json",
+      "owner": "planprice",
+      "status": "draft",
+      "sha256": "ff30a09a3aa93a4953da7a2da8c7b9ace67642ac568a3a2f82112b70bc091385"
+    },
+    {
+      "path": "semantics-1.md",
+      "owner": "joint",
+      "status": "draft",
+      "sha256": "82fc352c15742a2aefbd3034cbd030829c0d2c8cea5b3e321078c2c8b78b7d84"
+    },
+    {
+      "path": "vectors/digest-1.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "8cd65a325044b42f4b9e52637533842f6e2ba29d68417875c8bf8ccf407fcc9a"
+    },
+    {
+      "path": "vectors/fx-1.json",
+      "owner": "joint",
+      "status": "executable-draft",
+      "sha256": "9883f2dfa71fa6815effe913c512274b68e960f21c7802a8c17f5551f28c6054"
+    }
+  ],
+  "openQuestions": [
+    "Planprice production catalog origin and management origin",
+    "Bearer test token and scope/audience rules",
+    "conditions schema for tiers, bundles, cache TTL and reasoning charges",
+    "catalogVersion URL-safe generation and retention confirmation",
+    "runtime evidence reference format",
+    "compatibility endpoint deprecation window"
+  ],
+  "g3Gaps": [
+    "AEEIS PlanpriceHttpCatalog Bearer headers",
+    "AEEIS formal v1 adapter",
+    "offering to endpointRef/requestModel mapping",
+    "FX freshness/provenance and complex price consumption",
+    "Planprice management-origin isolation and default-key removal",
+    "real provider/sandbox acceptance"
+  ]
+}

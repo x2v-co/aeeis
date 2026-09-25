@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "pricing-conditions-fixtures/1",
+  "conditions": [
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "tier",
+      "tiers": []
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "cache",
+      "operation": "read"
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "unknown"
+    }
+  ]
+}

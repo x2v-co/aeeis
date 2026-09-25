@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "planprice-error/1",
+  "code": "catalog_unavailable",
+  "message": "No valid current catalog",
+  "retryable": true,
+  "requestId": "req_example"
+}

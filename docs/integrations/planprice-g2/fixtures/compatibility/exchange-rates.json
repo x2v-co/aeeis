@@ -1,0 +1,7 @@
+{
+  "rates": { "CNY": 7.2 },
+  "allRates": { "USD": { "CNY": 7.2 } },
+  "lastUpdated": "2026-09-23T00:00:00Z",
+  "count": 1,
+  "sources": { "sample-source": "Data from sample-source" }
+}

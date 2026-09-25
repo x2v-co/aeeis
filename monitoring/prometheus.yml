@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: aeeis
+
+rule_files:
+  - /etc/prometheus/alerts/aeeis.yml
+
+scrape_configs:
+  - job_name: aeeis
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['aeeis:4323']
+        labels:
+          component: control-plane
+    # If AEEIS principal authentication is enabled, add a bearer_token_file
+    # mounted from a secret. The development Compose profile intentionally
+    # leaves this unset because it runs without authentication.

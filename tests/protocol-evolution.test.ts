@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createContextPack, delegationGrantSchema, resultEnvelopeSchema, validateResultForGrant } from '../src/protocol.js';
+import { createContextPack, delegationGrantSchema, resultEnvelopeSchema, validateContextPackEvidence, validateResultForGrant } from '../src/protocol.js';
 import { EvolutionEngine } from '../src/evolution.js';
 import { RsiEvaluator } from '../src/evaluation.js';
 
@@ -12,6 +12,17 @@ describe('versioned agent protocol', () => {
     const result = resultEnvelopeSchema.parse({ schemaVersion: 'result-envelope/1', taskId: 'task.1', agentId: 'agent.1', status: 'completed', resultType: 'report/1', summary: 'done', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: 'ctx.1', receiptRef: 'receipt.1' });
     expect(() => validateResultForGrant(result, grant)).not.toThrow();
     expect(() => validateResultForGrant({ ...result, taskId: 'task.2' }, grant)).toThrow('task');
+  });
+
+  it('requires Context Pack claims to bind to frozen evidence', () => {
+    expect(() => validateContextPackEvidence({
+      schemaVersion: 'context-pack/1', id: 'ctx.1', taskId: 'task.1', version: 1, audience: ['agent.1'], classification: 'internal', expiresAt: date,
+      sourceRefs: ['source.1'], artifactRefs: [], claims: [{ id: 'claim.1', text: 'unbound', evidenceRefs: ['source.missing'] }], redactions: [], digest: 'a'.repeat(64),
+    })).toThrow('outside the Context Pack');
+    expect(() => createContextPack({
+      schemaVersion: 'context-pack/1', id: 'ctx.2', taskId: 'task.1', version: 1, audience: ['agent.1'], classification: 'internal', expiresAt: date,
+      sourceRefs: ['source.1'], artifactRefs: [], claims: [{ id: 'claim.1', text: 'self', evidenceRefs: ['claim.1'] }], redactions: [],
+    })).toThrow('cannot cite itself');
   });
 });
 

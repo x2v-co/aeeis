@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "pricing-conditions-fixtures/1",
+  "conditions": [
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "standard"
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "tier",
+      "tiers": [
+        {
+          "upToUnits": 1000,
+          "unitPrice": "1"
+        },
+        {
+          "upToUnits": null,
+          "unitPrice": "0.9"
+        }
+      ]
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "cache",
+      "operation": "read",
+      "ttlSeconds": 3600
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "reasoning",
+      "mode": "extended",
+      "multiplier": "1.5"
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "minimum_spend",
+      "amount": "10",
+      "currency": "USD"
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "batch",
+      "mode": "batch",
+      "discountMultiplier": "0.8"
+    },
+    {
+      "schemaVersion": "pricing-conditions/1",
+      "kind": "composite",
+      "conditions": [
+        {
+          "schemaVersion": "pricing-conditions/1",
+          "kind": "standard"
+        },
+        {
+          "schemaVersion": "pricing-conditions/1",
+          "kind": "cache",
+          "operation": "write",
+          "ttlSeconds": 86400
+        }
+      ]
+    }
+  ]
+}

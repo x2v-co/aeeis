@@ -1,0 +1,228 @@
+services:
+  temporal-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - aeeis-temporal-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: aeeis
+      POSTGRES_PASSWORD: aeeis
+      POSTGRES_DB: aeeis
+    volumes:
+      - aeeis-postgres:/var/lib/postgresql/data
+    # Keep the host port explicit so the PostgreSQL integration suite can
+    # target this Compose database even when another local PostgreSQL uses 5432.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aeeis -d aeeis"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  fixture-model:
+    build: .
+    command: ["node", "scripts/fixture-model.mjs"]
+    environment:
+      AEEIS_FIXTURE_MODEL_HOST: 0.0.0.0
+      AEEIS_FIXTURE_MODEL_PORT: 4399
+
+  fixture-evaluator:
+    build: .
+    command: ["node", "scripts/fixture-evaluator.mjs"]
+    environment:
+      AEEIS_FIXTURE_EVALUATOR_HOST: 0.0.0.0
+      AEEIS_FIXTURE_EVALUATOR_PORT: 4499
+
+  fixture-agent:
+    build: .
+    command: ["node", "scripts/fixture-agent.mjs"]
+    environment:
+      AEEIS_FIXTURE_AGENT_HOST: 0.0.0.0
+      AEEIS_FIXTURE_AGENT_PORT: 4599
+
+  fixture-planprice:
+    build: .
+    command: ["node", "scripts/fixture-planprice.mjs"]
+    environment:
+      AEEIS_FIXTURE_PLANPRICE_HOST: 0.0.0.0
+      AEEIS_FIXTURE_PLANPRICE_PORT: 4699
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7233:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 && temporal operator namespace describe --address temporal:7233 --namespace default"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: on-failure
+
+  aeeis:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fixture-model:
+        condition: service_started
+      fixture-evaluator:
+        condition: service_started
+      fixture-agent:
+        condition: service_started
+      fixture-planprice:
+        condition: service_started
+      temporal:
+        condition: service_healthy
+    environment:
+      PORT: 4323
+      # Compose uses deliberately local HTTP fixtures; keep production
+      # startup invariants from rejecting this development-only environment.
+      AEEIS_ENV: development
+      AEEIS_DEMO_MODE: "1"
+      AEEIS_HOST: 0.0.0.0
+      # Tailscale Serve exposes this loopback API at the stable tailnet name.
+      # Keep the Docker service name for internal health checks as well.
+      AEEIS_TRUSTED_HOSTS: aeeis,aeeis-server.tailc7b6c3.ts.net
+      AEEIS_TRUSTED_ORIGINS: https://aeeis-server.tailc7b6c3.ts.net
+      # Permit the optional Prometheus container to scrape the public metrics route.
+      AEEIS_PUBLIC_HOSTS: aeeis,aeeis-server.tailc7b6c3.ts.net
+      DATABASE_URL: postgresql://aeeis:aeeis@postgres:5432/aeeis
+      AEEIS_PLANPRICE_URL: http://fixture-planprice:4699
+      AEEIS_PLANPRICE_ALLOW_INSECURE_HTTP: "1"
+      AEEIS_MODEL_PROVIDER_ENDPOINTS: '{"compose-fixture":"http://fixture-model:4399/v1"}'
+      AEEIS_MODEL_PROVIDER_HEALTH_URLS: '{"compose-fixture":"http://fixture-model:4399/health"}'
+      AEEIS_MODEL_PROVIDER_ALLOW_INSECURE_HTTP: "1"
+      # Competition/Debate's static role pool still uses the same local model
+      # fixture and reads this development-only switch.
+      AEEIS_MODEL_ALLOW_INSECURE_HTTP: "1"
+      AEEIS_OWNHOW_ENABLED: "1"
+      AEEIS_OWNHOW_BIN: /app/scripts/fixture-ownhow.mjs
+      # Optional real toolkit.fun Registry. Values are supplied through the
+      # deployment-only env file and never committed to the repository.
+      AEEIS_TOOLKIT_REGISTRY_URL: ${AEEIS_TOOLKIT_REGISTRY_URL:-}
+      AEEIS_TOOLKIT_TOKEN: ${AEEIS_TOOLKIT_TOKEN:-}
+      AEEIS_TOOLKIT_VERIFY_SIGNATURES: ${AEEIS_TOOLKIT_VERIFY_SIGNATURES:-0}
+      AEEIS_TOOLKIT_ROOT_PUBLIC_JWK: ${AEEIS_TOOLKIT_ROOT_PUBLIC_JWK:-}
+      AEEIS_TOOLKIT_PINNED_TOOLS: ${AEEIS_TOOLKIT_PINNED_TOOLS:-}
+      AEEIS_OWNHOW_RUNTIME: codex
+      AEEIS_OWNHOW_STATE_DIR: /app/data/ownhow-fixture
+      AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: "1"
+      AEEIS_RSI_PROPOSAL_SYNTHESIS_PRIVACY: public,internal
+      AEEIS_RSI_EVALUATOR_URL: http://fixture-evaluator:4499/evaluate
+      AEEIS_RSI_EVALUATOR_ALLOW_INSECURE_HTTP: "1"
+      # Internal-test RSI automation. The suite is fixed and versioned; a
+      # candidate cannot generate its own proof. Low-risk candidates may pass
+      # replay/holdout/safety, shadow, canary and activate automatically.
+      AEEIS_RSI_AUTOMATION_ENABLED: "1"
+      AEEIS_RSI_AUTO_APPROVE_LOW_RISK: "1"
+      AEEIS_RSI_AUTO_ROLLOUT: "1"
+      AEEIS_RSI_AUTO_ACTIVATE: "1"
+      AEEIS_RSI_AUTOMATION_INTERVAL_MS: "30000"
+      AEEIS_RSI_AUTOMATION_BATCH: "10"
+      AEEIS_RSI_EVALUATION_SUITE_VERSION: internal-v1
+      AEEIS_COMPETITION_AGENT_MODELS: '{"agent.one":{"baseUrl":"http://fixture-model:4399/v1","model":"aeeis-fixture/1","provider":"compose-fixture"},"agent.two":{"baseUrl":"http://fixture-model:4399/v1","model":"aeeis-fixture/1","provider":"compose-fixture"},"agent.moderator":{"baseUrl":"http://fixture-model:4399/v1","model":"aeeis-fixture/1","provider":"compose-fixture"},"agent.adjudicator":{"baseUrl":"http://fixture-model:4399/v1","model":"aeeis-fixture/1","provider":"compose-fixture"}}'
+      AEEIS_COMPETITION_EVALUATOR_AGENT_ID: agent.evaluator
+      AEEIS_COMPETITION_EVALUATOR_BASE_URL: http://fixture-model:4399/v1
+      AEEIS_COMPETITION_EVALUATOR_MODEL: aeeis-fixture/1
+      AEEIS_DEBATE_MODERATOR_AGENT_ID: agent.moderator
+      AEEIS_DEBATE_ADJUDICATOR_AGENT_ID: agent.adjudicator
+      AEEIS_RUNNER: temporal
+      # Compose smoke exercises the Temporal reminder timer; the in-process
+      # pump remains available as a safety net in local deployments.
+      AEEIS_REMINDER_INTERVAL_MS: "0"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      AEEIS_TASK_QUEUE: aeeis-agent
+      AEEIS_WORKER_TOKEN: compose-worker-token
+      AEEIS_BUILD_ID: aeeis-compose-api
+      AEEIS_TEMPORAL_WORKER_HEALTH_URL: http://temporal-worker:4324/readyz
+      AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP: "1"
+      AEEIS_DATA_DIR: /app/data/runs
+      AEEIS_PROJECT_SOURCES_FILE: /app/fixtures/project-sources.json
+      AEEIS_AGENT_REGISTRY_PATH: ""
+      AEEIS_AGENT_ALLOW_INSECURE_HTTP: "1"
+      AEEIS_AGENT_CARDS: '[{"schemaVersion":"agent-card/1","agentId":"agent.fixture","name":"AEEIS Fixture Agent","owner":"aeeis-development","protocols":["aeeis-task/1"],"capabilities":["research"],"inputSchemas":["task-brief/1"],"outputSchemas":["result-envelope/1"],"auth":["local"],"privacy":{"dataRetention":"session","regions":["local"]},"pricing":{"unit":"run"},"cardVersion":"1","endpoint":"http://fixture-agent:4599/task"}]'
+    ports:
+      - "127.0.0.1:4323:4323"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4323/readyz').then(async r=>{const j=await r.json();process.exit(r.ok&&j.protocol==='aeeis-readiness/1'&&j.status==='ready'?0:1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  temporal-worker:
+    build: .
+    command: ["node", "dist/temporal/worker.js"]
+    depends_on:
+      aeeis:
+        condition: service_started
+      temporal:
+        condition: service_healthy
+    environment:
+      AEEIS_ENV: development
+      AEEIS_WORKER_TOKEN: compose-worker-token
+      AEEIS_WORKER_ALLOW_INSECURE_HTTP: "1"
+      AEEIS_INTERNAL_URL: http://aeeis:4323
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      AEEIS_TASK_QUEUE: aeeis-agent
+      AEEIS_BUILD_ID: aeeis-compose-worker
+      AEEIS_WORKER_HEALTH_HOST: 0.0.0.0
+      AEEIS_WORKER_HEALTH_PORT: 4324
+      AEEIS_WORKER_SHUTDOWN_GRACE_MS: 30000
+      AEEIS_WORKER_SHUTDOWN_FORCE_MS: 60000
+    ports:
+      - "127.0.0.1:4324:4324"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4324/readyz').then(async r=>{const j=await r.json();process.exit(r.ok&&j.protocol==='aeeis-worker-readiness/1'&&j.status==='ready'&&j.workerState==='RUNNING'?0:1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: on-failure
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    depends_on:
+      aeeis:
+        condition: service_healthy
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts:/etc/prometheus/alerts:ro
+      - aeeis-prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  aeeis-postgres:
+  aeeis-temporal-postgres:
+  aeeis-prometheus:

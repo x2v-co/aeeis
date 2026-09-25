@@ -1,0 +1,10 @@
+{
+  "name": "AEEIS Control Surface",
+  "description": "A light, spacious operating console for long-running agent work.",
+  "tokens": {
+    "colors": {"ink":"#172033","surface":"#ffffff","page":"#f4f6f8","blue":"#315efb","cyan":"#13b8b0","amber":"#f2b84b","red":"#d65262"},
+    "radii": {"control":"9px","surface":"16px","hero":"26px"},
+    "fonts": {"ui":"Manrope","mono":"DM Mono"}
+  },
+  "motion": {"signature":"command center, focused run mode, agent orbit, and run activity strip","reducedMotion":"prefers-reduced-motion"}
+}

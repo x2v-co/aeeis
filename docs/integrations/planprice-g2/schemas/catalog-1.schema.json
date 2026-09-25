@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/catalog-1.schema.json",
+  "title": "catalog-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "planprice-catalog/1"
+    },
+    "catalogVersion": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "effectiveAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "baseCurrency": {
+      "const": "USD"
+    },
+    "offerings": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "https://contracts.aeeis.dev/planprice/1/schemas/offering-1.schema.json"
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "catalogVersion",
+    "generatedAt",
+    "effectiveAt",
+    "expiresAt",
+    "baseCurrency",
+    "offerings",
+    "digest"
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/health-1.schema.json",
+  "title": "health-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "planprice-health/1"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "alive",
+        "ready",
+        "not_ready"
+      ]
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "database_unavailable",
+            "catalog_missing",
+            "catalog_not_effective",
+            "catalog_expired"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ready"
+      ]
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "catalogVersion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ready",
+        "catalogVersion",
+        "expiresAt"
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "status"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "alive"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "maxProperties": 2
+      },
+      "else": {
+        "required": [
+          "reason",
+          "checkedAt",
+          "database",
+          "catalog"
+        ],
+        "properties": {
+          "reason": {},
+          "checkedAt": {},
+          "database": {},
+          "catalog": {}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ready"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          },
+          "database": {
+            "properties": {
+              "ready": {
+                "const": true
+              }
+            }
+          },
+          "catalog": {
+            "properties": {
+              "ready": {
+                "const": true
+              },
+              "catalogVersion": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+              },
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "Z$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "not_ready"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "database_unavailable",
+              "catalog_missing",
+              "catalog_not_effective",
+              "catalog_expired"
+            ]
+          },
+          "catalog": {
+            "properties": {
+              "ready": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -10,6 +10,27 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "npm run build && tsx src/server.ts",
+    "demo:local": "node scripts/demo-local.mjs",
+    "demo:full-local": "node scripts/demo-full-local.mjs",
+    "smoke:local": "node scripts/smoke-local.mjs",
+    "smoke:full-local": "node scripts/smoke-full-local.mjs",
+    "smoke:local:restart": "node scripts/smoke-local-restart.mjs",
+    "demo:model": "node scripts/fixture-model.mjs",
+    "demo:evaluator": "node scripts/fixture-evaluator.mjs",
+    "demo:agent": "node scripts/fixture-agent.mjs",
+    "smoke:compose": "node scripts/smoke-compose.mjs",
+    "smoke:monitoring": "node scripts/smoke-monitoring.mjs",
+    "test:monitoring": "node scripts/test-monitoring.mjs",
+    "smoke:toolkit": "npm run build && node scripts/smoke-toolkit.mjs",
+    "smoke:planprice": "npm run build && node scripts/smoke-planprice.mjs",
+    "smoke:planprice:v1": "npm run build && node scripts/smoke-planprice-v1.mjs",
+    "g2:validate": "node scripts/validate-planprice-g2.mjs",
+    "g3:preflight": "node scripts/preflight-planprice-g3.mjs",
+    "backup:postgres": "node scripts/backup-postgres.mjs",
+    "backup:verify": "node scripts/verify-backup.mjs",
+    "backup:restore": "node scripts/restore-postgres.mjs",
+    "recovery:postgres": "npm run build && node scripts/recovery-drill.mjs",
+    "temporal:replay": "npm run build && node scripts/replay-temporal-history.mjs",
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -21,16 +42,21 @@
     "@temporalio/testing": "^1.24.0",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.23.1",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "yaml": "2.8.1"
   },
   "dependencies": {
+    "@js-temporal/polyfill": "^0.5.1",
     "@temporalio/client": "^1.24.0",
     "@temporalio/worker": "^1.24.0",
     "@temporalio/workflow": "^1.24.0",
     "fastify": "^5.12.5",
     "pg": "^8.23.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "canonicalize": "^2.1.0"
   }
 }

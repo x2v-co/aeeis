@@ -1,16 +1,33 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { fileURLToPath } from 'node:url';
-import { createAdvanceRunActivity } from './activity.js';
+import { createAdvanceReminderActivity, createAdvanceRunActivity } from './activity.js';
+import { closeWorkerHealthServer, startWorkerHealthServer } from './health.js';
+import { parseTemporalWorkerConfig } from './config.js';
 
-const token = process.env.AEEIS_WORKER_TOKEN;
-if (!token) throw new Error('Set AEEIS_WORKER_TOKEN for the private activity endpoint');
-const api = process.env.AEEIS_INTERNAL_URL ?? 'http://127.0.0.1:4323';
-const connection = await NativeConnection.connect({ address: process.env.TEMPORAL_ADDRESS ?? '127.0.0.1:7233' });
+const config = parseTemporalWorkerConfig();
+const { token, api, taskQueue, namespace, versioning, healthHost, healthPort, shutdownGraceTime, shutdownForceTime, address } = config;
+const connection = await NativeConnection.connect({ address });
 try {
   const worker = await Worker.create({
-    connection, taskQueue: process.env.AEEIS_TASK_QUEUE ?? 'aeeis-agent',
+    connection, namespace, taskQueue, buildId: versioning.buildId,
+    ...(versioning.useVersioning ? {
+      workerDeploymentOptions: {
+        version: { deploymentName: versioning.deploymentName, buildId: versioning.buildId },
+        useWorkerVersioning: true,
+        defaultVersioningBehavior: 'PINNED',
+      },
+    } : {}),
+    shutdownGraceTime, shutdownForceTime,
     workflowsPath: fileURLToPath(new URL('./workflows.js', import.meta.url)),
-    activities: { advanceRun: createAdvanceRunActivity({ api, token }) },
+    activities: {
+      advanceRun: createAdvanceRunActivity({ api, token }),
+      advanceReminder: createAdvanceReminderActivity({ api, token }),
+    },
   });
-  await worker.run();
-} finally { await connection.close(); }
+  const health = await startWorkerHealthServer(worker, { host: healthHost, port: healthPort, taskQueue, buildId: versioning.buildId });
+  console.log(`AEEIS Temporal worker ready: http://${healthHost}:${healthPort}/readyz (queue=${taskQueue}, build=${versioning.buildId}, rollout=${versioning.rollout})`);
+  try { await worker.run(); }
+  finally { await closeWorkerHealthServer(health); }
+} finally {
+  await connection.close();
+}

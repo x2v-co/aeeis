@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: aeeis
+
+rule_files:
+  - /etc/prometheus/alerts/aeeis.yml
+
+# Production template. Replace the example hostname and mount the token and
+# CA files outside the image. The token must map to an AEEIS Principal with
+# the installation-level operator role; a browser/session token is not valid.
+scrape_configs:
+  - job_name: aeeis
+    scheme: https
+    metrics_path: /metrics
+    bearer_token_file: /etc/prometheus/secrets/aeeis-metrics.token
+    tls_config:
+      ca_file: /etc/prometheus/tls/aeeis-ca.crt
+      server_name: aeeis.internal.example
+      insecure_skip_verify: false
+    static_configs:
+      - targets: ['aeeis.internal.example:443']
+        labels:
+          component: control-plane

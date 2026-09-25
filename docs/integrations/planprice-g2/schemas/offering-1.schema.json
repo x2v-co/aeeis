@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.aeeis.dev/planprice/1/schemas/offering-1.schema.json",
+  "title": "offering-1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "offeringId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "modelId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "modelVersion": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "versionStatus": {
+      "type": "string",
+      "enum": [
+        "pinned",
+        "rolling",
+        "unknown"
+      ]
+    },
+    "providerId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "channelId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "regionSetId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "pricingVariantId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9._~-]{0,119}$"
+    },
+    "regions": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+      },
+      "uniqueItems": true
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+      },
+      "uniqueItems": true
+    },
+    "contextWindow": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "catalogStatus": {
+      "type": "string",
+      "enum": [
+        "available",
+        "degraded",
+        "unavailable",
+        "deprecated"
+      ]
+    },
+    "runtimeStatus": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "degraded",
+        "unhealthy",
+        "unknown"
+      ]
+    },
+    "runtimeObservedAt": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runtimeEvidenceRef": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pricing": {
+      "$ref": "https://contracts.aeeis.dev/planprice/1/schemas/pricing-1.schema.json"
+    }
+  },
+  "required": [
+    "offeringId",
+    "modelId",
+    "modelVersion",
+    "versionStatus",
+    "providerId",
+    "channelId",
+    "regionSetId",
+    "pricingVariantId",
+    "regions",
+    "capabilities",
+    "contextWindow",
+    "catalogStatus",
+    "runtimeStatus",
+    "runtimeObservedAt",
+    "runtimeEvidenceRef",
+    "pricing"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "versionStatus": {
+            "const": "pinned"
+          }
+        },
+        "required": [
+          "versionStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "modelVersion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "modelVersion": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runtimeStatus": {
+            "const": "unknown"
+          }
+        },
+        "required": [
+          "runtimeStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "runtimeObservedAt": {
+            "type": "null"
+          },
+          "runtimeEvidenceRef": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "runtimeObservedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$"
+          },
+          "runtimeEvidenceRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      }
+    }
+  ]
+}

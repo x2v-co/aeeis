@@ -12,6 +12,7 @@ export interface Ownership { owner: string; tenantId: string }
 export const localPrincipal = (): Principal => ({ id: 'owner', tenantId: 'local', roles: ['owner', 'operator'] });
 export const validatePrincipal = (principal: unknown): Principal => principalSchema.parse(principal);
 export const principalTokensSchema = z.record(z.string().regex(/^\S+$/).max(4096), principalSchema);
+export type PrincipalResolver = (authorization: string | undefined) => Principal | undefined | Promise<Principal | undefined>;
 export const ownershipOf = (principal: Principal): Ownership => ({ owner: principal.id, tenantId: principal.tenantId });
 export function isOwnedBy(record: { owner?: string | undefined; tenantId?: string | undefined }, scope: Ownership): boolean {
   return (record.owner ?? 'owner') === scope.owner && (record.tenantId ?? 'local') === scope.tenantId;
@@ -29,7 +30,7 @@ export function brainActor(actor: Principal | string): Principal {
 
 /** Copy and validate credentials once at startup; compare fixed-size hashes.
  * No credential or digest is exposed through status or error responses. */
-export function principalResolver(tokens: Record<string, Principal> | undefined): (authorization: string | undefined) => Principal | undefined {
+export function principalResolver(tokens: Record<string, Principal> | undefined): PrincipalResolver {
   if (tokens === undefined) return () => localPrincipal();
   const entries = Object.entries(principalTokensSchema.parse(tokens)).map(([token, principal]) => ({ digest: hash(token), principal }));
   return authorization => {

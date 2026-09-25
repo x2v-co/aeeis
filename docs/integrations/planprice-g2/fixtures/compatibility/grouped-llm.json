@@ -1,0 +1,23 @@
+[
+  {
+    "id": 101,
+    "slug": "sample-model",
+    "context_window": 128000,
+    "versions": [
+      {
+        "id": 201,
+        "model_id": 101,
+        "provider_id": 301,
+        "model_slug": "sample-model",
+        "providers": { "id": 301, "slug": "sample-provider", "region": "china" },
+        "input_price_per_1m": 1,
+        "output_price_per_1m": 2,
+        "cached_input_price_per_1m": 0.1,
+        "currency": "CNY",
+        "price_unit": "per_1m_tokens",
+        "is_available": true,
+        "price_variants": [{ "id": 401, "variant_key": "standard", "variant_name": "Standard", "input_price_per_1m": 1, "output_price_per_1m": 2, "cached_input_price_per_1m": 0.1, "currency": "CNY", "price_unit": "per_1m_tokens", "is_headline": true, "constraints_json": null }]
+      }
+    ]
+  }
+]
