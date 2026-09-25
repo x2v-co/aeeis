@@ -50,6 +50,57 @@ export interface ToolGateway {
   health?(): Promise<{ ready: boolean; detail: string; checkedAt?: string }>;
 }
 
+/** Streamable JSON-RPC MCP client used for the normal AEEIS -> Toolkit path. */
+export class ToolkitMcpGateway implements ToolGateway {
+  private requestId = 0;
+  private initialized?: Promise<void>;
+  constructor(private readonly endpoint: string, private readonly token: string, private readonly defaultVersion = 'rolling') {
+    const url = new URL(endpoint);
+    if (url.username || url.password || url.search || url.hash) throw new Error('Toolkit MCP URL must not contain credentials, query or fragment');
+    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Toolkit MCP URL must use HTTPS except loopback');
+    if (!token.trim()) throw new Error('Toolkit MCP bearer token is required');
+  }
+  private async rpc(method: string, params?: unknown, timeoutMs = 15_000, extraHeaders: Record<string, string> = {}): Promise<any> {
+    const id = ++this.requestId;
+    const response = await fetch(this.endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}`, ...extraHeaders }, body: JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }) });
+    if (method === 'notifications/initialized' && response.status === 202) return {};
+    if (!response.ok) throw new Error(`Toolkit MCP returned HTTP ${response.status}`);
+    const body = z.record(z.string(), z.unknown()).parse(await response.json());
+    if (body.error && typeof body.error === 'object') throw new Error(String((body.error as Record<string, unknown>).message ?? 'Toolkit MCP error'));
+    return body.result;
+  }
+  private async init(): Promise<void> {
+    if (!this.initialized) this.initialized = (async () => { await this.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'aeeis', version: '1.0.0' } }); await this.rpc('notifications/initialized'); })();
+    return this.initialized;
+  }
+  async health() { const checkedAt = new Date().toISOString(); try { const tools = await this.listTools(); return { ready: true, detail: `Toolkit MCP reachable (${tools.length} tools)`, checkedAt }; } catch (error) { return { ready: false, detail: `Toolkit MCP unavailable: ${error instanceof Error ? error.message : 'unknown error'}`.slice(0, 500), checkedAt }; } }
+  async listTools(): Promise<ToolDescriptor[]> {
+    await this.init();
+    const result = await this.rpc('tools/list');
+    const tools = z.object({ tools: z.array(z.object({ name: z.string().min(1), description: z.string().optional(), inputSchema: z.unknown(), _meta: z.record(z.string(), z.unknown()).optional() }).passthrough()) }).parse(result).tools;
+    return tools.map(tool => {
+      const meta = tool._meta?.toolkit && typeof tool._meta.toolkit === 'object' ? tool._meta.toolkit as Record<string, unknown> : {};
+      const id = typeof meta.slug === 'string' ? meta.slug : tool.name;
+      const version = typeof meta.version === 'string' ? meta.version : this.defaultVersion;
+      return { id, version, capabilities: ['execute'], inputSchema: tool.inputSchema, outputSchema: {}, ...(tool.description ? { description: tool.description } : {}) };
+    });
+  }
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    const started = new Date(); const requestHash = digest(request);
+    try {
+      await this.init();
+      const args = typeof request.input === 'object' && request.input && !Array.isArray(request.input) ? request.input as Record<string, unknown> : { input: typeof request.input === 'string' ? request.input : JSON.stringify(request.input) };
+      const result = await this.rpc('tools/call', { name: request.toolId, arguments: args }, request.timeoutMs, { 'idempotency-key': request.idempotencyKey });
+      const parsed = z.object({ content: z.array(z.unknown()).optional(), structuredContent: z.unknown().optional(), isError: z.boolean().optional(), receipt: z.unknown().optional() }).passthrough().parse(result);
+      const receipt = receiptSchema.safeParse(parsed.receipt).success ? parsed.receipt as Receipt : receiptSchema.parse({ schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_mcp', operation: request.toolId, requestHash, responseHash: digest(result), inputRefs: [request.taskId], outputRefs: [], capabilitiesUsed: ['execute'], startedAt: started.toISOString(), completedAt: new Date().toISOString(), status: parsed.isError ? 'failed' : 'completed' });
+      const textOutput = parsed.content?.filter((item): item is { type: 'text'; text: string } => Boolean(item && typeof item === 'object' && (item as any).type === 'text' && typeof (item as any).text === 'string')).map(item => item.text).join('\n');
+      return { status: parsed.isError ? 'failed' : 'completed', ...(parsed.structuredContent !== undefined ? { output: parsed.structuredContent } : { output: textOutput ?? null }), receipt };
+    } catch (error) {
+      return { status: 'unknown', receipt: receiptSchema.parse({ schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_mcp', operation: request.toolId, requestHash, inputRefs: [request.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: started.toISOString(), completedAt: new Date().toISOString(), status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
+    }
+  }
+}
+
 export interface SkillGovernance {
   /** Checks the adapter protocol, not the quality of governed methods. */
   health?(): Promise<{ ready: boolean; detail: string; checkedAt: string }>;

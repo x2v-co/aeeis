@@ -1,6 +1,6 @@
 import { collaborationPricesSchema, type CollaborationPrices } from './collaboration-budget.js';
 import { FileRunRepository, PostgresRunRepository } from './runtime/repository.js';
-import { HttpModelAdapter } from './runtime/model.js';
+import { AgentpayModelAdapter, HttpModelAdapter } from './runtime/model.js';
 import { AgentEngine, digest } from './runtime/engine.js';
 import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
@@ -9,7 +9,7 @@ import { buildApp } from './runtime/http.js';
 import { FileBrainStore } from './brain.js';
 import { PostgresBrainStore } from './adapters/postgres-brain-store.js';
 import { PostgresBrainSemanticIndex } from './adapters/postgres-brain-semantic-index.js';
-import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitRegistryGateway } from './integrations.js';
+import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitMcpGateway, ToolkitRegistryGateway } from './integrations.js';
 import { PlanpriceV1Catalog, type ProviderMapping } from './planprice-v1-adapter.js';
 import { CatalogModelResolver, HttpCatalogModelFactory, StaticModelResolver, type ModelResolver } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider, type AgentDirectoryPort } from './agent-gateway.js';
@@ -262,7 +262,9 @@ let debateRunner: ModelPoolDebateOrchestrator | undefined;
 let feishuDebateIngress: FeishuDebateIngress | undefined;
 let hermesDebateIngress: HermesDebateIngress | undefined;
 try {
-  const toolkit = process.env.AEEIS_TOOLKIT_REGISTRY_URL
+  const toolkit = process.env.AEEIS_TOOLKIT_MCP_URL
+    ? new ToolkitMcpGateway(process.env.AEEIS_TOOLKIT_MCP_URL, process.env.AEEIS_TOOLKIT_TOKEN ?? '', process.env.AEEIS_TOOLKIT_DEFAULT_VERSION ?? 'rolling')
+    : process.env.AEEIS_TOOLKIT_REGISTRY_URL
     ? new ToolkitRegistryGateway(
       process.env.AEEIS_TOOLKIT_REGISTRY_URL,
       process.env.AEEIS_TOOLKIT_TOKEN,
@@ -356,7 +358,12 @@ try {
   const projectSources = sourceProviders.length ? new CombinedProjectSourceProvider(sourceProviders) : undefined;
   let modelServices: ConstructorParameters<typeof AgentEngine>[1] | undefined;
   let rsiModelResolver: ModelResolver | undefined;
-  if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
+  if (process.env.AEEIS_AGENTPAY_MCP_URL && process.env.AEEIS_AGENTPAY_TOKEN && process.env.AEEIS_MODEL) {
+    const maxCredits = Number(process.env.AEEIS_AGENTPAY_MAX_CREDITS ?? '1');
+    if (!Number.isFinite(maxCredits) || maxCredits <= 0 || maxCredits > 100) throw new Error('AEEIS_AGENTPAY_MAX_CREDITS must be between 0 and 100');
+    const model = new AgentpayModelAdapter(process.env.AEEIS_AGENTPAY_MCP_URL, process.env.AEEIS_AGENTPAY_TOKEN, process.env.AEEIS_MODEL, maxCredits);
+    modelServices = { model }; rsiModelResolver = new StaticModelResolver(model);
+  } else if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
     const model = new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '', undefined, 60_000, process.env.AEEIS_MODEL_HEALTH_URL, process.env.AEEIS_MODEL_ALLOW_INSECURE_HTTP === '1');
     modelServices = { model }; rsiModelResolver = new StaticModelResolver(model);
   } else if (process.env.AEEIS_PLANPRICE_URL) {

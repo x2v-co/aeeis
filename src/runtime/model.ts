@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelPin } from './contracts.js';
 
@@ -21,6 +22,47 @@ export class ModelOutcomeUnknown extends Error {}
 /** A completed provider response may be billable even if its output is unusable. */
 export class ModelResponseRejected extends Error {
   constructor(message: string, readonly usage?: ModelResponse['usage']) { super(message); }
+}
+
+/** Model transport backed by Toolkit's Agentpay credit MCP tool. */
+export class AgentpayModelAdapter implements ModelAdapter {
+  readonly pin: ModelPin;
+  private requestId = 0;
+  private initialized?: Promise<void>;
+  constructor(private readonly mcpUrl: string, private readonly token: string, model: string, private readonly maxCredits: number, private readonly timeoutMs = 120_000) {
+    const url = new URL(mcpUrl);
+    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Agentpay MCP URL must use HTTPS except loopback');
+    if (!token || !Number.isFinite(maxCredits) || maxCredits <= 0 || maxCredits > 100) throw new Error('Agentpay credentials and max credits are required');
+    this.pin = { model, provider: 'toolkit-agentpay', endpoint: url.href, promptVersion: 'aeeis-project-agent/agentpay-1' };
+  }
+  private async rpc(method: string, params?: unknown, timeoutMs = 15_000): Promise<any> {
+    const id = ++this.requestId;
+    const response = await fetch(this.mcpUrl, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` }, body: JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }) });
+    if (!response.ok) throw new Error(`Agentpay MCP returned HTTP ${response.status}`);
+    const body = await response.json() as any;
+    if (body.error) throw new Error(String(body.error.message || 'Agentpay MCP error'));
+    return body.result;
+  }
+  private async init() { if (!this.initialized) this.initialized = this.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'aeeis', version: '1.0.0' } }).then(() => undefined); return this.initialized; }
+  async health() { const checkedAt = new Date().toISOString(); try { await this.init(); return { ready: true, detail: 'Agentpay MCP reachable', checkedAt }; } catch { return { ready: false, detail: 'Agentpay MCP unavailable', checkedAt }; } }
+  async complete(request: ModelRequest): Promise<ModelResponse> {
+    await this.init();
+    const purchaseId = `aeeis_${createHash('sha256').update(request.idempotencyKey ?? randomUUID()).digest('hex').slice(0, 48)}`;
+    const prompt = `${request.system}\n\n${JSON.stringify(request.input)}`;
+    const result = await this.rpc('tools/call', { name: 'agentpay_credit_purchase', arguments: { request: { purchaseId, paymentMethod: 'toolkit_credits', prompt, outputCap: 4096, model: this.pin.model, maxCredits: this.maxCredits } } }, this.timeoutMs);
+    const wrapper = result?.structuredContent ?? result;
+    const data = wrapper?.data ?? wrapper;
+    if (result?.isError || data?.errorCode) {
+      if (data?.state === 'execution_unknown') throw new ModelOutcomeUnknown('Agentpay purchase outcome is unknown; reconcile the same purchaseId before retrying');
+      throw new Error(String(data?.errorCode || 'Agentpay purchase failed'));
+    }
+    const value = data?.result ?? data?.result?.result ?? data?.output ?? data;
+    if (value === undefined || value === null) throw new ModelOutcomeUnknown('Agentpay returned no model output; reconcile the same purchaseId');
+    let parsed: unknown = value;
+    if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { /* preserve text output */ } }
+    const usage = data?.usage && Number.isInteger(data.usage.inputTokens) && Number.isInteger(data.usage.outputTokens) ? data.usage : undefined;
+    return { value: parsed, ...(usage ? { usage } : {}) };
+  }
 }
 const envelope = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().min(1) }), finish_reason: z.string().nullable() })).min(1),
