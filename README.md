@@ -65,8 +65,19 @@ Compose 还启用受控的 RSI proposal synthesis smoke：专用运行会产生�
 npm install
 npm test
 npm run typecheck
+npm run verify
 npm run dev
 ```
+
+`npm run verify` is the default local quality gate. It runs type checking, the
+unit test suite in a single worker (to keep HTTP fixture tests deterministic)
+and the production TypeScript build in a fixed order. Optional
+environment flags extend the same gate without changing the default developer
+loop: set `AEEIS_VERIFY_POSTGRES=1` together with
+`AEEIS_TEST_DATABASE_URL` for PostgreSQL tests, `AEEIS_VERIFY_MONITORING=1`
+for monitoring configuration checks, or `AEEIS_VERIFY_FULL_LOCAL=1` for the
+complete local protocol smoke. Pull requests and pushes to `main` run the
+default and PostgreSQL gates in GitHub Actions.
 
 如果只想在本机快速查看完整的控制面，可以用一条命令启动 Fixture Model 和 AEEIS；它会把演示数据写入独立的 `data/demo-local`，不会覆盖默认的 `data/runs`：
 
@@ -240,6 +251,7 @@ RSI 与协作 Trigger Pump 现在使用独立的持久化 Run 扫描位置，每
 - `GET /readyz`（依赖未就绪时返回 503，供部署和长时任务监控使用）
 - `GET /metrics`（Prometheus 文本格式的运行、RSI、投影和依赖指标）
 - `GET /api/status`
+- `GET|POST /api/devices`、`POST /api/devices/:id/revoke`：管理当前 Principal 的设备会话。客户端可在后续请求带 `X-AEEIS-Device-ID: device_<uuid>`；该值只是设备会话标识，Bearer/OIDC Principal 仍是认证依据。设备撤销后，带该 ID 的请求会被拒绝；不带 header 的旧客户端保持兼容。
 - `GET|POST /api/reminders`、`GET /api/reminders/page`、`GET /api/reminders/:id`、`POST /api/reminders/:id/cancel`、`POST /api/reminders/:id/retry`（owner/tenant scoped 的 durable Reminder；分页接口要求 `limit`，支持 `cursor` 和 `status`）
 - `GET /api/knowledge/embedding-reindex`、`POST /api/knowledge/embedding-reindex`、`POST /api/knowledge/embedding-reindex/run`（PostgreSQL + embedding 配置下的 operator 回填任务：入队、查看状态、执行单批）
 - `GET /api/brain/semantic-reindex`、`POST /api/brain/semantic-reindex`（PostgreSQL + Brain embedding 配置下的 operator 语义索引配置查看与全量重建）
@@ -285,7 +297,7 @@ RSI 与协作 Trigger Pump 现在使用独立的持久化 Run 扫描位置，每
 - `POST /webhooks/agents/:runId/callback`（外部异步 Agent 的签名 callback）：校验原始 body 的 `x-aeeis-timestamp` / `x-aeeis-signature`，通过 pending Delegation 的 Agent Card、Context Pack、Grant 和 Result Envelope 约束结果；成功只返回 `{ "accepted": true }`，不会把 Run 详情暴露给外部 Agent。
 - `GET|POST /api/collaborations/projections`，以及 `/:id/deliver`、`/:id/reconcile`、`/deliver-pending`；投影 outbox 以幂等键持久化 Debate、Competition、Evolution、Goal、Plan、Task、Run 和 `session_event` 快照，服务 pump 会周期性从独立 canonical state 重发现 RSI/协作/Run 快照，传输结果不明会进入 `unknown`，只能通过 provider 核查恢复，配置 `AEEIS_PROJECTION_SINK_URL` 后可投递到飞书/Hermes/Linear/Jira 等渠道；也可配置 `AEEIS_FEISHU_WEBHOOK_URL` 使用内置飞书 Incoming Webhook 卡片适配器，或配置 `AEEIS_FEISHU_APP_ID`、`AEEIS_FEISHU_APP_SECRET` 使用飞书应用 API 按 `chat_id` 投影。设置 `AEEIS_FEISHU_ALLOWED_CHAT_IDS` 后，应用只能向明确允许的群发送。也可配置 `AEEIS_HERMES_CLI_PATH`，通过本机 Hermes 的 `hermes send --to TARGET --json` 契约投影到 `feishu:chat_id` 等 Hermes 目标；Hermes CLI 不复制凭证到 AEEIS，进程/传输不明会保留为 `unknown`。`RoutingProjectionSink` 按 channel 同时路由多个渠道，未知 channel 只有在配置通用 fallback 时才会投递。三种内置 channel sink 都拒绝私有内容，confidential 内容需显式允许；应用 API 使用短期 tenant access token 缓存和消息幂等 UUID。Task 投影的 aggregate ID 使用 `planId.taskId`；Shared Session 事件必须先经 `SessionEventService` 的实时 Room/Manifest 权限校验，再由 owner/operator 通过 Projection Outbox 显式投影，外部消息仍不能成为 canonical event。
 
-运行状态和事件保存在 `data/runs`；设置 `DATABASE_URL` 可切换 Run、Room、Room membership、Goal、Plan、Receipt、Memory、Context Manifest、Brain、RSI candidate/activation registry、Competition/Debate 协作状态、Task dispatch ledger 和 Projection outbox 到 PostgreSQL，启动时会创建所需表和索引。Brain 使用版本化 JSONB 状态和乐观并发检测；并发写入不会静默覆盖，遇到冲突需要重新读取后重试。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，领域 Task Scheduler 为每个已确认的任务保存对应的 Run/Workflow ID，并通过同一 dispatcher 启动 `agentRunWorkflow`；Temporal 仍是执行平面，Plan/Task/Receipt 和 dispatch ledger 是 AEEIS 的事实源。Worker 使用 `npm run worker` 启动。Worker 支持稳定的 `AEEIS_BUILD_ID`、可选的 Temporal Worker Versioning、显式 `TEMPORAL_NAMESPACE`，以及 `AEEIS_WORKER_SHUTDOWN_GRACE_MS` / `AEEIS_WORKER_SHUTDOWN_FORCE_MS` 优雅退出配置。启用 Versioning 时，Worker 启动前会检查当前 Build ID 是否已注册；生产滚动发布必须通过 `AEEIS_TEMPORAL_BUILD_ID_ROLLOUT` 显式选择 `bootstrap`、`new-default`、`compatible` 或 `promote`，兼容发布还要提供 `AEEIS_TEMPORAL_COMPATIBLE_WITH`，不会静默把不兼容的 Worker 接到旧长时任务上。目标 Temporal namespace 必须启用对应的 Worker Versioning 能力；服务端未启用时 Worker 会在启动阶段明确失败。生产 Temporal 配置强制启用 Versioning。Worker health surface 默认在 `http://127.0.0.1:4324/health` 和 `/readyz`；设置 `AEEIS_TEMPORAL_WORKER_HEALTH_URL` 后，API 在 Temporal 模式下的 `/readyz` 会同时检查 Temporal gRPC health service 与 Worker `/readyz`，生产必须提供 HTTPS Worker health URL，避免只有 Temporal 集群存活而 Worker 没有轮询时仍接收长时任务。
+运行状态和事件保存在 `data/runs`；设备会话在本地模式保存为 `${AEEIS_DATA_DIR}/device-sessions.json`，配置 `DATABASE_URL` 时写入 PostgreSQL 的 `aeeis_device_sessions` 表。设置 `DATABASE_URL` 可切换 Run、Room、Room membership、Goal、Plan、Receipt、Memory、Context Manifest、Brain、RSI candidate/activation registry、Competition/Debate 协作状态、Task dispatch ledger 和 Projection outbox 到 PostgreSQL，启动时会创建所需表和索引。Brain 使用版本化 JSONB 状态和乐观并发检测；并发写入不会静默覆盖，遇到冲突需要重新读取后重试。设置 `AEEIS_RUNNER=temporal` 后，API 会把 Run 调度到 Temporal，领域 Task Scheduler 为每个已确认的任务保存对应的 Run/Workflow ID，并通过同一 dispatcher 启动 `agentRunWorkflow`；Temporal 仍是执行平面，Plan/Task/Receipt 和 dispatch ledger 是 AEEIS 的事实源。Worker 使用 `npm run worker` 启动。Worker 支持稳定的 `AEEIS_BUILD_ID`、可选的 Temporal Worker Versioning、显式 `TEMPORAL_NAMESPACE`，以及 `AEEIS_WORKER_SHUTDOWN_GRACE_MS` / `AEEIS_WORKER_SHUTDOWN_FORCE_MS` 优雅退出配置。启用 Versioning 时，Worker 启动前会检查当前 Build ID 是否已注册；生产滚动发布必须通过 `AEEIS_TEMPORAL_BUILD_ID_ROLLOUT` 显式选择 `bootstrap`、`new-default`、`compatible` 或 `promote`，兼容发布还要提供 `AEEIS_TEMPORAL_COMPATIBLE_WITH`，不会静默把不兼容的 Worker 接到旧长时任务上。目标 Temporal namespace 必须启用对应的 Worker Versioning 能力；服务端未启用时 Worker 会在启动阶段明确失败。生产 Temporal 配置强制启用 Versioning。Worker health surface 默认在 `http://127.0.0.1:4324/health` 和 `/readyz`；设置 `AEEIS_TEMPORAL_WORKER_HEALTH_URL` 后，API 在 Temporal 模式下的 `/readyz` 会同时检查 Temporal gRPC health service 与 Worker `/readyz`，生产必须提供 HTTPS Worker health URL，避免只有 Temporal 集群存活而 Worker 没有轮询时仍接收长时任务。
 
 HTTP API 默认保持本地单用户 `owner` 模式。开发环境可设置 `AEEIS_PRINCIPAL_TOKENS`，其值是“Bearer token → Principal”的 JSON 对象，例如 `{"alice-secret":{"id":"alice","tenantId":"team-a","roles":["owner"]}}`。组织部署可改用 OIDC：同时设置 `AEEIS_OIDC_ISSUER`、`AEEIS_OIDC_AUDIENCE` 和 `AEEIS_OIDC_JWKS_URL`，AEEIS 会只接受 RS256，校验 issuer、audience、exp/nbf、JWKS `kid`，并从配置的租户和角色 claims 构造 Principal；OIDC 不能和本地 token 映射同时启用。Goal、Plan、Memory、Context Manifest、Run、RSI candidate/activation、Competition、Debate 和 Projection event 会按 principal 过滤；owner 只能管理自己的租户，operator 可执行安装级运维。反向代理部署时用 `AEEIS_PUBLIC_HOSTS` 显式列出公开 Host，用 `AEEIS_TRUSTED_ORIGINS` 显式列出浏览器 Origin；`/internal/` Worker 端点仍只接受 `AEEIS_TRUSTED_HOSTS`，不会因为公开 Host 配置而暴露。用户交互授权、组织策略和密钥轮换仍由外部 OIDC 提供商负责。
 

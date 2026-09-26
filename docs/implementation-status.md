@@ -449,3 +449,6 @@ Web 工作台的每个 Room 现在会读取并展示受当前成员权限约束�
 按设计基线逐项核对后，Goal/Plan/Task/DAG、Execution/Evidence Graph、Brain/Memory/Knowledge、Temporal 适配、Room/Shared Session、Toolkit/OwnHow/Planprice 边界、外部 Agent、Competition/Debate、Feishu/Hermes 入站与投影、受控 RSI、预算、提醒、观测和恢复脚本均已有对应实现与回归入口。当前可复现证据为：全量本地测试 76 个文件、634 个测试通过、67 个跳过；PostgreSQL 17 实例回归 24 个文件、69 个测试通过；`npm run smoke:local:restart` 实际验证 Run 在 API 重启后保留 `needs_approval`、计划 hash 和最终 Evidence 结果；`npm run demo:full-local` 实际验证无 Docker 完整协议闭环；`npm run typecheck`、`npm run build` 和 `git diff --check` 通过。
 
 这份审计没有把真实模型质量、生产 Temporal/PostgreSQL 容量、Feishu/Hermes 组织权限、外部 Agent SLA、备份上传或跨区域恢复标为已完成；这些仍是部署侧验收项目。
+# 2026-09-26 增量：多终端设备会话边界
+
+AEEIS 现在支持 Web、CLI、桌面或移动端共享同一 Principal 的设备会话。`POST /api/devices` 注册带 label 和 capability 的设备，`GET /api/devices` 列出当前 owner/tenant 的设备，`POST /api/devices/:id/revoke` 幂等撤销；后续请求可带 `X-AEEIS-Device-ID`，API 会校验设备格式、Principal/tenant 归属、撤销状态并更新 `lastSeenAt`。设备 ID 不是认证凭证，Bearer/OIDC Principal 仍是身份根；旧客户端省略 header 时保持兼容。File 模式使用 `${AEEIS_DATA_DIR}/device-sessions.json`，PostgreSQL 模式使用 `aeeis_device_sessions`。新增跨 Principal/tenant、撤销、重复撤销、旧客户端和 JSON 重启持久化回归；定向 4 个测试、typecheck、build 和 diff check 通过。完整 verify 在当前受限沙箱中仍受测试尝试监听 `127.0.0.1` 的 `EPERM` 影响。

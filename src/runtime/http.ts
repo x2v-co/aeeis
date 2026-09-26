@@ -42,10 +42,11 @@ import type { ChannelIdentityResolver } from '../security/channel-identity.js';
 import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
 import type { GrantLedger } from '../agent-ledger.js';
+import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
 
-declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; maxSseConnections?: number }
+interface Options { demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -335,6 +336,17 @@ export function buildApp(options: Options) {
       const principal = await resolvePrincipal(request.headers.authorization);
       if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
       request.aeeisPrincipal = principal;
+      const suppliedDeviceId = request.headers['x-aeeis-device-id'];
+      if (suppliedDeviceId !== undefined) {
+        if (!options.deviceSessions) return reply.code(503).send({ error: 'Device sessions are not configured' });
+        if (typeof suppliedDeviceId !== 'string' || !deviceIdSchema.safeParse(suppliedDeviceId).success) return reply.code(400).send({ error: 'Invalid device session ID' });
+        const scope = { owner: principal.id, tenantId: principal.tenantId };
+        const device = await options.deviceSessions.get(suppliedDeviceId, scope);
+        if (!device) return reply.code(401).send({ error: 'Unknown device session' });
+        if (device.revokedAt) return reply.code(401).send({ error: 'Device session revoked' });
+        await options.deviceSessions.touch(suppliedDeviceId, scope);
+        request.aeeisDeviceId = suppliedDeviceId;
+      }
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex';
@@ -359,6 +371,8 @@ export function buildApp(options: Options) {
     if (error instanceof AgentCallbackAuthenticationError) return reply.code(401).send({ error: 'Agent callback authentication failed' });
     if (error instanceof AgentResponseRejected) return reply.code(400).send({ error: 'Agent response rejected', kind: error.kind, detail: error.message });
     if (error instanceof BrainConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof DeviceSessionNotFound) return reply.code(401).send({ error: 'Unknown device session' });
+    if (error instanceof DeviceSessionConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof NotFound || error instanceof EvolutionNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof PrincipalDirectoryUnavailable) return reply.code(503).send({ error: 'Principal directory unavailable; invitation refused' });
@@ -516,8 +530,29 @@ export function buildApp(options: Options) {
     ]);
     return {
       executionProfile: options.demoMode ? 'fixture' : 'unverified',
-      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
+      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
     };
+  });
+  app.get('/api/devices', async request => {
+    if (!options.deviceSessions) throw new Conflict('Device sessions are not configured');
+    const principal = principalOf(request);
+    return options.deviceSessions.list({ owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.post('/api/devices', async (request, reply) => {
+    if (!options.deviceSessions) throw new Conflict('Device sessions are not configured');
+    const principal = principalOf(request);
+    if (!principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
+    const body = z.object({ label: z.string().trim().min(1).max(200), capabilities: z.array(deviceCapabilitySchema).min(1).max(4) }).strict().parse(request.body);
+    const device = await options.deviceSessions.register({ owner: principal.id, tenantId: principal.tenantId, label: body.label, capabilities: body.capabilities });
+    return reply.code(201).send(device);
+  });
+  app.post<{ Params: { id: string } }>('/api/devices/:id/revoke', async (request, reply) => {
+    if (!options.deviceSessions) throw new Conflict('Device sessions are not configured');
+    const principal = principalOf(request);
+    if (!principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
+    const id = deviceIdSchema.parse(request.params.id);
+    const device = await options.deviceSessions.revoke(id, { owner: principal.id, tenantId: principal.tenantId });
+    return reply.send(device);
   });
   app.get('/api/brain/semantic-reindex', async (): Promise<{ configured: false } | { configured: true; model?: string; dimensions?: number }> => options.brainSemanticIndex ? { configured: true, ...(options.brainSemanticIndex.model === undefined ? {} : { model: options.brainSemanticIndex.model }), ...(options.brainSemanticIndex.dimensions === undefined ? {} : { dimensions: options.brainSemanticIndex.dimensions }) } : { configured: false });
   app.post('/api/brain/semantic-reindex', async request => {

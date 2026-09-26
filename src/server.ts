@@ -59,6 +59,7 @@ import { CachedPrincipalDirectory, HttpPrincipalDirectory, JsonPrincipalDirector
 import { HttpChannelIdentityResolver, JsonChannelIdentityResolver, type ChannelIdentityResolver } from './security/channel-identity.js';
 import { JsonSessionEventRepository, PostgresSessionEventRepository, SessionEventService, type SessionEventRepository } from './session-events.js';
 import { loadFileEnvironment } from './config-secrets.js';
+import { JsonDeviceSessionRepository, PostgresDeviceSessionRepository, type DeviceSessionRepository } from './device-sessions.js';
 
 // Validate credentials before opening stores and acquiring writer locks.
 loadFileEnvironment();
@@ -215,6 +216,10 @@ const sessionEventRepository: SessionEventRepository = process.env.DATABASE_URL
   : new JsonSessionEventRepository(process.env.AEEIS_SESSION_EVENTS_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/session-events.json`);
 await sessionEventRepository.init?.();
 const sessionEvents = new SessionEventService(sessionEventRepository, domain);
+const deviceSessions: DeviceSessionRepository = process.env.DATABASE_URL
+  ? new PostgresDeviceSessionRepository(process.env.DATABASE_URL)
+  : new JsonDeviceSessionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/device-sessions.json`);
+await deviceSessions.init?.();
 const taskDispatchRepository = process.env.DATABASE_URL
   ? new PostgresTaskDispatchRepository(process.env.DATABASE_URL)
   : new FileTaskDispatchRepository(process.env.AEEIS_TASK_DISPATCH_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/task-dispatch.json`);
@@ -510,6 +515,7 @@ try {
     ...(principalDirectory ? { principalDirectory } : {}),
     ...(channelIdentityResolver ? { channelIdentityResolver } : {}),
     sessionEvents,
+    deviceSessions,
     ...(process.env.AEEIS_MAX_SSE_CONNECTIONS ? { maxSseConnections: Number(process.env.AEEIS_MAX_SSE_CONNECTIONS) } : {}),
   });
   const compactRun = (run: AgentRun): unknown => ({
@@ -787,7 +793,7 @@ try {
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await app.close(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.();
+    await unsubscribeRunChanges?.(); await app.close(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); throw error; }
+} catch (error) { await dispatcher?.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); throw error; }

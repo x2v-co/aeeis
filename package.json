@@ -9,6 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "verify": "node scripts/verify.mjs",
+    "test:serial": "vitest run --pool=forks --maxWorkers=1 --minWorkers=1 --no-file-parallelism",
     "dev": "npm run build && tsx src/server.ts",
     "demo:local": "node scripts/demo-local.mjs",
     "demo:full-local": "node scripts/demo-full-local.mjs",
