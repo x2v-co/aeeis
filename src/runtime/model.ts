@@ -106,14 +106,20 @@ export class HttpModelAdapter implements ModelAdapter {
   }
   async complete(request: ModelRequest): Promise<ModelResponse> {
     let response: Response;
+    const signal = AbortSignal.timeout(this.requestTimeoutMs);
+    const transportFailure = (stage: 'request' | 'response'): ModelOutcomeUnknown => new ModelOutcomeUnknown(
+      signal.aborted
+        ? `Model ${stage} timed out after ${this.requestTimeoutMs}ms. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`
+        : `Model ${stage} connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`,
+    );
     try {
       response = await fetch(this.pin.endpoint, {
-        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.requestTimeoutMs),
+        method: 'POST', redirect: 'error', signal,
         headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}) },
         body: JSON.stringify({ model: this.pin.model, max_tokens: 4096, response_format: { type: 'json_object' },
           messages: [{ role: 'system', content: request.system }, { role: 'user', content: JSON.stringify(request.input) }] }),
       });
-    } catch { throw new ModelOutcomeUnknown('Model request outcome is unknown after a transport failure. Reconcile before retrying; the provider may have billed the request.'); }
+    } catch { throw transportFailure('request'); }
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status >= 500 || response.status === 408) throw new ModelOutcomeUnknown(`Model provider returned HTTP ${response.status}; execution outcome requires reconciliation`);
@@ -125,7 +131,7 @@ export class HttpModelAdapter implements ModelAdapter {
     for (;;) {
       let chunk: ReadableStreamReadResult<Uint8Array>;
       try { chunk = await reader.read(); }
-      catch { throw new ModelOutcomeUnknown('Model response transport interrupted; reconcile before retrying'); }
+      catch { throw transportFailure('response'); }
       const { done, value } = chunk; if (done) break;
       size += value.length;
       if (size > 1_000_000) { await reader.cancel(); throw new Error('Model response exceeds size limit'); }

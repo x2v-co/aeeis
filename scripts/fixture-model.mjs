@@ -81,8 +81,9 @@ function responseFor(system, input) {
 
   const source = input.sourceCatalog?.[0];
   const dependency = input.dependencies?.[0];
+  const answers = Array.isArray(input.answers) ? input.answers.filter((answer) => typeof answer?.answer === 'string' && answer.answer.trim()) : [];
   const catalogTools = Array.isArray(input.capabilityCatalog?.tools) ? input.capabilityCatalog.tools : [];
-  const webTool = input.task && !(input.observations?.length)
+  const webTool = input.task?.id === 'inspect' && !(input.observations?.length)
     ? catalogTools.find((tool) => tool?.id === (String(input.goal ?? '').match(/https?:\/\//) ? 'web-fetch' : 'web-search'))
     : undefined;
   if (webTool) {
@@ -94,7 +95,12 @@ function responseFor(system, input) {
   if (input.task && input.observations?.length && catalogTools.some((tool) => tool?.id === 'web-search' || tool?.id === 'web-fetch')) {
     const observation = input.observations.at(-1)?.result ?? {};
     const evidenceRefs = Array.isArray(observation.outputRefs) ? observation.outputRefs.filter(Boolean) : [];
-    return { type: 'finish', title: 'Web tool result', content: 'Completed the requested web lookup using the authorized toolkit tool.', evidenceRefs };
+    const output = observation.output && typeof observation.output === 'object' ? observation.output : undefined;
+    const summary = typeof output?.summary === 'string' ? output.summary : typeof output?.text === 'string' ? output.text : JSON.stringify(output ?? {}, null, 2);
+    return { type: 'finish', title: 'Web tool result', content: `已通过授权的 web-fetch 获取资料。\n\n${summary}`.slice(0, 30000), evidenceRefs };
+  }
+  if (input.task?.id !== 'inspect' && dependency?.content) {
+    return { type: 'finish', title: '基于网页资料的交付', content: `已使用 inspect 任务取得的网页资料生成交付。\n\n${dependency.content}`.slice(0, 30000), evidenceRefs: [dependency.id] };
   }
   const fixtureAgent = input.capabilityCatalog?.agents?.find((agent) => agent.agentId === 'agent.fixture');
   // Delegate only the inspection task. Subsequent tasks should consume the
@@ -109,14 +115,24 @@ function responseFor(system, input) {
   }
   if (input.task?.id === 'inspect' && !(input.observations?.length)) {
     if (source?.id) return { type: 'tool', tool: 'sources.read', argument: source.id };
+    if (answers.length) {
+      const answer = answers.at(-1).answer.trim();
+      return { type: 'finish', title: '已收到补充信息', content: `已使用你补充的信息继续处理：${answer}`, evidenceRefs: [] };
+    }
     return { type: 'question', question: '请提供可核验的资料或允许访问天气数据的工具。当前任务没有可用证据来源。' };
   }
   return {
     type: 'finish',
-    title: input.task?.id === 'inspect' ? 'Inspected source facts' : 'Evidence-linked deliverable',
+    title: input.task?.id === 'inspect'
+      ? 'Inspected source facts'
+      : answers.length && !source?.id
+        ? '固定模型执行回执'
+        : 'Evidence-linked deliverable',
     content: input.task?.id === 'inspect'
       ? `Inspected the supplied source: ${source?.title ?? 'source material'}.`
-      : 'Completed the requested result from the inspected task and supplied source material.',
+      : answers.length && !source?.id
+        ? `已收到补充信息：${answers.at(-1).answer.trim()}\n\n验证结果：当前使用的本地固定模型不会访问外部 URL 或天气服务，因此本次只验证了 AEEIS 的规划、执行和交付协议，没有生成可核验的真实天气报告。`
+        : 'Completed the requested result from the inspected task and supplied source material.',
     evidenceRefs: dependency?.id ? [dependency.id] : source?.id ? [source.id] : [],
     ...(system.includes('Project Pulse') && input.task?.id !== 'inspect' ? {
       artifactType: 'project-pulse/1',

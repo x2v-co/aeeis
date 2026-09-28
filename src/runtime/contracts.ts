@@ -114,7 +114,16 @@ export type ProjectPulseArtifact = z.infer<typeof projectPulseArtifactSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string; globalBudgetAccountKey?: string; /** Durable attempt fence shared by independent Engines. Recovery invalidates it before reconciliation. */ executionToken?: string; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean; receiptRef?: string; globalBudgetAccountKey?: string; /** Durable provider-attempt fence shared by independent Engines. */ executionToken?: string; /** Diagnostic for an unknown attempt; the provider result remains untrusted. */ failure?: AgentFailure; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'waiting_external' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
-export interface Source { id: string; title: string; content: string; source: string; hash: string; classification?: TaskRequest['privacy']; origin?: { runId: string; ref: string } }
+export interface Source {
+  id: string; title: string; content: string; source: string; hash: string;
+  /** Hash of the exact content presented to a model. */
+  contentHash?: string;
+  /** Identifies the source family in the evidence graph. */
+  kind?: 'material' | 'knowledge' | 'project-source' | 'memory' | 'brain' | 'run-evidence' | 'unknown';
+  /** User/connector material is data, never an instruction channel. */
+  untrusted?: boolean;
+  classification?: TaskRequest['privacy']; origin?: { runId: string; ref: string }
+}
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; artifactType?: 'project-pulse/1'; structured?: ProjectPulseArtifact; hash: string; createdAt: string }
 /**
  * The transport fields are retained for compatibility with static providers.
@@ -164,7 +173,7 @@ export interface AgentRun {
   taskExecution?: { domainPlanId: string; taskId: string; requestHash: string };
   followUpPlanId?: string;
   status: RunStatus; createdAt: string; updatedAt: string;
-  context: { id: string; audience: string[]; sources: Source[]; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
+  context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;
   builtinSkill?: TaskRequest['builtinSkill'];

@@ -1,4 +1,7 @@
 import type { PlanComparison } from '../runtime/graphs.js';
+import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
+
+window.addEventListener('pagehide', releaseArtifactDownloads);
 
 interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string }
 interface RoomSummary { id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
@@ -40,10 +43,11 @@ interface RunView extends RunSummary {
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
-  privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; classification?: string; origin?: { runId: string; ref: string } }> };
+  privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
   steps: Array<{ taskId: string; status: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
+  model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
   events: Array<{ seq: number; type: string; at: string; data?: { validation?: { issues?: Array<{ path?: string; message?: string }> } } }>;
   calls: Array<{ phase: string; state: string; usage?: { inputTokens: number; outputTokens: number } }>;
   modelBudget?: { tokens?: number; moneyUsd?: number }; modelUsage?: { tokens: number; moneyUsd?: number; unreportedCalls: number };
@@ -127,6 +131,12 @@ let runDockObserver: IntersectionObserver | undefined;
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 let timelineFilter = localStorage.getItem('aeeis.timeline-filter') ?? 'all';
+const MAX_MATERIAL_FILES = 8;
+const MAX_MATERIAL_FILE_BYTES = 1_000_000;
+const MAX_MATERIAL_CONTENT_LENGTH = 30_000;
+let materialFilesLoading = false;
+let selectedMaterialFiles: Array<{ name: string; content: string; size: number }> = [];
+let materialFileReadSequence = 0;
 const ATTENTION_STATUSES = new Set(['needs_approval', 'needs_input', 'waiting_external', 'unknown', 'failed']);
 const ACTIVE_STATUSES = new Set(['queued', 'planning', 'running', 'reviewing', 'paused']);
 const DONE_STATUSES = new Set(['succeeded', 'cancelled']);
@@ -716,11 +726,13 @@ function openInputPanel(mode: InputPanelMode): void {
   const panel = $('input-panel');
   const heading = panel.querySelector('h2');
   const submit = panel.querySelector('button');
+  const answer = $<HTMLTextAreaElement>('answer');
   if (heading) heading.textContent = mode === 'answer' ? '需要你的信息' : '核查外部结果';
   if (submit) submit.textContent = mode === 'answer' ? '提交并继续' : '提交核查并继续';
+  if (answer) answer.placeholder = mode === 'answer' ? '可直接粘贴资料、约束、链接或补充说明…' : '说明外部调用是否已经完成，或提供核查依据…';
   panel.hidden = false;
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  $<HTMLTextAreaElement>('answer').focus();
+  answer.focus();
 }
 function renderAttentionInbox(runs: RunSummary[]): void {
   const panel = $('attention-inbox');
@@ -1526,9 +1538,73 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
   }
   goalViewSignature = signature;
 }
+function formatMaterialFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function renderMaterialFiles(status?: string): void {
+  const list = $('material-file-list');
+  const label = $('material-files-status');
+  const clear = $('clear-material-files') as HTMLButtonElement | null;
+  if (!list || !label) return;
+  list.replaceChildren();
+  for (const file of selectedMaterialFiles) {
+    const item = element('li');
+    item.append(element('span', file.name), element('small', formatMaterialFileSize(file.size)));
+    list.append(item);
+  }
+  if (clear) clear.hidden = selectedMaterialFiles.length === 0 && !materialFilesLoading;
+  if (status) label.textContent = status;
+  else if (materialFilesLoading) label.textContent = '正在读取资料…';
+  else if (selectedMaterialFiles.length) label.textContent = `${selectedMaterialFiles.length} 个文件已绑定到本次 Run`;
+  else label.textContent = '支持 TXT、Markdown、CSV、JSON；文件只绑定当前 Run。';
+}
+async function readMaterialFiles(files: FileList | null): Promise<void> {
+  const sequence = ++materialFileReadSequence;
+  const incoming = [...(files ?? [])];
+  if (!incoming.length) return;
+  materialFilesLoading = true;
+  renderMaterialFiles();
+  const accepted = incoming.slice(0, MAX_MATERIAL_FILES);
+  const skipped: string[] = incoming.length > MAX_MATERIAL_FILES ? incoming.slice(MAX_MATERIAL_FILES).map(file => file.name) : [];
+  const loaded: Array<{ name: string; content: string; size: number }> = [];
+  for (const file of accepted) {
+    const extension = file.name.toLocaleLowerCase().split('.').pop() ?? '';
+    const supported = ['txt', 'md', 'markdown', 'csv', 'json'].includes(extension) || ['text/plain', 'text/markdown', 'text/csv', 'application/json'].includes(file.type);
+    if (!supported) { skipped.push(`${file.name}（仅支持文本文件）`); continue; }
+    if (file.size > MAX_MATERIAL_FILE_BYTES) { skipped.push(`${file.name}（超过 1 MB）`); continue; }
+    try {
+      const content = (await file.text()).slice(0, MAX_MATERIAL_CONTENT_LENGTH).trim();
+      if (!content) { skipped.push(`${file.name}（内容为空）`); continue; }
+      loaded.push({ name: file.name.slice(0, 200), content, size: file.size });
+    } catch { skipped.push(`${file.name}（读取失败）`); }
+  }
+  if (sequence !== materialFileReadSequence) return;
+  selectedMaterialFiles = loaded;
+  materialFilesLoading = false;
+  renderMaterialFiles(skipped.length ? `已载入 ${loaded.length} 个文件；跳过 ${skipped.join('、')}` : undefined);
+}
+($('material-files') as HTMLInputElement | null)?.addEventListener('change', event => {
+  void readMaterialFiles((event.target as HTMLInputElement).files).catch(error => {
+    materialFilesLoading = false;
+    renderMaterialFiles('资料读取失败，请重新选择文本文件');
+    message(errorMessage(error));
+  });
+});
+($('clear-material-files') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  materialFileReadSequence += 1;
+  materialFilesLoading = false;
+  selectedMaterialFiles = [];
+  const input = $<HTMLInputElement>('material-files');
+  if (input) input.value = '';
+  renderMaterialFiles();
+});
+renderMaterialFiles();
 function runOptions(includeProjectQuery = true): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
+  const allowedTools = [...new Set($<HTMLInputElement>('allowed-tools').value.split(',').map(value => value.trim()).filter(Boolean))];
   const allowedAgents = [...new Set($<HTMLInputElement>('allowed-agents').value.split(',').map(value => value.trim()).filter(Boolean))];
   const brainScope = $<HTMLInputElement>('brain-scope').value.trim();
   const brainQuery = $<HTMLInputElement>('brain-query').value.trim();
@@ -1546,7 +1622,12 @@ function runOptions(includeProjectQuery = true): Record<string, unknown> {
     if (field.value) externalBudget[key] = Number(field.value);
   }
   const modelBudget = { ...(tokenField.value ? { tokens: Number(tokenField.value) } : {}), ...(moneyField.value ? { moneyUsd: Number(moneyField.value) } : {}) };
-  return { ...(builtinSkill ? { builtinSkill } : {}), materials: content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : [], privacy: $<HTMLSelectElement>('privacy').value, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  if (materialFilesLoading) throw new Error('资料仍在读取，请稍候再启动 Run');
+  const materials = [
+    ...(content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : []),
+    ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
+  ];
+  return { ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(allowedTools.length ? { allowedTools } : {}), ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -1990,12 +2071,13 @@ function render(run: RunView): void {
     ? `计划 v${plan.version} · ${plan.summary}${run.plans.length > 1 ? ` · 历史版本：${run.plans.slice(0, -1).map(item => `v${item.version}`).join('、')}` : ''}`
     : '正在等待模型生成任务计划';
   const sources = $('sources'); sources.replaceChildren();
-  $('memory-context').textContent = run.context?.memoryManifestId
-    ? `Goal Memory Manifest：${run.context.memoryManifestId} · hash ${run.context.memoryManifestHash ?? 'legacy'} · 冻结 ${run.context.memoryRefs?.length ?? 0} 条记忆引用`
-    : '本次 Run 没有绑定 Goal Memory Manifest。';
+  const contextSummary: string[] = [];
+  if (run.context?.manifestHash) contextSummary.push(`Context Manifest hash ${run.context.manifestHash}`);
+  if (run.context?.memoryManifestId) contextSummary.push(`Goal Memory Manifest：${run.context.memoryManifestId} · hash ${run.context.memoryManifestHash ?? 'legacy'} · 冻结 ${run.context.memoryRefs?.length ?? 0} 条记忆引用`);
+  $('memory-context').textContent = contextSummary.length ? contextSummary.join(' · ') : '本次 Run 没有绑定 Context Manifest。';
   for (const source of run.context?.sources ?? []) {
     const box = element('details');
-    box.append(element('summary', `${source.title} · ${privacyLabel(source.classification ?? run.privacy)}`), element('small', `${source.source} · ${source.id} · sha256 ${source.hash}${source.origin ? ` · 来源 Run ${source.origin.runId}` : ''}`), element('pre', source.content));
+    box.append(element('summary', `${source.title} · ${privacyLabel(source.classification ?? run.privacy)}`), element('small', `${source.kind ?? 'source'}${source.untrusted ? ' · 外部资料' : ''} · ${source.source} · ${source.id} · sha256 ${source.hash}${source.contentHash ? ` · content ${source.contentHash}` : ''}${source.origin ? ` · 来源 Run ${source.origin.runId}` : ''}`), element('pre', source.content));
     sources.append(box);
   }
   if (!sources.children.length) sources.append(element('p', '本次运行没有读取外部项目源或知识记录。', 'muted'));
@@ -2041,7 +2123,9 @@ function render(run: RunView): void {
   const artifacts = $('artifacts'); artifacts.replaceChildren();
   for (const artifact of run.artifacts) {
     const box = element('details'); box.open = true;
-    box.append(element('summary', `${artifact.title}${artifact.artifactType ? ` · ${artifact.artifactType}` : ''}`), element('pre', artifact.content));
+    const actions = element('div', '', 'artifact-actions');
+    actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
+    box.append(element('summary', `${artifact.title}${artifact.artifactType ? ` · ${artifact.artifactType}` : ''}`), actions, renderArtifactMarkdown(artifact.content));
     if (isProjectPulseArtifact(artifact.structured)) appendProjectPulse(box, artifact.structured, run);
     else if (artifact.structured) box.append(element('small', '结构化产物'), element('pre', JSON.stringify(artifact.structured, null, 2)));
     box.append(element('small', `证据：${artifact.evidenceRefs.join(', ') || '无外部来源引用'}`)); artifacts.append(box);
@@ -2220,7 +2304,54 @@ function renderDeliverySummary(run: RunView): void {
     const card = element('div', '', 'delivery-metric');
     card.append(element('small', label), element('strong', value)); metrics.append(card);
   }
+  renderDeliveryArtifact(run);
   renderFollowUpPlan(run);
+}
+
+function renderDeliveryArtifact(run: RunView): void {
+  const box = $('delivery-artifact');
+  if (!box) return;
+  box.replaceChildren();
+  box.hidden = true;
+  const artifact = run.artifacts.at(-1);
+  if (!artifact) {
+    const completedCalls = run.calls.filter(call => call.state === 'completed').length;
+    const model = run.model?.model ?? run.modelDecision?.selected?.model ?? '固定模型';
+    const isFixture = /fixture|local/i.test(`${model} ${run.model?.endpoint ?? ''}`);
+    if (run.calls.length || run.status === 'succeeded') {
+      box.hidden = false;
+      box.append(element('strong', run.status === 'succeeded' ? '运行已完成，但没有生成可展示的产物。' : '运行没有生成产物。'));
+      if (run.calls.length) box.append(element('small', `已发起 ${run.calls.length} 次模型请求，${completedCalls} 次完成 · ${model}`, 'delivery-runtime-ok'));
+      box.append(element('p', isFixture
+        ? '当前连接的是本地固定协议桩：它会返回预置 JSON 来验证 AEEIS 流程，不代表真实 LLM 推理。要验证真实模型，需要配置实际 provider endpoint 和 key。'
+        : '请展开执行详情查看模型调用和事件记录。', 'delivery-artifact-warning'));
+    }
+    return;
+  }
+  box.hidden = false;
+  const completedCalls = run.calls.filter(call => call.state === 'completed').length;
+  const failedCalls = run.calls.filter(call => call.state === 'failed' || call.state === 'unknown').length;
+  const model = run.model?.model ?? run.modelDecision?.selected?.model ?? '固定模型';
+  const isFixture = /fixture|local/i.test(`${model} ${run.model?.endpoint ?? ''}`);
+  const runtimeText = run.calls.length
+    ? `Agent runtime 已执行：${run.calls.length} 次模型请求，${completedCalls} 次完成${failedCalls ? `，${failedCalls} 次异常` : ''} · ${model}`
+    : '未记录模型调用；当前产物可能来自恢复或历史导入。';
+  const runtime = element('small', runtimeText, completedCalls === run.calls.length && run.calls.length ? 'delivery-runtime-ok' : 'delivery-runtime-warning');
+  const content = renderArtifactMarkdown(artifact.content);
+  content.classList.add('delivery-artifact-content');
+  const evidence = element('small', `证据引用：${artifact.evidenceRefs.length ? artifact.evidenceRefs.join('、') : '无外部来源引用'}`, 'delivery-artifact-evidence');
+  box.append(element('div', '最终产物', 'delivery-artifact-kicker'), element('h3', artifact.title), runtime, content, evidence);
+  if (isFixture) box.append(element('p', run.toolReceipts?.length
+    ? '编排使用的是本地固定协议桩；上面的外部资料来自已授权 Tool，模型本身没有进行真实推理。'
+    : '当前使用本地固定协议桩，仅验证 AEEIS 的规划、执行和交付协议；这份内容不能替代真实资料报告。', 'delivery-artifact-warning'));
+  const open = button('打开完整产物与证据', async () => {
+    setRunDetailsMode(true);
+    $('artifacts')?.closest('section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  open.className = 'quiet-button delivery-artifact-open';
+  const actions = element('div', '', 'artifact-actions');
+  actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }), open);
+  box.insertBefore(actions, content);
 }
 
 function renderFollowUpPlan(run: RunView): void {

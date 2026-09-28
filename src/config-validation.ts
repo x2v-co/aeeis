@@ -205,6 +205,7 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   validateFractionConfig(env, 'AEEIS_RSI_AUTOMATION_MINIMUM_SCORE', 0.7);
   validateFractionConfig(env, 'AEEIS_RSI_LOW_CONFIDENCE_THRESHOLD', 0.5);
   const hasFixedModelBase = Boolean(env.AEEIS_MODEL_BASE_URL?.trim());
+  validateIntegerConfig(env, 'AEEIS_MODEL_TIMEOUT_MS', { defaultValue: 180_000, min: 1_000, max: 600_000 });
   const hasFixedModelName = Boolean(env.AEEIS_MODEL?.trim());
   if (hasFixedModelBase !== hasFixedModelName) throw new Error('AEEIS_MODEL_BASE_URL and AEEIS_MODEL must be configured together');
   validateEndpoint(env.AEEIS_MODEL_BASE_URL, 'AEEIS_MODEL_BASE_URL', env.AEEIS_MODEL_ALLOW_INSECURE_HTTP === '1');

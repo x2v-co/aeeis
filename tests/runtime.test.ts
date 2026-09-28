@@ -19,6 +19,7 @@ import { AeeisService } from '../src/application/aeeis-service.js';
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
+import { materialContentHash } from '../src/runtime/materials.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -53,6 +54,8 @@ class MissingSourceFixture implements ModelAdapter {
     if (request.system.includes('Independently review')) {
       return { value: { verdict: 'accepted', summary: 'No review is needed while input is pending', issues: [] } };
     }
+    const input = request.input as { answers?: Array<{ answer: string }> };
+    if (input.answers?.length) return { value: { type: 'finish', title: '补充信息结果', content: `已使用补充信息：${input.answers.at(-1)!.answer}`, evidenceRefs: [] } };
     return { value: { type: 'question', question: '请提供可核验的资料或允许访问天气数据的工具。当前任务没有可用证据来源。' } };
   }
 }
@@ -254,6 +257,11 @@ describe('AEEIS runtime', () => {
     expect(current.question?.text).toContain('可核验');
     expect(current.events.some(event => event.type === 'run.failed')).toBe(false);
     expect(current.events.some(event => event.type === 'tool.completed')).toBe(false);
+    await engine.command(run.id, 'answer', { answer: '北京天气暂无可用实时接口，请基于这条说明继续。' });
+    for (let index = 0; index < 3 && (await repo.get(run.id)).status !== 'succeeded'; index += 1) await engine.advance(run.id);
+    expect((await repo.get(run.id)).status).toBe('succeeded');
+    current = await repo.get(run.id);
+    expect(current.artifacts[0]?.content).toContain('北京天气暂无可用实时接口');
     await repo.close();
   });
 
@@ -272,6 +280,8 @@ describe('AEEIS runtime', () => {
     const goal = await domain.createGoal({ title: 'Assess this release' });
     const engine = new AgentEngine(repo, { model: new PlanningFixture(), domain });
     const run = await engine.create({ goal: goal.title, goalId: goal.id, materials: [{ title: 'Brief', source: 'fixture', content: 'The source says to ship safely.' }] });
+    expect(run.context.manifestHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(run.context.sources[0]).toMatchObject({ kind: 'material', untrusted: true, contentHash: materialContentHash('The source says to ship safely.'), classification: 'internal' });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     const proposed = await repo.get(run.id);
     expect(proposed.domainPlanId).toBeDefined();

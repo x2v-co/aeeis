@@ -8,7 +8,7 @@ AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也�
 
 能力与验证入口的对应关系见[验证矩阵](docs/verification-matrix.md)。
 
-工作台的“工作方式”提供内置 `Project Pulse`（`project-pulse/1`）：不接项目连接器时，也可以直接粘贴项目资料。AEEIS 会按目标先生成计划，执行后交付带 Evidence refs 的进展、已完成变更、阻塞、风险、决策、负责人、期限、下一步和未知信息；审核通过后，`nextActions` 会生成可继续调度的后续 Plan。它是首个产品化入口，连接器只是让同一工作方式自动读取项目源。
+工作台的“工作方式”提供内置 `Project Pulse`（`project-pulse/1`）：不接项目连接器时，也可以直接粘贴项目资料，或选择 TXT、Markdown、CSV、JSON 文件作为本次 Run 的资料。AEEIS 会按目标先生成计划，执行后交付带 Evidence refs 的进展、已完成变更、阻塞、风险、决策、负责人、期限、下一步和未知信息；审核通过后，`nextActions` 会生成可继续调度的后续 Plan。它是首个产品化入口，连接器只是让同一工作方式自动读取项目源。用户资料会被标记为 `material`、绑定当前 Run 的 privacy，并保存精确内容 hash；模型读取资料时会收到明确的外部来源边界，长资料搜索返回命中附近的有界片段。Run 创建后会冻结整个 Context Manifest hash，便于核对本次运行实际使用的资料集合。浏览器文件只进入当前 Run，不会自动写入长期 Knowledge 库。
 
 当后续 Plan 生成后，Run 工作台的“当前交付”会显示 successor Plan，并可按需展开后续任务、依赖、状态和证据引用；实际调度仍在“长期目标”区域完成，Plan 仍只有一份领域事实源。
 
@@ -132,11 +132,15 @@ npm run dev
 
 复制 `.env.example` 后配置一个 OpenAI-compatible endpoint：
 
+固定模型的请求超时由 `AEEIS_MODEL_TIMEOUT_MS` 控制，默认 180000（3 分钟），范围 1000–600000 毫秒，覆盖等待响应和读取正文。超时后 Run 保留 `unknown`，不自动重发；收到服务商回执后再核查恢复。超时不等于服务商没有执行或没有计费。
+
 ```bash
 cp .env.example .env
-set -a; source .env; set +a
+# 编辑 .env，填写模型 endpoint、model 和 API key
 npm run dev
 ```
+
+`npm run dev` 自动读取当前目录的 `.env`，忽略模板中的空配置项，显式进程环境变量优先；修改后需重启。`npm start`、Worker 与 demo 仍使用各自显式的环境配置，不会自动读取该文件。用 `/api/status` 核对实际的 `model.model`、`model.endpoint` 与 `executionProfile`；`modelConfigured` 仅代表配置存在，真实调用结果应查看 Run 的 `calls` 和 `usage`。
 
 也可以配置 `AEEIS_PLANPRICE_URL` 启用按能力、隐私策略和目录价格的模型选择；AEEIS 读取 Planprice 的 `/api/products/grouped?type=llm` 渠道价格，并用 `/api/exchange-rates` 的汇率归一到 USD；没有可验证汇率时不会把本地币种数字直接拿来比较。每次 Model Decision 都会保存候选目录的排序稳定 `catalogHash` 和读取时间，便于重建长时 Run 当时的路由依据。必须额外为选中的 provider 配置 `AEEIS_MODEL_PROVIDER_ENDPOINTS` 和 `AEEIS_MODEL_PROVIDER_KEYS`。`AEEIS_MODEL_PRIVATE_DATA_ALLOWED` 是由部署者维护的 provider/model 数据策略 JSON 映射；只有显式为 `true` 的条目才能承载 `private` Run，省略条目会安全拒绝路由，策略也会进入候选目录 hash。 在生产环境启用 Planprice 路由时，启动校验会要求两者都是非空 JSON 对象，并拒绝带凭证、查询参数、fragment 或非 HTTPS 的 provider/health URL；目录读取成功但没有可调用 provider 配置不会进入 ready。可用 `AEEIS_PLANPRICE_HEALTH_URL` 配置与目录同源的只读 GET 探针；它只用于依赖诊断，不触发模型调用，重定向、超时或非 2xx 会明确标记目录不可用。`/readyz` 和 `/api/status.modelHealth` 会区分 Planprice 目录故障、无满足策略的模型和被选 provider 故障；可用 `AEEIS_MODEL_PROVIDER_HEALTH_URLS` 按 provider 或 model 配置健康地址，未配置时会明确标出只完成目录选择、没有 provider 探测。工具和 Personal Method 治理分别通过 `AEEIS_TOOLKIT_*`、`AEEIS_OWNHOW_*` 接入。启用 OwnHow 时要设置 `AEEIS_OWNHOW_RUNTIME`，或者在每个 Run 提供 `skillRuntime`，因为 OwnHow 的解析必须绑定具体宿主 runtime。对 toolkit_new，优先设置 `AEEIS_TOOLKIT_REGISTRY_URL`（指向 `/api/v1/registry`）；AEEIS 会读取 Registry index/Manifest，再把已批准的版本调用转换为 toolkit_new 的 `/api/v1/t/:slug` 请求，并保留自己的 allowlist、幂等键和 Receipt。设置 `AEEIS_TOOLKIT_VERIFY_SIGNATURES=1` 后还会读取 `/keysets/current`，验证 Registry keyset 的根签名以及 index/manifest 的 Ed25519 签名和 canonical digest；生产环境默认要求开启，并通过 `AEEIS_TOOLKIT_ROOT_PUBLIC_JWK` 注入独立信任根，启动时会校验该变量是公开的 Ed25519 JWK，缺失或无效会直接拒绝启动；只有显式设置 `AEEIS_TOOLKIT_VERIFY_SIGNATURES=0` 才关闭这一生产要求。旧的 `AEEIS_TOOLKIT_MANIFEST_URL` + `AEEIS_TOOLKIT_INVOKE_URL` 仍支持自定义网关。外部工具版本在 Run 创建时冻结，未知结果只能通过 provider reconcile 恢复。
 
@@ -305,7 +309,7 @@ HTTP API 默认保持本地单用户 `owner` 模式。开发环境可设置 `AEE
 
 领域 Task 转移以一次存储提交更新 Plan、Goal 完成状态和 Receipt。并发分支按最新 Plan 快照重新校验，避免状态覆盖和缺失回执；JSON 存储限制单个活动写入者，PostgreSQL 使用行锁与事务。Plan 的 `version` 仍表示 DAG 版本，不作为执行状态的修订号。
 
-创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems`、`brainScope`、`brainQuery` 和 `brainMaxItems`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；同时填写 `brainQuery` 会使用权限检查后的有界确定性检索，避免把整个长期 Brain scope 注入上下文；没有配置对应 Provider 时会明确失败。
+创建 Run 时可以提供 `knowledgeQuery`、`knowledgeMaxItems`、`brainScope`、`brainQuery` 和 `brainMaxItems`。配置 Knowledge Provider 后，Runtime 会按 Run 的 privacy 级别检索知识，并把命中的记录作为带 hash 的来源交给 Planner、Executor 和 Reviewer；填写 `brainScope` 时，Runtime 会按 owner 授权读取对应 Brain claims、留下 read 审计并把 claim hash 作为来源；同时填写 `brainQuery` 会使用权限检查后的有界确定性检索，避免把整个长期 Brain scope 注入上下文；没有配置对应 Provider 时会明确失败。所有资料来源都进入同一个冻结 Context Manifest，模型只能通过 `sources.search` / `sources.read` 读取，读取结果带 `sourceRef`、`contentHash` 和不可信资料边界，不会把资料里的指令当作 AEEIS 协议。
 
 Brain 的语义检索是可选的派生能力。配置 `AEEIS_BRAIN_EMBEDDING_URL` 且使用 PostgreSQL 时，AEEIS 会在 `aeeis_brain_embeddings` 中维护按 embedding model 绑定的 pgvector 侧索引；Brain 的版本化 JSONB 状态、撤回历史和审计仍是唯一事实源，索引可以丢弃后从 claims 重建。语义服务只返回候选 claim ID，Runtime 会再次按 owner/tenant、grant、classification 和 active 状态校验；embedding 服务或 pgvector 暂不可用时自动回退确定性词法检索，不阻断 Brain 写入或 Run 创建。embedding 服务恢复后，operator 可调用 `GET /api/brain/semantic-reindex` 查看索引配置，并用 `POST /api/brain/semantic-reindex` 按当前 canonical claims 重建派生索引；该操作不会改变 Brain 版本或审计记录。
 

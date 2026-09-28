@@ -1,3 +1,4 @@
+import { artifactFilename } from './artifact-download.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
@@ -1385,6 +1386,15 @@ export function buildApp(options: Options) {
     catch (error) { release(); throw error; }
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => { const principal = principalOf(request); return getReadableRun(options.repository, options.domain, request.params.id, principal); });
+  app.get<{ Params: { id: string; artifactId: string } }>('/api/runs/:id/artifacts/:artifactId/download', async (request, reply) => {
+    const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
+    const artifact = run.artifacts.find(item => item.id === request.params.artifactId);
+    if (!artifact) throw new NotFound('Unknown artifact');
+    const filename = encodeURIComponent(artifactFilename(artifact.title)).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    return reply.type('text/markdown; charset=utf-8')
+      .header('content-disposition', `attachment; filename="aeeis-artifact.md"; filename*=UTF-8''${filename}`)
+      .send(artifact.content);
+  });
   app.get<{ Params: { id: string } }>('/api/runs/:id/explanation', async request => {
     const principal = principalOf(request);
     return explainRun(await getReadableRun(options.repository, options.domain, request.params.id, principal));

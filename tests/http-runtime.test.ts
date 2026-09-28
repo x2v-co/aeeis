@@ -31,6 +31,33 @@ import { InMemoryStore } from '../src/adapters/in-memory-store.js';
 import { InMemoryGrantLedger } from '../src/agent-ledger.js';
 
 describe('AEEIS HTTP boundary', () => {
+  it('downloads exact Markdown with a Unicode filename and enforces Run access', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-artifact-download-'))); await repo.init();
+    const app = buildApp({ repository: repo, principalTokens: {
+      alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
+      bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] },
+      outsider: { id: 'alice', tenantId: 'team-b', roles: ['owner'] },
+    } });
+    try {
+      const now = new Date().toISOString();
+      const id = `run_${randomUUID()}`;
+      const content = '# 北京天气\n\n**出行建议**\n\n| 日期 | 温度 |\n|---|---|\n| 十一 | 22℃ |\n';
+      await repo.create({ id, owner: 'alice', tenantId: 'team-a', goal: 'Report', status: 'succeeded', revision: 1, createdAt: now, updatedAt: now, calls: [], steps: [], plans: [], events: [], artifacts: [{ id: 'artifact_1', taskId: 'task_1', title: '北京/天气:报告', content, evidenceRefs: [], hash: 'hash', createdAt: now }], context: { id: 'ctx', sources: [], audience: ['alice'] }, privacy: 'internal', approval: { approved: true }, answers: [], model: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'fixture/1' }, allowedTools: [], allowedAgents: [], maxModelCalls: 1, brainMaxItems: 1, memoryMaxItems: 1, knowledgeMaxItems: 1, externalUsage: { calls: 0, tokens: 0, unreportedTokenCalls: 0, unreportedMoneyCalls: 0 }, schemaVersion: 1 });
+      const url = `/api/runs/${id}/artifacts/artifact_1/download`;
+      const response = await app.inject({ url, headers: { authorization: 'Bearer alice' } });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toBe(content);
+      expect(response.headers['content-type']).toBe('text/markdown; charset=utf-8');
+      expect(response.headers['content-disposition']).toBe(`attachment; filename="aeeis-artifact.md"; filename*=UTF-8''${encodeURIComponent('北京-天气-报告.md')}`);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect((await app.inject({ url })).statusCode).toBe(401);
+      for (const token of ['bob', 'outsider']) {
+        expect((await app.inject({ url, headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(404);
+      }
+      expect((await app.inject({ url: `/api/runs/${id}/artifacts/missing/download`, headers: { authorization: 'Bearer alice' } })).statusCode).toBe(404);
+    } finally { await app.close(); await repo.close(); }
+  });
+
   it('passes validated limits and caller scope down to storage before reading collections', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-bounded-runs-'))); await repo.init();
     const collaboration = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-bounded-collaboration-'))); await collaboration.init();

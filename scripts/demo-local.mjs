@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 const host = process.env.AEEIS_HOST ?? '127.0.0.1';
 const apiPort = Number(process.env.PORT ?? 4323);
 const modelPort = Number(process.env.AEEIS_FIXTURE_MODEL_PORT ?? 4399);
+const webToolPort = Number(process.env.AEEIS_LOCAL_WEB_TOOL_PORT ?? 4398);
 const dataDir = process.env.AEEIS_DEMO_DATA_DIR ?? 'data/demo-local';
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
@@ -23,6 +24,11 @@ const demoEnvironment = {
   AEEIS_DEMO_MODE: '1',
   AEEIS_FIXTURE_MODEL_HOST: host,
   AEEIS_FIXTURE_MODEL_PORT: String(modelPort),
+  AEEIS_LOCAL_WEB_TOOL_HOST: host,
+  AEEIS_LOCAL_WEB_TOOL_PORT: String(webToolPort),
+  AEEIS_LOCAL_WEB_HOSTS: process.env.AEEIS_LOCAL_WEB_HOSTS ?? 'weather.cma.cn,api.open-meteo.com',
+  AEEIS_TOOLKIT_MANIFEST_URL: `http://${host}:${webToolPort}/manifest`,
+  AEEIS_TOOLKIT_INVOKE_URL: `http://${host}:${webToolPort}/invoke`,
   AEEIS_MODEL_BASE_URL: `http://${host}:${modelPort}/v1`,
   AEEIS_MODEL: 'aeeis-fixture/1',
   AEEIS_MODEL_ALLOW_INSECURE_HTTP: '1',
@@ -113,11 +119,16 @@ const modelAlreadyRunning = await isHealthy(`http://${host}:${modelPort}/health`
 const aeeisAlreadyRunning = await isFixtureAeeisHealthy();
 
 if (!modelAlreadyRunning) start(process.execPath, ['scripts/fixture-model.mjs']);
+const webToolAlreadyRunning = await isHealthy(`http://${host}:${webToolPort}/health`, body => body?.ok === true && body?.mode === 'development-local-web-tool');
+if (!webToolAlreadyRunning) start(process.execPath, ['scripts/local-web-tool.mjs']);
 if (!aeeisAlreadyRunning) start(npmCommand, ['run', 'dev']);
 
 try {
   await waitFor(`http://${host}:${modelPort}/health`, 'Fixture Model', body => (
     body?.ok === true && body?.mode === 'development-fixture'
+  ));
+  await waitFor(`http://${host}:${webToolPort}/health`, 'Local web tool', body => (
+    body?.ok === true && body?.mode === 'development-local-web-tool'
   ));
   await waitFor(`http://${host}:${apiPort}/health`, 'AEEIS health', body => (
     body?.service === 'aeeis-agent' && body?.protocol === 'aeeis-health/1'

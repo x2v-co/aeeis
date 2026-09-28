@@ -20,6 +20,7 @@ import { claimDigest, type BrainPersistence, type GovernedBrain, type BrainSeman
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 import { globalBudgetReconciliationSchema, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
+import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt } from './materials.js';
 
 /** JSONB and other stores may reorder object keys. Hash the canonical form so
  * pins, plans, receipts and idempotency checks survive a persistence roundtrip. */
@@ -322,9 +323,10 @@ export class AgentEngine {
           const record = artifact ?? receipt ?? delegation ?? call;
           if (source) {
             if (!allowedKnowledgeClassifications(request.privacy).includes(source.classification ?? evidenceRun.privacy)) throw new Conflict('Source classification exceeds the requested Run privacy');
-            inheritedSources.push({ ...source, classification: source.classification ?? evidenceRun.privacy, origin: { runId: evidenceRun.id, ref } });
+            inheritedSources.push({ ...source, kind: source.kind ?? 'run-evidence', classification: source.classification ?? evidenceRun.privacy, origin: { runId: evidenceRun.id, ref } });
           } else if (record) {
-            inheritedSources.push({ id: ref, title: artifact?.title ?? `Evidence ${ref}`, content: artifact?.content ?? JSON.stringify(record), source: `run:${evidenceRun.id}#${ref}`, hash: artifact?.hash ?? digest(record), classification: evidenceRun.privacy, origin: { runId: evidenceRun.id, ref } });
+            const content = artifact?.content ?? JSON.stringify(record);
+            inheritedSources.push({ id: ref, title: artifact?.title ?? `Evidence ${ref}`, content, source: `run:${evidenceRun.id}#${ref}`, hash: artifact?.hash ?? digest(record), contentHash: materialContentHash(content), kind: 'run-evidence', classification: evidenceRun.privacy, origin: { runId: evidenceRun.id, ref } });
           } else throw new Conflict(`Evidence reference is not available in the bound Run: ${ref}`);
         }
       }
@@ -360,7 +362,7 @@ export class AgentEngine {
       if (outputPrice > modelPolicy.maxOutputPricePerMillion) throw new Error('Active model policy denies the selected model price');
     }
     const timestamp = now();
-    const sources: Source[] = [...inheritedSources, ...request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m) }))];
+    const sources: Source[] = [...inheritedSources, ...request.materials.map(m => ({ ...m, id: id('source'), hash: digest(m), contentHash: materialContentHash(m.content), kind: 'material' as const, untrusted: true, classification: request.privacy }))];
     let memoryManifest: Awaited<ReturnType<AeeisService['createContextManifest']>> | undefined;
     if (request.goalId && this.domain) {
       const allowedMemoryClassifications = allowedKnowledgeClassifications(request.privacy);
@@ -379,6 +381,8 @@ export class AgentEngine {
           content: memory.content,
           source: `memory:${memory.id}`,
           hash: digest(memory),
+          contentHash: materialContentHash(memory.content),
+          kind: 'memory',
           classification: memory.classification,
         });
       }
@@ -388,7 +392,7 @@ export class AgentEngine {
       const claims = request.brainQuery
         ? await this.brain.searchSemantic(request.brainScope, request.brainQuery, principal, request.privacy, request.brainMaxItems, this.brainSemanticSearcher)
         : this.brain.read(request.brainScope, principal, request.privacy);
-      for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim), classification: claim.classification });
+      for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim), contentHash: materialContentHash(claim.content), kind: 'brain', classification: claim.classification });
       if (this.brainPersistence) await this.brainPersistence.save(this.brain);
     }
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
@@ -396,7 +400,7 @@ export class AgentEngine {
       const knowledgeRequest = { query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience, tenantId };
       const knowledgeResult = normalizeKnowledgeSearchResult(await this.connectorCall(pendingRunId, owner, tenantId, 'knowledge', knowledgeRequest, () => this.knowledge!.search(knowledgeRequest), value => normalizeKnowledgeSearchResult(value).usage));
       const hits = validateKnowledgeHits(knowledgeRequest, knowledgeResult.hits);
-      for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash, ...(hit.record.classification ? { classification: hit.record.classification } : {}) });
+      for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash, contentHash: hit.record.contentHash, kind: 'knowledge', ...(hit.record.classification ? { classification: hit.record.classification } : {}) });
     }
     if (request.projectSourceQuery && !this.projectSources) throw new Error('projectSourceQuery was requested but no Project Source Provider is configured');
     let projectSourceSync: ProjectSourceSyncReceipt | undefined;
@@ -405,7 +409,7 @@ export class AgentEngine {
       const synced = await this.connectorCall(pendingRunId, owner, tenantId, 'project-source', sourceRequest, () => synchronizeProjectSources(this.projectSources!, sourceRequest, this.projectSourceCheckpoints), value => value.receipt.usage);
       const records = synced.records;
       projectSourceSync = projectSourceSyncReceiptSchema.parse(synced.receipt);
-      for (const record of records) sources.push({ id: record.id, title: `[${record.kind}] ${record.title}`, content: record.content, source: record.source, hash: record.contentHash, ...(record.classification ? { classification: record.classification } : {}) });
+      for (const record of records) sources.push({ id: record.id, title: `[${record.kind}] ${record.title}`, content: record.content, source: record.source, hash: record.contentHash, contentHash: record.contentHash, kind: 'project-source', ...(record.classification ? { classification: record.classification } : {}) });
     }
     if (new Set(sources.map(source => source.id)).size !== sources.length) throw new Conflict('Context contains duplicate evidence IDs; use distinct sources');
     if (JSON.stringify(sources).length > 90000) throw new Conflict('Evidence context exceeds the Run size limit; split this task');
@@ -416,12 +420,14 @@ export class AgentEngine {
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
     const toolApproval = await this.approveTools(request.allowedTools);
     const approvedAgents = request.allowedAgents.length ? await this.agents!.describeApproved(request.allowedAgents, request.privacy) : [];
+    const contextId = id('ctx');
+    const contextManifestHash = digest({ contextId, owner, tenantId, goal: request.goal, privacy: request.privacy, audience, sources: sources.map(source => ({ id: source.id, title: source.title, source: source.source, hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content), classification: source.classification ?? request.privacy, kind: source.kind ?? 'unknown' })) });
     const run: AgentRun = {
       schemaVersion: 1, id: pendingRunId, revision: 0, owner, tenantId, goal: request.goal,
       ...(request.goalId ? { goalId: request.goalId } : {}),
       ...(request.taskExecution ? { domainPlanId: request.taskExecution.domainPlanId, taskExecution: { ...request.taskExecution, requestHash: taskRequestHash! } } : {}),
       status: 'queued', createdAt: timestamp, updatedAt: timestamp,
-      context: { id: id('ctx'), audience: [audience], sources, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: digest(memoryManifest), memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSync } : {}) }, privacy: request.privacy,
+      context: { id: contextId, audience: [audience], sources, manifestHash: contextManifestHash, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: digest(memoryManifest), memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSync } : {}) }, privacy: request.privacy,
       capabilityCatalogVersion: 1, approvedAgents,
       ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}),
       ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), model: selectedModel.pin,
@@ -443,7 +449,7 @@ export class AgentEngine {
       allowedTools: request.allowedTools, allowedAgents: request.allowedAgents, ...(request.brainScope ? { brainScope: request.brainScope } : {}), ...(request.brainQuery ? { brainQuery: request.brainQuery } : {}), brainMaxItems: request.brainMaxItems, ...(request.memoryQuery ? { memoryQuery: request.memoryQuery } : {}), memoryMaxItems: request.memoryMaxItems, ...(request.memoryClassifications ? { memoryClassifications: request.memoryClassifications } : {}), ...(request.knowledgeQuery ? { knowledgeQuery: request.knowledgeQuery } : {}), knowledgeMaxItems: request.knowledgeMaxItems, ...(request.projectSourceQuery ? { projectSourceQuery: request.projectSourceQuery } : {}), projectSourceMaxItems: request.projectSourceMaxItems, ...(request.projectSourceCursor ? { projectSourceCursor: request.projectSourceCursor } : {}), ...(toolApproval.selected.length ? { approvedTools: toolApproval.selected, toolManifestDigest: toolApproval.digest } : {}), toolReceipts: [], delegationOutcomes: [],
       ...(skillSelection ? { skillSelection } : {}),
     };
-    event(run, 'run.created', { contextId: run.context.id, sourceRefs: sources.map(s => s.id), model: run.model, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: run.context.memoryManifestHash, memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSyncProvider: projectSourceSync.provider, projectSourceSyncResponseHash: projectSourceSync.responseHash, projectSourceCursor: projectSourceSync.nextCursor } : {}) });
+    event(run, 'run.created', { contextId: run.context.id, contextManifestHash, sourceRefs: sources.map(s => s.id), model: run.model, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: run.context.memoryManifestHash, memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSyncProvider: projectSourceSync.provider, projectSourceSyncResponseHash: projectSourceSync.responseHash, projectSourceCursor: projectSourceSync.nextCursor } : {}) });
     if (resolution.decision) event(run, 'model.selected', { decision: resolution.decision });
     if (skillSelection) event(run, 'skill.selected', { methodId: skillSelection.methodId ?? null, version: skillSelection.version ?? null, receiptRef: skillSelection.receiptRef ?? null });
     if (activeEvolution.length || evolutionSelection.traffic.length) event(run, 'evolution.snapshot', { candidateIds: activeEvolution.map(item => item.candidateId), versionDigest: digest(activeEvolution), ...(evolutionSelection.traffic.length ? { traffic: evolutionSelection.traffic } : {}) });
@@ -1050,11 +1056,16 @@ export class AgentEngine {
         if (decision.tool === 'sources.read') {
           const source = current.context.sources.find(s => s.id === decision.argument);
           if (!source) throw new Error('Source tool denied an unknown resource');
-          result = source;
+          result = materialForModel(source);
         } else {
-          const terms = decision.argument.toLocaleLowerCase().split(/\s+/).filter(Boolean);
-          result = current.context.sources.filter(s => terms.some(t => `${s.title} ${s.content}`.toLocaleLowerCase().includes(t)))
-            .slice(0, 8).map(({ id, title, content, hash }) => ({ id, title, excerpt: content.slice(0, 1200), hash }));
+          const terms = materialQueryTerms(decision.argument);
+          result = current.context.sources.filter(s => terms.length === 0 || terms.some(t => `${s.title} ${s.content}`.toLocaleLowerCase().includes(t)))
+            .slice(0, 8).map(source => ({
+              id: source.id, sourceRef: source.id, title: source.title, source: source.source,
+              excerpt: `<external_source ref="${escapeMaterialRef(source.id)}" hash="${source.contentHash ?? materialContentHash(source.content)}">\n${relevantMaterialExcerpt(source.content, terms)}\n</external_source>`,
+              hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content),
+              ...(source.classification ? { classification: source.classification } : {}),
+            }));
         }
         live.observations.push({ tool: decision.tool, argument: decision.argument, result });
         event(current, 'tool.completed', { taskId: node.id, tool: decision.tool, inputHash: digest(decision.argument), outputHash: digest(result), contextId: current.context.id });

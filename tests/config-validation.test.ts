@@ -11,6 +11,12 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it('accepts a longer model timeout and rejects invalid or unbounded deadlines', () => {
+    expect(() => validateRuntimeConfig({ AEEIS_MODEL_TIMEOUT_MS: '180000' })).not.toThrow();
+    for (const value of ['0', '-1', 'NaN', '1.5', '600001']) {
+      expect(() => validateRuntimeConfig({ AEEIS_MODEL_TIMEOUT_MS: value })).toThrow('AEEIS_MODEL_TIMEOUT_MS');
+    }
+  });
   it('accepts a production database and authenticated local deployment', () => {
     expect(() => validateRuntimeConfig(production)).not.toThrow();
   });
