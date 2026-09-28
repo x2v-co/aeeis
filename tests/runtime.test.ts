@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AgentEngine } from '../src/runtime/engine.js';
+import { AgentEngine, digest } from '../src/runtime/engine.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
@@ -686,6 +686,30 @@ describe('AEEIS runtime', () => {
     const plannerInput = model.requests[0]?.input as { capabilityCatalog: { schemaVersion: string; tools: Array<{ id: string; version: string; capabilities: string[] }> } };
     expect(plannerInput.capabilityCatalog).toMatchObject({ schemaVersion: 'capability-catalog/1' });
     expect(plannerInput.capabilityCatalog.tools[0]).toMatchObject({ id: 'fixture.lookup', version: '1', capabilities: ['read'] });
+    await repo.close();
+  });
+
+  it('freezes Plugin, Skill, Workflow and Tool resource versions for a Run', async () => {
+    const repo = await repository();
+    const tools = new CapabilityGateway();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
+    const run = await engine.create({
+      goal: 'Pin website resources',
+      builtinSkill: 'website-builder/1',
+      resources: {
+        plugin: { id: 'aeeis.website-builder', version: '1.0.0', interface: 'aeeis.website-builder/1', digest: 'a'.repeat(64), channel: 'stable' },
+        workflow: { id: 'website-build', version: '1.2.0', interface: 'website-build/1', digest: 'b'.repeat(64), channel: 'canary' },
+      },
+      allowedTools: ['fixture.lookup@1'],
+    });
+    expect(run.resourceSnapshot).toMatchObject({
+      plugin: { id: 'aeeis.website-builder', version: '1.0.0', channel: 'stable' },
+      workflow: { id: 'website-build', version: '1.2.0' },
+      lockfileDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      policyDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      resolverVersion: 'aeeis-resource-resolver/1',
+    });
+    expect(run.resourceSnapshot?.tools?.[0]).toMatchObject({ id: 'fixture.lookup', version: '1', interface: 'tool/fixture.lookup/1', digest: digest(run.approvedTools?.[0]) });
     await repo.close();
   });
 

@@ -43,7 +43,7 @@ interface RunView extends RunSummary {
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
-  privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
+  privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; resourceSnapshot?: { plugin?: { id: string; version: string; interface: string; digest: string; channel?: string }; skill?: { id: string; version: string; interface: string; digest: string; channel?: string }; workflow?: { id: string; version: string; interface: string; digest: string; channel?: string }; tools?: Array<{ id: string; version: string; interface: string; digest: string; channel?: string }>; lockfileDigest: string; policyDigest: string; resolvedAt: string; resolverVersion: string }; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
   steps: Array<{ taskId: string; status: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
@@ -2235,6 +2235,16 @@ function renderGovernance(run: RunView): void {
     for (const tool of run.approvedTools) tools.append(element('span', `${tool.id}@${tool.version} · ${tool.capabilities.join(', ')}`));
   } else tools.append(element('span', '本次运行没有获准的外部 Tool。', 'muted'));
   container.append(tools);
+
+  if (run.resourceSnapshot) {
+    const resources = element('div', '', 'fact-row');
+    resources.append(element('strong', '资源快照'));
+    const refs = [run.resourceSnapshot.plugin, run.resourceSnapshot.skill, run.resourceSnapshot.workflow].filter(Boolean) as Array<{ id: string; version: string; interface: string; channel?: string }>;
+    for (const ref of refs) resources.append(element('span', `${ref.id}@${ref.version} · ${ref.interface}${ref.channel ? ` · ${ref.channel}` : ''}`));
+    resources.append(element('small', `lockfile：${run.resourceSnapshot.lockfileDigest} · policy：${run.resourceSnapshot.policyDigest}`));
+    const resourceDetails = element('details'); resourceDetails.append(element('summary', '查看资源 digest'), element('pre', JSON.stringify(run.resourceSnapshot, null, 2))); resources.append(resourceDetails);
+    container.append(resources);
+  }
 }
 
 function memoryWritebackForm(run: RunView, artifact: RunView['artifacts'][number]): HTMLElement {

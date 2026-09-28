@@ -17,13 +17,33 @@ export const externalBudgetSchema = z.object({
   tokens: z.number().int().positive().optional(),
   moneyUsd: z.number().nonnegative().optional(),
 }).strict().refine(value => value.calls !== undefined || value.tokens !== undefined || value.moneyUsd !== undefined, 'externalBudget must specify calls, tokens or moneyUsd');
+const resourceVersionSchema = z.string().trim().min(1).max(100);
+const resourceDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const resourceRefSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  version: resourceVersionSchema,
+  digest: resourceDigestSchema,
+  interface: z.string().trim().min(1).max(100),
+  channel: z.enum(['dev', 'canary', 'beta', 'stable']).optional(),
+}).strict();
+export const resourceSelectionSchema = z.object({
+  plugin: resourceRefSchema.optional(),
+  skill: resourceRefSchema.optional(),
+  workflow: resourceRefSchema.optional(),
+  tools: z.array(resourceRefSchema).max(100).optional(),
+  lockfileDigest: resourceDigestSchema.optional(),
+  policyDigest: resourceDigestSchema.optional(),
+}).strict();
 export const requestSchema = z.object({
   goal: z.string().trim().min(1).max(8000),
   goalId: z.string().trim().min(1).max(200).optional(),
   taskExecution: z.object({ domainPlanId: z.string().trim().min(1).max(200), taskId: z.string().trim().min(1).max(200) }).strict().optional(),
   materials: z.array(materialSchema).max(20).default([]),
   /** Built-in output contract, independent of external source connectors. */
-  builtinSkill: z.literal('project-pulse/1').optional(),
+  builtinSkill: z.enum(['project-pulse/1', 'website-builder/1']).optional(),
+  /** Optional compatibility declaration. The Runtime resolves concrete versions
+   * and records them in the Run; callers cannot change an approved tool version. */
+  resources: resourceSelectionSchema.optional(),
   maxModelCalls: z.number().int().min(3).max(100).default(20),
   /** Optional per-Run model budget. Money is normalized to USD by Planprice. */
   modelBudget: modelBudgetSchema.optional(),
@@ -60,7 +80,7 @@ export const decisionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strict(),
   z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strict(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strict(),
-  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100), artifactType: z.literal('project-pulse/1').optional(), structured: z.unknown().optional() }).strict(),
+  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100), artifactType: z.enum(['project-pulse/1', 'website-builder/1']).optional(), structured: z.unknown().optional() }).strict(),
 ]);
 export const reviewSchema = z.object({
   verdict: z.enum(['accepted', 'needs_revision']),
@@ -92,6 +112,16 @@ const projectPulseDeadlineSchema = z.object({
   date: z.string().trim().min(1).max(100),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
 }).strict();
+const websiteBuilderEvidenceItemSchema = z.object({ text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict();
+export const websiteBuilderArtifactSchema = z.object({
+  schemaVersion: z.literal('website-builder/1'),
+  changedFiles: z.array(z.string().trim().min(1).max(1000)).max(500),
+  preview: z.object({ url: z.string().url().optional(), status: z.enum(['started', 'ready', 'failed', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict().optional(),
+  validation: z.array(z.object({ name: z.string().trim().min(1).max(200), status: z.enum(['passed', 'failed', 'skipped', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict()).max(100),
+  artifacts: z.array(z.object({ path: z.string().trim().min(1).max(1000), kind: z.string().trim().min(1).max(100).optional(), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict()).max(100),
+  blockers: z.array(websiteBuilderEvidenceItemSchema).max(50),
+  unknowns: z.array(websiteBuilderEvidenceItemSchema).max(50),
+}).strict();
 /** Machine-readable Project Pulse output. Empty sections are valid; every
  * asserted entry must carry at least one source, receipt or artifact ref. */
 export const projectPulseArtifactSchema = z.object({
@@ -111,6 +141,7 @@ export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
 export type ProjectPulseArtifact = z.infer<typeof projectPulseArtifactSchema>;
+export type WebsiteBuilderArtifact = z.infer<typeof websiteBuilderArtifactSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string; globalBudgetAccountKey?: string; /** Durable attempt fence shared by independent Engines. Recovery invalidates it before reconciliation. */ executionToken?: string; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean; receiptRef?: string; globalBudgetAccountKey?: string; /** Durable provider-attempt fence shared by independent Engines. */ executionToken?: string; /** Diagnostic for an unknown attempt; the provider result remains untrusted. */ failure?: AgentFailure; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'waiting_external' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
@@ -124,7 +155,13 @@ export interface Source {
   untrusted?: boolean;
   classification?: TaskRequest['privacy']; origin?: { runId: string; ref: string }
 }
-export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; artifactType?: 'project-pulse/1'; structured?: ProjectPulseArtifact; hash: string; createdAt: string }
+export type ResourceRef = z.infer<typeof resourceRefSchema>;
+export type ResourceSelection = z.infer<typeof resourceSelectionSchema>;
+export interface ResourceSnapshot extends ResourceSelection {
+  resolvedAt: string;
+  resolverVersion: 'aeeis-resource-resolver/1';
+}
+export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact; hash: string; createdAt: string }
 /**
  * The transport fields are retained for compatibility with static providers.
  * Catalog-routed runs additionally carry the complete aeeis-model-pin/1
@@ -197,6 +234,8 @@ export interface AgentRun {
   approvedAgents?: ApprovedAgent[];
   /** Versioned model context, preserved for older unknown-call reconciliation. */
   capabilityCatalogVersion?: 1;
+  /** Concrete Plugin/Skill/Workflow/Tool versions used by this Run. */
+  resourceSnapshot?: ResourceSnapshot;
   toolManifestDigest?: string;
   skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string };
   skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string };

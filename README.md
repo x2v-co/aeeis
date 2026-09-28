@@ -8,6 +8,8 @@ AEEIS 正在作为独立 Agent 开发，不是 `ai-chat-system` 的改版，也�
 
 能力与验证入口的对应关系见[验证矩阵](docs/verification-matrix.md)。
 
+Plugin、Skill、Workflow 和 Tool 的版本匹配、Lockfile、Run 快照、channel 晋升、升级推送和回滚约定见[资源版本治理](docs/website-builder-resources.md)。AEEIS 在创建 Run 时冻结具体版本与 digest；stable 的升级只影响新 Run，旧 Run 按原快照恢复。
+
 工作台的“工作方式”提供内置 `Project Pulse`（`project-pulse/1`）：不接项目连接器时，也可以直接粘贴项目资料，或选择 TXT、Markdown、CSV、JSON 文件作为本次 Run 的资料。AEEIS 会按目标先生成计划，执行后交付带 Evidence refs 的进展、已完成变更、阻塞、风险、决策、负责人、期限、下一步和未知信息；审核通过后，`nextActions` 会生成可继续调度的后续 Plan。它是首个产品化入口，连接器只是让同一工作方式自动读取项目源。用户资料会被标记为 `material`、绑定当前 Run 的 privacy，并保存精确内容 hash；模型读取资料时会收到明确的外部来源边界，长资料搜索返回命中附近的有界片段。Run 创建后会冻结整个 Context Manifest hash，便于核对本次运行实际使用的资料集合。浏览器文件只进入当前 Run，不会自动写入长期 Knowledge 库。
 
 当后续 Plan 生成后，Run 工作台的“当前交付”会显示 successor Plan，并可按需展开后续任务、依赖、状态和证据引用；实际调度仍在“长期目标”区域完成，Plan 仍只有一份领域事实源。

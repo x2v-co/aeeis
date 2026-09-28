@@ -34,3 +34,13 @@
 2. 接入并验收真实模型、Planprice、OwnHow、toolkit_new、RSI evaluator 和外部 Agent。
 3. 完成 OIDC、多租户 ACL、Secret Manager、备份上传、容量压测、故障注入和跨区域恢复。
 4. 用真实 Feishu/Hermes 权限和通知 SLA 验证投影、入站 Debate 及 unknown/reconcile。
+# Resource governance
+
+Plugin/Skill/Workflow/Tool 的版本治理、升级、推送和回滚约定见 [`website-builder-resources.md`](website-builder-resources.md)。资源变更必须至少验证：
+
+- Manifest 接口和语义范围能解析成唯一组合；
+- Run 保存具体版本、digest、Lockfile digest 和 policy digest；
+- Tool Receipt 绑定冻结版本，Manifest 改变会拒绝继续执行；
+- stable 升级只影响新 Run，旧 Run 可按快照恢复；
+- canary、撤销和回滚都有审批、证据和可复现 Lockfile；
+- website-builder Run 有真实 changed files、preview、validation、artifact 或明确 blocker/unknown。
