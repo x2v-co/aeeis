@@ -142,6 +142,37 @@ npm run dev
 
 `npm run dev` 自动读取当前目录的 `.env`，忽略模板中的空配置项，显式进程环境变量优先；修改后需重启。`npm start`、Worker 与 demo 仍使用各自显式的环境配置，不会自动读取该文件。用 `/api/status` 核对实际的 `model.model`、`model.endpoint` 与 `executionProfile`；`modelConfigured` 仅代表配置存在，真实调用结果应查看 Run 的 `calls` 和 `usage`。
 
+### 持久化本地工具
+
+本地工具可随 AEEIS 主进程启动，不需要另起 4398 服务。复制 `local-tools.example.json`，在 `.env` 中设置 `AEEIS_LOCAL_TOOLS_CONFIG=local-tools.example.json`，启动 Colima（macOS）或本机 Linux Docker Engine，运行 `npm run sandbox:up` 检查引擎，再运行 `npm run sandbox:build` 构建 Linux 工作镜像，最后运行 `npm run dev`。构建上下文仅为 `sandbox/`，不会发送项目或 `.env`。也可以指向自己保存的 JSON 配置。配置路径相对启动目录，JSON 内的 `workspaceRoot`、`stateDirectory` 相对该 JSON 文件；修改后重启生效。`npm start` 的环境变量仍由部署者显式提供。
+
+`GET /api/tools` 返回已连接工具、输入格式和 `defaultAllowedTools`。前端在连接时自动填入默认工具，可以在“更多设置 → 运行边界”调整，清空表示本次运行禁用外部工具。API 创建 Run 时仍显式传入 `allowedTools`，避免改变既有客户端的授权语义。每次 Run 冻结所选工具和配置指纹；配置改变后需创建新 Run。
+
+文件和命令都在 `workspaceRoot/<runId>/` 对应的持久 Linux 容器里运行。容器不挂载宿主机目录、`.env` 或 Docker socket；Run 之间使用不同容器和专用网络。容器默认 2 CPU、1 GiB 内存、256 个进程，网络为 bridge，端口只发布到宿主机 `127.0.0.1`。可在 `sandbox` 配置中把 `network` 改成 `none`、调整资源和端口，以及设置空闲回收和最长存活时间。
+
+| 工具 | 输入与作用 |
+| --- | --- |
+| `read` / `write` / `diff` / `glob` / `grep` | 在持久 `/workspace` 中读写、比较、查找文本；路径仍限制在工作区内 |
+| `python` | 运行 Python 3.12；可使用容器内安装的包，文件和虚拟环境跨调用保留 |
+| `shell` | 运行 Bash、Git、apt、pip 和其他 Linux 命令；容器内以 root 运行，适合安装依赖和启动服务 |
+| `process` | `start`、`list`、`logs`、`stop`、`ports`；管理跨工具调用和 AEEIS 重启仍存活的后台进程 |
+| `web-fetch` | 主进程按 `webHosts` HTTPS 白名单取证，拒绝跳转；Shell/Python 的网络遵循 sandbox 的 network 配置 |
+
+最终交付文件必须放在容器的 `/workspace/artifacts/` 下。Run 进入终态后，AEEIS 导出该目录到宿主机 `workspaceRoot/<runId>/artifacts/`，再停止并删除容器和专用网络；未完成 Run 会保留环境，空闲超时或达到最长存活时间后回收。容器被外部删除、策略或镜像发生变化时，AEEIS 会进入明确错误，不会静默创建一个丢失依赖的新环境。
+
+文件/Python/Shell/Process 工具版本为 `3`。AEEIS 重启会重新连接原 Run 容器，因此已安装依赖和后台服务继续存在。每个 Run 的容器 root 权限只覆盖容器本身，宿主机权限、文件和密钥不会自动开放；需要访问宿主机文件时应通过明确的资料或产物接口传递。`web-fetch` 仍由主进程执行，避免把 AEEIS 凭证带入容器。
+
+macOS 推荐使用 Colima 的独立 `aeeis` profile；Linux 直接使用 Docker Engine 或 rootless Docker。两者共用同一个镜像和 JSON 配置：
+
+```bash
+# macOS：创建隔离 Colima profile；Linux 直接检查本机 Docker
+npm run sandbox:up
+npm run sandbox:build
+npm run sandbox:doctor
+```
+
+`npm run sandbox:up` 不修改全局 Docker context。macOS 的镜像下载失败时可重新执行；Linux 不需要安装 Colima 或 Docker Desktop。`npm run sandbox:release -- run_<uuid>` 可手动导出 artifacts 并回收指定 Run 环境。真实容器测试使用 `AEEIS_TEST_SANDBOX=1 npm run test:sandbox`，会覆盖安装依赖、Shell、Git、后台服务、端口、重启、隔离和回收；没有可用引擎时测试会明确失败，不会退回宿主执行。
+
 也可以配置 `AEEIS_PLANPRICE_URL` 启用按能力、隐私策略和目录价格的模型选择；AEEIS 读取 Planprice 的 `/api/products/grouped?type=llm` 渠道价格，并用 `/api/exchange-rates` 的汇率归一到 USD；没有可验证汇率时不会把本地币种数字直接拿来比较。每次 Model Decision 都会保存候选目录的排序稳定 `catalogHash` 和读取时间，便于重建长时 Run 当时的路由依据。必须额外为选中的 provider 配置 `AEEIS_MODEL_PROVIDER_ENDPOINTS` 和 `AEEIS_MODEL_PROVIDER_KEYS`。`AEEIS_MODEL_PRIVATE_DATA_ALLOWED` 是由部署者维护的 provider/model 数据策略 JSON 映射；只有显式为 `true` 的条目才能承载 `private` Run，省略条目会安全拒绝路由，策略也会进入候选目录 hash。 在生产环境启用 Planprice 路由时，启动校验会要求两者都是非空 JSON 对象，并拒绝带凭证、查询参数、fragment 或非 HTTPS 的 provider/health URL；目录读取成功但没有可调用 provider 配置不会进入 ready。可用 `AEEIS_PLANPRICE_HEALTH_URL` 配置与目录同源的只读 GET 探针；它只用于依赖诊断，不触发模型调用，重定向、超时或非 2xx 会明确标记目录不可用。`/readyz` 和 `/api/status.modelHealth` 会区分 Planprice 目录故障、无满足策略的模型和被选 provider 故障；可用 `AEEIS_MODEL_PROVIDER_HEALTH_URLS` 按 provider 或 model 配置健康地址，未配置时会明确标出只完成目录选择、没有 provider 探测。工具和 Personal Method 治理分别通过 `AEEIS_TOOLKIT_*`、`AEEIS_OWNHOW_*` 接入。启用 OwnHow 时要设置 `AEEIS_OWNHOW_RUNTIME`，或者在每个 Run 提供 `skillRuntime`，因为 OwnHow 的解析必须绑定具体宿主 runtime。对 toolkit_new，优先设置 `AEEIS_TOOLKIT_REGISTRY_URL`（指向 `/api/v1/registry`）；AEEIS 会读取 Registry index/Manifest，再把已批准的版本调用转换为 toolkit_new 的 `/api/v1/t/:slug` 请求，并保留自己的 allowlist、幂等键和 Receipt。设置 `AEEIS_TOOLKIT_VERIFY_SIGNATURES=1` 后还会读取 `/keysets/current`，验证 Registry keyset 的根签名以及 index/manifest 的 Ed25519 签名和 canonical digest；生产环境默认要求开启，并通过 `AEEIS_TOOLKIT_ROOT_PUBLIC_JWK` 注入独立信任根，启动时会校验该变量是公开的 Ed25519 JWK，缺失或无效会直接拒绝启动；只有显式设置 `AEEIS_TOOLKIT_VERIFY_SIGNATURES=0` 才关闭这一生产要求。旧的 `AEEIS_TOOLKIT_MANIFEST_URL` + `AEEIS_TOOLKIT_INVOKE_URL` 仍支持自定义网关。外部工具版本在 Run 创建时冻结，未知结果只能通过 provider reconcile 恢复。
 
 Planprice 目录默认缓存 30 秒，同一时间的并发读取会合并为一次上游请求；可用 `AEEIS_PLANPRICE_CACHE_TTL_MS=0` 关闭缓存。Model Decision 保存真实上游读取时间，便于重建长时 Run 当时的路由依据。

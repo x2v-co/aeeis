@@ -175,6 +175,13 @@ function validatePrivacyList(raw: string | undefined, label: string): void {
  * stores and network calls so CI and deployment tooling can validate config
  * before opening locks or connecting to external systems. */
 export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.AEEIS_LOCAL_TOOLS_CONFIG) {
+    if ((env.AEEIS_ENV ?? env.NODE_ENV) === 'production' || env.AEEIS_PRINCIPAL_TOKENS !== undefined || env.AEEIS_OIDC_ISSUER || env.AEEIS_RUNNER === 'temporal'
+      || !['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1')) {
+      throw new Error('AEEIS_LOCAL_TOOLS_CONFIG requires a loopback, single-owner, local development runtime; use an isolated remote tool gateway for shared deployments');
+    }
+  }
+
   // AEEIS_ENV is the deployment intent. An explicit development value is
   // allowed inside a production-built image (for example the local Compose
   // fixture stack); NODE_ENV is only the fallback when AEEIS_ENV is absent.

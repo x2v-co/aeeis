@@ -38,7 +38,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "worker": "node dist/temporal/worker.js",
     "test:runtime": "vitest run tests/runtime.test.ts tests/model-http.test.ts tests/http-runtime.test.ts tests/protocol-evolution.test.ts tests/integrations-brain.test.ts",
-    "test:postgres": "node scripts/test-postgres.mjs"
+    "test:postgres": "node scripts/test-postgres.mjs",
+    "sandbox:build": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts build",
+    "test:sandbox": "AEEIS_TEST_SANDBOX=1 vitest run tests/local-tools.test.ts --testTimeout=60000 --hookTimeout=30000",
+    "sandbox:up": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts up",
+    "sandbox:doctor": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts doctor",
+    "sandbox:release": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts release"
   },
   "devDependencies": {
     "@temporalio/testing": "^1.24.0",

@@ -81,6 +81,7 @@ interface RuntimeStatus {
   modelHealth?: { ready: boolean; detail?: string; catalog?: { ready: boolean; detail?: string }; provider?: { ready: boolean; detail?: string } }; skillGovernanceHealth?: { ready: boolean; detail?: string };
   rsiEvaluatorHealth?: { ready: boolean; detail?: string } | null;
   dispatcherHealth?: { ready: boolean; detail?: string } | null; knowledgeConfigured: boolean; brainSemanticSearchConfigured: boolean; brainSemanticIndexHealth?: { ready: boolean; detail?: string } | null;
+  toolsConfigured: boolean; toolsHealth?: { ready: boolean; detail?: string } | null;
   projectSourcesConfigured: boolean; evolutionConfigured: boolean; rsiEvaluatorConfigured: boolean; rsiProposalSynthesisConfigured: boolean; skillGovernanceConfigured: boolean;
   rsiAutomation?: { enabled: boolean; autoApproveLowRisk?: boolean; autoRollout?: boolean; autoActivate?: boolean; suiteVersion?: string; inFlight?: boolean; lastRunAt?: string; lastResult?: { inspected: number; evaluated: number; approved: number; shadowed: number; canaried: number; promoted: number; activated: number; skipped: number; failed: number } };
   collaborationConfigured: boolean; projectionConfigured: boolean; projectionSinkConfigured: boolean; domainConfigured: boolean;
@@ -1173,6 +1174,7 @@ function renderRuntimeStatus(status: RuntimeStatus): void {
   const items: Array<[string, boolean, string]> = [
     ['模型', Boolean(status.modelConfigured && status.modelHealth?.ready), status.model ? `${status.model.model}${modelHealthDetail ? ` · ${modelHealthDetail}` : ''}` : (status.modelRouting === 'catalog' ? `目录路由${modelHealthDetail ? ` · ${modelHealthDetail}` : ''}` : '未配置')],
     ['执行器', Boolean(status.dispatcherHealth?.ready), `${runtimeLabel(status.runner)}${status.dispatcherHealth?.detail ? ` · ${status.dispatcherHealth.detail}` : ''}`],
+    ['工具', Boolean(status.toolsConfigured && status.toolsHealth?.ready), status.toolsConfigured ? status.toolsHealth?.detail ?? '已配置，健康状态未验证' : '未配置'],
     ['Goal / Plan / Task', status.domainConfigured, status.domainConfigured ? '已启用' : '未启用'],
     ['DAG 调度', status.taskSchedulerConfigured, status.taskSchedulerConfigured ? '已启用' : '未启用'],
     ['Brain 语义检索', Boolean(status.brainSemanticSearchConfigured && status.brainSemanticIndexHealth?.ready), status.brainSemanticSearchConfigured ? (status.brainSemanticIndexHealth?.detail ?? 'pgvector / embedding，健康状态未验证') : '词法或未配置'],
@@ -1627,7 +1629,7 @@ function runOptions(includeProjectQuery = true): Record<string, unknown> {
     ...(content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : []),
     ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
   ];
-  return { ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(allowedTools.length ? { allowedTools } : {}), ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  return { ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -2554,6 +2556,21 @@ $('connect').onclick = () => {
 async function initialize(): Promise<void> {
   try {
     const status = await api<RuntimeStatus>('/status');
+    const toolHelp = $('tool-config-summary');
+    try {
+      const toolCatalog = await api<{ tools: { id: string }[]; defaultAllowedTools: string[] }>('/tools');
+      const allowedTools = $<HTMLInputElement>('allowed-tools');
+      if (!allowedTools.dataset.initialized) {
+        if (!allowedTools.value.trim()) allowedTools.value = toolCatalog.defaultAllowedTools.join(', ');
+        allowedTools.dataset.initialized = 'true';
+      }
+      if (toolHelp) toolHelp.textContent = toolCatalog.tools.length
+        ? `已连接：${toolCatalog.tools.map(tool => tool.id).join('、')}。默认选择来自服务端配置；清空可禁用本次运行的外部工具。`
+        : '尚未配置工具；本次运行只能使用提供的资料。';
+    } catch (error) {
+      if (toolHelp) toolHelp.textContent = `工具暂不可用：${status.toolsHealth?.detail ?? errorMessage(error)}。恢复后重新连接以加载工具。`;
+    }
+
     const mode = $('instance-mode');
     const modeLabels: Record<string, string> = { 'single-owner-local': '开发版 · 单用户本地模式', 'static-principal-scoped': '开发版 · Principal / Tenant 隔离', 'oidc-principal-scoped': '开发版 · OIDC Principal / Tenant 隔离', 'principal-scoped': '开发版 · Principal / Tenant 隔离' };
     mode.textContent = modeLabels[status.mode] ?? `开发版 · ${status.mode}`;
@@ -2565,7 +2582,7 @@ async function initialize(): Promise<void> {
       ? `${profile} ${status.model ? `${status.model.model} · ${status.runner}` : `模型目录路由 · ${status.runner}`}。${status.modelHealth?.ready === false ? `模型探测失败：${status.modelHealth.detail ?? '未知原因'}。` : ''}${status.skillGovernanceConfigured && status.skillGovernanceHealth?.ready === false ? ` OwnHow 探测失败：${status.skillGovernanceHealth.detail ?? '未知原因'}。` : ''}${status.knowledgeConfigured ? 'Knowledge 已启用；' : ''}${status.evolutionConfigured ? 'RSI 候选存储已启用；' : ''}${status.collaborationConfigured ? '协作平面已启用。' : ''}`
       : '尚未配置模型。请在服务端设置 AEEIS_MODEL_BASE_URL、AEEIS_MODEL，或配置 AEEIS_PLANPRICE_URL 后重启；Knowledge、RSI 和协作状态仍可查看，但不会生成模拟结果。';
     const minimalConfiguration = status.modelConfigured
-      ? `已连接 · ${status.model ? `${status.model.model} · ${status.runner}` : '模型目录路由'}`
+      ? `已连接 · ${status.model ? `${status.model.model} · ${status.runner}` : '模型目录路由'}${status.toolsConfigured && status.toolsHealth?.ready === false ? ' · 工具暂不可用，请查看设置' : ''}`
       : '模型尚未连接；点击“连接模型”打开运行配置。';
     const configuration = $('configuration');
     configuration.dataset.fullText = fullConfiguration;
