@@ -94,6 +94,13 @@ async function runSmoke(baseUrl, environment) {
 
 const dataDir = process.env.AEEIS_FULL_DEMO_DATA_DIR ?? join(root, 'data', 'demo-full-local');
 await mkdir(dataDir, { recursive: true });
+const localToolsConfig = join(dataDir, 'local-tools.json');
+await writeFile(localToolsConfig, JSON.stringify({
+  schemaVersion: 'local-tools/1', workspaceRoot: './tool-workspaces', stateDirectory: './tool-state',
+  tools: ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process'],
+  defaultAllowedTools: ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process'], timeoutMs: 120_000,
+  webHosts: [], sandbox: { runtime: 'docker', context: process.platform === 'darwin' ? 'desktop-linux' : 'auto', image: 'aeeis-sandbox:2', memoryMiB: 1024, cpus: 2, pids: 256, network: 'bridge', snapshotMiB: 16, idleSeconds: 3600, maxLifetimeSeconds: 86400, ports: [3000, 8000] },
+}, null, 2), 'utf8');
 const [apiPort, modelPort, evaluatorPort, agentPort, planpricePort] = await Promise.all([
   freePort(), freePort(), freePort(), freePort(), freePort(),
 ]);
@@ -139,6 +146,7 @@ const environment = {
   AEEIS_DEBATE_MODERATOR_AGENT_ID: 'agent.moderator', AEEIS_DEBATE_ADJUDICATOR_AGENT_ID: 'agent.adjudicator',
   AEEIS_AGENT_ALLOW_INSECURE_HTTP: '1', AEEIS_AGENT_CARDS: cards,
   AEEIS_PROJECT_SOURCES_FILE: join(root, 'fixtures', 'project-sources.json'),
+  AEEIS_LOCAL_TOOLS_CONFIG: localToolsConfig,
   AEEIS_RUNNER: 'local',
 };
 

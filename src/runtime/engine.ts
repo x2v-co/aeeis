@@ -70,7 +70,7 @@ function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['
   const policyDigest = declared?.policyDigest ?? digest({ privacy: request.privacy, allowedTools: request.allowedTools, allowedAgents: request.allowedAgents });
   return {
     ...(declared?.plugin ? { plugin: declared.plugin } : {}),
-    ...(declared?.skill ? { skill: declared.skill } : skillSelection?.methodId && skillSelection.version ? { skill: { id: skillSelection.methodId, version: skillSelection.version, digest: digest(skillSelection.plan), interface: `skill/${skillSelection.methodId}/1` } } : builtinSkillRef ? { skill: builtinSkillRef } : {}),
+    ...(declared?.skill ? { skill: declared.skill } : skillSelection?.methodId && skillSelection.version ? { skill: { id: skillSelection.methodId, version: skillSelection.version, digest: digest(skillSelection.plan), interface: request.builtinSkill && skillSelection.methodId === request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')) ? request.builtinSkill : `skill/${skillSelection.methodId}/1` } } : builtinSkillRef ? { skill: builtinSkillRef } : {}),
     ...(declared?.workflow ? { workflow: declared.workflow } : {}),
     ...(tools.length ? { tools } : declared?.tools ? { tools: declared.tools } : {}),
     lockfileDigest, policyDigest, resolvedAt: timestamp, resolverVersion: 'aeeis-resource-resolver/1',

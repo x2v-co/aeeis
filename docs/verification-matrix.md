@@ -44,3 +44,5 @@ Plugin/Skill/Workflow/Tool 的版本治理、升级、推送和回滚约定见 [
 - stable 升级只影响新 Run，旧 Run 可按快照恢复；
 - canary、撤销和回滚都有审批、证据和可复现 Lockfile；
 - website-builder Run 有真实 changed files、preview、validation、artifact 或明确 blocker/unknown。
+
+跨模块验收使用 `AEEIS_FULL_DEMO_TIMEOUT_MS=300000 npm run demo:full-local`。该 smoke 会通过 Planprice、OwnHow、Local Tool sandbox、AEEIS Runtime、Dispatcher 和 Reviewer 完成一次 `website-builder/1` Run，并检查四类 Tool Receipt、资源快照、结构化 Artifact、预览启动状态和审核结果。

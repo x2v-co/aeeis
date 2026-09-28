@@ -222,6 +222,36 @@ async function approveRun(runId, options = {}) {
   return waitForRun(runId, ['succeeded', 'failed', 'cancelled'], options);
 }
 
+// Exercise the complete website-builder resource path through the catalog
+// routed model, OwnHow Skill governance, persistent sandbox tools and the
+// structured AEEIS artifact contract. This is the cross-module acceptance
+// gate for the resource versioning design.
+const websiteRunRef = await request('/api/runs', {
+  method: 'POST',
+  body: JSON.stringify({
+    goal: 'website-builder smoke: update the landing page and verify the preview',
+    builtinSkill: 'website-builder/1',
+    skillRuntime: 'codex',
+    materials: [{ title: 'Website smoke request', source: 'full-local-website-builder', content: 'The landing page should contain the AEEIS smoke heading.' }],
+    allowedTools: ['glob@3', 'write@3', 'shell@3', 'process@3'],
+    externalBudget: { calls: 4 },
+  }),
+});
+const websiteRun = await approveRun(websiteRunRef.id);
+const websiteArtifact = websiteRun.artifacts?.find((item) => item.artifactType === 'website-builder/1');
+const websiteSnapshot = websiteRun.resourceSnapshot;
+if (websiteRun.status !== 'succeeded' || websiteRun.review?.verdict !== 'accepted' || !websiteArtifact?.structured
+  || websiteArtifact.structured.schemaVersion !== 'website-builder/1' || websiteArtifact.structured.changedFiles?.length !== 1
+  || websiteArtifact.structured.preview?.status !== 'started' || !websiteArtifact.structured.validation?.some((item) => item.status === 'passed')
+  || !websiteArtifact.structured.artifacts?.some((item) => item.path === 'artifacts/site.html')
+  || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'glob')
+  || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'write')
+  || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'shell')
+  || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'process')
+  || websiteSnapshot?.skill?.interface !== 'website-builder/1' || !websiteSnapshot?.lockfileDigest || !websiteSnapshot?.policyDigest) {
+  throw new Error(`Expected a completed cross-module website-builder Run, got ${JSON.stringify({ status: websiteRun.status, error: websiteRun.error, artifact: websiteArtifact, resources: websiteSnapshot, receipts: websiteRun.toolReceipts })}`);
+}
+
 // Verify the configured File project-source connector is part of the real
 // full local path. The first run reads the configured source snapshot (or resumes
 // an existing durable snapshot when smoke is rerun against a persistent DB),
@@ -467,6 +497,7 @@ console.log(JSON.stringify({
   goalId: goal.id,
   planId: plan.id,
   runIds: [firstDispatch.runId, secondDispatch.runId],
+  websiteRunId: websiteRun.id,
   externalRunId: externalRun.id,
   trafficRouteId: trafficRoute.id,
   trafficRunId: trafficRunRef.id,

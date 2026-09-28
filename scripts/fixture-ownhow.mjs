@@ -17,9 +17,10 @@ const valueAfter = (flag) => {
 const digest = (value) => createHash('sha256').update(String(value)).digest('hex').slice(0, 24);
 
 if (command === 'resolve') {
+  const website = /website/i.test(task);
   process.stdout.write(JSON.stringify({
-    methodId: 'project-pulse',
-    methodVersion: 'fixture/1',
+    methodId: website ? 'website-builder' : 'project-pulse',
+    methodVersion: '1.0.0',
     digest: `ownhow-fixture:plan:${digest(task)}`,
     plan: { steps: ['inspect-supplied-evidence', 'produce-evidence-linked-deliverable'], runtime: valueAfter('--runtime') ?? 'codex', task },
   }) + '\n');

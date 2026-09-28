@@ -83,6 +83,39 @@ function responseFor(system, input) {
   const dependency = input.dependencies?.[0];
   const answers = Array.isArray(input.answers) ? input.answers.filter((answer) => typeof answer?.answer === 'string' && answer.answer.trim()) : [];
   const catalogTools = Array.isArray(input.capabilityCatalog?.tools) ? input.capabilityCatalog.tools : [];
+  const websiteRun = system.includes('website-builder/1');
+  if (websiteRun && input.task?.id === 'inspect' && !(input.observations?.length)) {
+    const globTool = catalogTools.find((tool) => tool?.id === 'glob');
+    if (globTool) return { type: 'capability', toolId: globTool.id, toolVersion: String(globTool.version), input: { pattern: '**/*', limit: 100 }, purpose: 'Inspect the website workspace before changing files.' };
+  }
+  if (websiteRun && input.task?.id === 'inspect' && input.observations?.length) {
+    const observation = input.observations.at(-1)?.result ?? {};
+    const evidenceRefs = Array.isArray(observation.outputRefs) ? observation.outputRefs.filter(Boolean) : [];
+    return { type: 'finish', title: 'Website workspace inspected', content: 'Inspected the website workspace with the approved glob tool.', evidenceRefs };
+  }
+  if (websiteRun && input.task?.id !== 'inspect') {
+    const observations = input.observations ?? [];
+    const last = observations.at(-1)?.result ?? {};
+    const evidenceRefs = observations.flatMap((item) => Array.isArray(item?.result?.outputRefs) ? item.result.outputRefs : []).filter(Boolean);
+    if (observations.length === 0) {
+      const writeTool = catalogTools.find((tool) => tool?.id === 'write');
+      if (writeTool) return { type: 'capability', toolId: writeTool.id, toolVersion: String(writeTool.version), input: { path: 'src/App.tsx', content: '<main><h1>AEEIS website smoke</h1></main>\n' }, purpose: 'Apply the requested website change in the Run workspace.' };
+    }
+    if (observations.length === 1) {
+      const shellTool = catalogTools.find((tool) => tool?.id === 'shell');
+      if (shellTool) return { type: 'capability', toolId: shellTool.id, toolVersion: String(shellTool.version), input: { command: 'test -f src/App.tsx && mkdir -p artifacts && cp src/App.tsx artifacts/site.html && test -s artifacts/site.html' }, purpose: 'Build and validate the website artifact.' };
+    }
+    if (observations.length === 2) {
+      const processTool = catalogTools.find((tool) => tool?.id === 'process');
+      if (processTool) return { type: 'capability', toolId: processTool.id, toolVersion: String(processTool.version), input: { action: 'start', command: 'python3 -m http.server 3000 --bind 0.0.0.0' }, purpose: 'Start the website preview process.' };
+    }
+    const dependencyRef = input.dependencies?.[0]?.id;
+    const refs = [...new Set([...evidenceRefs, dependencyRef].filter(Boolean))];
+    return { type: 'finish', title: 'Website build and preview', content: 'Applied a website change, produced an artifact, validated it and started the preview process.', evidenceRefs: refs, artifactType: 'website-builder/1', structured: {
+      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'], preview: { status: 'started', evidenceRefs: refs.slice(-1) },
+      validation: [{ name: 'artifact-build', status: 'passed', evidenceRefs: refs.slice(-1) }], artifacts: [{ path: 'artifacts/site.html', kind: 'html', evidenceRefs: refs.slice(-1) }], blockers: [], unknowns: [],
+    } };
+  }
   const webTool = input.task?.id === 'inspect' && !(input.observations?.length)
     ? catalogTools.find((tool) => tool?.id === (String(input.goal ?? '').match(/https?:\/\//) ? 'web-fetch' : 'web-search'))
     : undefined;
@@ -99,7 +132,7 @@ function responseFor(system, input) {
     const summary = typeof output?.summary === 'string' ? output.summary : typeof output?.text === 'string' ? output.text : JSON.stringify(output ?? {}, null, 2);
     return { type: 'finish', title: 'Web tool result', content: `已通过授权的 web-fetch 获取资料。\n\n${summary}`.slice(0, 30000), evidenceRefs };
   }
-  if (input.task?.id !== 'inspect' && dependency?.content) {
+  if (input.task?.id !== 'inspect' && dependency?.content && !system.includes('Project Pulse')) {
     return { type: 'finish', title: '基于网页资料的交付', content: `已使用 inspect 任务取得的网页资料生成交付。\n\n${dependency.content}`.slice(0, 30000), evidenceRefs: [dependency.id] };
   }
   const fixtureAgent = input.capabilityCatalog?.agents?.find((agent) => agent.agentId === 'agent.fixture');
