@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "local-tools/1",
+  "workspaceRoot": "./data/tool-workspaces",
+  "stateDirectory": "./data/local-tool-state",
+  "tools": [
+    "read",
+    "write",
+    "diff",
+    "glob",
+    "grep",
+    "python",
+    "web-fetch",
+    "shell",
+    "process"
+  ],
+  "defaultAllowedTools": [
+    "read",
+    "write",
+    "diff",
+    "glob",
+    "grep",
+    "python",
+    "web-fetch",
+    "shell",
+    "process"
+  ],
+  "timeoutMs": 120000,
+  "webHosts": [
+    "weather.cma.cn",
+    "api.open-meteo.com"
+  ],
+  "sandbox": {
+    "runtime": "docker",
+    "context": "auto",
+    "image": "aeeis-sandbox:2",
+    "memoryMiB": 1024,
+    "cpus": 2,
+    "pids": 256,
+    "network": "bridge",
+    "snapshotMiB": 16,
+    "idleSeconds": 3600,
+    "maxLifetimeSeconds": 86400,
+    "ports": [
+      3000,
+      8000
+    ]
+  }
+}

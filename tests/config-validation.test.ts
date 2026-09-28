@@ -11,6 +11,14 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it('limits local execution tools to a single-owner loopback development runtime', () => {
+    const env = { AEEIS_LOCAL_TOOLS_CONFIG: 'tools.json' };
+    expect(() => validateRuntimeConfig(env)).not.toThrow();
+    for (const extra of [{ AEEIS_ENV: 'production' }, { NODE_ENV: 'production' }, { AEEIS_HOST: '0.0.0.0' }, { AEEIS_RUNNER: 'temporal' }, { AEEIS_PRINCIPAL_TOKENS: '{}' }, { AEEIS_OIDC_ISSUER: 'https://issuer.example' }]) {
+      expect(() => validateRuntimeConfig({ ...env, ...extra })).toThrow('AEEIS_LOCAL_TOOLS_CONFIG');
+    }
+  });
+
   it('accepts a longer model timeout and rejects invalid or unbounded deadlines', () => {
     expect(() => validateRuntimeConfig({ AEEIS_MODEL_TIMEOUT_MS: '180000' })).not.toThrow();
     for (const value of ['0', '-1', 'NaN', '1.5', '600001']) {
