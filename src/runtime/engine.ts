@@ -53,7 +53,9 @@ function usesWebsiteBuilder(run: AgentRun): boolean {
 }
 function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['skillSelection'], approvedTools: ToolDescriptor[], toolManifestDigest: string, timestamp: string): ResourceSnapshot | undefined {
   const declared = request.resources;
-  if (!declared && !skillSelection && approvedTools.length === 0) return undefined;
+  if (!declared && !skillSelection && !request.builtinSkill && approvedTools.length === 0) return undefined;
+  const builtinSkillRef = request.builtinSkill ? { id: request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')), version: '1.0.0', digest: digest(request.builtinSkill), interface: request.builtinSkill, channel: 'stable' as const } : undefined;
+  if (declared?.skill && request.builtinSkill && declared.skill.interface !== request.builtinSkill) throw new Conflict('Declared Skill interface does not match the built-in output contract');
   if (declared?.skill && skillSelection?.methodId && declared.skill.id !== skillSelection.methodId) throw new Conflict('Declared Skill does not match the governed Skill resolution');
   if (declared?.skill && skillSelection?.version && declared.skill.version !== skillSelection.version) throw new Conflict('Declared Skill version does not match the governed Skill resolution');
   const resolvedTools = approvedTools.map(tool => ({ id: tool.id, version: tool.version, digest: digest(tool), interface: `tool/${tool.id}/1`, capabilities: undefined }));
@@ -68,7 +70,7 @@ function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['
   const policyDigest = declared?.policyDigest ?? digest({ privacy: request.privacy, allowedTools: request.allowedTools, allowedAgents: request.allowedAgents });
   return {
     ...(declared?.plugin ? { plugin: declared.plugin } : {}),
-    ...(declared?.skill ? { skill: declared.skill } : skillSelection?.methodId && skillSelection.version ? { skill: { id: skillSelection.methodId, version: skillSelection.version, digest: digest(skillSelection.plan), interface: `skill/${skillSelection.methodId}/1` } } : {}),
+    ...(declared?.skill ? { skill: declared.skill } : skillSelection?.methodId && skillSelection.version ? { skill: { id: skillSelection.methodId, version: skillSelection.version, digest: digest(skillSelection.plan), interface: `skill/${skillSelection.methodId}/1` } } : builtinSkillRef ? { skill: builtinSkillRef } : {}),
     ...(declared?.workflow ? { workflow: declared.workflow } : {}),
     ...(tools.length ? { tools } : declared?.tools ? { tools: declared.tools } : {}),
     lockfileDigest, policyDigest, resolvedAt: timestamp, resolverVersion: 'aeeis-resource-resolver/1',

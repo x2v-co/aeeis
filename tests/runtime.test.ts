@@ -736,6 +736,7 @@ describe('AEEIS runtime', () => {
     });
     expect(run.resourceSnapshot).toMatchObject({
       plugin: { id: 'aeeis.website-builder', version: '1.0.0', channel: 'stable' },
+      skill: { id: 'website-builder', version: '1.0.0', interface: 'website-builder/1', channel: 'stable' },
       workflow: { id: 'website-build', version: '1.2.0' },
       lockfileDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       policyDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
