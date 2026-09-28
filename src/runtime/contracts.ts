@@ -20,8 +20,14 @@ export const externalBudgetSchema = z.object({
 const resourceVersionSchema = z.string().trim().min(1).max(100);
 const resourceDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const resourceRefSchema = z.object({
+  /** Registry release identity. Optional for legacy callers that provide an
+   * already-resolved reference without a Registry connection. */
+  releaseId: z.string().trim().min(1).max(200).optional(),
   id: z.string().trim().min(1).max(200),
   version: resourceVersionSchema,
+  /** Optional semver range accepted at the Registry boundary. Resolved Run
+   * snapshots always replace it with the concrete manifest version. */
+  range: z.string().trim().min(1).max(100).optional(),
   digest: resourceDigestSchema,
   interface: z.string().trim().min(1).max(100),
   channel: z.enum(['dev', 'canary', 'beta', 'stable']).optional(),
@@ -112,13 +118,14 @@ const projectPulseDeadlineSchema = z.object({
   date: z.string().trim().min(1).max(100),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
 }).strict();
-const websiteBuilderEvidenceItemSchema = z.object({ text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict();
+const workspacePathSchema = z.string().trim().min(1).max(1000).refine(value => !value.startsWith('/') && !value.includes('\\') && !value.split('/').some(part => part === '' || part === '.' || part === '..'), 'path must be relative to the Run workspace');
+const websiteBuilderEvidenceItemSchema = z.object({ text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict();
 export const websiteBuilderArtifactSchema = z.object({
   schemaVersion: z.literal('website-builder/1'),
-  changedFiles: z.array(z.string().trim().min(1).max(1000)).max(500),
-  preview: z.object({ url: z.string().url().optional(), status: z.enum(['started', 'ready', 'failed', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict().optional(),
-  validation: z.array(z.object({ name: z.string().trim().min(1).max(200), status: z.enum(['passed', 'failed', 'skipped', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict()).max(100),
-  artifacts: z.array(z.object({ path: z.string().trim().min(1).max(1000), kind: z.string().trim().min(1).max(100).optional(), evidenceRefs: z.array(z.string().trim().min(1).max(50)) }).strict()).max(100),
+  changedFiles: z.array(workspacePathSchema).max(500),
+  preview: z.object({ url: z.string().url().optional(), status: z.enum(['started', 'ready', 'failed', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict().optional(),
+  validation: z.array(z.object({ name: z.string().trim().min(1).max(200), status: z.enum(['passed', 'failed', 'skipped', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict()).max(100),
+  artifacts: z.array(z.object({ path: workspacePathSchema, kind: z.string().trim().min(1).max(100).optional(), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict()).max(100),
   blockers: z.array(websiteBuilderEvidenceItemSchema).max(50),
   unknowns: z.array(websiteBuilderEvidenceItemSchema).max(50),
 }).strict();
@@ -160,6 +167,9 @@ export type ResourceSelection = z.infer<typeof resourceSelectionSchema>;
 export interface ResourceSnapshot extends ResourceSelection {
   resolvedAt: string;
   resolverVersion: 'aeeis-resource-resolver/1';
+  /** Revision of the Registry used to resolve this Run. It is audit metadata;
+   * old Runs continue to use their immutable release digests after promotion. */
+  registryRevision?: string;
 }
 export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact; hash: string; createdAt: string }
 /**

@@ -232,9 +232,13 @@ const websiteRunRef = await request('/api/runs', {
     goal: 'website-builder smoke: update the landing page and verify the preview',
     builtinSkill: 'website-builder/1',
     skillRuntime: 'codex',
+    resources: {
+      plugin: { id: 'aeeis.website-builder', version: '1.0.0', interface: 'aeeis.website-builder/1', digest: 'a'.repeat(64), channel: 'stable' },
+      workflow: { id: 'website-build', version: '1.2.0', interface: 'website-build/1', digest: 'b'.repeat(64), channel: 'canary' },
+    },
     materials: [{ title: 'Website smoke request', source: 'full-local-website-builder', content: 'The landing page should contain the AEEIS smoke heading.' }],
     allowedTools: ['glob@3', 'write@3', 'shell@3', 'process@3'],
-    externalBudget: { calls: 4 },
+    externalBudget: { calls: 5 },
   }),
 });
 const websiteRun = await approveRun(websiteRunRef.id);
@@ -242,15 +246,19 @@ const websiteArtifact = websiteRun.artifacts?.find((item) => item.artifactType =
 const websiteSnapshot = websiteRun.resourceSnapshot;
 if (websiteRun.status !== 'succeeded' || websiteRun.review?.verdict !== 'accepted' || !websiteArtifact?.structured
   || websiteArtifact.structured.schemaVersion !== 'website-builder/1' || websiteArtifact.structured.changedFiles?.length !== 1
-  || websiteArtifact.structured.preview?.status !== 'started' || !websiteArtifact.structured.validation?.some((item) => item.status === 'passed')
+  || websiteArtifact.structured.preview?.status !== 'ready' || !websiteArtifact.structured.preview?.url || !websiteArtifact.structured.validation?.some((item) => item.status === 'passed')
   || !websiteArtifact.structured.artifacts?.some((item) => item.path === 'artifacts/site.html')
   || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'glob')
   || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'write')
   || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'shell')
   || !websiteRun.toolReceipts?.some((receipt) => receipt.operation === 'process')
-  || websiteSnapshot?.skill?.interface !== 'website-builder/1' || !websiteSnapshot?.lockfileDigest || !websiteSnapshot?.policyDigest) {
+  || websiteSnapshot?.plugin?.interface !== 'aeeis.website-builder/1' || websiteSnapshot?.workflow?.interface !== 'website-build/1'
+  || websiteSnapshot?.skill?.interface !== 'website-builder/1' || websiteSnapshot?.registryRevision !== 'full-local-1'
+  || !websiteSnapshot?.lockfileDigest || !websiteSnapshot?.policyDigest) {
   throw new Error(`Expected a completed cross-module website-builder Run, got ${JSON.stringify({ status: websiteRun.status, error: websiteRun.error, artifact: websiteArtifact, resources: websiteSnapshot, receipts: websiteRun.toolReceipts })}`);
 }
+const previewResponse = await fetch(websiteArtifact.structured.preview.url, { signal: AbortSignal.timeout(10_000) });
+if (!previewResponse.ok) throw new Error(`Expected website preview HTTP probe to succeed, got ${previewResponse.status}`);
 
 // Verify the configured File project-source connector is part of the real
 // full local path. The first run reads the configured source snapshot (or resumes

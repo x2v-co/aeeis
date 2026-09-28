@@ -121,4 +121,73 @@ Brain 只保存已批准的治理结论，例如“`website-build/1.2.0` 要求 
 6. 需要升级时只更新 channel 指针，保留可复现的旧 Lockfile；
 7. 发现问题时执行回滚或撤销，生成新的状态记录。
 
+## Registry 的实现边界和匹配规则
+
+上面的 Manifest 和 Lockfile 必须由一个受信任的 Registry 产生。请求方可以提交
+兼容范围或已经解析好的引用，但不能自己定义资源的 digest。Registry 至少保存以下
+不可变记录：`releaseId`、资源类型和 ID、语义版本、接口版本、内容 digest、依赖范围、
+解析后的 Lockfile digest、签名、SBOM、发布者、channel 和状态（`published`、
+`revoked`）。同一个 `id@version` 只能对应一个 digest；如果内容变化，必须发布新版本。
+
+解析器按下面的顺序匹配，任何一步失败都拒绝创建 Run：
+
+| 检查 | 规则 | 失败处理 |
+| --- | --- | --- |
+| 接口 | Plugin、Skill、Workflow 和 Tool 的 interface major 必须与依赖声明完全相同 | `interface_mismatch` |
+| 版本范围 | 具体版本必须满足 Manifest 的 semver range；预发布版本只能由相同 channel 请求 | `version_unsatisfied` |
+| 依赖 | Workflow 引用的 Skill/Tool，以及 Plugin 的子资源，必须来自同一个解析结果 | `dependency_conflict` |
+| 内容 | Registry 返回的 digest、签名和 SBOM 必须与下载内容一致 | `digest_mismatch` |
+| 能力 | Tool 的实际 capabilities 必须覆盖 Workflow 所需能力，且是 Run allowlist 的子集 | `capability_denied` |
+| 策略 | privacy、租户、平台和 OwnHow runtime 必须通过 admission | `policy_denied` |
+
+因此，Run 创建应是 `resolve(range) → verify(signature) → admission → freeze`。冻结后
+只把 Registry 返回的具体引用写入 `resourceSnapshot`，并额外保存
+`registryRevision`、`lockfileDigest` 和 `policyDigest`。Runtime 恢复 Run 时重新读取同一个
+`releaseId`/digest 做存在性和撤销检查；如果旧 Artifact 已归档，应从内容仓库恢复，不能用
+当前 channel 的同名资源替代。若安全撤销策略要求暂停存量 Run，状态应变为 `isolated` 或
+`paused` 并生成事件，不能静默换版本继续运行。
+
+## 升级和推送协议
+
+发布工具应该把一次升级作为不可变的 `ReleaseCandidate`，而不是直接覆盖 Registry 文件：
+
+1. 在 `dev` 生成新 Artifact、Manifest、SBOM、签名和候选 Lockfile；校验所有依赖的
+   interface、capability 和 policy。
+2. 用 replay、holdout、权限边界、Tool Receipt、Website Builder preview/build/QA smoke
+   生成带 Run ID 的评测报告。报告和候选 Lockfile digest 一起写入 candidate。
+3. 通过带 `expectedRegistryRevision` 的 CAS 推送把候选提升到 `canary`。推送请求必须带
+   `idempotencyKey`；重复请求返回原始发布结果，不能产生第二个 release。
+4. 观察 canary 的失败率、unknown/reconcile、预算和产物质量后，负责人显式批准提升到
+   `beta` 或 `stable`。每次提升都追加审计事件，记录旧/新 channel pointer、审批人、评测
+   Run IDs 和生效时间。
+
+`stable` 指针只决定以后新 Run 的默认解析结果。运行中的 Run、重试和 unknown reconcile
+始终使用其冻结的 Lockfile 与 Tool version；升级推送不能修改它们。回滚也是一次 CAS
+   指针更新，指向上一个已验证的 Lockfile，不删除当前或历史 Artifact。`revoke` 与回滚
+   不同：revoke 会阻止新 Run 解析该版本，并按安全策略暂停或隔离仍在运行的 Run。
+
+发布工具至少应提供以下可审计操作：
+
+```text
+resource resolve --channel stable --plugin aeeis.website-builder --lock lock.json
+resource verify --lock lock.json --registry-revision 1842
+resource promote --candidate rc_… --from dev --to canary --expected-revision 1842
+resource promote --candidate rc_… --from canary --to stable --approval approval_…
+resource rollback --channel stable --to-lock sha256:… --reason incident_…
+resource revoke --release release_… --reason security_…
+```
+
+每条命令都应返回 `registryRevision`、旧/新 Lockfile digest 和审计事件 ID；这些值写入
+AEEIS 的发布 Receipt，并作为后续 Brain decision 的证据。这样可以在服务升级、推送失败或
+多实例并发发布后，依据同一个 revision 和 Lockfile 重放、恢复或回滚。
+
+当前 Runtime 提供 `InMemoryResourceRegistry` 和 `FileResourceRegistry` 实现。部署时可设置
+`AEEIS_RESOURCE_REGISTRY_FILE=/path/resource-registry.json`，文件格式为
+`{"schemaVersion":"resource-registry/1","revision":"…","manifests":[…]}`。
+Run 创建会调用 `resolve`，把 Registry 返回的 `releaseId`、具体版本和 digest 写入
+`resourceSnapshot`；每次规划、执行 Tool、review 和恢复 Run 前都会调用 `verify`。
+Registry 中同一 `kind + id + version` 不能有多个 digest，`revoked` release 会拒绝新调用或
+继续执行。未配置 Registry 时保留旧客户端兼容模式，但生产环境应启用 Registry 并开启签名
+和 SBOM 校验的远程实现。
+
 验收入口见 [`docs/verification-matrix.md`](verification-matrix.md)。

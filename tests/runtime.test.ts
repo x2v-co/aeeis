@@ -6,6 +6,7 @@ import { AgentEngine, digest } from '../src/runtime/engine.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
+import { websiteBuilderArtifactSchema } from '../src/runtime/contracts.js';
 import type { AgentRun, ModelPin } from '../src/runtime/contracts.js';
 import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '../src/integrations.js';
 import type { RunRepository } from '../src/runtime/repository.js';
@@ -20,6 +21,7 @@ import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 import { materialContentHash } from '../src/runtime/materials.js';
+import { InMemoryResourceRegistry } from '../src/runtime/resources.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -148,6 +150,17 @@ class WebsiteBuilderFixture implements ModelAdapter {
   }
 }
 
+class FakeWebsiteBuilderFixture implements ModelAdapter {
+  readonly pin = pin;
+  async complete(request: ModelRequest) {
+    if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Fake website result', nodes: [{ id: 'build', title: 'Build website', instruction: 'Build the site', dependsOn: [] }] } };
+    if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Accepted', issues: [] } };
+    return { value: { type: 'finish', title: 'Fake website', content: 'Claimed a website change without running a tool.', evidenceRefs: [], artifactType: 'website-builder/1', structured: {
+      schemaVersion: 'website-builder/1', changedFiles: ['fake.html'], validation: [], artifacts: [], blockers: [], unknowns: [],
+    } } };
+  }
+}
+
 class CapabilityGateway implements ToolGateway {
   requests: ToolInvocation[] = [];
   async listTools() { return [{ id: 'fixture.lookup', version: '1', capabilities: ['read'], inputSchema: {}, outputSchema: {} }]; }
@@ -164,6 +177,21 @@ class CapabilityGateway implements ToolGateway {
         startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), status: 'completed',
       },
     };
+  }
+}
+
+class WebsiteCapabilityGateway extends CapabilityGateway {
+  async listTools() { return [{ id: 'fixture.lookup', version: '1', capabilities: ['read', 'write', 'execute'], inputSchema: {}, outputSchema: {} }]; }
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    const result = await super.invoke(request);
+    return { ...result, receipt: { ...result.receipt, capabilitiesUsed: ['read', 'write', 'execute'] } };
+  }
+}
+
+class MismatchedOutputGateway extends CapabilityGateway {
+  async invoke(request: ToolInvocation): Promise<ToolResult> {
+    const result = await super.invoke(request);
+    return { ...result, outputRefs: ['fake-output'] };
   }
 }
 
@@ -636,7 +664,7 @@ describe('AEEIS runtime', () => {
 
   it('completes a website-builder/1 Run with a structured evidence-linked artifact', async () => {
     const repo = await repository();
-    const engine = new AgentEngine(repo, { model: new WebsiteBuilderFixture(), tools: new CapabilityGateway() });
+    const engine = new AgentEngine(repo, { model: new WebsiteBuilderFixture(), tools: new WebsiteCapabilityGateway() });
     const run = await engine.create({ goal: 'Update the website landing page', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
@@ -649,6 +677,48 @@ describe('AEEIS runtime', () => {
     expect(current.status).toBe('succeeded');
     expect(current.artifacts[0]).toMatchObject({ artifactType: 'website-builder/1', structured: { schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'] } });
     expect(current.artifacts[0]?.evidenceRefs).toContain('tool-output-1');
+    await repo.close();
+  });
+
+  it('rejects website-builder structured claims without evidence references', () => {
+    expect(() => websiteBuilderArtifactSchema.parse({
+      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'],
+      preview: { status: 'started', evidenceRefs: [] }, validation: [], artifacts: [], blockers: [], unknowns: [],
+    })).toThrow();
+    expect(() => websiteBuilderArtifactSchema.parse({
+      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'],
+      validation: [{ name: 'build', status: 'passed', evidenceRefs: [] }], artifacts: [], blockers: [], unknowns: [],
+    })).toThrow();
+    expect(() => websiteBuilderArtifactSchema.parse({
+      schemaVersion: 'website-builder/1', changedFiles: ['/etc/passwd'], validation: [], artifacts: [], blockers: [], unknowns: [],
+    })).toThrow();
+  });
+
+  it('rejects a website artifact that has no execution evidence', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new FakeWebsiteBuilderFixture() });
+    const run = await engine.create({ goal: 'Fake website change', builtinSkill: 'website-builder/1' });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    const planned = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash });
+    for (let i = 0; i < 12; i += 1) { const state = await engine.advance(run.id); if (['succeeded', 'failed'].includes(state)) break; }
+    const current = await repo.get(run.id);
+    expect(current.status).toBe('failed');
+    expect(current.error).toContain('write-capable Tool Receipt');
+    await repo.close();
+  });
+
+  it('rejects tool output references that are not bound to the receipt', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools: new MismatchedOutputGateway() });
+    const run = await engine.create({ goal: 'Check tool evidence binding', allowedTools: ['fixture.lookup@1'] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    const planned = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash });
+    for (let i = 0; i < 12; i += 1) { const state = await engine.advance(run.id); if (['unknown', 'succeeded', 'failed'].includes(state)) break; }
+    const current = await repo.get(run.id);
+    expect(current.status).toBe('unknown');
+    expect(current.artifacts).toHaveLength(0);
     await repo.close();
   });
 
@@ -743,6 +813,63 @@ describe('AEEIS runtime', () => {
       resolverVersion: 'aeeis-resource-resolver/1',
     });
     expect(run.resourceSnapshot?.tools?.[0]).toMatchObject({ id: 'fixture.lookup', version: '1', interface: 'tool/fixture.lookup/1', digest: digest(run.approvedTools?.[0]) });
+    await repo.close();
+  });
+
+  it('rejects forged lockfile, policy and Tool interface declarations', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools: new CapabilityGateway() });
+    await expect(engine.create({
+      goal: 'Reject forged resources', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'],
+      resources: {
+        plugin: { id: 'aeeis.website-builder', version: '1.0.0', interface: 'aeeis.website-builder/1', digest: 'a'.repeat(64) },
+        workflow: { id: 'website-build', version: '1.0.0', interface: 'website-build/1', digest: 'b'.repeat(64) },
+        tools: [{ id: 'fixture.lookup', version: '1', interface: 'tool/fixture.lookup/99', digest: 'c'.repeat(64) }],
+        lockfileDigest: 'd'.repeat(64), policyDigest: 'e'.repeat(64),
+      },
+    })).rejects.toThrow(/tool|lockfile|interface/i);
+    await repo.close();
+  });
+
+  it('resolves Plugin and Workflow references from the Registry and rejects digest forgery', async () => {
+    const repo = await repository();
+    const pluginDigest = '1'.repeat(64); const workflowDigest = '2'.repeat(64);
+    const registry = new InMemoryResourceRegistry([
+      { releaseId: 'rel.plugin.1', kind: 'plugin', id: 'demo.plugin', version: '1.0.0', interface: 'demo.plugin/1', digest: pluginDigest, channel: 'stable' },
+      { releaseId: 'rel.workflow.1', kind: 'workflow', id: 'demo-workflow', version: '1.0.0', interface: 'demo-workflow/1', digest: workflowDigest, channel: 'stable' },
+    ], '42');
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), resourceRegistry: registry });
+    const run = await engine.create({ goal: 'Resolve a signed resource set', resources: {
+      plugin: { id: 'demo.plugin', version: '1.0.0', interface: 'demo.plugin/1', digest: pluginDigest, channel: 'stable' },
+      workflow: { id: 'demo-workflow', version: '1.0.0', interface: 'demo-workflow/1', digest: workflowDigest, channel: 'stable' },
+    } });
+    expect(run.resourceSnapshot).toMatchObject({ registryRevision: '42', plugin: { releaseId: 'rel.plugin.1' }, workflow: { releaseId: 'rel.workflow.1' } });
+    await expect(engine.create({ goal: 'Reject a forged Registry reference', resources: {
+      plugin: { id: 'demo.plugin', version: '1.0.0', interface: 'demo.plugin/1', digest: 'f'.repeat(64), channel: 'stable' },
+    } })).rejects.toThrow(/Registry manifest/i);
+    await repo.close();
+  });
+
+  it('resolves a semver range to the highest published compatible release', async () => {
+    const repo = await repository();
+    const registry = new InMemoryResourceRegistry([
+      { releaseId: 'rel.plugin.110', kind: 'plugin', id: 'range.plugin', version: '1.1.0', interface: 'range.plugin/1', digest: '4'.repeat(64), channel: 'stable' },
+      { releaseId: 'rel.plugin.120', kind: 'plugin', id: 'range.plugin', version: '1.2.0', interface: 'range.plugin/1', digest: '5'.repeat(64), channel: 'stable' },
+    ]);
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), resourceRegistry: registry });
+    const run = await engine.create({ goal: 'Resolve compatible range', resources: { plugin: { id: 'range.plugin', version: '*', range: '^1.0.0', interface: 'range.plugin/1', digest: '0'.repeat(64), channel: 'stable' } } });
+    expect(run.resourceSnapshot?.plugin).toMatchObject({ version: '1.2.0', digest: '5'.repeat(64), releaseId: 'rel.plugin.120' });
+    await repo.close();
+  });
+
+  it('blocks a Run when its frozen Registry release is revoked', async () => {
+    const repo = await repository();
+    const registry = new InMemoryResourceRegistry([{ releaseId: 'rel.workflow.revocable', kind: 'workflow', id: 'revocable', version: '1.0.0', interface: 'revocable/1', digest: '3'.repeat(64), channel: 'stable' }]);
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), resourceRegistry: registry });
+    const run = await engine.create({ goal: 'Run with revocable resource', resources: { workflow: { id: 'revocable', version: '1.0.0', interface: 'revocable/1', digest: '3'.repeat(64), channel: 'stable' } } });
+    registry.revoke('rel.workflow.revocable');
+    expect(await engine.advance(run.id)).toBe('failed');
+    expect((await repo.get(run.id)).error).toMatch(/revoked/i);
     await repo.close();
   });
 

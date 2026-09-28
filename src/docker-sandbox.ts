@@ -158,8 +158,10 @@ export class DockerSandbox {
     return response;
   }
   private async ensure(runId: string, files: WorkspaceFile[]): Promise<State> {
-    const image = await this.imageId(), policy = digestProtocol({ config: this.config, image });
+    if (this.blocked) throw new SandboxError('Sandbox stop could not be confirmed; recover Docker and restart AEEIS', 'unknown');
     let state = await this.state(runId);
+    const image = state ? state.image : await this.imageId();
+    const policy = digestProtocol({ config: this.config, image });
     if (state) {
       if (state.released) throw new SandboxError('Run sandbox was released; start a new Run');
       if (!state.ready) throw new SandboxError('Sandbox initialization was interrupted; inspect/release this environment before retrying', 'unknown');
@@ -214,7 +216,6 @@ export class DockerSandbox {
     return { schemaVersion: 'sandbox-output/2' as const, status: 'completed' as const, output: { bindings: result.stdout.trim(), note: 'Only configured ports bind to host loopback; services must listen on 0.0.0.0 inside the container.' }, files: null };
   }
   async release(runId: string, saveArtifacts: (files: WorkspaceFile[]) => Promise<void>) {
-    await this.imageId();
     const state = await this.state(runId);
     if (!state || state.released) return;
     if (await this.inspect(state)) {

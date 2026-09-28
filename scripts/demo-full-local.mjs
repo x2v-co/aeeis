@@ -101,6 +101,13 @@ await writeFile(localToolsConfig, JSON.stringify({
   defaultAllowedTools: ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process'], timeoutMs: 120_000,
   webHosts: [], sandbox: { runtime: 'docker', context: process.platform === 'darwin' ? 'desktop-linux' : 'auto', image: 'aeeis-sandbox:2', memoryMiB: 1024, cpus: 2, pids: 256, network: 'bridge', snapshotMiB: 16, idleSeconds: 3600, maxLifetimeSeconds: 86400, ports: [3000, 8000] },
 }, null, 2), 'utf8');
+const resourceRegistryFile = join(dataDir, 'resource-registry.json');
+await writeFile(resourceRegistryFile, JSON.stringify({
+  schemaVersion: 'resource-registry/1', revision: 'full-local-1', manifests: [
+    { releaseId: 'release.aeeis.website-builder.1', kind: 'plugin', id: 'aeeis.website-builder', version: '1.0.0', interface: 'aeeis.website-builder/1', digest: 'a'.repeat(64), channel: 'stable', status: 'published' },
+    { releaseId: 'release.website-build.1', kind: 'workflow', id: 'website-build', version: '1.2.0', interface: 'website-build/1', digest: 'b'.repeat(64), channel: 'canary', status: 'published' },
+  ],
+}, null, 2), 'utf8');
 const [apiPort, modelPort, evaluatorPort, agentPort, planpricePort] = await Promise.all([
   freePort(), freePort(), freePort(), freePort(), freePort(),
 ]);
@@ -147,6 +154,7 @@ const environment = {
   AEEIS_AGENT_ALLOW_INSECURE_HTTP: '1', AEEIS_AGENT_CARDS: cards,
   AEEIS_PROJECT_SOURCES_FILE: join(root, 'fixtures', 'project-sources.json'),
   AEEIS_LOCAL_TOOLS_CONFIG: localToolsConfig,
+  AEEIS_RESOURCE_REGISTRY_FILE: resourceRegistryFile,
   AEEIS_RUNNER: 'local',
 };
 

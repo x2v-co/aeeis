@@ -61,6 +61,7 @@ import { HttpChannelIdentityResolver, JsonChannelIdentityResolver, type ChannelI
 import { JsonSessionEventRepository, PostgresSessionEventRepository, SessionEventService, type SessionEventRepository } from './session-events.js';
 import { loadFileEnvironment } from './config-secrets.js';
 import { JsonDeviceSessionRepository, PostgresDeviceSessionRepository, type DeviceSessionRepository } from './device-sessions.js';
+import { FileResourceRegistry, type ResourceRegistry } from './runtime/resources.js';
 
 // Validate credentials before opening stores and acquiring writer locks.
 loadFileEnvironment();
@@ -262,6 +263,7 @@ const agentDirectory: AgentDirectoryPort & { close?: () => Promise<void> } = pro
   : new AgentDirectory(process.env.AEEIS_AGENT_REGISTRY_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/agent-registry.json`);
 if (agentDirectory instanceof PostgresAgentDirectory) await agentDirectory.init();
 let engine: AgentEngine | undefined, dispatcher: Dispatcher | undefined, taskScheduler: TaskScheduler | undefined;
+let resourceRegistry: ResourceRegistry | undefined;
 let localToolkit: LocalToolGateway | undefined;
 let competitionRunner: ModelPoolCandidateRunner | undefined;
 let competitionEvaluator: ModelPoolIndependentEvaluator | undefined;
@@ -298,6 +300,7 @@ try {
     ? new ConfiguredHttpToolGateway(process.env.AEEIS_TOOLKIT_MANIFEST_URL, process.env.AEEIS_TOOLKIT_INVOKE_URL, process.env.AEEIS_TOOLKIT_TOKEN, process.env.AEEIS_TOOLKIT_RECONCILE_URL)
     : undefined;
   localToolkit = process.env.AEEIS_LOCAL_TOOLS_CONFIG ? await LocalToolGateway.load(process.env.AEEIS_LOCAL_TOOLS_CONFIG) : undefined;
+  if (process.env.AEEIS_RESOURCE_REGISTRY_FILE) resourceRegistry = await FileResourceRegistry.load(process.env.AEEIS_RESOURCE_REGISTRY_FILE);
   const toolkit = localToolkit && remoteToolkit ? new CombinedToolGateway([localToolkit, remoteToolkit]) : localToolkit ?? remoteToolkit;
   const skills = process.env.AEEIS_OWNHOW_ENABLED === '1'
     ? new OwnHowCliGovernance(process.env.AEEIS_OWNHOW_BIN ?? 'ownhow', process.env.AEEIS_OWNHOW_STATE_DIR, process.env.AEEIS_OWNHOW_RUNTIME)
@@ -451,7 +454,7 @@ try {
     rsiProposalPump.setSynthesis(synthesis);
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');

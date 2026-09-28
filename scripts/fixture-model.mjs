@@ -95,7 +95,6 @@ function responseFor(system, input) {
   }
   if (websiteRun && input.task?.id !== 'inspect') {
     const observations = input.observations ?? [];
-    const last = observations.at(-1)?.result ?? {};
     const evidenceRefs = observations.flatMap((item) => Array.isArray(item?.result?.outputRefs) ? item.result.outputRefs : []).filter(Boolean);
     if (observations.length === 0) {
       const writeTool = catalogTools.find((tool) => tool?.id === 'write');
@@ -109,10 +108,18 @@ function responseFor(system, input) {
       const processTool = catalogTools.find((tool) => tool?.id === 'process');
       if (processTool) return { type: 'capability', toolId: processTool.id, toolVersion: String(processTool.version), input: { action: 'start', command: 'python3 -m http.server 3000 --bind 0.0.0.0' }, purpose: 'Start the website preview process.' };
     }
+    if (observations.length === 3) {
+      const processTool = catalogTools.find((tool) => tool?.id === 'process');
+      if (processTool) return { type: 'capability', toolId: processTool.id, toolVersion: String(processTool.version), input: { action: 'ports' }, purpose: 'Verify the website preview port is published.' };
+    }
     const dependencyRef = input.dependencies?.[0]?.id;
     const refs = [...new Set([...evidenceRefs, dependencyRef].filter(Boolean))];
+    const portOutput = observations.at(-1)?.result?.output;
+    const binding = typeof portOutput?.bindings === 'string' ? portOutput.bindings : '';
+    const hostPort = binding.match(/127\.0\.0\.1:(\d+)/)?.[1] ?? binding.match(/0\.0\.0\.0:(\d+)/)?.[1];
+    const previewUrl = hostPort ? `http://127.0.0.1:${hostPort}` : undefined;
     return { type: 'finish', title: 'Website build and preview', content: 'Applied a website change, produced an artifact, validated it and started the preview process.', evidenceRefs: refs, artifactType: 'website-builder/1', structured: {
-      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'], preview: { status: 'started', evidenceRefs: refs.slice(-1) },
+      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'], preview: { ...(previewUrl ? { url: previewUrl } : {}), status: previewUrl ? 'ready' : 'unknown', evidenceRefs: refs.slice(-1) },
       validation: [{ name: 'artifact-build', status: 'passed', evidenceRefs: refs.slice(-1) }], artifacts: [{ path: 'artifacts/site.html', kind: 'html', evidenceRefs: refs.slice(-1) }], blockers: [], unknowns: [],
     } };
   }

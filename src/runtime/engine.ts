@@ -21,6 +21,7 @@ import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 import { globalBudgetReconciliationSchema, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
 import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt } from './materials.js';
+import type { ResourceRegistry, ResourceResolution } from './resources.js';
 
 /** JSONB and other stores may reorder object keys. Hash the canonical form so
  * pins, plans, receipts and idempotency checks survive a persistence roundtrip. */
@@ -51,29 +52,67 @@ function usesProjectPulse(run: AgentRun): boolean {
 function usesWebsiteBuilder(run: AgentRun): boolean {
   return run.builtinSkill === 'website-builder/1' || run.resourceSnapshot?.skill?.id === 'website-builder';
 }
-function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['skillSelection'], approvedTools: ToolDescriptor[], toolManifestDigest: string, timestamp: string): ResourceSnapshot | undefined {
-  const declared = request.resources;
+const builtinSkillImplementationRevision: Record<'project-pulse/1' | 'website-builder/1', string> = {
+  'project-pulse/1': 'project-pulse-runtime/1',
+  'website-builder/1': 'website-builder-runtime/1',
+};
+function builtinSkillDigest(ref: 'project-pulse/1' | 'website-builder/1'): string {
+  return digest({ ref, revision: builtinSkillImplementationRevision[ref], guidance: ref === 'website-builder/1' ? websiteBuilderGuidance : projectPulseGuidance });
+}
+function resolvedSkillDigest(ref: 'project-pulse/1' | 'website-builder/1', plan?: unknown): string {
+  const implementation = builtinSkillDigest(ref);
+  return plan === undefined ? implementation : digest({ implementation, plan: digest(plan) });
+}
+function resourceInterfaceMajor(value: string): number | undefined {
+  const match = /\/(\d+)$/.exec(value);
+  return match ? Number(match[1]) : undefined;
+}
+function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['skillSelection'], approvedTools: ToolDescriptor[], toolManifestDigest: string, timestamp: string, registryResolution?: ResourceResolution): ResourceSnapshot | undefined {
+  const declared = registryResolution?.selection ?? request.resources;
   if (!declared && !skillSelection && !request.builtinSkill && approvedTools.length === 0) return undefined;
-  const builtinSkillRef = request.builtinSkill ? { id: request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')), version: '1.0.0', digest: digest(request.builtinSkill), interface: request.builtinSkill, channel: 'stable' as const } : undefined;
+  const builtinSkillRef = request.builtinSkill ? { id: request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')), version: '1.0.0', digest: builtinSkillDigest(request.builtinSkill), interface: request.builtinSkill, channel: 'stable' as const } : undefined;
   if (declared?.skill && request.builtinSkill && declared.skill.interface !== request.builtinSkill) throw new Conflict('Declared Skill interface does not match the built-in output contract');
   if (declared?.skill && skillSelection?.methodId && declared.skill.id !== skillSelection.methodId) throw new Conflict('Declared Skill does not match the governed Skill resolution');
   if (declared?.skill && skillSelection?.version && declared.skill.version !== skillSelection.version) throw new Conflict('Declared Skill version does not match the governed Skill resolution');
-  const resolvedTools = approvedTools.map(tool => ({ id: tool.id, version: tool.version, digest: digest(tool), interface: `tool/${tool.id}/1`, capabilities: undefined }));
-  const tools = resolvedTools.map(({ id, version, digest: toolDigest, interface: toolInterface }) => ({ id, version, digest: toolDigest, interface: toolInterface }));
+  const resolvedTools = approvedTools.map(tool => {
+    const declaredTool = declared?.tools?.find(item => item.id === tool.id && item.version === tool.version);
+    return { id: tool.id, version: tool.version, digest: digest(tool), interface: `tool/${tool.id}/1`, ...(declaredTool?.releaseId ? { releaseId: declaredTool.releaseId } : {}) };
+  });
+  const tools = resolvedTools.map(({ id, version, digest: toolDigest, interface: toolInterface, releaseId }) => ({ id, version, digest: toolDigest, interface: toolInterface, ...(releaseId ? { releaseId } : {}) }));
   if (declared?.tools) {
+    if (new Set(declared.tools.map(tool => `${tool.id}@${tool.version}:${tool.interface}`)).size !== declared.tools.length) throw new Conflict('Declared tools must be unique');
     for (const wanted of declared.tools) {
       const resolved = tools.find(tool => tool.id === wanted.id);
-      if (!resolved || resolved.version !== wanted.version || resolved.digest !== wanted.digest) throw new Conflict(`Declared tool ${wanted.id}@${wanted.version} does not match the approved toolkit manifest`);
+      if (!resolved || resolved.version !== wanted.version || resolved.digest !== wanted.digest || resolved.interface !== wanted.interface || resourceInterfaceMajor(wanted.interface) !== 1) throw new Conflict(`Declared tool ${wanted.id}@${wanted.version} does not match the approved toolkit manifest/interface`);
     }
   }
-  const lockfileDigest = declared?.lockfileDigest ?? digest({ plugin: declared?.plugin ?? null, skill: declared?.skill ?? null, workflow: declared?.workflow ?? null, tools, toolManifestDigest });
-  const policyDigest = declared?.policyDigest ?? digest({ privacy: request.privacy, allowedTools: request.allowedTools, allowedAgents: request.allowedAgents });
+  for (const resource of [declared?.plugin, declared?.skill, declared?.workflow].filter(Boolean)) {
+    if (resourceInterfaceMajor(resource!.interface) === undefined) throw new Conflict(`Resource ${resource!.id} has an invalid interface version`);
+  }
+  if (request.builtinSkill === 'website-builder/1') {
+    if (declared?.plugin && (declared.plugin.id !== 'aeeis.website-builder' || declared.plugin.interface !== 'aeeis.website-builder/1')) throw new Conflict('Website Builder Plugin reference must implement aeeis.website-builder/1');
+    if (declared?.workflow && (declared.workflow.id !== 'website-build' || declared.workflow.interface !== 'website-build/1')) throw new Conflict('Website Builder Workflow reference must implement website-build/1');
+  }
+  const skill = declared?.skill ?? (skillSelection?.methodId && skillSelection.version ? { id: skillSelection.methodId, version: skillSelection.version, digest: request.builtinSkill ? resolvedSkillDigest(request.builtinSkill, skillSelection.plan) : digest(skillSelection.plan), interface: request.builtinSkill && skillSelection.methodId === request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')) ? request.builtinSkill : `skill/${skillSelection.methodId}/1` } : builtinSkillRef);
+  if (request.builtinSkill && skill) {
+    const expectedId = request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/'));
+    if (skill.id !== expectedId || skill.interface !== request.builtinSkill) throw new Conflict('Website/Project built-in Skill reference does not match its output interface');
+    const expectedDigest = resolvedSkillDigest(request.builtinSkill, skillSelection?.plan);
+    if (skill.digest !== expectedDigest) throw new Conflict('Built-in Skill digest does not match the resolved implementation and plan');
+  }
+  const snapshotForDigest = { plugin: declared?.plugin ?? null, skill: skill ?? null, workflow: declared?.workflow ?? null, tools, toolManifestDigest };
+  const computedLockfileDigest = digest(snapshotForDigest);
+  const lockfileDigest = declared?.lockfileDigest ?? computedLockfileDigest;
+  if (lockfileDigest !== computedLockfileDigest) throw new Conflict('Declared lockfile digest does not match the resolved resource set');
+  const computedPolicyDigest = digest({ privacy: request.privacy, allowedTools: request.allowedTools, allowedAgents: request.allowedAgents });
+  const policyDigest = declared?.policyDigest ?? computedPolicyDigest;
+  if (policyDigest !== computedPolicyDigest) throw new Conflict('Declared policy digest does not match the Run policy');
   return {
     ...(declared?.plugin ? { plugin: declared.plugin } : {}),
-    ...(declared?.skill ? { skill: declared.skill } : skillSelection?.methodId && skillSelection.version ? { skill: { id: skillSelection.methodId, version: skillSelection.version, digest: digest(skillSelection.plan), interface: request.builtinSkill && skillSelection.methodId === request.builtinSkill.slice(0, request.builtinSkill.lastIndexOf('/')) ? request.builtinSkill : `skill/${skillSelection.methodId}/1` } } : builtinSkillRef ? { skill: builtinSkillRef } : {}),
+    ...(skill ? { skill } : {}),
     ...(declared?.workflow ? { workflow: declared.workflow } : {}),
     ...(tools.length ? { tools } : declared?.tools ? { tools: declared.tools } : {}),
-    lockfileDigest, policyDigest, resolvedAt: timestamp, resolverVersion: 'aeeis-resource-resolver/1',
+    lockfileDigest, policyDigest, resolvedAt: timestamp, resolverVersion: 'aeeis-resource-resolver/1', ...(registryResolution?.registryRevision ? { registryRevision: registryResolution.registryRevision } : {}),
   };
 }
 export function event(run: AgentRun, type: string, data: Record<string, unknown> = {}): void {
@@ -133,10 +172,11 @@ function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
     }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const candidate = value as Record<string, unknown>;
+      const artifactType = candidate.artifactType === 'project-pulse/1' || candidate.artifactType === 'website-builder/1' ? candidate.artifactType : undefined;
       if (typeof candidate.title === 'string' && typeof candidate.content === 'string' && Array.isArray(candidate.evidenceRefs)) {
         return decisionSchema.parse({
           type: 'finish', title: candidate.title, content: candidate.content, evidenceRefs: candidate.evidenceRefs,
-          ...(candidate.artifactType === 'project-pulse/1' ? { artifactType: candidate.artifactType, structured: candidate.structured } : {}),
+          ...(artifactType ? { artifactType, structured: candidate.structured } : {}),
         });
       }
       if (typeof candidate.content === 'string' && candidate.content.trim()
@@ -146,7 +186,7 @@ function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
           title: typeof candidate.title === 'string' && candidate.title.trim() ? candidate.title : 'Task result',
           content: candidate.content,
           evidenceRefs: Array.isArray(candidate.evidenceRefs) ? candidate.evidenceRefs : [],
-          ...(candidate.artifactType === 'project-pulse/1' ? { artifactType: candidate.artifactType, structured: candidate.structured } : {}),
+          ...(artifactType ? { artifactType, structured: candidate.structured } : {}),
         });
       }
       if (typeof candidate.answer === 'string' && candidate.answer.trim()
@@ -287,9 +327,10 @@ export class AgentEngine {
   private domain: AeeisService | undefined;
   private evolution: EvolutionSnapshotProvider | undefined;
   private globalBudget: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector } | undefined;
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector } }) {
+  private resourceRegistry: ResourceRegistry | undefined;
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry }) {
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.projectSources = modelOrServices.projectSources; this.projectSourceCheckpoints = modelOrServices.projectSourceCheckpoints; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.brainSemanticSearcher = modelOrServices.brainSemanticSearcher; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; this.globalBudget = modelOrServices.globalBudget; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.projectSources = modelOrServices.projectSources; this.projectSourceCheckpoints = modelOrServices.projectSourceCheckpoints; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.brainSemanticSearcher = modelOrServices.brainSemanticSearcher; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; this.globalBudget = modelOrServices.globalBudget; this.resourceRegistry = modelOrServices.resourceRegistry; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
@@ -449,7 +490,8 @@ export class AgentEngine {
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
     const toolApproval = await this.approveTools(request.allowedTools);
     const approvedAgents = request.allowedAgents.length ? await this.agents!.describeApproved(request.allowedAgents, request.privacy) : [];
-    const resourceSnapshot = freezeResourceSnapshot(request, skillSelection, toolApproval.selected, toolApproval.digest, timestamp);
+    const resourceResolution = this.resourceRegistry ? await this.resourceRegistry.resolve({ ...(request.resources ? { resources: request.resources } : {}), ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}) }) : undefined;
+    const resourceSnapshot = freezeResourceSnapshot(request, skillSelection, toolApproval.selected, toolApproval.digest, timestamp, resourceResolution);
     const contextId = id('ctx');
     const contextManifestHash = digest({ contextId, owner, tenantId, goal: request.goal, privacy: request.privacy, audience, sources: sources.map(source => ({ id: source.id, title: source.title, source: source.source, hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content), classification: source.classification ?? request.privacy, kind: source.kind ?? 'unknown' })) });
     const run: AgentRun = {
@@ -1002,6 +1044,7 @@ export class AgentEngine {
   }
 
   private async plan(run: AgentRun, model: ModelAdapter): Promise<void> {
+    await this.verifyResources(run);
     if (run.taskExecution) {
       const domainPlan = run.goalId
         ? (await this.domain?.getPlan(run.taskExecution.domainPlanId, run.owner, run.tenantId ?? 'local'))
@@ -1068,6 +1111,7 @@ export class AgentEngine {
     }
     const step = run.steps.find(s => s.taskId === node.id)!;
     const dependencies = run.artifacts.filter(a => node.dependsOn.includes(a.taskId));
+    await this.verifyResources(run);
     if (this.tools && run.allowedTools.length) await this.verifyTools(run);
     await this.repository.mutate(run.id, current => {
       if (current.status !== 'running') return;
@@ -1156,15 +1200,26 @@ export class AgentEngine {
         let structured: ProjectPulseArtifact | WebsiteBuilderArtifact | undefined;
         let structuredEvidenceRefs: string[] = [];
         if (decision.artifactType !== undefined) {
-          if (decision.structured === undefined) throw new Error('Project Pulse artifactType requires structured project-pulse/1 data');
+          if (decision.structured === undefined) throw new Error(`${decision.artifactType} requires structured data`);
           structured = decision.artifactType === 'project-pulse/1' ? projectPulseArtifactSchema.parse(decision.structured) : websiteBuilderArtifactSchema.parse(decision.structured);
           structuredEvidenceRefs = decision.artifactType === 'project-pulse/1' ? projectPulseEvidenceRefs(structured as ProjectPulseArtifact) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
-          if (structuredEvidenceRefs.some(ref => !observed.has(ref))) throw new Error('Project Pulse structured output cited evidence the task did not receive');
+          if (structuredEvidenceRefs.some(ref => !observed.has(ref))) throw new Error(`${decision.artifactType} structured output cited evidence the task did not receive`);
         } else if (decision.structured !== undefined) {
           throw new Error('Structured output requires a recognized artifactType');
         }
         if (usesProjectPulse(current) && terminal && !structured) throw new Error('The final Project Pulse artifact must use artifactType project-pulse/1');
         if (usesWebsiteBuilder(current) && terminal && (!structured || decision.artifactType !== 'website-builder/1')) throw new Error('The final Website Builder artifact must use artifactType website-builder/1');
+        if (usesWebsiteBuilder(current) && terminal && structured && structured.schemaVersion === 'website-builder/1'
+          && (structured.changedFiles.length > 0 || Boolean(structured.preview) || structured.artifacts.length > 0)) {
+          const evidenceRefs = new Set([...decision.evidenceRefs, ...structuredEvidenceRefs]);
+          const authorizedReceipts = current.toolReceipts.filter(receipt => receipt.authorization?.decision === 'authorized' && receipt.status === 'completed');
+          const matchingReceipts = authorizedReceipts.filter(receipt => evidenceRefs.has(receipt.receiptId) || receipt.outputRefs.some(ref => evidenceRefs.has(ref)));
+          const dependencyEvidence = dependencies.some(artifact => evidenceRefs.has(artifact.id));
+          if (structured.changedFiles.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write'))) throw new Error('Website Builder changed files require an authorized write-capable Tool Receipt');
+          if (structured.preview && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder preview requires an authorized execute-capable Tool Receipt');
+          if (structured.artifacts.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write') || receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder artifacts require an authorized write or execute-capable Tool Receipt');
+          if (!matchingReceipts.length && !dependencyEvidence) throw new Error('Website Builder changed files, preview or artifacts require an authorized Tool Receipt or dependency artifact');
+        }
         if (decision.evidenceRefs.some(ref => !observed.has(ref))) throw new Error('Artifact cited evidence the task did not receive');
         if (current.context.sources.length > 0 && decision.evidenceRefs.length === 0) throw new Error('Artifact must cite inspected source evidence or dependency artifacts');
         const evidenceRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])];
@@ -1255,6 +1310,7 @@ export class AgentEngine {
     if (!this.tools) throw new Error('Pending external tool cannot run without a toolkit gateway');
     const previous = initialPending.receiptId ? run.toolReceipts?.find(receipt => receipt.receiptId === initialPending.receiptId) : undefined;
     assertExternalBudget(run, Boolean(previous));
+    await this.verifyResources(run);
     if (!previous) await this.verifyTools(run);
     const executionToken = randomUUID();
     let claimed = false;
@@ -1321,7 +1377,8 @@ export class AgentEngine {
       result = previous
         ? await this.tools.reconcile!(providerRequest, previous)
         : await this.tools.invoke(providerRequest);
-      validateToolResult(providerRequest, result);
+      const approvedTool = run.approvedTools?.find(tool => tool.id === providerRequest.toolId && tool.version === providerRequest.toolVersion);
+      validateToolResult(providerRequest, result, approvedTool?.capabilities);
     } catch {
       // A thrown transport/protocol error does not prove the provider did no
       // work. Preserve a reservation receipt so retry cannot issue a new call.
@@ -1582,6 +1639,7 @@ export class AgentEngine {
     });
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
+    await this.verifyResources(run);
     if (run.taskExecution && run.review?.verdict === 'accepted' && !run.review.issues.length) { await this.finishBoundReview(run); return; }
     await this.call(run, model, 'reviewer', { system: this.governedPrompt(reviewerPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...(run.capabilityCatalogVersion ? { externalEvidence: { toolReceipts: (run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated'), delegations: (run.delegationOutcomes ?? []).filter(outcome => outcome.disposition !== 'isolated'), observations: run.steps.flatMap(step => step.observations.filter(observation => !observation.tool.startsWith('sources.'))) } } : {}), evolution: run.evolution ?? [], sources: run.context.sources, artifacts: run.artifacts, answers: run.answers } }, (current, value) => {
       current.review = parseReviewDecision(value);
@@ -1691,6 +1749,28 @@ export class AgentEngine {
     const current = await this.tools.listTools();
     if (digest(current) !== run.toolManifestDigest) throw new Error('Toolkit manifest changed after approval; create a new run to pin the new tool versions');
   }
+
+  private async verifyResources(run: AgentRun): Promise<void> {
+    const snapshot = run.resourceSnapshot;
+    if (!snapshot) return;
+    if (this.resourceRegistry) await this.resourceRegistry.verify(snapshot);
+    if (run.builtinSkill) {
+      if (!snapshot.skill || snapshot.skill.id !== run.builtinSkill.slice(0, run.builtinSkill.lastIndexOf('/'))
+        || snapshot.skill.interface !== run.builtinSkill || snapshot.skill.digest !== resolvedSkillDigest(run.builtinSkill, run.skillSelection?.plan)) {
+        throw new Error('Built-in Skill implementation changed after Run creation; create a new Run to pin the new resource version');
+      }
+    } else if (run.skillSelection && snapshot.skill) {
+      if (snapshot.skill.id !== run.skillSelection.methodId || snapshot.skill.version !== run.skillSelection.version || snapshot.skill.digest !== digest(run.skillSelection.plan)) {
+        throw new Error('Governed Skill snapshot no longer matches the Run resolution');
+      }
+    }
+    const expectedPolicyDigest = digest({ privacy: run.privacy, allowedTools: run.allowedTools, allowedAgents: run.allowedAgents });
+    if (snapshot.policyDigest !== expectedPolicyDigest) throw new Error('Run policy changed after resource snapshot creation');
+    const expectedTools = (run.approvedTools ?? []).map(tool => ({ id: tool.id, version: tool.version, digest: digest(tool), interface: `tool/${tool.id}/1`, ...(snapshot.tools?.find(item => item.id === tool.id && item.version === tool.version)?.releaseId ? { releaseId: snapshot.tools.find(item => item.id === tool.id && item.version === tool.version)!.releaseId } : {}) }));
+    if (JSON.stringify(snapshot.tools ?? []) !== JSON.stringify(expectedTools)) throw new Error('Tool resource snapshot no longer matches the approved capability catalog');
+    const expectedLockfileDigest = digest({ plugin: snapshot.plugin ?? null, skill: snapshot.skill ?? null, workflow: snapshot.workflow ?? null, tools: snapshot.tools ?? [], toolManifestDigest: run.toolManifestDigest ?? digest([]) });
+    if (snapshot.lockfileDigest !== expectedLockfileDigest) throw new Error('Resource lockfile changed after Run creation; create a new Run to resolve the new versions');
+  }
 }
 
 function currentDelegationReceipt(run: AgentRun, receiptRef: string): import('../agent-gateway.js').DelegationReceipt | undefined {
@@ -1732,11 +1812,14 @@ function websiteBuilderEvidenceRefs(value: WebsiteBuilderArtifact): string[] {
   return [...refs];
 }
 
-function validateToolResult(request: { toolId: string; taskId: string }, result: ToolResult): void {
+function validateToolResult(request: { toolId: string; taskId: string }, result: ToolResult, approvedCapabilities?: string[]): void {
   const receipt: Receipt = receiptSchema.parse(result.receipt);
   if (receipt.operation !== request.toolId) throw new Error('Tool receipt operation does not match the requested tool');
   if (receipt.inputRefs.length === 0 || !receipt.inputRefs.includes(request.taskId)) throw new Error('Tool receipt does not identify the requesting task');
   if (receipt.status !== result.status) throw new Error('Tool receipt status does not match the tool result');
+  const outputRefs = result.outputRefs ?? [];
+  if (JSON.stringify(outputRefs) !== JSON.stringify(receipt.outputRefs)) throw new Error('Tool result output references do not match its receipt');
+  if (approvedCapabilities && receipt.capabilitiesUsed.some(capability => !approvedCapabilities.includes(capability))) throw new Error('Tool receipt claims a capability outside the approved manifest');
 }
 
 function toolAuthorization(run: AgentRun, pending: ExternalToolInvocation, budgetError?: string): NonNullable<Receipt['authorization']> {
