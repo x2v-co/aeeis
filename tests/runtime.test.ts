@@ -134,6 +134,20 @@ class CapabilityFixture implements ModelAdapter {
   }
 }
 
+class WebsiteBuilderFixture implements ModelAdapter {
+  readonly pin = pin;
+  async complete(request: ModelRequest) {
+    if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Inspect, build and verify the site', nodes: [{ id: 'build', title: 'Build website', instruction: 'Inspect files, apply the requested change and verify the preview', dependsOn: [] }] } };
+    if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Website artifact has execution evidence', issues: [] } };
+    const input = request.input as { observations: Array<unknown> };
+    if (input.observations.length === 0) return { value: { type: 'capability', toolId: 'fixture.lookup', toolVersion: '1', input: { operation: 'build' }, purpose: 'Build and verify the website preview' } };
+    return { value: { type: 'finish', title: 'Website build', content: 'Built the website and verified the preview.', evidenceRefs: ['tool-output-1'], artifactType: 'website-builder/1', structured: {
+      schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'], preview: { status: 'ready', url: 'http://127.0.0.1:4323/preview', evidenceRefs: ['tool-output-1'] },
+      validation: [{ name: 'build', status: 'passed', evidenceRefs: ['tool-output-1'] }], artifacts: [{ path: 'artifacts/site.zip', kind: 'bundle', evidenceRefs: ['tool-output-1'] }], blockers: [], unknowns: [],
+    } } };
+  }
+}
+
 class CapabilityGateway implements ToolGateway {
   requests: ToolInvocation[] = [];
   async listTools() { return [{ id: 'fixture.lookup', version: '1', capabilities: ['read'], inputSchema: {}, outputSchema: {} }]; }
@@ -617,6 +631,24 @@ describe('AEEIS runtime', () => {
     expect(current.toolReceipts[0]?.authorization).toMatchObject({ decision: 'authorized', reason: 'admitted', toolId: 'fixture.lookup', toolVersion: '1', taskId: 'operate' });
     expect(current.events.map(item => item.type)).toContain('tool.requested');
     expect(current.artifacts[0]?.evidenceRefs).toEqual(['tool-output-1']);
+    await repo.close();
+  });
+
+  it('completes a website-builder/1 Run with a structured evidence-linked artifact', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new WebsiteBuilderFixture(), tools: new CapabilityGateway() });
+    const run = await engine.create({ goal: 'Update the website landing page', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'] });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    let current = await repo.get(run.id);
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    for (let i = 0; i < 20; i += 1) {
+      const state = await engine.advance(run.id);
+      if (state === 'succeeded' || state === 'failed') break;
+    }
+    current = await repo.get(run.id);
+    expect(current.status).toBe('succeeded');
+    expect(current.artifacts[0]).toMatchObject({ artifactType: 'website-builder/1', structured: { schemaVersion: 'website-builder/1', changedFiles: ['src/App.tsx'] } });
+    expect(current.artifacts[0]?.evidenceRefs).toContain('tool-output-1');
     await repo.close();
   });
 
