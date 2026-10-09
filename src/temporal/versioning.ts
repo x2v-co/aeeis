@@ -6,6 +6,7 @@ export interface TemporalVersioningConfig {
   buildId: string;
   deploymentName: string;
   useVersioning: boolean;
+  defaultVersioningBehavior: 'PINNED' | 'AUTO_UPGRADE';
   rollout: TemporalBuildIdRollout;
   compatibleWith?: string;
 }
@@ -28,6 +29,10 @@ export function assertTemporalBuildId(buildId: string): string {
 export function parseTemporalVersioningConfig(env: NodeJS.ProcessEnv = process.env, defaultBuildId?: string): TemporalVersioningConfig {
   const buildId = assertTemporalBuildId(env.AEEIS_BUILD_ID?.trim() || defaultBuildId || '');
   const useVersioning = env.AEEIS_TEMPORAL_USE_VERSIONING === '1';
+  const defaultVersioningBehavior = env.AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR ?? 'PINNED';
+  if (defaultVersioningBehavior !== 'PINNED' && defaultVersioningBehavior !== 'AUTO_UPGRADE') {
+    throw new Error(`AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR must be PINNED or AUTO_UPGRADE; received: ${defaultVersioningBehavior}`);
+  }
   const rollout = (env.AEEIS_TEMPORAL_BUILD_ID_ROLLOUT ?? 'none') as TemporalBuildIdRollout;
   if (!['none', 'bootstrap', 'new-default', 'compatible', 'promote'].includes(rollout)) {
     throw new Error(`Unsupported AEEIS_TEMPORAL_BUILD_ID_ROLLOUT: ${rollout}`);
@@ -42,7 +47,7 @@ export function parseTemporalVersioningConfig(env: NodeJS.ProcessEnv = process.e
   if (compatibleWith) assertTemporalBuildId(compatibleWith);
   const deploymentName = env.AEEIS_TEMPORAL_DEPLOYMENT_NAME?.trim() || env.AEEIS_TASK_QUEUE?.trim() || 'aeeis-worker';
   if (!buildIdPattern.test(deploymentName)) throw new Error('AEEIS_TEMPORAL_DEPLOYMENT_NAME must be 1-128 characters using letters, digits, ., _, :, / or -');
-  return { buildId, deploymentName, useVersioning, rollout, ...(compatibleWith ? { compatibleWith } : {}) };
+  return { buildId, deploymentName, useVersioning, defaultVersioningBehavior, rollout, ...(compatibleWith ? { compatibleWith } : {}) };
 }
 
 function containsBuildId(sets: WorkerBuildIdVersionSets | undefined, buildId: string): boolean {

@@ -1,0 +1,218 @@
+# AEEIS single-host full stack: API + Temporal Worker + Temporal (PostgreSQL
+# persistence) + AEEIS PostgreSQL. One copy runs per region (ADR-0001):
+#   AEEIS-CN on kk-cn   -> AEEIS_STACK=aeeis-cn, AEEIS_TASK_QUEUE=aeeis-cn
+#   AEEIS-SG on aeeis-sg -> AEEIS_STACK=aeeis-sg, AEEIS_TASK_QUEUE=aeeis-sg
+#
+# Network design
+# --------------
+# `netns` owns one network namespace (the Kubernetes "pod" pattern). `api` and
+# `worker` join it with `network_mode: service:netns`, so:
+#   * Worker -> API uses http://127.0.0.1:4323 (loopback), which production
+#     validation accepts without TLS (src/temporal/config.ts).
+#   * API -> Worker readiness uses http://127.0.0.1:4324/readyz (loopback).
+#   * API or Worker restarts never tear down the shared namespace, because
+#     only the idle `netns` container owns it.
+# Published ports therefore live on `netns`. Only the API is published, and
+# ONLY on AEEIS_BIND_IP (the host's tailnet IP). Worker health (127.0.0.1:4324
+# inside the namespace) is not published; bin/health.sh probes it in-namespace.
+# Temporal gRPC is not published at all. Nothing listens publicly.
+#
+# Usage: see deploy/stack/README.md (bin/deploy.sh wraps build + up + promote).
+
+name: ${AEEIS_STACK:?Set AEEIS_STACK, e.g. aeeis-cn or aeeis-sg}
+
+x-aeeis-image: &aeeis-image
+  image: ${AEEIS_IMAGE:-aeeis:local}
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  netns:
+    # Independently pinned (NOT the release image) so upgrades never recreate
+    # the namespace holder underneath a draining API/Worker.
+    image: ${AEEIS_NETNS_IMAGE:-alpine:3.20}
+    init: true
+    restart: unless-stopped
+    command: ["sleep", "infinity"]
+    ports:
+      - "${AEEIS_BIND_IP:?Set AEEIS_BIND_IP to the tailnet IP}:${AEEIS_API_PORT:-4323}:4323"
+      # Host-loopback listener for same-host clients (e.g. Toolkit CN staging on
+      # kk-cn, which accepts plain HTTP only on loopback). Still authenticated.
+      - "127.0.0.1:${AEEIS_LOOPBACK_API_PORT:-4323}:4323"
+    networks: [aeeis]
+
+  temporal-postgres:
+    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?Set TEMPORAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-postgres:/var/lib/postgresql/data
+    networks: [aeeis]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging: &small-logs
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  temporal:
+    # auto-setup creates/upgrades the Temporal SQL schema and the namespace on
+    # every start (idempotent). Pin the tag; upgrade one minor at a time.
+    image: ${AEEIS_TEMPORAL_IMAGE:-temporalio/auto-setup:1.29.7}
+    restart: unless-stopped
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:?Set TEMPORAL_POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: temporal-postgres
+      BIND_ON_IP: 0.0.0.0
+      TEMPORAL_BROADCAST_ADDRESS: 127.0.0.1
+      DEFAULT_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}
+      DEFAULT_NAMESPACE_RETENTION: ${TEMPORAL_NAMESPACE_RETENTION:-720h}
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/aeeis.yaml
+    volumes:
+      - ./temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/aeeis.yaml:ro
+    # No host port: Temporal frontend is unauthenticated and only the Worker
+    # and API (same compose network) need it. Operators use
+    # `docker compose exec temporal temporal ...`. See README for remote access.
+    networks: [aeeis]
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator namespace describe --address temporal:7233 --namespace \"$$DEFAULT_NAMESPACE\" >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    logging: *small-logs
+
+  postgres:
+    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aeeis
+      POSTGRES_PASSWORD: ${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}
+      POSTGRES_DB: aeeis
+    volumes:
+      - aeeis-postgres:/var/lib/postgresql/data
+    networks: [aeeis]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aeeis -d aeeis"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging: *small-logs
+
+  api:
+    <<: *aeeis-image
+    network_mode: service:netns
+    depends_on:
+      netns:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    env_file:
+      - ${AEEIS_ENV_FILE:-./stack.env}
+    environment: &aeeis-runtime
+      AEEIS_ENV: production
+      AEEIS_HOST: 0.0.0.0
+      PORT: 4323
+      AEEIS_DATA_DIR: /app/data/runs
+      DATABASE_URL: postgresql://aeeis:${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}@postgres:5432/aeeis
+      AEEIS_RUNNER: temporal
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}
+      AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-cn}
+      AEEIS_TEMPORAL_DEPLOYMENT_NAME: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE}
+      AEEIS_BUILD_ID: ${AEEIS_BUILD_ID:?Set AEEIS_BUILD_ID (bin/deploy.sh derives it from the git sha)}
+      AEEIS_TEMPORAL_USE_VERSIONING: "1"
+      # One worker build per host: replaced builds are never polled again, so
+      # workflows must follow the current build (guarded by the replay gate).
+      AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR: AUTO_UPGRADE
+      AEEIS_WORKER_TOKEN: ${AEEIS_WORKER_TOKEN:?Set AEEIS_WORKER_TOKEN}
+      AEEIS_INTERNAL_URL: http://127.0.0.1:4323
+      AEEIS_TEMPORAL_WORKER_HEALTH_URL: http://127.0.0.1:4324/readyz
+      AEEIS_PUBLIC_HOSTS: ${AEEIS_PUBLIC_HOSTS:?Set AEEIS_PUBLIC_HOSTS (tailnet IP and MagicDNS name)}
+      AEEIS_TRUSTED_HOSTS: ${AEEIS_TRUSTED_HOSTS:-}
+      AEEIS_TRUSTED_ORIGINS: ${AEEIS_TRUSTED_ORIGINS:-}
+      AEEIS_REMINDER_INTERVAL_MS: ${AEEIS_REMINDER_INTERVAL_MS:-0}
+      AEEIS_DEMO_MODE: "0"
+    # Model calls may take AEEIS_MODEL_TIMEOUT_MS (180s); let in-flight work
+    # finish and persist before SIGKILL.
+    stop_grace_period: 200s
+    volumes:
+      - aeeis-data:/app/data
+      # Optional *_FILE secrets (e.g. AEEIS_MODEL_API_KEY_FILE=/run/aeeis-secrets/model-key).
+      # Files must be readable by uid 1000 (chown 1000:1000, chmod 400).
+      - ${AEEIS_SECRETS_DIR:-./secrets}:/run/aeeis-secrets:ro
+    healthcheck:
+      # /health = liveness. Readiness (/readyz) needs the Worker, which starts
+      # after the API, so readiness is checked by bin/deploy.sh and monitoring.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4323/health').then(async r=>{const j=await r.json();process.exit(r.ok&&j.protocol==='aeeis-health/1'&&j.status==='ok'?0:1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  worker:
+    <<: *aeeis-image
+    network_mode: service:netns
+    command: ["node", "dist/temporal/worker.js"]
+    stop_grace_period: 70s
+    depends_on:
+      api:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *aeeis-runtime
+      AEEIS_WORKER_HEALTH_HOST: 127.0.0.1
+      AEEIS_WORKER_HEALTH_PORT: 4324
+      AEEIS_WORKER_SHUTDOWN_GRACE_MS: 30000
+      AEEIS_WORKER_SHUTDOWN_FORCE_MS: 60000
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4324/readyz').then(async r=>{const j=await r.json();process.exit(r.ok&&j.protocol==='aeeis-worker-readiness/1'&&j.status==='ready'&&j.workerState==='RUNNING'?0:1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # One-shot backup job: `docker compose run --rm backup` (bin/backup.sh).
+  backup:
+    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    profiles: [ops]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      AEEIS_POSTGRES_PASSWORD: ${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}
+      TEMPORAL_POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?Set TEMPORAL_POSTGRES_PASSWORD}
+      BACKUP_STAMP: ${BACKUP_STAMP:-}
+    volumes:
+      - ${AEEIS_BACKUP_DIR:-./backups}:/backups
+      - ./bin/pg-dump-all.sh:/usr/local/bin/pg-dump-all.sh:ro
+    entrypoint: ["sh", "/usr/local/bin/pg-dump-all.sh"]
+    networks: [aeeis]
+
+networks:
+  aeeis: {}
+
+volumes:
+  aeeis-postgres:
+  aeeis-data:
+  temporal-postgres:

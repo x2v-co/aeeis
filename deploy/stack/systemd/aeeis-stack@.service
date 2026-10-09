@@ -1,0 +1,28 @@
+# /etc/systemd/system/aeeis-stack@.service   (instance = aeeis-cn | aeeis-sg)
+# Keeps the compose stack up across reboots (containers also have
+# restart: unless-stopped). Failures route through notify-failure: the unit
+# name matches the `aeeis-*` route -> x2v_alerts [aeeis].
+# Checkout location: /opt/<instance>/aeeis
+[Unit]
+Description=AEEIS single-host stack (%i)
+Requires=docker.service
+After=docker.service network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/%i/aeeis/deploy/stack
+# Port publication fails if the tailnet IP is not up yet: wait for it.
+ExecStartPre=/bin/bash -c '. ./stack.env; for i in $(seq 1 60); do ip -o addr show | grep -q " $${AEEIS_BIND_IP}/" && exit 0; sleep 5; done; echo "tailnet IP $${AEEIS_BIND_IP} not present" >&2; exit 1'
+ExecStart=/bin/bash -c 'exec docker compose -f compose.yml --env-file stack.env --env-file .current.env up -d --remove-orphans'
+ExecStop=/bin/bash -c 'exec docker compose -f compose.yml --env-file stack.env --env-file .current.env stop'
+Restart=on-failure
+RestartSec=60
+TimeoutStartSec=900
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

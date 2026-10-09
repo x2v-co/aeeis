@@ -1,0 +1,11 @@
+# /etc/systemd/system/aeeis-backup@.service
+[Unit]
+Description=AEEIS stack backup (%i)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/%i/aeeis/deploy/stack
+ExecStart=/opt/%i/aeeis/deploy/stack/bin/backup.sh
+TimeoutStartSec=3600

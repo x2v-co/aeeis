@@ -34,8 +34,8 @@ if (!history || !Array.isArray(history.events) || history.events.length === 0) {
 }
 const started = history.events.find(event => event.workflowExecutionStartedEventAttributes);
 const historyWorkflowType = started?.workflowExecutionStartedEventAttributes?.workflowType?.name;
-if (historyWorkflowType && historyWorkflowType !== 'agentRunWorkflow') {
-  throw new Error(`Temporal history workflow type ${historyWorkflowType} is not agentRunWorkflow`);
+if (historyWorkflowType && !['agentRunWorkflow', 'reminderWorkflow'].includes(historyWorkflowType)) {
+  throw new Error(`Temporal history workflow type ${historyWorkflowType} is not agentRunWorkflow or reminderWorkflow`);
 }
 const parsedHistory = protoJson.fromJson(historyType, history, { ignoreUnknownFields: true });
 
@@ -52,6 +52,7 @@ try {
     protocol: 'aeeis-temporal-replay/1',
     status: 'failed',
     workflowId,
+    workflowType: historyWorkflowType,
     historyFile,
     eventCount: history.events.length,
     error: detail,
@@ -64,6 +65,7 @@ if (process.exitCode !== 1) {
     protocol: 'aeeis-temporal-replay/1',
     status: 'passed',
     workflowId,
+    workflowType: historyWorkflowType,
     historyFile,
     eventCount: history.events.length,
     workflowPath,
