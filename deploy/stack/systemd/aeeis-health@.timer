@@ -1,0 +1,9 @@
+[Unit]
+Description=AEEIS stack readiness probe every 5 minutes (%i)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

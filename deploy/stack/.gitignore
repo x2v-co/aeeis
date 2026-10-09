@@ -1,0 +1,7 @@
+stack.env
+.current.env
+.previous.env
+.candidate.env
+backups/
+secrets/*
+!secrets/.gitkeep

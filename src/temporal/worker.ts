@@ -14,7 +14,9 @@ try {
       workerDeploymentOptions: {
         version: { deploymentName: versioning.deploymentName, buildId: versioning.buildId },
         useWorkerVersioning: true,
-        defaultVersioningBehavior: 'PINNED',
+        // A single-host stack has one worker build: replaced PINNED builds are never
+        // polled again, so AUTO_UPGRADE plus the replay gate is the safe choice there.
+        defaultVersioningBehavior: versioning.defaultVersioningBehavior,
       },
     } : {}),
     shutdownGraceTime, shutdownForceTime,

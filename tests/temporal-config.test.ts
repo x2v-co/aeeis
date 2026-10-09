@@ -14,7 +14,15 @@ const base = {
 
 describe('Temporal Worker startup configuration', () => {
   it('parses an explicit development HTTP configuration', () => {
-    expect(parseTemporalWorkerConfig(base)).toMatchObject({ api: 'http://aeeis:4323', taskQueue: 'aeeis-agent', address: 'temporal:7233' });
+    expect(parseTemporalWorkerConfig(base)).toMatchObject({ api: 'http://aeeis:4323', taskQueue: 'aeeis-agent', address: 'temporal:7233', versioning: { defaultVersioningBehavior: 'PINNED' } });
+  });
+
+  it('passes AUTO_UPGRADE through the worker startup configuration', () => {
+    expect(parseTemporalWorkerConfig({
+      ...base,
+      AEEIS_TEMPORAL_USE_VERSIONING: '1',
+      AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR: 'AUTO_UPGRADE',
+    }).versioning).toMatchObject({ useVersioning: true, defaultVersioningBehavior: 'AUTO_UPGRADE' });
   });
 
   it.each([
@@ -24,6 +32,7 @@ describe('Temporal Worker startup configuration', () => {
     ['invalid protocol', { ...base, AEEIS_INTERNAL_URL: 'ftp://aeeis:4323', AEEIS_WORKER_ALLOW_INSECURE_HTTP: '1' }],
     ['force timeout before grace', { ...base, AEEIS_WORKER_SHUTDOWN_GRACE_MS: '5000', AEEIS_WORKER_SHUTDOWN_FORCE_MS: '1000' }],
     ['whitespace in Temporal address', { ...base, TEMPORAL_ADDRESS: 'temporal:7233 ' }],
+    ['invalid versioning behavior', { ...base, AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR: 'AUTO' }],
   ])('rejects %s before connecting', (_name, env) => {
     expect(() => parseTemporalWorkerConfig(env)).toThrow();
   });

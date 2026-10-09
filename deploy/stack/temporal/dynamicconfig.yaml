@@ -1,0 +1,14 @@
+# Temporal dynamic config for the AEEIS single-host stack.
+# AEEIS workers use Worker Deployment versioning (deploymentName + buildId);
+# these keys keep the versioning APIs enabled regardless of server defaults.
+system.enableDeploymentVersions:
+  - value: true
+frontend.workerVersioningWorkflowAPIs:
+  - value: true
+frontend.workerVersioningDataAPIs:
+  - value: true
+frontend.workerVersioningRuleAPIs:
+  - value: true
+# Bound per-namespace visibility/history growth on a small host.
+limit.maxIDLength:
+  - value: 255
