@@ -880,6 +880,12 @@ describe('AEEIS HTTP boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/api/runs' })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer local-secret', origin: 'https://evil.example' } })).statusCode).toBe(403);
     expect((await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer local-secret' } })).statusCode).toBe(200);
+    // Probe endpoints must not be blocked by the token (the minimal app has
+    // readiness failures, so assert "not an auth error" rather than 200).
+    expect((await app.inject({ url: '/health' })).statusCode).toBe(200);
+    expect((await app.inject({ url: '/readyz' })).statusCode).not.toBe(401);
+    expect((await app.inject({ url: '/metrics', headers: { authorization: 'Bearer local-secret' } })).statusCode).toBe(200);
+    expect((await app.inject({ url: '/metrics' })).statusCode).toBe(401);
     await app.close(); await repo.close();
   });
 
