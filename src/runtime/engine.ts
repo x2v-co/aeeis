@@ -1767,7 +1767,10 @@ export class AgentEngine {
     const expectedPolicyDigest = digest({ privacy: run.privacy, allowedTools: run.allowedTools, allowedAgents: run.allowedAgents });
     if (snapshot.policyDigest !== expectedPolicyDigest) throw new Error('Run policy changed after resource snapshot creation');
     const expectedTools = (run.approvedTools ?? []).map(tool => ({ id: tool.id, version: tool.version, digest: digest(tool), interface: `tool/${tool.id}/1`, ...(snapshot.tools?.find(item => item.id === tool.id && item.version === tool.version)?.releaseId ? { releaseId: snapshot.tools.find(item => item.id === tool.id && item.version === tool.version)!.releaseId } : {}) }));
-    if (JSON.stringify(snapshot.tools ?? []) !== JSON.stringify(expectedTools)) throw new Error('Tool resource snapshot no longer matches the approved capability catalog');
+    // Persistence backends such as PostgreSQL jsonb normalise object key
+    // ordering (jsonb orders keys by length then bytes), so compare canonical
+    // digests rather than order-sensitive JSON strings.
+    if (digest(snapshot.tools ?? []) !== digest(expectedTools)) throw new Error('Tool resource snapshot no longer matches the approved capability catalog');
     const expectedLockfileDigest = digest({ plugin: snapshot.plugin ?? null, skill: snapshot.skill ?? null, workflow: snapshot.workflow ?? null, tools: snapshot.tools ?? [], toolManifestDigest: run.toolManifestDigest ?? digest([]) });
     if (snapshot.lockfileDigest !== expectedLockfileDigest) throw new Error('Resource lockfile changed after Run creation; create a new Run to resolve the new versions');
   }

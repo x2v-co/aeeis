@@ -451,7 +451,10 @@ export class ToolkitRegistryGateway implements ToolGateway {
       if (!response.ok && providerReceipt === undefined) throw new Error('Toolkit execution returned HTTP ' + response.status);
       const status: ToolResult['status'] = completed ? 'completed' : 'failed';
       const providerReceiptId = providerReceipt === undefined ? undefined : String(providerReceipt);
-      const result = completed ? (body.output ?? body.structuredContent ?? null) : { error: typeof body.error === 'string' ? body.error : 'Toolkit execution failed' };
+      // Prefer the schema-bound structured content (title, truncation and
+      // other evidence fields) over the convenience text output; the MCP
+      // gateway resolves structured content first for the same reason.
+      const result = completed ? (body.structuredContent ?? body.output ?? null) : { error: typeof body.error === 'string' ? body.error : 'Toolkit execution failed' };
       const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
       return { status, output: result, ...(providerReceiptId ? { outputRefs: [`toolkit-receipt:${providerReceiptId}`] } : {}), receipt };
     } catch (error) {
