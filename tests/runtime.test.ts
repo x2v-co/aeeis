@@ -791,6 +791,22 @@ describe('AEEIS runtime', () => {
     await repo.close();
   });
 
+  it('accepts resource snapshots whose tool keys were reordered by a jsonb persistence layer', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools: new CapabilityGateway() });
+    const run = await engine.create({ goal: 'Explain service status', allowedTools: ['fixture.lookup@1'] });
+    // PostgreSQL jsonb orders object keys by length then by bytes; rebuild the
+    // frozen snapshot tool entries in that ordering before planning.
+    await repo.mutate(run.id, (current) => {
+      current.resourceSnapshot!.tools = (current.resourceSnapshot!.tools ?? []).map((tool) => {
+        const reordered = Object.keys(tool).sort((a, b) => a.length - b.length || a.localeCompare(b));
+        return Object.fromEntries(reordered.map((key) => [key, tool[key as keyof typeof tool]]));
+      });
+    });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    await repo.close();
+  });
+
   it('freezes Plugin, Skill, Workflow and Tool resource versions for a Run', async () => {
     const repo = await repository();
     const tools = new CapabilityGateway();
