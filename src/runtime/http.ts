@@ -332,7 +332,11 @@ export function buildApp(options: Options) {
     } else if (route.startsWith('/api/') && options.token && !matches(options.token, request.headers.authorization)) {
       return reply.code(401).send({ error: 'Local access token required' });
     }
-    if (!agentCallbackRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && ['/metrics', '/readyz'].includes(route)))) {
+    // /health and /readyz are liveness/readiness probes (the container
+    // healthcheck and Tailscale Serve call them without credentials): they must
+    // stay reachable when an access token is configured. Only /api/ routes and
+    // /metrics resolve a principal.
+    if (!agentCallbackRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
       if (options.token && !matches(options.token, request.headers.authorization)) return reply.code(401).send({ error: 'Local access token required' });
       const principal = await resolvePrincipal(request.headers.authorization);
       if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
