@@ -109,6 +109,38 @@ describe('ToolkitRegistryGateway', () => {
     expect(result.receipt.outputRefs).toEqual(['toolkit-receipt:provider-receipt-1']);
   });
 
+  it('prefers structured content evidence over the convenience text output', async () => {
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      const port = (server.address() as { port: number }).port;
+      if (request.url === '/api/v1/registry/manifest') {
+        response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [{ slug: 'web-fetch', version: 1, manifestUrl: `http://127.0.0.1:${port}/api/v1/registry/tools/web-fetch/manifest` }] }));
+        return;
+      }
+      if (request.url === '/api/v1/registry/tools/web-fetch/manifest') {
+        response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.tool.v1', slug: 'web-fetch', version: 1, endpoints: { rest: `http://127.0.0.1:${port}/api/v1/t/web-fetch` } }));
+        return;
+      }
+      if (request.url === '/api/v1/t/web-fetch' && request.method === 'POST') {
+        response.end(JSON.stringify({
+          output: 'plain body text',
+          structuredContent: { schemaVersion: 'toolkit.web-fetch.v1', title: 'Example Domain', truncated: false },
+          receipt: { id: 'webfetch-receipt-1' },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+    const gateway = new ToolkitRegistryGateway(`http://127.0.0.1:${port}/api/v1/registry`, 'tk_test');
+    const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: { input: 'https://example.com' }, capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'idem-1', timeoutMs: 5000 });
+    expect(result.status).toBe('completed');
+    expect(result.output).toEqual({ schemaVersion: 'toolkit.web-fetch.v1', title: 'Example Domain', truncated: false });
+  });
+
   it('reports an unavailable Registry from its read-only health probe', async () => {
     const gateway = new ToolkitRegistryGateway('http://127.0.0.1:1/api/v1/registry');
     await expect(gateway.health()).resolves.toMatchObject({ ready: false, detail: expect.stringContaining('Toolkit Registry unavailable:') });
