@@ -58,15 +58,18 @@ label. For `--no-build`, the helper reads that label after pulling the image,
 then falls back to a hex commit image tag (never the local checkout's SHA).
 An explicit shell/systemd value takes precedence over the selected env file;
 both override derived metadata. Use a 7–40 character git SHA. Untagged legacy
-images without metadata use `unknown` until an explicit SHA is supplied.
+images without metadata retain their image environment; helpers omit the
+override instead of exporting `unknown`. Systemd startup also resolves image
+labels after pulling, so an image absent at startup can supply its SHA.
 
 The resolved SHA is recorded in `.candidate.<stack>.env`, `.current.<stack>.env`
 and `.previous.<stack>.env`, so promotion, rollback and systemd restarts retain
-the release identity. API and worker share the Compose environment setting.
-Compose requires a nonempty value instead of letting an empty interpolation
-erase the container's `env_file` value. For direct Compose commands, supply
-`AEEIS_GIT_COMMIT` in the selected `--env-file` or recorded release file, or
-export it explicitly; the stack helpers resolve older release files too.
+the release identity. Helpers include `compose.commit.yml` for both API and
+worker only when a SHA is available. For direct Compose commands, include
+`-f compose.yml -f compose.commit.yml` and supply `AEEIS_GIT_COMMIT` in the
+selected `--env-file`, recorded release file, or shell environment. Omit that
+override file to retain the image's metadata; helpers resolve older release
+files too.
 The older `deploy/production/compose.yml` passes the build argument and leaves
 runtime precedence to the image and `.env.production` (no empty environment
 override); build it with `--env-file .env.production` when the SHA is there.

@@ -48,7 +48,7 @@ AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" prepull_images
 AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" verify_images
 if (( ! build )); then
   # The deployed image can differ from this checkout. Inspect after preload.
-  export AEEIS_GIT_COMMIT="${AEEIS_CONFIG_GIT_COMMIT:-$(image_git_commit "$release_ref")}"
+  resolve_git_commit "$release_ref" 0
 fi
 
 # Always invoke the gate. Missing/unreachable Temporal, listing/export errors,
@@ -57,7 +57,12 @@ echo "replay gate: stack=$AEEIS_STACK namespace=${TEMPORAL_NAMESPACE:-aeeis} can
 AEEIS_REPLAY_IMAGE="$release_ref" "$STACK_DIR/bin/replay.sh"
 
 candidate="$CANDIDATE_FILE"
-( umask 077; printf 'AEEIS_STACK=%s\nAEEIS_IMAGE=%s\nAEEIS_BUILD_ID=%s\nAEEIS_GIT_COMMIT=%s\n' "$AEEIS_STACK" "$image" "$AEEIS_STACK-$sha" "$AEEIS_GIT_COMMIT" > "$candidate" )
+( umask 077
+  {
+    printf 'AEEIS_STACK=%s\nAEEIS_IMAGE=%s\nAEEIS_BUILD_ID=%s\n' "$AEEIS_STACK" "$image" "$AEEIS_STACK-$sha"
+    if [[ -n "${AEEIS_GIT_COMMIT:-}" ]]; then printf 'AEEIS_GIT_COMMIT=%s\n' "$AEEIS_GIT_COMMIT"; fi
+  } > "$candidate"
+)
 set -a
 # shellcheck source=/dev/null
 . "$candidate"

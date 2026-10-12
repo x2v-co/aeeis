@@ -21,12 +21,12 @@ describe('run advance scheduling', () => {
     expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
     expect(decideRunAdvance({ status, progress: 'new' }, 'same', stalled)).toEqual({ kind: 'advance', stalled: 0, delayMs: 0 });
   });
-  it('bounds older API responses without progress tokens even when status alternates', () => {
-    let stalled = 0;
-    for (let index = 0; index < maxStalledAdvances; index++) {
-      const decision = decideRunAdvance({ status: index % 2 ? 'running' : 'planning' }, undefined, stalled);
+  it.each(['queued', 'planning', 'running', 'reviewing'])('keeps advancing legacy %s responses without progress tokens', status => {
+    let stalled = maxStalledAdvances;
+    for (let index = 0; index < maxStalledAdvances * 2; index++) {
+      const decision = decideRunAdvance({ status }, 'previous-token', stalled);
       stalled = decision.stalled;
-      expect(decision.kind).toBe(index === maxStalledAdvances - 1 ? 'wait' : 'advance');
+      expect(decision).toEqual({ kind: 'advance', stalled: 0, delayMs: 0 });
     }
   });
 });

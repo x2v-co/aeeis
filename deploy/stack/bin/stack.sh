@@ -8,7 +8,11 @@ set -euo pipefail
 . "$STACK_DIR/bin/_images.sh"
 stack_guard
 case "${1:-}" in
-  start) prepull_images; verify_images; dc up -d --pull never ;;
+  start)
+    prepull_images
+    verify_images
+    resolve_git_commit "${AEEIS_IMAGE_REGISTRY:+$AEEIS_IMAGE_REGISTRY/}${AEEIS_IMAGE:-aeeis:unknown}"
+    dc up -d --pull never ;;
   stop) dc stop ;;
   *) echo "usage: $0 {start|stop}" >&2; exit 2 ;;
 esac

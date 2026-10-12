@@ -40,6 +40,14 @@ if [[ -r "$CURRENT_FILE" ]]; then
   [[ "$AEEIS_STACK" == "$selected_stack" ]] || { echo "state file stack mismatch: $CURRENT_FILE" >&2; exit 2; }
 fi
 set +a
+# Resolve image metadata only after preload. Keep configured and recorded SHAs
+# separate so a new deployment cannot inherit the previous release's SHA.
+AEEIS_STATE_GIT_COMMIT="${AEEIS_GIT_COMMIT:-}"
+for commit_var in AEEIS_CONFIG_GIT_COMMIT AEEIS_STATE_GIT_COMMIT; do
+  if [[ "${!commit_var}" == unknown ]]; then printf -v "$commit_var" '%s' ''; fi
+  [[ -z "${!commit_var}" || "${!commit_var}" =~ ^[a-fA-F0-9]{7,40}$ ]] || { echo "AEEIS_GIT_COMMIT must be a git SHA or unknown" >&2; exit 2; }
+done
+unset AEEIS_GIT_COMMIT
 
 image_git_commit() {
   local ref="$1" revision tag
@@ -49,10 +57,15 @@ image_git_commit() {
   if [[ "$ref" != *@* && "$tag" =~ ^([a-fA-F0-9]{7,40})(-dirty[0-9]+)?$ ]]; then
     printf '%s' "${BASH_REMATCH[1]}"; return
   fi
-  printf '%s' unknown
+  return 0
 }
-export AEEIS_GIT_COMMIT="${AEEIS_CONFIG_GIT_COMMIT:-${AEEIS_GIT_COMMIT:-$(image_git_commit "${AEEIS_IMAGE_REGISTRY:+$AEEIS_IMAGE_REGISTRY/}${AEEIS_IMAGE:-aeeis:unknown}")}}"
-[[ "$AEEIS_GIT_COMMIT" =~ ^([a-fA-F0-9]{7,40}|unknown)$ ]] || { echo "AEEIS_GIT_COMMIT must be a git SHA or unknown" >&2; exit 2; }
+resolve_git_commit() { # image-ref [use-recorded-state]
+  local revision="${AEEIS_CONFIG_GIT_COMMIT:-}"
+  if [[ -z "$revision" && "${2:-1}" == 1 ]]; then revision="${AEEIS_STATE_GIT_COMMIT:-}"; fi
+  if [[ -z "$revision" ]]; then revision="$(image_git_commit "$1")"; fi
+  unset AEEIS_GIT_COMMIT
+  if [[ -n "$revision" ]]; then export AEEIS_GIT_COMMIT="$revision"; fi
+}
 # The selected file is also the container env_file. Use an absolute path so
 # callers can select it from any directory. STACK_ENV_FILE is not an AEEIS
 # *_FILE secret (AEEIS_ENV_FILE would collide with AEEIS_ENV at startup).
@@ -69,7 +82,13 @@ fi
 [[ "${AEEIS_STACK_SMOKE:-0}" == 1 ]] && compose_files+=(-f "$STACK_DIR/compose.smoke.yml")
 env_args=(--env-file "$ENV_FILE")
 [[ -r "$CURRENT_FILE" ]] && env_args+=(--env-file "$CURRENT_FILE")
-dc() { docker compose -p "$AEEIS_STACK" "${compose_files[@]}" "${env_args[@]}" "$@"; }
+dc() {
+  local files=("${compose_files[@]}")
+  # Omit the environment override when metadata is unavailable, preserving
+  # the image's own ENV rather than masking it with an empty/unknown value.
+  if [[ -n "${AEEIS_GIT_COMMIT:-}" ]]; then files+=(-f "$STACK_DIR/compose.commit.yml"); fi
+  docker compose -p "$AEEIS_STACK" "${files[@]}" "${env_args[@]}" "$@"
+}
 temporal_cli() { dc exec -T temporal temporal --address temporal:7233 --namespace "${TEMPORAL_NAMESPACE:-aeeis}" "$@"; }
 
 # Probe a URL from inside the stack's shared network namespace (via the api

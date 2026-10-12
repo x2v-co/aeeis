@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
+import { MAX_DEBUG_FIELD_BYTES } from '../src/runtime/run-debug.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 const plan = { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Summarize supplied evidence', dependsOn: [] }] };
 const fence = (value: unknown) => '```json\n' + JSON.stringify(value) + '\n```';
 
-async function runModel(options: { planner?: unknown; plannerResponses?: unknown[]; materialContent?: string; restartBeforeRepair?: boolean; modelBudget?: { tokens: number }; executor?: (ref: string) => unknown; reviewer?: unknown; skill?: 'project-pulse/1' | 'website-builder/1' } = {}) {
+async function runModel(options: { planner?: unknown; plannerResponses?: unknown[]; plannerRawOutput?: string; materialContent?: string; restartBeforeRepair?: boolean; modelBudget?: { tokens: number }; executor?: (ref: string) => unknown; reviewer?: unknown; skill?: 'project-pulse/1' | 'website-builder/1' } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-schema-'));
   const repository = new FileRunRepository(directory); await repository.init();
   cleanup.push(async () => { await repository.close(); await rm(directory, { recursive: true, force: true }); });
@@ -25,7 +26,7 @@ async function runModel(options: { planner?: unknown; plannerResponses?: unknown
       const value = request.system.includes('Plan a real deliverable') ? options.plannerResponses?.[plannerCalls++] ?? options.planner ?? plan
         : request.system.includes('Independently review') ? options.reviewer ?? { verdict: 'accepted', summary: 'Verified' }
         : options.executor?.(input.sourceCatalog[0]!.id) ?? { type: 'finish', title: 'Report', content: 'Evidence supports the report.', evidenceRefs: [input.sourceCatalog[0]!.id] };
-      return { value, rawOutput: typeof value === 'string' ? value : JSON.stringify(value), usage: { inputTokens: 10, outputTokens: 5 } };
+      return { value, rawOutput: plannerCalls === 1 && options.plannerRawOutput !== undefined ? options.plannerRawOutput : typeof value === 'string' ? value : JSON.stringify(value), usage: { inputTokens: 10, outputTokens: 5 } };
     },
   };
   let engine = new AgentEngine(repository, model);
@@ -85,6 +86,70 @@ describe('model schema normalization', () => {
     expect(requests).toHaveLength(1);
     expect(run.calls[0]?.validationErrors?.[0]?.path).toBe('nodes');
     expect(run.calls[0]?.rawOutput).toBe('{"summary":"Missing nodes"}');
+  });
+
+  it.each(['object', 'prose', 'fenced'] as const)('redacts credential keys and copied values before repairing %s output after restart', async format => {
+    const credentials = { session_id: 'opaque-session-value', token: 'opaque-token-value', secret: 'opaque-secret-value', password: 'opaque-password-value', api_key: 'opaque-key-value' };
+    const values = [...Object.values(credentials), 'bearer-credential-value', 'sk-proj-abcdefgh12345678'];
+    const invalid = { summary: `Keep this safe summary. ${Object.values(credentials).join(' ')} Bearer ${values.at(-2)} ${values.at(-1)}`, ...credentials };
+    const raw = `Here is the response:\n${format === 'fenced' ? fence(invalid) : JSON.stringify(invalid)}\n${'😀'.repeat(6000)}`;
+    const { run, requests } = await runModel({ plannerResponses: [format === 'object' ? invalid : raw, plan], restartBeforeRepair: true });
+    expect(run.status, run.error).toBe('succeeded');
+    const repair = (requests.filter(request => request.system.includes('Plan a real deliverable'))[1]!.input as { plannerRepair: { rawOutput: string; validationError: string } }).plannerRepair;
+    const prompt = JSON.stringify(repair);
+    for (const value of values) {
+      expect(prompt).not.toContain(value);
+      expect(run.calls[0]!.rawOutput).not.toContain(value);
+    }
+    expect(repair.rawOutput).toContain('Keep this safe summary.');
+    expect(repair.rawOutput).toContain('[REDACTED]');
+    expect(Buffer.byteLength(repair.rawOutput)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
+    expect(Buffer.byteLength(repair.validationError)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
+    if (format !== 'object') expect(repair.rawOutput).toContain('[truncated]');
+  });
+
+  it('uses credentials in the extracted object to scrub the separate raw text', async () => {
+    const invalid = { summary: 'Safe summary', session_id: 'opaque-session-from-object', api_key: 'opaque-key-from-object' };
+    const { run, requests } = await runModel({ plannerResponses: [invalid, plan], plannerRawOutput: `Safe summary with copied values ${invalid.session_id} ${invalid.api_key}`, restartBeforeRepair: true });
+    expect(run.status, run.error).toBe('succeeded');
+    const repair = (requests[1]!.input as { plannerRepair: { rawOutput: string } }).plannerRepair;
+    expect(repair.rawOutput).toBe('Safe summary with copied values [REDACTED] [REDACTED]');
+    expect(run.calls[0]!.rawOutput).toBe(repair.rawOutput);
+  });
+
+  it('collects escaped credentials beyond the truncation boundary before scrubbing copied summary values', async () => {
+    const credentials = { session_id: 'session-"quoted"-value', api_key: 'key-with-\\slash-value' };
+    const invalid = { summary: `Safe summary ${Object.values(credentials).join(' ')}`, padding: 'x'.repeat(MAX_DEBUG_FIELD_BYTES * 2), ...credentials };
+    const raw = `Here is the response: ${JSON.stringify(invalid)}`;
+    const { run, requests } = await runModel({ plannerResponses: [raw, plan], restartBeforeRepair: true });
+    expect(run.status, run.error).toBe('succeeded');
+    const repair = (requests[1]!.input as { plannerRepair: { rawOutput: string } }).plannerRepair;
+    for (const value of Object.values(credentials)) {
+      expect(repair.rawOutput).not.toContain(value);
+      expect(repair.rawOutput).not.toContain(JSON.stringify(value).slice(1, -1));
+    }
+    expect(repair.rawOutput).toContain('Safe summary [REDACTED] [REDACTED]');
+    expect(repair.rawOutput).toContain('[truncated]');
+    expect(Buffer.byteLength(repair.rawOutput)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
+  });
+
+  it('redacts and caps existing durable repair data before sending it to the model', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-existing-repair-'));
+    const repository = new FileRunRepository(directory); await repository.init();
+    cleanup.push(async () => { await repository.close(); await rm(directory, { recursive: true, force: true }); });
+    const requests: ModelRequest[] = [];
+    const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1:1', promptVersion: 'test' }, complete: async request => { requests.push(request); return { value: plan }; } };
+    const engine = new AgentEngine(repository, model);
+    const run = await engine.create({ goal: 'Report' });
+    await repository.mutate(run.id, current => {
+      current.status = 'planning';
+      current.plannerRepair = { rawOutput: 'Previous output: {"session_id":"historical-session","summary":"historical-session"}\n' + '😀'.repeat(6000), validationError: 'api_key=historical-key\n' + '😀'.repeat(6000) };
+    });
+    expect(await engine.advance(run.id)).toBe('needs_approval');
+    const repair = (requests[0]!.input as { plannerRepair: { rawOutput: string; validationError: string } }).plannerRepair;
+    expect(JSON.stringify(repair)).not.toContain('historical-session');
+    expect(JSON.stringify(repair)).not.toContain('historical-key');
+    for (const value of Object.values(repair)) expect(Buffer.byteLength(value)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
   });
   it.each(['project-pulse/1', 'website-builder/1'] as const)('strips extras and unwraps fenced decisions and %s artifacts', async skill => {
     const { run } = await runModel({

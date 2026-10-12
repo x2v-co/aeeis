@@ -212,6 +212,13 @@ describe('share storage and redaction helpers', () => {
 });
 
 describe('debug redaction hardening', () => {
+  it('scrubs session credentials and copied values inside prose-wrapped and incomplete JSON', () => {
+    const text = 'Here is the response: {"summary":"copied-session copied-api-key", "session_id":"copied-session", "api_key":"copied-api-key"}\n'
+      + 'session_id=plain-session\n{"session-id":"partial-session", "summary":';
+    const out = JSON.stringify(redactRunData({ rawOutput: text }));
+    for (const value of ['copied-session', 'copied-api-key', 'plain-session', 'partial-session']) expect(out).not.toContain(value);
+    expect(out).toContain('Here is the response');
+  });
   it('scrubs cookies, auth headers, capability URLs, tk_ tokens and nested env blocks', () => {
     const share = 'b'.repeat(43);
     const text = [

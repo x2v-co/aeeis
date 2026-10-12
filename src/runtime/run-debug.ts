@@ -10,6 +10,10 @@ const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|acces
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+// Also recognize assignments inside prose and incomplete JSON. Quoted values
+// honor escapes so a credential copied into another field can be scrubbed.
+const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
+const assignmentKey = (key: string): string => key.replace(/^["']|["']$/g, '');
 /** Redact `env: { ... }` objects with brace matching so nested objects cannot leak past the first `}`. */
 function redactEnvBlocks(text: string): string {
   const opener = /(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{/gi;
@@ -42,6 +46,17 @@ export function redactRunData<T>(value: T): T {
     if (depth > 40 || ++collected > MAX_DEBUG_NODES * 4) return;
     if (typeof item === 'string') {
       if (sensitive && item.length) secrets.add(item);
+      for (const match of item.matchAll(credentialAssignment)) {
+        if (!isSensitive(assignmentKey(match[2]!))) continue;
+        const raw = match[3]!;
+        if (raw.startsWith('"')) {
+          try { const decoded = JSON.parse(raw) as string; if (decoded.length) secrets.add(decoded); } catch { /* incomplete string */ }
+          if (raw.length > 2) secrets.add(raw.slice(1, -1));
+        } else {
+          const decoded = raw.startsWith("'") ? raw.slice(1, -1) : raw;
+          if (decoded.length) secrets.add(decoded);
+        }
+      }
       if (/^\s*[\[{]/.test(item)) { try { collect(JSON.parse(item), sensitive, depth + 1); } catch { /* free text */ } }
       for (const match of item.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)) {
         try { collect(JSON.parse(match[1]!), sensitive, depth + 1); } catch { /* incomplete model output */ }
@@ -52,7 +67,7 @@ export function redactRunData<T>(value: T): T {
   };
   collect(value);
   const scrub = (text: string): string => {
-    let result = text;
+    let result = redactEnvBlocks(text);
     for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
       if (secret.length >= 4) result = result.replaceAll(secret, '[REDACTED]');
       else {
@@ -70,7 +85,7 @@ export function redactRunData<T>(value: T): T {
       .replace(/(\/(?:api\/)?share\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
       .replace(/([?&](?:sig|signature|x-amz-[\w-]+|key|apikey|api_key|code|auth|token|access_token|refresh_token|id_token)=)[^&#\s"'<>]+/gi, '$1[REDACTED]')
       .replace(/\btk_[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
-      .replace(/((?:["']?)(?:[\w.-]{0,80}(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|token|(?:^|_)env)[\w.-]{0,80})(?:["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s&,;}\n]+)/gi, '$1[REDACTED]');
+      .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitive(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
     return capDebugField(redactEnvBlocks(result));
   };
   const visit = (item: unknown, depth = 0): unknown => {
@@ -88,8 +103,8 @@ export function redactRunData<T>(value: T): T {
   };
   return visit(value) as T;
 }
-export function modelRawOutput(value: unknown): string {
-  const redacted = redactRunData(value);
+export function modelRawOutput(value: unknown, credentialSource?: unknown): string {
+  const redacted = redactRunData({ value, sourceValue: credentialSource }).value;
   return capDebugField(typeof redacted === 'string' ? redacted : JSON.stringify(redacted) ?? String(redacted));
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
