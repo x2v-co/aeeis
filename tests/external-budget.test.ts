@@ -97,6 +97,7 @@ describe('Run external capability budgets', () => {
     const run = await repo.get(runId);
     expect(run.status).toBe(control === 'running' ? 'failed' : control);
     if (control === 'paused') expect(run.resumeStatus).toBe('failed');
+    if (control !== 'cancelled') expect(run.steps[0]?.failureReason).toContain('authorization was withdrawn');
     expect(run.externalUsage).toMatchObject({ calls: 1, tokens: 10, moneyUsd: 0.1, unreportedCalls: 0 });
     expect(run.pendingDelegation).toBeUndefined();
     expect(run.steps[0]?.observations).toEqual([]); expect(run.artifacts).toEqual([]);
@@ -241,6 +242,7 @@ describe('Run external capability budgets', () => {
     const id = await prepare({ moneyUsd: 1 });
     expect(await engine.advance(id)).toBe('failed');
     expect((await repo.get(id)).externalUsage).toMatchObject({ calls: 1, moneyUsd: 2 });
+    expect((await repo.get(id)).steps[0]).toMatchObject({ error: 'External tool execution failed', failureReason: 'External tool execution failed' });
     await expect(engine.command(id, 'retry', {})).rejects.toThrow('money budget exceeded');
   });
 

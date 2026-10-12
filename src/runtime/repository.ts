@@ -3,11 +3,13 @@ import { mkdir, readFile, writeFile, rename, open, unlink, stat, readdir } from 
 import { join } from 'node:path';
 import pg from 'pg';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
+import { FileRunShareStore, PostgresRunShareStore, runSharesMigration, type RunShareStore } from './run-shares.js';
 import type { AgentRun } from './contracts.js';
 import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
 
 export interface RunRepository {
+  readonly shares?: RunShareStore;
   create(run: AgentRun): Promise<void>;
   get(id: string, scope?: Ownership): Promise<AgentRun>;
   list(scope?: Ownership, limit?: number): Promise<AgentRun[]>;
@@ -89,12 +91,13 @@ function decodeEventCursor(value: string | undefined): number {
 // Single-process local adapter. The lock prevents two API processes from sharing a directory.
 // Mutations write a complete run aggregate (state, receipts, artifacts) in one replacement.
 export class FileRunRepository implements RunRepository {
+  readonly shares: RunShareStore;
   private queue: Promise<unknown> = Promise.resolve();
   private lockPath: string;
   private indexPath: string;
   private summaries: Map<string, FileRunSummary> | undefined;
   private readonly changeSubscribers = new Set<(change: RunChange) => void | Promise<void>>();
-  constructor(private directory: string) { this.lockPath = join(directory, '.writer.lock'); this.indexPath = join(directory, '.runs.index.json'); }
+  constructor(private directory: string) { this.shares = new FileRunShareStore(directory); this.lockPath = join(directory, '.writer.lock'); this.indexPath = join(directory, '.runs.index.json'); }
   async init(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     try {
@@ -375,11 +378,12 @@ export class FileRunRepository implements RunRepository {
 }
 
 export class PostgresRunRepository implements RunRepository {
+  readonly shares: RunShareStore;
   private pool: pg.Pool;
   private readonly changeSubscribers = new Map<(change: RunChange) => void | Promise<void>, PostgresChangeSubscription>();
   private changeChannel = 'aeeis_run_changes';
   private closed = false;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); this.shares = new PostgresRunShareStore(this.pool); }
   async init(): Promise<void> {
     const schema = await this.pool.query<{ schema: string }>('SELECT current_schema() AS schema');
     const schemaName = schema.rows[0]?.schema ?? 'public';
@@ -389,6 +393,7 @@ export class PostgresRunRepository implements RunRepository {
         id text PRIMARY KEY, revision integer NOT NULL, state jsonb NOT NULL,
         updated_at timestamptz NOT NULL DEFAULT now()
       )`);
+      await client.query(runSharesMigration);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')), updated_at DESC, id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_shared_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (state->>'goalId'), updated_at DESC, id) WHERE COALESCE(state->>'privacy', 'internal') IN ('public', 'internal')`);

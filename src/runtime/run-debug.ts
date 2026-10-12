@@ -1,0 +1,81 @@
+import { readFileSync } from 'node:fs';
+import type { AgentRun } from './contracts.js';
+import { projectRunGraphs } from './graphs.js';
+import { explainRun } from './explanation.js';
+
+export const MAX_DEBUG_FIELD_BYTES = 8192;
+const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|(?:^env|env$|[_-]env[_-])|environment|token)/i;
+// Usage counters carry no credentials and remain useful for debugging budgets.
+const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
+const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+export function capDebugField(value: string): string {
+  if (Buffer.byteLength(value, 'utf8') <= MAX_DEBUG_FIELD_BYTES) return value;
+  const marker = '…[truncated]';
+  return Buffer.from(value, 'utf8').subarray(0, MAX_DEBUG_FIELD_BYTES - Buffer.byteLength(marker)).toString('utf8').replace(/\uFFFD$/, '') + marker;
+}
+/** Remove credential fields and scrub recognizable credentials even inside free text.
+ * Values found under credential/environment keys are also scrubbed wherever copied. */
+export function redactRunData<T>(value: T): T {
+  const secrets = new Set<string>();
+  const collect = (item: unknown, sensitive = false, depth = 0): void => {
+    if (depth > 40) return;
+    if (typeof item === 'string') {
+      if (sensitive && item.length) secrets.add(item);
+      if (/^\s*[\[{]/.test(item)) { try { collect(JSON.parse(item), sensitive, depth + 1); } catch { /* free text */ } }
+      for (const match of item.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)) {
+        try { collect(JSON.parse(match[1]!), sensitive, depth + 1); } catch { /* incomplete model output */ }
+      }
+    }
+    else if (Array.isArray(item)) item.forEach(child => collect(child, sensitive, depth + 1));
+    else if (item && typeof item === 'object') for (const [key, child] of Object.entries(item)) collect(child, sensitive || isSensitive(key), depth + 1);
+  };
+  collect(value);
+  const scrub = (text: string): string => {
+    let result = text;
+    for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+      if (secret.length >= 4) result = result.replaceAll(secret, '[REDACTED]');
+      else {
+        const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        result = result.replace(new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'gi'), '$1[REDACTED]');
+      }
+    }
+    result = result
+      .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[REDACTED]')
+      .replace(/\b(?:Bearer|Basic)\s+[a-z0-9._~+/=-]+/gi, '[REDACTED]')
+      .replace(/\b(?:sk-(?:proj-|ant-)?[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9]{10,}|github_pat_[a-z0-9_]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[a-z0-9-]+)\b/gi, '[REDACTED]')
+      .replace(/\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b/gi, '[REDACTED]')
+      .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@')
+      .replace(/(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{[^}]*\}/gi, '$1[REDACTED]')
+      .replace(/((?:["']?)(?:[\w.-]{0,80}(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|token|(?:^|_)env)[\w.-]{0,80})(?:["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s&,;}\n]+)/gi, '$1[REDACTED]');
+    return capDebugField(result);
+  };
+  const visit = (item: unknown, depth = 0): unknown => {
+    if (depth > 40) return '[truncated]';
+    if (typeof item === 'string') {
+      // JSON embedded in model raw output/materials still receives key-based redaction.
+      if (/^\s*[\[{]/.test(item)) {
+        try { const parsed: unknown = JSON.parse(item); collect(parsed); return capDebugField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
+      }
+      return scrub(item);
+    }
+    if (Array.isArray(item)) return item.map(child => visit(child, depth + 1));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key)).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
+    return item;
+  };
+  return visit(value) as T;
+}
+export function modelRawOutput(value: unknown): string {
+  const redacted = redactRunData(value);
+  return capDebugField(typeof redacted === 'string' ? redacted : JSON.stringify(redacted) ?? String(redacted));
+}
+const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+export function sharedRunView(run: AgentRun) {
+  return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
+}
+export function debugBundle(run: AgentRun) {
+  return redactRunData({ schemaVersion: 'aeeis-debug-bundle/1', id: run.id, run, plans: run.plans,
+    taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
+    modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
+    validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
+    events: run.events, graphs: projectRunGraphs(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' });
+}

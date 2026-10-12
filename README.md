@@ -390,3 +390,21 @@ RSI 提案发现会从失败、低置信度审核和纠正事件中生成带 Evi
 ## License
 
 Apache-2.0。产品名称和商标归其所有者所有。
+
+## How to share a run
+
+Open `/runs/<id>` to view a run's plan/DAG, task failures, timeline, artifacts, review and evidence graph. **Copy link** copies this authenticated workbench URL; recipients use their normal AEEIS access.
+
+Choose **创建只读分享** (create read-only share), or call `POST /api/runs/<id>/share` with normal authentication and an optional JSON body `{ "ttlSeconds": 3600 }`. The response contains `token`, `url` (`/share/<token>`), `expiresAt` and the share `id`. Anyone holding this URL can read only that run's redacted view and debug bundle until expiry or revocation. Share tokens do not authorize mutations. List shares with `GET /api/runs/<id>/shares`; revoke one with `DELETE /api/runs/<id>/share/<shareId>` using normal authentication. Only the run owner can manage shares.
+
+Shares expire after seven days by default. Configure `AEEIS_SHARE_TTL_SECONDS` and `AEEIS_SHARE_MAX_TTL_SECONDS` (default maximum: 30 days; both accept positive integers up to one year). Shares persist with the existing file or Postgres run repository; Postgres bootstrap applies `src/adapters/migrations/001-run-shares.sql` under the existing migration lock. Only SHA-256 token hashes are stored. Credential/environment fields and recognizable credentials in text are removed, and content fields are capped at 8 KiB.
+
+To investigate a run, download `GET /api/runs/<id>/debug-bundle` with normal authentication, or `GET /api/share/<token>/debug-bundle` with a share URL. Bundles include the run, plans, task attempts, bounded model output, validation errors, events, version and commit. Set `AEEIS_GIT_COMMIT` to identify the build (otherwise `unknown`). New model failures preserve raw output and validation details; historical runs cannot recover output already discarded.
+
+```sh
+node scripts/fetch-run.mjs https://aeeis.example/share/<token>
+AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN=<access-token> node scripts/fetch-run.mjs <run-id>
+AEEIS_TOKEN=<access-token> node scripts/fetch-run.mjs https://aeeis.example/runs/<run-id>
+```
+
+The script writes `run-<run-id>.debug.json`. `AEEIS_BASE_URL` is required for bare IDs and relative URLs; `AEEIS_TOKEN` is required for authenticated run URLs/IDs. Share URLs need no access token.
