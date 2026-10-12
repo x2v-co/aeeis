@@ -27,18 +27,20 @@ else
   printf '%s\n' "$@" > "$dir/executions"
 fi
 count=0
-while IFS=$'\t' read -r workflow_id run_id; do
+# Read IDs on fd 3: `docker compose exec -T` (temporal_cli) still forwards
+# stdin and would otherwise swallow the remaining IDs after the first one.
+while IFS=$'\t' read -r -u 3 workflow_id run_id; do
   [[ -n "$workflow_id" ]] || continue
   args=(--workflow-id "$workflow_id")
   [[ -z "$run_id" ]] || args+=(--run-id "$run_id")
   echo "replay gate: checking workflow=$workflow_id run=${run_id:-latest} image=$image"
-  temporal_cli workflow show "${args[@]}" --output json > "$dir/history.json" || {
+  temporal_cli workflow show "${args[@]}" --output json < /dev/null > "$dir/history.json" || {
     echo "replay gate: history export FAILED for $workflow_id" >&2; exit 1; }
   # Keep stderr and JSON evidence visible. pipefail propagates Docker failure
   # even when it printed a success-looking marker before exiting nonzero.
   if ! docker run --rm --network none --user "$(id -u):$(id -g)" -v "$dir:/histories:ro" \
     -e AEEIS_TEMPORAL_HISTORY_FILE=/histories/history.json -e AEEIS_TEMPORAL_WORKFLOW_ID="$workflow_id" \
-    "$image" node scripts/replay-temporal-history.mjs | tee "$dir/result"; then
+    "$image" node scripts/replay-temporal-history.mjs < /dev/null | tee "$dir/result"; then
     echo "replay gate: replay FAILED for $workflow_id on $image" >&2; exit 1
   fi
   python3 - "$dir/result" "$workflow_id" <<'PY' || { echo "replay gate: missing valid success result for $workflow_id" >&2; exit 1; }
@@ -51,5 +53,5 @@ for line in open(sys.argv[1]):
 assert len(results)==1 and results[0].get('status')=='passed' and results[0].get('workflowId')==sys.argv[2], results
 PY
   count=$((count + 1))
-done < "$dir/executions"
+done 3< "$dir/executions"
 echo "replay gate: PASSED checked=$count image=$image (zero means no AEEIS histories found)"
