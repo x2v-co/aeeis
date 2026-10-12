@@ -1,7 +1,7 @@
 # Migrate aeeis-sg and kk-cn to the production stack
 
-Run this procedure separately on **aeeis-sg** (SG, stack `aeeis-sg`) and
-**kk-cn** (CN, stack `aeeis-cn`). Both currently run the root
+Run this procedure separately on **aeeis-sg** (SG, legacy stack `aeeis-sg`) and
+**kk-cn** (CN, legacy stack `aeeis-cn`; new stack `aeeis-cn-prod`). Both currently run the root
 `docker-compose.yml` + `aeeis-compose-model.yml` + `aeeis-sg.override.yml` or
 `aeeis-cn.override.yml`, with `AEEIS_ENV=development` and existing tokens.
 The destination is `deploy/stack/compose.yml`, with `AEEIS_ENV=production`,
@@ -28,10 +28,10 @@ fixture smoke overlay on either production host.
 - Rehearse on isolated copies of the backups with the candidate image and a
   real provider. API startup can migrate AEEIS schemas; Temporal auto-setup can
   upgrade its persistence and visibility schemas. The root default Temporal
-  image is 1.24.2; the stack default is 1.29.7. Rehearse the intermediate minor
-  upgrades described in the stack's image comments rather than jumping an old
-  persistence volume straight to the new default. Record each image and schema
-  transition. Match the Postgres major when reusing physical volumes; use a
+  image is 1.24.2; the stack default is 1.29.7. Use the Temporal checkpoints
+  **1.24.2 -> 1.25.2 -> 1.27.4 -> 1.29.7** and the per-hop procedure in section 4a;
+  never start the new default directly on a 1.24.2 schema. Record each image
+  and schema transition. Match the Postgres major when reusing physical volumes; use a
   logical dump/restore for a major upgrade. Validate the entire restore before
   scheduling cutover.
 
@@ -83,7 +83,15 @@ Edit locally with a secure editor. Replace **every** `REPLACE_WITH_*` value:
   existing 16-character minimum. If a host uses principal tokens or OIDC rather
   than the stated access-token setup, reconcile that auth mode before using
   this static-access-token stack template.
+- Set `AEEIS_STACK=aeeis-cn-prod` on CN (`aeeis-sg-prod` on SG),
+  distinct from `OLD_PROJECT`. Set `AEEIS_LEGACY_STACK="$OLD_PROJECT"` in the
+  env file using its literal inventory value. Default legacy project is `aeeis-cn`.
+  All new Compose commands must pass `-p "$AEEIS_STACK"`; do not remove orphans.
+  Fresh volumes default to `<project>-postgres`, `<project>-temporal-postgres`,
+  and `<project>-data`. The guard rejects foreign Compose volume labels and
+  legacy-container mount/name overlap, even if legacy containers are stopped.
 - Preserve the current Temporal namespace and task queue for restored state.
+  The existing CN task queue is **`aeeis-agent`**, independent of project name.
   `AEEIS_TASK_QUEUE` also names the new Worker Deployment. The script derives a
   stable `AEEIS_BUILD_ID` from stack name and Git commit, and promotes that build
   after worker readiness. Versioning and `AUTO_UPGRADE` are configured by Compose.
@@ -100,7 +108,7 @@ Edit locally with a secure editor. Replace **every** `REPLACE_WITH_*` value:
   Alternatively remove the direct key assignment and set
   `AEEIS_MODEL_API_KEY_FILE=/run/aeeis-secrets/model-key`; install that file in
   `deploy/stack/secrets/model-key` owned by UID 1000, mode 0400. Never set both.
-- On reused/restored databases preserve the database passwords and roles from
+- On restored databases preserve the database passwords and roles from
   the old installation. `POSTGRES_PASSWORD` initializes an empty volume; it
   does **not** change credentials in an existing volume. Defer password rotation
   to a separate coordinated change. Check the configured connection URI works.
@@ -120,6 +128,56 @@ Edit locally with a secure editor. Replace **every** `REPLACE_WITH_*` value:
   `--env-file` and resolves that path itself. The name deliberately avoids the
   `AEEIS_*_FILE` secret loader. Never put deployment secrets in `.env` as an
   implicit fallback.
+
+### 2a. Preload every image before the maintenance window
+
+Use the same architecture, reviewed release and image pins as the destination.
+On SG/dev with Docker access to upstream (transfer **images only**, no CN data):
+
+```bash
+cd "$NEW_REPO/deploy/stack"
+# Set the actual reviewed release repository:tag in the selected env/release.
+export AEEIS_IMAGE='aeeis:REPLACE_WITH_COMMIT'
+export AEEIS_ENV_FILE="$STACK_ENV"
+./bin/images.sh list
+./bin/images.sh prepull
+./bin/images.sh save /tmp/aeeis-images.tar
+# Export an additional bundle for each rehearsed Temporal hop, with matching pins.
+for temporal_hop in 1.24.2 1.25.2 1.27.4 1.29.7; do
+  AEEIS_TEMPORAL_IMAGE="temporalio/auto-setup:$temporal_hop" ./bin/images.sh prepull
+  AEEIS_TEMPORAL_IMAGE="temporalio/auto-setup:$temporal_hop" ./bin/images.sh save "/tmp/aeeis-images-$temporal_hop.tar"
+done
+(cd /tmp && sha256sum aeeis-images*.tar > aeeis-images.sha256)
+scp /tmp/aeeis-images*.tar /tmp/aeeis-images.sha256 kk-cn:/tmp/
+# On CN, select its protected configuration and the same release:
+(cd /tmp && sha256sum -c aeeis-images.sha256)
+AEEIS_ENV_FILE="$STACK_ENV" ./bin/images.sh load /tmp/aeeis-images.tar
+for temporal_hop in 1.24.2 1.25.2 1.27.4 1.29.7; do
+  AEEIS_ENV_FILE="$STACK_ENV" AEEIS_TEMPORAL_IMAGE="temporalio/auto-setup:$temporal_hop" \
+    ./bin/images.sh load "/tmp/aeeis-images-$temporal_hop.tar"
+done
+AEEIS_ENV_FILE="$STACK_ENV" ./bin/images.sh verify
+```
+
+`images.sh` honors explicitly supplied image/registry variables over `stack.env`
+and `.current.env`, so each bundle uses the selected release and hop. Build the
+release on SG/dev first if it is not published.
+`load` verifies/retags locally and never pulls. `save` includes every service
+image, including ops profiles. `prepull` tries local -> registry prefix -> mirror
+-> upstream, retagging each success to the canonical Compose reference. Any
+missing image aborts deployment before `up`/replacement; startup disables pulls.
+DaoCloud is only a best-effort fallback, never a prerequisite.
+
+For TCR, configure `AEEIS_IMAGE_REGISTRY=ccr.ccs.tencentyun.com/x2v-co` (no trailing
+slash) in CN's selected env. Compose prefixes the repository paths of **all**
+images; with this setting, use repository:tag release refs such as
+`AEEIS_DEPLOY_IMAGE=aeeis:<commit>`. Use `docker login ccr.ccs.tencentyun.com`
+without placing passwords in argv. On the connected build
+host, tag/push each listed upstream ref to `<prefix>/<upstream-repository>:<tag>`
+(e.g. `<prefix>/postgres:17-alpine`, `<prefix>/temporalio/auto-setup:1.29.7`, and
+`<prefix>/aeeis:<commit>`); confirm the namespace/repository paths are supported
+by your registry. Run `images.sh prepull` and `verify` on CN before draining.
+A loaded upstream bundle also works: local images are retagged to TCR refs.
 
 ## 3. Drain, then back up Postgres, Temporal persistence and data
 
@@ -177,23 +235,17 @@ Do not rely on successful dump exit codes alone. Backups must precede any new
 API/Temporal startup that can migrate schemas. Abort cutover on backup or
 restore-test failure and restart the drained old stack.
 
-## 4. Cut over with volume reuse or restore
+## 4. Cut over by restoring into fresh volumes
 
 Ensure the old Compose stack and its auto-start units remain stopped. Keep
 its containers and volumes for rollback. Confirm its API port has been released.
 
-Choose one rehearsed path:
-
-- **Reuse:** Set `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and,
-  when present, `AEEIS_DATA_VOLUME` to the exact inventoried names in `stack.env`.
-  Run `docker volume inspect` on each first; a typo could otherwise create an
-  empty volume. Keep the existing PG major, credentials and data permissions.
-  If the old data was a bind mount or writable layer, create a new AEEIS data
-  volume and copy the backup into it with UID/GID 1000 before API startup.
-- **Restore (preferred for retaining untouched rollback volumes):** Use fresh,
-  distinctly named stack volumes and matching-version PG images. Export the
-  selected env and supply a temporary release/build ID for Compose interpolation,
-  then start **only** the two database services. Do not start API or Temporal yet.
+Use fresh, distinctly named stack volumes and matching-version PG images.
+Do not reuse legacy project volumes: foreign Compose labels or mounts referenced
+by legacy containers are rejected by the guard. Preserve the stopped legacy
+containers and volumes for rollback. Export the selected env and supply the
+reviewed release/build ID for Compose interpolation, then start **only** the two
+database services. Do not start API or Temporal yet.
 
 ```bash
 set -a
@@ -203,9 +255,15 @@ export STACK_ENV_FILE="$STACK_ENV"
 export AEEIS_IMAGE='REPLACE_WITH_BUILT_RELEASE_IMAGE'
 export AEEIS_BUILD_ID='REPLACE_WITH_STACK_NAME-RELEASE_COMMIT'
 new_dc() {
-  docker compose -f "$NEW_REPO/deploy/stack/compose.yml" --env-file "$STACK_ENV" "$@"
+  docker compose -p "$AEEIS_STACK" -f "$NEW_REPO/deploy/stack/compose.yml" --env-file "$STACK_ENV" "$@"
 }
 new_dc config --quiet
+# Read-only safety guard + all-image preflight before the first up.
+AEEIS_ENV_FILE="$STACK_ENV" bash -euo pipefail -c '
+  . "$1/bin/_lib.sh"; stack_guard
+' guard "$NEW_REPO/deploy/stack"
+AEEIS_ENV_FILE="$STACK_ENV" "$NEW_REPO/deploy/stack/bin/images.sh" prepull
+AEEIS_ENV_FILE="$STACK_ENV" "$NEW_REPO/deploy/stack/bin/images.sh" verify
 # Fresh-volume restore only: a distinct bootstrap role/database avoids
 # colliding with the roles/databases included in pg_dumpall.
 # Confirm this name is absent from the old inventory before use.
@@ -225,10 +283,10 @@ services:
       test: ["CMD-SHELL", "pg_isready -U aeeis_migration_restore -d aeeis_migration_restore"]
 YAML
 restore_dc() {
-  docker compose -f "$NEW_REPO/deploy/stack/compose.yml" \
+  docker compose -p "$AEEIS_STACK" -f "$NEW_REPO/deploy/stack/compose.yml" \
     -f "$migration_backup/restore-bootstrap.yml" --env-file "$STACK_ENV" "$@"
 }
-restore_dc up -d --wait postgres temporal-postgres
+restore_dc up -d --pull never --wait postgres temporal-postgres
 restore_dc exec -T postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d aeeis_migration_restore' \
   < "$migration_backup/aeeis-pg-dumpall.sql"
 restore_dc exec -T temporal-postgres sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d aeeis_migration_restore' \
@@ -239,22 +297,25 @@ for migration_db_service in postgres temporal-postgres; do
   [[ "$migration_db_service" == temporal-postgres ]] && migration_restored_user=temporal
   restore_dc exec -T "$migration_db_service" psql -X -v ON_ERROR_STOP=1 \
     -U "$migration_restored_user" -d postgres \
-    -c 'ALTER ROLE aeeis_migration_restore NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;'
+    -c 'ALTER ROLE aeeis_migration_restore NOLOGIN;'
 done
 # Return to production service config on the already-initialized volumes.
-new_dc up -d --wait postgres temporal-postgres
+new_dc up -d --pull never --wait postgres temporal-postgres
 ```
 
 This bootstrap override is for **empty, fresh volumes only**. Restore into the
 same logical database names/roles as the old deployment, then disable the
-bootstrap login. Rehearse the exact commands against the full dumps first;
+bootstrap login with **NOLOGIN only**: the PostgreSQL bootstrap role cannot
+be stripped of its superuser attribute. Rehearse the exact commands against
+the full dumps first;
 abort on any unexpected SQL error. Restore both Temporal persistence and
 visibility databases together with AEEIS.
 
 Populate the new AEEIS data volume from `aeeis-data` or its volume archive and
-verify file ownership (UID/GID 1000). Rehearse Temporal minor schema upgrades
-on restored volumes before the final target starts. Confirm database/table and
-artifact counts against the old snapshot. Then deploy the reviewed release:
+verify file ownership (UID/GID 1000). Complete the per-hop Temporal schema/server
+upgrades in section 4a on these restored volumes before deploying the final
+release. Confirm database/table and artifact counts against the old snapshot.
+After section 4a, deploy the reviewed release:
 
 ```bash
 cd "$NEW_REPO/deploy/stack"
@@ -270,6 +331,82 @@ source; perform the replay/restore rehearsal before cutover. Do not skip replay
 on later upgrades. Install/enable the new stack, backup and health systemd units
 only after verification; keep the old units disabled while the new stack owns
 these volumes and ports.
+
+### 4a. Temporal schema and server upgrade checkpoints
+
+The old component is **Temporal Server / `temporalio/auto-setup:1.24.2`** in
+root `docker-compose.yml`, not PostgreSQL or the SDK. The requested drill
+checkpoints are **1.24.2 -> 1.25.2 -> 1.27.4 -> 1.29.7**. At each transition,
+update **both** `temporal` persistence and `temporal_visibility` schemas using
+the target image's SQL tool, start that server, then verify health and schema
+versions before continuing. API/worker remain stopped throughout this sequence.
+
+[Temporal's upgrade guide](https://docs.temporal.io/self-hosted-guide/upgrade-server)
+guarantees consecutive minor upgrades, not skipped minors. These checkpoints
+skip 1.26 and 1.28: include reviewed/rehearsed 1.26.x and 1.28.x images and the
+same schema/health steps between checkpoints unless your release-specific
+compatibility review explicitly supports those jumps. Preload any additional
+images before draining. Do not infer skip compatibility from successful SQL
+migration alone. Allow at least ten minutes per server version for shards to
+load and migrate, and review the release notes before proceeding.
+
+Each checkpoint runs the schema/server/health commands below with this target:
+
+| From | Target image pin | Required checkpoint evidence |
+| --- | --- | --- |
+| 1.24.2 | `temporalio/auto-setup:1.25.2` | Both SQL schemas updated; cluster healthy; schema versions recorded |
+| 1.25.2 | `temporalio/auto-setup:1.27.4` | Repeat both schema updates and health checks, including the 1.26.x step |
+| 1.27.4 | `temporalio/auto-setup:1.29.7` | Repeat both schema updates and health checks, including the 1.28.x step |
+
+First start only the restored 1.24.2 Temporal server to verify the baseline.
+Then run this sequence (insert the required intermediate minor pins after the
+compatibility review). Keep ingress/producers blocked and execute each hop
+individually, checking its evidence before choosing the next tag:
+
+```bash
+# Repeat for 1.24.2 baseline, then 1.25.2, 1.27.4, 1.29.7 checkpoints,
+# and any required 1.26.x / 1.28.x intermediate versions.
+export AEEIS_TEMPORAL_IMAGE='temporalio/auto-setup:1.25.2'
+AEEIS_ENV_FILE="$STACK_ENV" "$NEW_REPO/deploy/stack/bin/images.sh" prepull
+AEEIS_ENV_FILE="$STACK_ENV" "$NEW_REPO/deploy/stack/bin/images.sh" verify
+new_dc stop temporal
+# Run the target image's schema tools BEFORE starting that server. The password
+# is read from the container environment, never interpolated into host argv.
+new_dc run --rm -T --no-deps --pull never --entrypoint sh temporal -ec '
+  export SQL_PASSWORD="$POSTGRES_PWD"
+  temporal-sql-tool --plugin postgres12 --ep temporal-postgres -p 5432 \
+    -u "$POSTGRES_USER" --db temporal update-schema \
+    -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+  temporal-sql-tool --plugin postgres12 --ep temporal-postgres -p 5432 \
+    -u "$POSTGRES_USER" --db temporal_visibility update-schema \
+    -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+'
+# auto-setup also checks/updates both schemas idempotently on startup.
+new_dc up -d --no-deps --pull never temporal
+# Poll until the server reports healthy. Earlier tags may ship tctl rather
+# than the temporal CLI; use the CLI present in that image.
+new_dc exec -T temporal sh -ec '
+  if command -v temporal >/dev/null; then
+    temporal operator cluster health --address temporal:7233
+  else
+    tctl --address temporal:7233 cluster health
+  fi
+'
+for temporal_db in temporal temporal_visibility; do
+  new_dc exec -T temporal-postgres psql -X -v ON_ERROR_STOP=1 \
+    -U temporal -d "$temporal_db" \
+    -c 'SELECT curr_version, min_compatible_version FROM schema_version;'
+done
+new_dc logs --tail 200 temporal
+# Check for errors, namespace/history visibility and expected release schema
+# versions; allow shard migration time before the next hop. Save evidence.
+```
+
+Abort on any schema/health failure. Preserve the failed volumes for diagnosis;
+restore the full snapshot before returning to older binaries. After the final
+1.29.7 hop, set `AEEIS_TEMPORAL_IMAGE=temporalio/auto-setup:1.29.7` in the protected
+env (or remove its override to use the pinned default), verify images again,
+and run the release deploy command in section 4.
 
 ## 5. Verify before admitting traffic
 
@@ -333,7 +470,7 @@ Run a new coordinated backup and schedule a restore drill after acceptance.
    schema-changing migration from the old root stack.
 3. If you restored into fresh volumes and old volumes remain untouched, retain
    the new volumes for investigation and select the original old volumes.
-   If physical volumes were reused and **any** AEEIS or Temporal schema migrated,
+   If the original volumes were modified outside this procedure,
    restore the complete pre-cutover backups into clean matching-version volumes
    using the rehearsed restore procedure: AEEIS `pg_dumpall`, Temporal
    `pg_dumpall` (persistence **and** visibility), and the matching data archive.

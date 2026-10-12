@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # Make the running worker build the Current Version of its Worker Deployment.
 # Versioned workers only receive tasks for the Current (or Ramping) version;
 # without this step new workflows stay queued with no poller. Retries until
 # Temporal reports the expected Current Version or the deadline passes.
 set -euo pipefail
+# shellcheck source=_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 : "${AEEIS_BUILD_ID:?AEEIS_BUILD_ID missing (bin/deploy.sh sets it)}"
 deployment="$AEEIS_TASK_QUEUE"

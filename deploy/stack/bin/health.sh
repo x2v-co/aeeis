@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # Readiness probe for systemd / fleet-health (via ssh). Exit 0 only when the
 # API /readyz is ready, the Worker is RUNNING, and the API answers on the
 # tailnet bind address. Probes run inside the stack's network namespace via
 # the api container (loopback). Prints one JSON line.
 set -euo pipefail
+# shellcheck source=_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 probe='
 const auth={authorization:"Bearer "+(process.env.AEEIS_ACCESS_TOKEN||"")};

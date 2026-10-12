@@ -4,7 +4,7 @@
 #   CI=true docker compose -f compose.yml -f compose.smoke.yml --env-file stack.env up -d
 services:
   fixture-model:
-    image: ${AEEIS_IMAGE:-aeeis:local}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_IMAGE:-aeeis:local}
     init: true
     network_mode: service:netns
     command: ["node", "scripts/fixture-model.mjs"]
@@ -17,7 +17,7 @@ services:
         condition: service_started
 
   fixture-sink:
-    image: ${AEEIS_IMAGE:-aeeis:local}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_IMAGE:-aeeis:local}
     init: true
     network_mode: service:netns
     command: ["node", "scripts/fixture-projection-sink.mjs"]
