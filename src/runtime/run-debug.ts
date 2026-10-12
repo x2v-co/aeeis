@@ -4,10 +4,30 @@ import { projectRunGraphs } from './graphs.js';
 import { explainRun } from './explanation.js';
 
 export const MAX_DEBUG_FIELD_BYTES = 8192;
-const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|(?:^env|env$|[_-]env[_-])|environment|token)/i;
+export const MAX_DEBUG_ARRAY_ITEMS = 500;
+export const MAX_DEBUG_NODES = 200_000;
+const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|(?:^env|env$|[_-]env[_-])|environment|token|cookie|signature|^sig$|^(?:x-)?auth(?:[_-][\w-]*)?$|session[_-]?(?:key|secret|id))/i;
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+/** Redact `env: { ... }` objects with brace matching so nested objects cannot leak past the first `}`. */
+function redactEnvBlocks(text: string): string {
+  const opener = /(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{/gi;
+  let out = '', last = 0, match: RegExpExecArray | null;
+  while ((match = opener.exec(text))) {
+    let depth = 0, end = text.length;
+    for (let i = match.index + match[1]!.length; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    out += text.slice(last, match.index) + match[1] + '[REDACTED]'; last = end; opener.lastIndex = end;
+  }
+  return out + text.slice(last);
+}
+/** Keep the newest items; event/call history is most useful at the tail. */
+function capArray<T>(items: T[]): Array<T | string> {
+  return items.length <= MAX_DEBUG_ARRAY_ITEMS ? items : [`[${items.length - MAX_DEBUG_ARRAY_ITEMS} earlier items truncated]`, ...items.slice(-MAX_DEBUG_ARRAY_ITEMS)];
+}
 export function capDebugField(value: string): string {
   if (Buffer.byteLength(value, 'utf8') <= MAX_DEBUG_FIELD_BYTES) return value;
   const marker = '…[truncated]';
@@ -17,8 +37,9 @@ export function capDebugField(value: string): string {
  * Values found under credential/environment keys are also scrubbed wherever copied. */
 export function redactRunData<T>(value: T): T {
   const secrets = new Set<string>();
+  let collected = 0, visited = 0;
   const collect = (item: unknown, sensitive = false, depth = 0): void => {
-    if (depth > 40) return;
+    if (depth > 40 || ++collected > MAX_DEBUG_NODES * 4) return;
     if (typeof item === 'string') {
       if (sensitive && item.length) secrets.add(item);
       if (/^\s*[\[{]/.test(item)) { try { collect(JSON.parse(item), sensitive, depth + 1); } catch { /* free text */ } }
@@ -26,7 +47,7 @@ export function redactRunData<T>(value: T): T {
         try { collect(JSON.parse(match[1]!), sensitive, depth + 1); } catch { /* incomplete model output */ }
       }
     }
-    else if (Array.isArray(item)) item.forEach(child => collect(child, sensitive, depth + 1));
+    else if (Array.isArray(item)) capArray(item).forEach(child => collect(child, sensitive, depth + 1));
     else if (item && typeof item === 'object') for (const [key, child] of Object.entries(item)) collect(child, sensitive || isSensitive(key), depth + 1);
   };
   collect(value);
@@ -45,12 +66,15 @@ export function redactRunData<T>(value: T): T {
       .replace(/\b(?:sk-(?:proj-|ant-)?[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9]{10,}|github_pat_[a-z0-9_]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[a-z0-9-]+)\b/gi, '[REDACTED]')
       .replace(/\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b/gi, '[REDACTED]')
       .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@')
-      .replace(/(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{[^}]*\}/gi, '$1[REDACTED]')
+      .replace(/\b((?:set-)?cookie|proxy-authorization|x-auth[\w-]*)\s*:\s*[^\r\n]*/gi, '$1: [REDACTED]')
+      .replace(/(\/(?:api\/)?share\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
+      .replace(/([?&](?:sig|signature|x-amz-[\w-]+|key|apikey|api_key|code|auth|token|access_token|refresh_token|id_token)=)[^&#\s"'<>]+/gi, '$1[REDACTED]')
+      .replace(/\btk_[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
       .replace(/((?:["']?)(?:[\w.-]{0,80}(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|token|(?:^|_)env)[\w.-]{0,80})(?:["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s&,;}\n]+)/gi, '$1[REDACTED]');
-    return capDebugField(result);
+    return capDebugField(redactEnvBlocks(result));
   };
   const visit = (item: unknown, depth = 0): unknown => {
-    if (depth > 40) return '[truncated]';
+    if (depth > 40 || ++visited > MAX_DEBUG_NODES) return '[truncated]';
     if (typeof item === 'string') {
       // JSON embedded in model raw output/materials still receives key-based redaction.
       if (/^\s*[\[{]/.test(item)) {
@@ -58,7 +82,7 @@ export function redactRunData<T>(value: T): T {
       }
       return scrub(item);
     }
-    if (Array.isArray(item)) return item.map(child => visit(child, depth + 1));
+    if (Array.isArray(item)) return capArray(item).map(child => visit(child, depth + 1));
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key)).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
     return item;
   };

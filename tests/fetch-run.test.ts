@@ -23,6 +23,10 @@ describe('fetch-run CLI', () => {
     expect(resolveRunTarget(`https://other.example/share/${token}`, env)).toEqual({ url: `https://other.example/api/share/${token}/debug-bundle`, headers: {} });
     expect(() => resolveRunTarget(id, {})).toThrow('AEEIS_BASE_URL');
     expect(() => resolveRunTarget(`https://aeeis.example/runs/${id}`, {})).toThrow('AEEIS_TOKEN');
+    expect(() => resolveRunTarget(`https://attacker.example/runs/${id}`, env)).toThrow('origin');
+    expect(() => resolveRunTarget(`//attacker.example/runs/${id}`, env)).toThrow('Protocol-relative');
+    expect(() => resolveRunTarget(`https://aeeis.example/runs/${id}`, { AEEIS_TOKEN: 'x' })).toThrow('AEEIS_BASE_URL');
+    expect(() => resolveRunTarget(`http://other.example/share/${token}`, env)).toThrow('HTTPS');
     expect(() => resolveRunTarget('https://aeeis.example/api/runs', env)).toThrow('Expected');
   });
   it('downloads a real debug bundle for a share URL, run URL and bare ID', async () => {
@@ -36,7 +40,7 @@ describe('fetch-run CLI', () => {
       const share = (await app.inject({ method: 'POST', url: `/api/runs/${run.id}/share`, headers: { authorization: 'Bearer access-token' } })).json();
       for (const [input, env] of [
         [`${base}${share.url}`, {}],
-        [`${base}/runs/${run.id}`, { AEEIS_TOKEN: 'access-token' }],
+        [`${base}/runs/${run.id}`, { AEEIS_TOKEN: 'access-token', AEEIS_BASE_URL: base }],
         [run.id, { AEEIS_TOKEN: 'access-token', AEEIS_BASE_URL: base }],
       ] as const) {
         const result = await exec(process.execPath, [cli, input], { cwd: root, env: { ...process.env, AEEIS_TOKEN: '', AEEIS_BASE_URL: '', ...env } });

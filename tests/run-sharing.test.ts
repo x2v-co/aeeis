@@ -207,3 +207,27 @@ describe('share storage and redaction helpers', () => {
     } finally { await pool.end(); await repo.close(); await second.close(); await db.close(); }
   });
 });
+
+describe('debug redaction hardening', () => {
+  it('scrubs cookies, auth headers, capability URLs, tk_ tokens and nested env blocks', () => {
+    const share = 'b'.repeat(43);
+    const text = [
+      'Cookie: sid=COOKIESECRET1', 'Set-Cookie: s=SETCOOKIESECRET', 'X-Auth-Token: XAUTHSECRET',
+      `see https://aeeis.example/share/${share} and /api/share/${share}/debug-bundle`,
+      'https://bucket.example/o?X-Amz-Signature=AMZSIG123&sig=SIGSECRET&code=OAUTHCODE',
+      'tool token tk_live_ABCDEFGHIJKL',
+      '{"env": {"A": {"B": "x"}, "LEAK": "NESTEDENVSECRET"} trailing',
+    ].join('\n');
+    const out = JSON.stringify(redactRunData({ rawOutput: text, headers: { cookie: 'HDRCOOKIE', 'x-auth': 'HDRXAUTH' } }));
+    for (const secret of ['COOKIESECRET1', 'SETCOOKIESECRET', 'XAUTHSECRET', share, 'AMZSIG123', 'SIGSECRET', 'OAUTHCODE', 'tk_live_ABCDEFGHIJKL', 'NESTEDENVSECRET', 'HDRCOOKIE', 'HDRXAUTH'])
+      expect(out).not.toContain(secret);
+    expect(out).toContain('trailing');
+  });
+  it('bounds arrays so a share holder cannot force unbounded export work', () => {
+    const items = Array.from({ length: 5000 }, (_, i) => ({ i, text: `item ${i}` }));
+    const out = redactRunData({ events: items }) as { events: unknown[] };
+    expect(out.events.length).toBe(501);
+    expect(out.events[0]).toContain('4500 earlier items truncated');
+    expect(out.events.at(-1)).toMatchObject({ i: 4999 });
+  });
+});
