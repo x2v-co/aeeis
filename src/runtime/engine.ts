@@ -711,7 +711,7 @@ export class AgentEngine {
         if (recovered.pendingDelegation?.globalBudgetAccountKey) await this.globalBudget.ledger.markUnknown(recovered.pendingDelegation.globalBudgetAccountKey, this.externalGlobalKey(recovered, recovered.pendingDelegation.idempotencyKey));
       }
       if (recovered.taskExecution) {
-        if (recovered.status === 'reviewing' && recovered.review?.verdict === 'accepted' && !recovered.review.issues.length) await this.finishBoundReview(recovered);
+        if (recovered.status === 'reviewing' && recovered.review?.verdict === 'accepted') await this.finishBoundReview(recovered);
         else await this.syncDomainState(recovered);
       }
       await this.projectPulseNextActions(run.id);
@@ -1814,19 +1814,22 @@ export class AgentEngine {
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.verifyResources(run);
-    if (run.taskExecution && run.review?.verdict === 'accepted' && !run.review.issues.length) { await this.finishBoundReview(run); return; }
+    if (run.taskExecution && run.review?.verdict === 'accepted') { await this.finishBoundReview(run); return; }
     await this.call(run, model, 'reviewer', { system: this.governedPrompt(reviewerPrompt, run), input: { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...(run.capabilityCatalogVersion ? { externalEvidence: { toolReceipts: (run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated'), delegations: (run.delegationOutcomes ?? []).filter(outcome => outcome.disposition !== 'isolated'), observations: run.steps.flatMap(step => step.observations.filter(observation => !observation.tool.startsWith('sources.'))) } } : {}), evolution: run.evolution ?? [], sources: run.context.sources, artifacts: run.artifacts, answers: run.answers } }, (current, value) => {
       current.review = parseReviewDecision(value);
-      const accepted = current.review.verdict === 'accepted' && current.review.issues.length === 0;
+      // The verdict is the reviewer's decision. Issues on an accepted review are
+      // non-blocking findings and are surfaced as warnings, not as a failure.
+      const accepted = current.review.verdict === 'accepted';
+      const warnings = accepted ? current.review.issues : [];
       // A bound task becomes terminal only after its domain receipt has been
       // committed below. This prevents clients from observing Run=succeeded
       // while the canonical Task is still running.
       current.status = accepted && current.taskExecution ? 'reviewing' : accepted ? 'succeeded' : 'failed';
       if (!accepted) current.error = 'Independent review requires revision. Inspect issues before retrying or creating a revised run.';
-      event(current, 'review.completed', { verdict: current.review.verdict, issues: current.review.issues, ...(current.review.confidence === undefined ? {} : { reviewConfidence: current.review.confidence }), ...(current.review.improvement === undefined ? {} : { proposal: current.review.improvement }) });
+      event(current, 'review.completed', { verdict: current.review.verdict, issues: current.review.issues, ...(warnings.length ? { warnings } : {}), ...(current.review.confidence === undefined ? {} : { reviewConfidence: current.review.confidence }), ...(current.review.improvement === undefined ? {} : { proposal: current.review.improvement }) });
     });
     const reviewed = await this.repository.get(run.id);
-    if (reviewed.taskExecution && reviewed.status === 'reviewing' && reviewed.review?.verdict === 'accepted' && !reviewed.review.issues.length) await this.finishBoundReview(reviewed);
+    if (reviewed.taskExecution && reviewed.status === 'reviewing' && reviewed.review?.verdict === 'accepted') await this.finishBoundReview(reviewed);
     else await this.syncDomainState(reviewed);
     await this.projectPulseNextActions(run.id);
     await this.recordSkillOutcome(run.id);
