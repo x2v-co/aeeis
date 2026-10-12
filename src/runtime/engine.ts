@@ -10,7 +10,7 @@ import { ModelOutcomeUnknown, ModelResponseRejected } from './model.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import type { ToolDescriptor, ToolGateway, SkillGovernance, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
-import type { ModelResolver } from './model-router.js';
+import type { ModelResolution, ModelResolver } from './model-router.js';
 import { AgentGateway, AgentOutcomeUnknown } from '../agent-gateway.js';
 import type { AgentCallbackAuthentication, AgentProgressEvent, AgentTransportResponse, DelegationReceipt, DelegationOutcome, DelegationRequest } from '../agent-gateway.js';
 import { createContextPack, delegationGrantSchema } from '../protocol.js';
@@ -128,6 +128,7 @@ export function event(run: AgentRun, type: string, data: Record<string, unknown>
   run.events.push({ id: id('evt'), seq: run.events.length + 1, type, at: now(), data });
 }
 export class Conflict extends Error {}
+export type CreateRunCheckpoint = <T>(stage: string, operation: () => Promise<T>) => Promise<T>;
 
 /** Strip durable AEEIS bookkeeping before a Tool provider call. The provider
  * receives the stable invocation contract; attempt fences and reconciliation
@@ -430,10 +431,11 @@ export class AgentEngine {
       if (memoryManifestId) await this.domain.getContextManifest(goalId, memoryManifestId, scope.owner, scope.tenantId);
     }
   }
-  async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>): Promise<AgentRun> {
+  async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>, reservedRunId?: string, checkpoint?: CreateRunCheckpoint): Promise<AgentRun> {
     const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
+    const prepare: CreateRunCheckpoint = checkpoint ?? ((_stage, operation) => operation());
     // The repository's unique primary key is the cross-process reservation.
     // Repeated starts return the original Run, including after a lost response.
     const taskRequestHash = request.taskExecution ? digest(request) : undefined;
@@ -454,7 +456,7 @@ export class AgentEngine {
     // if the provider returns an uncertain result. Connector protocols do not
     // report model tokens; their successful receipt settles explicit zeroes for
     // those dimensions while still consuming one global call.
-    const pendingRunId = taskRunId ?? id('run');
+    const pendingRunId = taskRunId ?? reservedRunId ?? id('run');
     if (request.taskExecution) {
       if (!request.goalId || !this.domain) throw new Error('taskExecution requires an active Goal domain');
       const domainPlan = await this.domain.getPlan(request.taskExecution.domainPlanId, owner, tenantId);
@@ -487,11 +489,12 @@ export class AgentEngine {
     // Snapshot active evolution before choosing a model. Operational targets
     // are parsed at the runtime boundary so activation cannot widen policy by
     // smuggling arbitrary text into a prompt.
-    const evolutionSelection = this.evolution
+    const selectEvolution = async () => this.evolution
       ? this.evolution.selectActiveWithTraffic
         ? await this.evolution.selectActiveWithTraffic({ owner, tenantId }, pendingRunId)
         : { active: this.evolution.selectActive ? await this.evolution.selectActive({ owner, tenantId }, pendingRunId) : await this.evolution.listActive({ owner, tenantId }), traffic: [] }
       : { active: [], traffic: [] };
+    const evolutionSelection = this.evolution ? await prepare('evolution', selectEvolution) : await selectEvolution();
     const activeEvolution = evolutionSelection.active;
     const workflowPolicy = typedEvolution(activeEvolution, 'workflow') as { maxModelCalls?: number; maxTaskCount?: number } | undefined;
     const toolPolicy = typedEvolution(activeEvolution, 'tool-policy') as { allow: string[]; deny: string[]; requireApproval: string[] } | undefined;
@@ -502,7 +505,14 @@ export class AgentEngine {
       if (toolPolicy?.deny.includes(toolId) || (toolPolicy?.allow.length && !toolPolicy.allow.includes(toolId))) throw new Error(`Active tool policy denies requested capability ${toolId}`);
     }
     const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy, ...(modelPolicy?.maxOutputPricePerMillion === undefined ? {} : { maxMoney: modelPolicy.maxOutputPricePerMillion }) };
-    const resolution = this.resolver ? await this.resolver.resolve(selection) : { adapter: this.defaultModel! };
+    const resolveModel = (): Promise<ModelResolution> => this.resolver ? this.resolver.resolve(selection) : Promise.resolve({ adapter: this.defaultModel! });
+    const modelSelection = checkpoint && this.resolver ? await prepare('model-selection', async () => {
+      const resolved = await this.resolver!.resolve(selection);
+      return { pin: resolved.adapter.pin, ...(resolved.decision ? { decision: resolved.decision } : {}) };
+    }) : undefined;
+    const resolution = modelSelection
+      ? { adapter: this.resolver!.forPin(modelSelection.pin), ...(modelSelection.decision ? { decision: modelSelection.decision } : {}) }
+      : await resolveModel();
     const selectedModel = resolution.adapter;
     if (request.modelBudget?.moneyUsd !== undefined && !modelPrices(resolution.decision)) {
       throw new Conflict('Model money budget requires finite nonnegative USD input and output prices before execution');
@@ -551,7 +561,7 @@ export class AgentEngine {
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
     if (request.knowledgeQuery && this.knowledge) {
       const knowledgeRequest = { query: request.knowledgeQuery, maxItems: request.knowledgeMaxItems, allowedClassifications: allowedKnowledgeClassifications(request.privacy), audience, tenantId };
-      const knowledgeResult = normalizeKnowledgeSearchResult(await this.connectorCall(pendingRunId, owner, tenantId, 'knowledge', knowledgeRequest, () => this.knowledge!.search(knowledgeRequest), value => normalizeKnowledgeSearchResult(value).usage));
+      const knowledgeResult = normalizeKnowledgeSearchResult(await prepare('knowledge', () => this.connectorCall(pendingRunId, owner, tenantId, 'knowledge', knowledgeRequest, () => this.knowledge!.search(knowledgeRequest), value => normalizeKnowledgeSearchResult(value).usage)));
       const hits = validateKnowledgeHits(knowledgeRequest, knowledgeResult.hits);
       for (const hit of hits) sources.push({ id: hit.record.id, title: hit.record.title, content: hit.record.content, source: hit.record.source, hash: hit.record.contentHash, contentHash: hit.record.contentHash, kind: 'knowledge', ...(hit.record.classification ? { classification: hit.record.classification } : {}) });
     }
@@ -559,21 +569,21 @@ export class AgentEngine {
     let projectSourceSync: ProjectSourceSyncReceipt | undefined;
     if (request.projectSourceQuery && this.projectSources) {
       const sourceRequest = { query: request.projectSourceQuery, maxItems: request.projectSourceMaxItems, tenantId, allowedClassifications: allowedKnowledgeClassifications(request.privacy), ...(request.projectSourceCursor ? { cursor: request.projectSourceCursor } : {}) };
-      const synced = await this.connectorCall(pendingRunId, owner, tenantId, 'project-source', sourceRequest, () => synchronizeProjectSources(this.projectSources!, sourceRequest, this.projectSourceCheckpoints), value => value.receipt.usage);
+      const synced = await prepare('project-source', () => this.connectorCall(pendingRunId, owner, tenantId, 'project-source', sourceRequest, () => synchronizeProjectSources(this.projectSources!, sourceRequest, this.projectSourceCheckpoints), value => value.receipt.usage));
       const records = synced.records;
       projectSourceSync = projectSourceSyncReceiptSchema.parse(synced.receipt);
       for (const record of records) sources.push({ id: record.id, title: `[${record.kind}] ${record.title}`, content: record.content, source: record.source, hash: record.contentHash, contentHash: record.contentHash, kind: 'project-source', ...(record.classification ? { classification: record.classification } : {}) });
     }
     if (new Set(sources.map(source => source.id)).size !== sources.length) throw new Conflict('Context contains duplicate evidence IDs; use distinct sources');
     if (JSON.stringify(sources).length > 90000) throw new Conflict('Evidence context exceeds the Run size limit; split this task');
-    const skillSelection = this.skills ? await this.skills.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) }) : undefined;
+    const skillSelection = this.skills ? await prepare('skill', () => this.skills!.resolve(request.goal, { ...(request.skillRuntime ? { runtime: request.skillRuntime } : {}) })) : undefined;
     const skillPolicy = typedEvolution(activeEvolution, 'skill') as { methodId: string; version: string; runtime?: string } | undefined;
     if (skillPolicy && (!skillSelection || skillSelection.methodId !== skillPolicy.methodId || skillSelection.version !== skillPolicy.version)) throw new Error('Active Skill policy does not match the governed Skill resolution');
     if (request.allowedTools.length && !this.tools) throw new Error('allowedTools were requested but no toolkit gateway is configured');
     if (request.allowedAgents.length && !this.agents) throw new Error('allowedAgents were requested but no Agent gateway is configured');
-    const toolApproval = await this.approveTools(request.allowedTools);
-    const approvedAgents = request.allowedAgents.length ? await this.agents!.describeApproved(request.allowedAgents, request.privacy) : [];
-    const resourceResolution = this.resourceRegistry ? await this.resourceRegistry.resolve({ ...(request.resources ? { resources: request.resources } : {}), ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}) }) : undefined;
+    const toolApproval = request.allowedTools.length ? await prepare('tools', () => this.approveTools(request.allowedTools)) : await this.approveTools(request.allowedTools);
+    const approvedAgents = request.allowedAgents.length ? await prepare('agents', () => this.agents!.describeApproved(request.allowedAgents, request.privacy)) : [];
+    const resourceResolution = this.resourceRegistry ? await prepare('resources', () => this.resourceRegistry!.resolve({ ...(request.resources ? { resources: request.resources } : {}), ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}) })) : undefined;
     const resourceSnapshot = freezeResourceSnapshot(request, skillSelection, toolApproval.selected, toolApproval.digest, timestamp, resourceResolution);
     const contextId = id('ctx');
     const contextManifestHash = digest({ contextId, owner, tenantId, goal: request.goal, privacy: request.privacy, audience, sources: sources.map(source => ({ id: source.id, title: source.title, source: source.source, hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content), classification: source.classification ?? request.privacy, kind: source.kind ?? 'unknown' })) });

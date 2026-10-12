@@ -2,16 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Ownership } from '../security/principal.js';
 import { requestSchema } from '../runtime/contracts.js';
-import type { AgentEngine } from '../runtime/engine.js';
+import type { AgentEngine, CreateRunCheckpoint } from '../runtime/engine.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { assertFollowupParent, assertUnthreaded, ThreadConflict, type Thread } from '../runtime/threads.js';
 import { buildThreadHistory, DEFAULT_THREAD_HISTORY_BYTES, MAX_THREAD_HISTORY_BYTES } from '../runtime/thread-history.js';
+import { assertSameFollowup, followupHash, followupRunId, idempotencyKeySchema, type ThreadFollowup } from '../runtime/thread-followups.js';
+import type { AgentRun } from '../runtime/contracts.js';
 
 export const createThreadSchema = z.object({ title: z.string().trim().min(1).max(200).optional(), initialRunId: z.string().min(1).optional() }).strict();
 export const threadRunSchema = z.object({
   request: requestSchema.omit({ goalId: true, taskExecution: true }),
   parentRunId: z.string().min(1).optional(),
   contextBudgetBytes: z.number().int().positive().max(MAX_THREAD_HISTORY_BYTES).optional(),
+  idempotencyKey: idempotencyKeySchema.optional(),
 }).strict();
 export const threadPageSchema = z.object({
   limit: z.string().regex(/^[0-9]+$/).transform(Number).pipe(z.number().int().min(1).max(100)).default(50),
@@ -42,24 +45,83 @@ export class ThreadService {
     }));
     return { ...thread, runs, ...(page.length > limit ? { nextAfterSequence: runs.at(-1)!.threadSequence } : {}) };
   }
-  async followUp(id: string, input: unknown, scope: Ownership) {
+  async followUp(id: string, input: unknown, scope: Ownership, headerKey?: unknown): Promise<AgentRun> {
     this.validateId(id);
     await this.repository.getThread(id, scope);
     const body = threadRunSchema.parse(input);
+    const key = idempotencyKeySchema.parse(headerKey ?? body.idempotencyKey);
+    if (headerKey !== undefined && body.idempotencyKey !== undefined && key !== body.idempotencyKey) throw new RangeError('Header and body idempotency keys must match');
     const budget = body.contextBudgetBytes ?? this.contextBudgetBytes;
-    if (budget > this.contextBudgetBytes) throw new RangeError('Thread context budget exceeds the server budget');
-    const parent = body.parentRunId === undefined ? await this.repository.latestRunByThread(id, scope) : await this.repository.get(body.parentRunId, scope);
-    if (parent && parent.threadId !== id) {
-      // A known owner run in another thread is a state conflict, not an access grant.
-      throw new ThreadConflict('Parent must belong to this thread');
-    }
-    assertFollowupParent(parent);
+    // Preserve default-parent intent rather than hashing the moving latest Run.
+    const request = { request: body.request, ...(body.parentRunId === undefined ? {} : { parentRunId: body.parentRunId }), contextBudgetBytes: budget };
+    const keyHash = followupHash(key), requestHash = followupHash({ ...request, contextBudgetBytes: body.contextBudgetBytes ?? null });
+    return this.repository.withThreadFollowupLock(id, keyHash, scope, async () => {
+      let record = await this.repository.getThreadFollowup(id, keyHash, scope);
+      if (record) assertSameFollowup(record, requestHash);
+      else {
+        if (budget > this.contextBudgetBytes) throw new RangeError('Thread context budget exceeds the server budget');
+        const parent = body.parentRunId === undefined ? await this.repository.latestRunByThread(id, scope) : await this.repository.get(body.parentRunId, scope);
+        if (parent && parent.threadId !== id) throw new ThreadConflict('Parent must belong to this thread');
+        assertFollowupParent(parent);
+        record = {
+          threadId: id, keyHash, requestHash, runId: followupRunId(id, keyHash, scope), state: 'reserved', request,
+          ...(parent ? { parentRunId: parent.id, parentRevision: parent.revision } : {}),
+          contextSnapshot: {}, createdAt: new Date().toISOString(),
+        };
+        await this.repository.saveThreadFollowup(record, scope);
+      }
+      return this.initialize(record, scope);
+    });
+  }
+  private async initialize(record: ThreadFollowup, scope: Ownership): Promise<AgentRun> {
+    if (record.state === 'completed') return this.repository.get(record.runId, scope);
     if (!this.engine) throw new Error('Model runtime is not configured');
     const engine = this.engine;
-    const history = await buildThreadHistory(this.repository, id, parent, scope, body.request.privacy, budget, (run, access) => engine.authorizeThreadHistory(run, scope, access));
-    return this.engine.create(body.request, scope.owner, scope.tenantId, async run => {
-      run.context.threadHistory = history;
-      return this.repository.createRunInThread(run, id, parent?.id, scope, parent?.revision);
-    });
+    const parent = record.parentRunId === undefined ? undefined : await this.repository.get(record.parentRunId, scope);
+    assertFollowupParent(parent, record.parentRevision);
+    if (!record.contextSnapshot.history) {
+      record.contextSnapshot.history = await buildThreadHistory(this.repository, record.threadId, parent, scope, record.request.request.privacy, record.request.contextBudgetBytes, (run, access) => engine.authorizeThreadHistory(run, scope, access));
+      await this.repository.saveThreadFollowup(record, scope);
+    } else if (parent) await engine.authorizeThreadHistory(parent, scope, record.contextSnapshot.history.accessProvenance);
+    const commit = (run: AgentRun) => this.repository.createRunInThread(run, record.threadId, record.parentRunId, scope, record.parentRevision, record);
+    if (record.contextSnapshot.run) return commit(record.contextSnapshot.run);
+    const checkpoint: CreateRunCheckpoint = async <T>(stage: string, operation: () => Promise<T>): Promise<T> => {
+      const stages = record.contextSnapshot.preparation ??= {};
+      const previous = stages[stage];
+      if (previous?.state === 'completed') return structuredClone(previous.value) as T;
+      // A crash between a provider call and checkpoint publication is ambiguous.
+      // Keep the request reserved for explicit recovery instead of resending it.
+      if (previous) throw new ThreadConflict(`Follow-up preparation ${stage} has an unknown outcome; reconcile before retrying`);
+      stages[stage] = { state: 'started' };
+      await this.repository.saveThreadFollowup(record, scope);
+      const value = await operation();
+      stages[stage] = { state: 'completed', ...(value === undefined ? {} : { value }) };
+      await this.repository.saveThreadFollowup(record, scope);
+      return value;
+    };
+    return engine.create(record.request.request, scope.owner, scope.tenantId, async run => {
+      run.context.threadHistory = record.contextSnapshot.history!;
+      record.contextSnapshot.run = run;
+      await this.repository.saveThreadFollowup(record, scope);
+      return commit(run);
+    }, record.runId, checkpoint);
+  }
+  /** Called before boot dispatch. Re-read under the same-key lock so another
+   * API's completed reservation cannot be initialized a second time. */
+  async recover(): Promise<void> {
+    for await (const pending of this.repository.pendingThreadFollowups()) {
+      const thread = await this.repository.getThread(pending.threadId);
+      const scope = { owner: thread.owner, tenantId: thread.tenantId };
+      try {
+        await this.repository.withThreadFollowupLock(thread.id, pending.keyHash, scope, async () => {
+          const current = await this.repository.getThreadFollowup(thread.id, pending.keyHash, scope);
+          if (current) await this.initialize(current, scope);
+        });
+      } catch (error) {
+        // Validation/ACL/provider failures remain reserved and undispatchable;
+        // recovery of other committed Runs must still proceed.
+        console.error('Thread follow-up recovery failed', pending.runId, error instanceof Error ? error.name : 'Error');
+      }
+    }
   }
 }

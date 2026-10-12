@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import type { AgentRun } from './contracts.js';
+import type { ThreadFollowup, ThreadFollowupRepository } from './thread-followups.js';
 
 export const threadSchema = z.object({
   id: z.string().regex(/^thread_[a-f0-9-]{36}$/),
@@ -10,7 +11,7 @@ export const threadSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
 }).strict();
 export type Thread = z.infer<typeof threadSchema>;
-export interface ThreadRepository {
+export interface ThreadRepository extends ThreadFollowupRepository {
   /** Optionally attach an existing unthreaded root in the same transaction. */
   createThread(thread: Thread, initialRunId?: string): Promise<void>;
   getThread(id: string, scope?: Ownership): Promise<Thread>;
@@ -19,7 +20,7 @@ export interface ThreadRepository {
   latestRunByThread(id: string, scope?: Ownership): Promise<AgentRun | undefined>;
   /** Persist a fully prepared run and its membership together, before dispatch.
    * The parent revision binds the commit to the frozen history read. */
-  createRunInThread(run: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number): Promise<AgentRun>;
+  createRunInThread(run: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number, followup?: ThreadFollowup): Promise<AgentRun>;
   /** First member has no parent; later members require an existing same-thread parent.
    * Sequence is allocated under the adapter lock. Repeating the same attachment is a no-op. */
   attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun>;

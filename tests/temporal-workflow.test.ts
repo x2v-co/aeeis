@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker, bundleWorkflowCode } from '@temporalio/worker';
+import { notifyTemporalRunWorkflow } from '../src/runtime/dispatcher.js';
 
 const workflowBundle = await bundleWorkflowCode({
   workflowsPath: fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url)),
@@ -51,6 +52,50 @@ describe('AEEIS Temporal workflow', () => {
       args: ['run-terminal'],
     })).resolves.toBeUndefined();
   });
+
+  it('starts independent follow-up workflows with unchanged arguments and resumes child waits without restarting the parent', async () => {
+    const queue = `${taskQueue}-threads`;
+    const parentId = 'run_11111111-1111-1111-1111-111111111111';
+    const childId = 'run_22222222-2222-2222-2222-222222222222';
+    let childStatus = 'needs_approval';
+    const calls: string[] = [];
+    let wakeObserved!: () => void;
+    let nextAdvance = new Promise<void>(resolve => { wakeObserved = resolve; });
+    const threadWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
+      activities: { advanceRun: async (id: string) => {
+        calls.push(id);
+        if (id === childId) wakeObserved();
+        return { status: id === parentId ? 'succeeded' : childStatus };
+      } },
+    });
+    const driver = threadWorker.run();
+    try {
+      await notifyTemporalRunWorkflow(environment.client, queue, parentId);
+      const parent = environment.client.workflow.getHandle(parentId);
+      await parent.result();
+      const parentExecution = await parent.describe();
+      await notifyTemporalRunWorkflow(environment.client, queue, childId);
+      const child = environment.client.workflow.getHandle(childId);
+      await nextAdvance;
+      await environment.sleep(60_000);
+      expect(calls.filter(id => id === childId)).toHaveLength(1);
+      childStatus = 'needs_input';
+      nextAdvance = new Promise<void>(resolve => { wakeObserved = resolve; });
+      await notifyTemporalRunWorkflow(environment.client, queue, childId); await nextAdvance;
+      await environment.sleep(60_000);
+      expect(calls.filter(id => id === childId)).toHaveLength(2);
+      childStatus = 'succeeded';
+      await notifyTemporalRunWorkflow(environment.client, queue, childId); await child.result();
+      expect(calls.filter(id => id === parentId)).toHaveLength(1);
+      expect((await parent.describe()).runId).toBe(parentExecution.runId);
+      for (const handle of [parent, child]) {
+        const history = await handle.fetchHistory();
+        expect(history.events?.some(event => event.startChildWorkflowExecutionInitiatedEventAttributes)).toBe(false);
+        await expect(Worker.runReplayHistory({ workflowBundle }, history, handle.workflowId)).resolves.toBeUndefined();
+      }
+    } finally { await threadWorker.shutdown(); await driver; }
+  }, 120_000);
 
   it.each(['failed', 'cancelled', 'succeeded'])('completes terminal %s Runs without needing another wake', async status => {
     await expect(environment.client.workflow.execute('agentRunWorkflow', {

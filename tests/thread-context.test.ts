@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,7 +70,7 @@ async function fixture(model = new HistoryModel()) {
   await repository.create(parent); await repository.createThread(thread, parent.id);
   let engine = new AgentEngine(repository, model);
   return { model, directory, parent, thread, get repository() { return repository; }, get engine() { return engine; },
-    async followUp(budget = 4096) { return new ThreadService(repository, engine).followUp(thread.id, { request: { goal: 'The authoritative current goal' }, parentRunId: parent.id, contextBudgetBytes: budget }, threadScope); },
+    async followUp(budget = 4096) { return new ThreadService(repository, engine).followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'The authoritative current goal' }, parentRunId: parent.id, contextBudgetBytes: budget }, threadScope); },
     async restart() { await repository.close(); repository = new FileRunRepository(directory); await repository.init(); engine = new AgentEngine(repository, model); },
   };
 }
@@ -187,7 +188,7 @@ describe('thread history model context', () => {
     for (const request of model.requests) { expect(request.input).not.toHaveProperty('threadHistory'); expect(request.system).not.toContain('untrusted_thread_history'); }
     expect(explainRun(await repository.get(plain.id)).evidence).not.toHaveProperty('threadHistory');
     const thread = await new ThreadService(repository, engine).create({}, threadScope);
-    const root = await new ThreadService(repository, engine).followUp(thread.id, { request: { goal: 'Root goal' } }, threadScope);
+    const root = await new ThreadService(repository, engine).followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Root goal' } }, threadScope);
     await engine.advance(root.id);
     expect(snapshotFrom(model.requests.at(-1)!)).toMatchObject({ entries: [], visitedAncestors: 0 });
   });
@@ -230,7 +231,7 @@ describe('thread history model context', () => {
       }));
     });
     const run = await new ThreadService(f.repository, f.engine, budget).followUp(f.thread.id, {
-      request: { goal: 'Summarize the HTML history' }, parentRunId: f.parent.id,
+      idempotencyKey: randomUUID(), request: { goal: 'Summarize the HTML history' }, parentRunId: f.parent.id,
     }, threadScope);
     expect(run.context.threadHistory!.actualBytes).toBeLessThanOrEqual(budget);
     expect(run.context.threadHistory!.actualBytes).toBe(Buffer.byteLength(JSON.stringify(run.context.threadHistory)));
@@ -262,7 +263,7 @@ describe('thread history model context', () => {
         evidenceRefs: run.context.sources.map(source => source.id), hash: digest('Room restricted fact'), createdAt: run.createdAt }];
     });
     const threads = new ThreadService(repository, engine), thread = await threads.create({ initialRunId: root.id }, threadScope);
-    const child = await threads.followUp(thread.id, { request: { goal: 'Follow up' } }, threadScope);
+    const child = await threads.followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Follow up' } }, threadScope);
     expect(child.goalId).toBeUndefined();
     expect(JSON.stringify(child.context.threadHistory)).toContain('Room restricted fact');
     const access = [{ goalId: goal.id, memoryManifestId: root.context.memoryManifestId }];
@@ -272,7 +273,7 @@ describe('thread history model context', () => {
       run.artifacts = [{ id: 'restricted', taskId: 'report', title: 'Report', content: 'Room restricted fact. ' + 'padding '.repeat(1000),
         evidenceRefs: [`history:${root.id}:restricted-root`], hash: digest('Room restricted fact'), createdAt: run.createdAt }];
     });
-    const grandchild = await threads.followUp(thread.id, { request: { goal: 'Continue' }, contextBudgetBytes: 1800 }, threadScope);
+    const grandchild = await threads.followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Continue' }, contextBudgetBytes: 1800 }, threadScope);
     expect(grandchild.context.threadHistory!.entries.map(entry => entry.runId)).toEqual([child.id]);
     expect(grandchild.context.threadHistory!.omitted.ancestorContinuations).toBe(1);
     expect(JSON.stringify(grandchild.context.threadHistory)).toContain('Room restricted fact');
@@ -282,7 +283,7 @@ describe('thread history model context', () => {
     const get = vi.spyOn(repository, 'get');
     for (const parentRunId of [root.id, child.id, grandchild.id]) {
       get.mockClear();
-      await expect(threads.followUp(thread.id, { request: { goal: 'Continue after revocation' }, parentRunId, contextBudgetBytes: 1800 }, threadScope)).rejects.toThrow('Unknown room');
+      await expect(threads.followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Continue after revocation' }, parentRunId, contextBudgetBytes: 1800 }, threadScope)).rejects.toThrow('Unknown room');
       if (parentRunId !== root.id) expect(get.mock.calls.some(([id]) => id === root.id)).toBe(false);
     }
     expect(await repository.listRunsByThread(thread.id, threadScope)).toHaveLength(3);
@@ -299,12 +300,12 @@ describe('thread history model context', () => {
     const root = await engine.create({ goal: 'Goal run', goalId: goal.id }, threadScope.owner, threadScope.tenantId);
     await repository.mutate(root.id, run => { run.status = 'succeeded'; });
     const threads = new ThreadService(repository, engine), thread = await threads.create({ initialRunId: root.id }, threadScope);
-    const next = await threads.followUp(thread.id, { request: { goal: 'Follow up' } }, threadScope);
+    const next = await threads.followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Follow up' } }, threadScope);
     expect(next.goalId).toBeUndefined(); expect(next.context.memoryManifestId).toBeUndefined();
     expect(next.context.audience).toEqual(root.context.audience);
     expect(JSON.stringify(next.context.threadHistory)).not.toContain('Room scoped fact');
     await domain.revokeRoomMember(room.id, 'alice', 'carol', threadScope.tenantId);
-    await expect(threads.followUp(thread.id, { request: { goal: 'Follow up after revocation' }, parentRunId: root.id }, threadScope)).rejects.toThrow('Unknown room');
+    await expect(threads.followUp(thread.id, { idempotencyKey: randomUUID(), request: { goal: 'Follow up after revocation' }, parentRunId: root.id }, threadScope)).rejects.toThrow('Unknown room');
     expect(await repository.listRunsByThread(thread.id, threadScope)).toHaveLength(2);
   });
 });

@@ -1,0 +1,163 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "agentRunWorkflow"
+        },
+        "taskQueue": {
+          "name": "legacy-thread-test"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "InJ1bl8xMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEi"
+            }
+          ]
+        },
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "22222222-2222-2222-2222-222222222222",
+        "firstExecutionRunId": "22222222-2222-2222-2222-222222222222",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "legacy-thread-test"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "fixture",
+        "requestId": "11111111-1111-1111-1111-111111111111"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "advanceRun"
+        },
+        "taskQueue": {
+          "name": "legacy-thread-test"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "InJ1bl8xMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEi"
+            }
+          ]
+        },
+        "startToCloseTimeout": "120s",
+        "workflowTaskCompletedEventId": "4"
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "fixture",
+        "requestId": "33333333-3333-3333-3333-333333333333",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzdGF0dXMiOiJzdWNjZWVkZWQifQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "legacy-thread-test"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "fixture",
+        "requestId": "44444444-4444-4444-4444-444444444444"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "startedEventId": "9",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-10-13T00:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "workflowExecutionCompletedEventAttributes": {
+        "result": {
+          "payloads": []
+        },
+        "workflowTaskCompletedEventId": "10"
+      }
+    }
+  ]
+}

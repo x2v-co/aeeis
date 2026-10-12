@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NotFound, PostgresRunRepository } from '../src/runtime/repository.js';
 import { ThreadConflict } from '../src/runtime/threads.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
+import { requestSchema } from '../src/runtime/contracts.js';
+import { followupHash, type ThreadFollowup } from '../src/runtime/thread-followups.js';
 
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -24,6 +26,68 @@ function fixture() {
 }
 
 describe('PostgreSQL thread transaction boundary', () => {
+  function followupFixture() {
+    const f = fixture(), child = threadRun();
+    f.run.threadId = f.thread.id; f.run.threadSequence = 1;
+    const reservation: ThreadFollowup = {
+      threadId: f.thread.id, keyHash: followupHash('key'), requestHash: followupHash('request'), runId: child.id, state: 'reserved',
+      request: { request: requestSchema.parse({ goal: child.goal }), contextBudgetBytes: 32768 },
+      parentRunId: f.run.id, parentRevision: f.run.revision, contextSnapshot: { run: structuredClone(child) }, createdAt: new Date().toISOString(),
+    };
+    const row = { thread_id: reservation.threadId, key_hash: reservation.keyHash, request_hash: reservation.requestHash, run_id: reservation.runId, state: reservation.state, request: reservation.request, parent_run_id: reservation.parentRunId, parent_revision: reservation.parentRevision, context_snapshot: reservation.contextSnapshot, created_at: new Date(reservation.createdAt) };
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, values) => {
+      if (sql.startsWith('SELECT * FROM aeeis_thread_followups')) return { rows: [structuredClone(row)], rowCount: 1 };
+      if (sql.startsWith('SELECT COALESCE(MAX(thread_sequence)')) return { rows: [{ seq: 1 }], rowCount: 1 };
+      return query(sql, values);
+    });
+    return { ...f, child, reservation };
+  }
+  it('commits follow-up membership and reservation completion before publishing dispatch hints', async () => {
+    const { repository, query, thread, run, child, reservation } = followupFixture();
+    const result = await repository.createRunInThread(child, thread.id, run.id, threadScope, run.revision, reservation);
+    expect(result).toMatchObject({ id: child.id, threadId: thread.id, parentRunId: run.id, threadSequence: 2 });
+    const statements = query.mock.calls.map(([sql]) => sql);
+    const insert = statements.findIndex(sql => sql.startsWith('INSERT INTO aeeis_runs'));
+    const complete = statements.findIndex(sql => sql.startsWith('UPDATE aeeis_thread_followups'));
+    expect(statements.slice(0, 3)).toEqual(['BEGIN', expect.stringContaining('aeeis_threads WHERE id=$1 FOR UPDATE'), expect.stringContaining('aeeis_thread_followups WHERE thread_id=$1 AND key_hash=$2 FOR UPDATE')]);
+    expect(insert).toBeLessThan(complete); expect(complete).toBeLessThan(statements.indexOf('COMMIT'));
+    expect(statements.indexOf('COMMIT')).toBeLessThan(statements.findIndex(sql => sql.includes('pg_notify')));
+    await repository.close();
+  });
+  it('rolls back a follow-up event write failure before completing its reservation', async () => {
+    const { repository, query, thread, run, child, reservation } = followupFixture();
+    const implementation = query.getMockImplementation()!;
+    query.mockImplementation(async (sql, values) => {
+      if (sql.startsWith('INSERT INTO aeeis_run_events')) throw new Error('event storage failed');
+      return implementation(sql, values);
+    });
+    await expect(repository.createRunInThread(child, thread.id, run.id, threadScope, run.revision, reservation)).rejects.toThrow('event storage failed');
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements).toContain('ROLLBACK');
+    expect(statements.some(sql => sql === 'COMMIT' || sql.startsWith('UPDATE aeeis_thread_followups') || sql.includes('pg_notify'))).toBe(false);
+    await repository.close();
+  });
+  it('rejects a reservation/run mismatch before publishing any run', async () => {
+    const { repository, query, thread, run, child, reservation } = followupFixture();
+    child.goal = 'changed after checkpoint';
+    await expect(repository.createRunInThread(child, thread.id, run.id, threadScope, run.revision, reservation)).rejects.toThrow('reservation commit');
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO aeeis_runs'))).toBe(false);
+    await repository.close();
+  });
+  it('holds a session key lock outside transactions and releases it when preparation throws', async () => {
+    const { repository, query, release, thread, reservation } = followupFixture();
+    await expect(repository.withThreadFollowupLock(thread.id, reservation.keyHash, threadScope, async () => {
+      expect(query.mock.calls.some(([sql]) => sql === 'BEGIN')).toBe(false);
+      await repository.getThreadFollowup(thread.id, reservation.keyHash, threadScope);
+      throw new Error('provider failed');
+    })).rejects.toThrow('provider failed');
+    const statements = query.mock.calls.map(([sql]) => sql);
+    expect(statements).toContain('SELECT pg_advisory_lock(hashtextextended($1,0))');
+    expect(statements.at(-1)).toBe('SELECT pg_advisory_unlock(hashtextextended($1,0))');
+    expect(release).toHaveBeenCalledWith(true);
+    await repository.close();
+  });
   it('commits columns and JSON together and publishes the hint after commit', async () => {
     const { repository, query, release, thread, run } = fixture();
     const attached = await repository.attachRunToThread(run.id, thread.id, undefined, threadScope);
