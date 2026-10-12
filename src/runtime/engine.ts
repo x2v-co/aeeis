@@ -51,6 +51,7 @@ export function taskRunIdFor(owner: string, tenantId: string, task: { domainPlan
   return `run_${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(12, 15)}-8${hex.slice(15, 18)}-${hex.slice(18, 30)}`;
 }
 const runnable = new Set<RunStatus>(['queued', 'planning', 'running', 'reviewing']);
+const terminalRunStatuses = new Set<RunStatus>(['succeeded', 'failed', 'cancelled']);
 // Legacy Runs with a project source query retain their original output contract.
 function usesProjectPulse(run: AgentRun): boolean {
   return run.builtinSkill === 'project-pulse/1' || Boolean(run.projectSourceQuery);
@@ -639,13 +640,14 @@ export class AgentEngine {
         }
         await this.repository.mutate(run.id, current => {
           const interruptedStatus = current.status;
-          if (current.calls.some(c => c.state === 'started')) {
+          const interruptedCalls = current.calls.some(c => c.state === 'started');
+          if (interruptedCalls && (!terminalRunStatuses.has(interruptedStatus) || interruptedStatus === 'cancelled')) {
             current.reconcileDisposition = interruptedStatus === 'cancelled'
               ? 'cancelled'
               : interruptedStatus === 'paused' ? 'paused' : 'running';
           }
           for (const call of current.calls.filter(c => c.state === 'started')) call.state = 'unknown';
-          if (current.status !== 'cancelled') {
+          if (!terminalRunStatuses.has(current.status)) {
             current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
             current.status = 'unknown'; current.error = 'Execution interrupted during a model request. Explicit reconciliation is required before another billable call.';
           }
@@ -663,7 +665,9 @@ export class AgentEngine {
             current.toolReceipts ??= [];
             current.toolReceipts.push(receipt);
             current.pendingTool = { ...current.pendingTool, receiptId: receipt.receiptId };
-            current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External tool execution was interrupted; reconcile the provider before retrying.';
+            if (!terminalRunStatuses.has(current.status)) {
+              current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External tool execution was interrupted; reconcile the provider before retrying.';
+            }
             event(current, 'tool.interrupted', { taskId: pending.taskId, toolId: pending.toolId, receiptId: receipt.receiptId });
           }
           if (current.pendingTool?.executionToken) delete current.pendingTool.executionToken;
@@ -684,7 +688,9 @@ export class AgentEngine {
             current.delegationOutcomes ??= [];
             current.delegationOutcomes.push({ idempotencyKey: pending.idempotencyKey, status: 'unknown', receiptRef: receipt.receiptRef, contextVersion: pending.contextPack.id, receipt });
             current.pendingDelegation = { ...current.pendingDelegation, receiptRef: receipt.receiptRef };
-            current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External Agent execution was interrupted; reconcile the provider before retrying.';
+            if (!terminalRunStatuses.has(current.status)) {
+              current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'External Agent execution was interrupted; reconcile the provider before retrying.';
+            }
             event(current, 'agent.interrupted', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: receipt.receiptRef });
           }
           if (current.pendingDelegation?.reconcileInFlight) {
@@ -693,8 +699,7 @@ export class AgentEngine {
           }
           if (current.pendingDelegation?.executionToken) delete current.pendingDelegation.executionToken;
           current.externalUsage = deriveExternalUsage(current);
-          if (run.status === 'cancelled') current.status = 'cancelled';
-          else if (run.status === 'paused' && !run.calls.some(call => call.state === 'started')) { current.resumeStatus = current.status; current.status = 'paused'; }
+          if (interruptedStatus === 'paused' && !interruptedCalls) { current.resumeStatus = current.status; current.status = 'paused'; }
           event(current, 'run.interrupted');
         });
       }
@@ -810,7 +815,7 @@ export class AgentEngine {
       }
     } catch (error) {
       await this.repository.mutate(runId, run => {
-        if (['cancelled', 'unknown'].includes(run.status)) return;
+        if (terminalRunStatuses.has(run.status) || run.status === 'unknown') return;
         if (run.status === 'paused') run.resumeStatus = 'failed';
         else run.status = 'failed';
         run.error = failureReason(error, 'Execution failed');
@@ -1096,11 +1101,11 @@ export class AgentEngine {
         call.state = error instanceof ModelOutcomeUnknown ? 'unknown' : 'failed'; call.endedAt = now();
         const usage = error instanceof ModelResponseRejected ? error.usage : result?.usage;
         if (validModelUsage(usage)) call.usage = usage;
-        if (error instanceof ModelOutcomeUnknown && current.status !== 'cancelled') {
+        if (error instanceof ModelOutcomeUnknown && !terminalRunStatuses.has(current.status)) {
           current.reconcileDisposition = current.status === 'paused' ? 'paused' : 'running';
           current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
           current.status = 'unknown'; current.error = error.message;
-        } else if (error instanceof ModelOutcomeUnknown) {
+        } else if (error instanceof ModelOutcomeUnknown && current.status === 'cancelled') {
           current.reconcileDisposition = 'cancelled';
         }
         current.modelUsage = deriveModelUsage(current);
@@ -1124,7 +1129,7 @@ export class AgentEngine {
       else event(current, 'model.usage_missing', { callId });
       if (current.reconciledModelCall?.callId === callId) delete current.reconciledModelCall;
       delete current.reconcileDisposition;
-      if (current.status === 'cancelled') { call.state = 'discarded'; event(current, 'model.result_discarded', { callId }); return; }
+      if (terminalRunStatuses.has(current.status)) { call.state = 'discarded'; event(current, 'model.result_discarded', { callId }); return; }
       const budgetError = settlementError(current);
       if (budgetError) {
         if (current.status === 'paused') current.resumeStatus = 'failed';
@@ -1229,7 +1234,10 @@ export class AgentEngine {
     const done = new Set(run.steps.filter(s => s.status === 'succeeded').map(s => s.taskId));
     const node = plan.nodes.find(n => !done.has(n.id) && n.dependsOn.every(d => done.has(d)));
     if (!node) {
-      await this.repository.mutate(run.id, current => { current.status = 'reviewing'; event(current, 'review.requested'); }); return;
+      await this.repository.mutate(run.id, current => {
+        if (current.status !== 'running') return;
+        current.status = 'reviewing'; event(current, 'review.requested');
+      }); return;
     }
     const step = run.steps.find(s => s.taskId === node.id)!;
     const dependencies = run.artifacts.filter(a => node.dependsOn.includes(a.taskId));
@@ -1489,8 +1497,9 @@ export class AgentEngine {
           await this.repository.mutate(run.id, current => {
             if (current.pendingTool?.idempotencyKey !== pending!.idempotencyKey || current.pendingTool.executionToken !== executionToken) return;
             delete current.pendingTool.executionToken;
+            if (terminalRunStatuses.has(current.status)) return;
             if (current.status === 'paused') current.resumeStatus = 'failed';
-            else if (current.status !== 'cancelled') current.status = 'failed';
+            else current.status = 'failed';
             current.error = error instanceof Error ? error.message : 'Global external budget reservation failed';
             recordTaskFailure(current, pending!.taskId);
             event(current, 'external.budget_reservation_failed', { taskId: pending!.taskId, toolId: pending!.toolId, reason: current.error });
@@ -1512,9 +1521,11 @@ export class AgentEngine {
             current.toolReceipts.push(receipt);
             const { executionToken: _attempt, ...reconcilable } = pending!;
             current.pendingTool = { ...reconcilable, receiptId: receipt.receiptId, reconcileInFlight: false };
-            if (current.status === 'paused') current.resumeStatus = 'unknown';
-            else if (current.status !== 'cancelled') { current.status = 'unknown'; current.resumeStatus = 'running'; }
-            current.error = 'Global external budget reservation exists; reconcile the provider before retrying.';
+            if (!terminalRunStatuses.has(current.status)) {
+              if (current.status === 'paused') current.resumeStatus = 'unknown';
+              else { current.status = 'unknown'; current.resumeStatus = 'running'; }
+              current.error = 'Global external budget reservation exists; reconcile the provider before retrying.';
+            }
             event(current, 'tool.interrupted', { taskId: pending!.taskId, toolId: pending!.toolId, receiptId: receipt.receiptId });
           });
           return;
@@ -1565,7 +1576,7 @@ export class AgentEngine {
       if (authorization) settledReceipt.authorization = authorization;
       const { executionToken: _attempt, ...reconcilable } = pending;
       event(current, 'external.usage_recorded', { receiptId: settledReceipt.receiptId, usage: current.externalUsage });
-      if (current.status === 'cancelled') {
+      if (terminalRunStatuses.has(current.status)) {
         if (result.status === 'unknown') current.pendingTool = { ...reconcilable, receiptId: settledReceipt.receiptId, reconcileInFlight: false };
         else delete current.pendingTool;
         event(current, 'tool.result_discarded', { receiptId: settledReceipt.receiptId, usage: current.externalUsage, authorization: authorization?.decision ?? 'pending' });
@@ -1631,8 +1642,9 @@ export class AgentEngine {
           await this.repository.mutate(run.id, current => {
             if (current.pendingDelegation?.idempotencyKey !== pending!.idempotencyKey || current.pendingDelegation.executionToken !== executionToken) return;
             delete current.pendingDelegation.executionToken;
+            if (terminalRunStatuses.has(current.status)) return;
             if (current.status === 'paused') current.resumeStatus = 'failed';
-            else if (current.status !== 'cancelled') current.status = 'failed';
+            else current.status = 'failed';
             current.error = error instanceof Error ? error.message : 'Global external budget reservation failed';
             recordTaskFailure(current, pending!.taskBrief.taskId);
             event(current, 'external.budget_reservation_failed', { taskId: pending!.taskBrief.taskId, agentId: pending!.agentId, reason: current.error });
@@ -1650,9 +1662,11 @@ export class AgentEngine {
             current.delegationOutcomes.push({ idempotencyKey: pending!.idempotencyKey, status: 'unknown', receiptRef: receipt.receiptRef, contextVersion: pending!.contextPack.id, receipt });
             const { executionToken: _attempt, ...reconcilable } = pending!;
             current.pendingDelegation = { ...reconcilable, receiptRef: receipt.receiptRef, reconcileRequested: false, reconcileInFlight: false };
-            if (current.status === 'paused') current.resumeStatus = 'unknown';
-            else if (current.status !== 'cancelled') { current.status = 'unknown'; current.resumeStatus = 'running'; }
-            current.error = 'Global external budget reservation exists; reconcile the provider before retrying.';
+            if (!terminalRunStatuses.has(current.status)) {
+              if (current.status === 'paused') current.resumeStatus = 'unknown';
+              else { current.status = 'unknown'; current.resumeStatus = 'running'; }
+              current.error = 'Global external budget reservation exists; reconcile the provider before retrying.';
+            }
             event(current, 'agent.interrupted', { taskId: pending!.taskBrief.taskId, agentId: pending!.agentId, receiptRef: receipt.receiptRef });
           });
           return;
@@ -1677,8 +1691,9 @@ export class AgentEngine {
           if (current.pendingDelegation?.executionToken !== executionToken) return;
           delete current.pendingDelegation.executionToken;
           current.pendingDelegation.reconcileInFlight = false;
+          if (terminalRunStatuses.has(current.status)) return;
           if (current.status === 'paused') current.resumeStatus = 'failed';
-          else if (current.status !== 'cancelled') current.status = 'failed';
+          else current.status = 'failed';
           current.error = error instanceof Error ? error.message : 'Agent admission failed';
           recordTaskFailure(current, pending!.taskBrief.taskId);
           event(current, 'agent.admission_failed', { agentId: pending!.agentId, reason: current.error });
@@ -1743,7 +1758,7 @@ export class AgentEngine {
       current.externalUsage = deriveExternalUsage(current);
       event(current, 'external.usage_recorded', { receiptRef: outcome.receipt.receiptRef, usage: current.externalUsage });
       const { executionToken: _attempt, ...reconcilable } = pending;
-      if (current.status === 'cancelled') {
+      if (terminalRunStatuses.has(current.status)) {
         if (['unknown', 'accepted'].includes(outcome.status)) current.pendingDelegation = { ...reconcilable, receiptRef: outcome.receipt.receiptRef, reconcileRequested: false, reconcileInFlight: false };
         else delete current.pendingDelegation;
         event(current, 'agent.result_discarded', { receiptRef: outcome.receipt.receiptRef, usage: current.externalUsage });
@@ -1984,7 +1999,7 @@ function validateToolResult(request: { toolId: string; taskId: string }, result:
 }
 
 function toolAuthorization(run: AgentRun, pending: ExternalToolInvocation, budgetError?: string): NonNullable<Receipt['authorization']> {
-  const approved = run.approvedTools?.some(tool => tool.id === pending.toolId && tool.version === pending.toolVersion)
+  const approved = !terminalRunStatuses.has(run.status) && run.approvedTools?.some(tool => tool.id === pending.toolId && tool.version === pending.toolVersion)
     && pending.capabilityGrant === `run:${run.id}:${pending.toolId}`
     && run.approval?.approved && run.approval.planHash === run.plans.at(-1)?.hash
     && run.steps.some(step => step.taskId === pending.taskId);

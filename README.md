@@ -356,7 +356,7 @@ RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `
 
 ## Run 取消与对账 (cancel / reconcile)
 
-`scripts/run-admin.mjs` 使用 `AEEIS_BASE_URL`（默认 `http://127.0.0.1:4323`）和 `AEEIS_TOKEN`（Bearer token），请求禁止重定向并设有 120 秒超时，输出 JSON；HTTP 错误时退出码非零。
+`scripts/run-admin.mjs` 使用 `AEEIS_BASE_URL`（默认 `http://127.0.0.1:4323`）和 `AEEIS_TOKEN`（Bearer token），请求禁止重定向并设有 120 秒超时，输出 JSON，并脱敏响应中的 AEEIS_TOKEN；HTTP 错误时退出码非零。
 
 ```bash
 export AEEIS_BASE_URL=http://127.0.0.1:4323
@@ -370,7 +370,7 @@ node scripts/run-admin.mjs reconcile --all --apply --limit 200
 
 `POST /api/runs/:id/cancel` 接收 `{ "reason": "..." }`（可省略，最多 2000 字符），沿用 Run 的 owner/operator 角色与 ownership 校验。先持久化 `cancelled`、`cancellation` 元数据和 `run.cancelled` 事件，再请求 Temporal 取消；`AEEIS_RUN_CANCEL_TIMEOUT_MS` 默认 10000，等待 workflow 关闭超时后 terminate。重复取消返回 200，不重复写 `run.cancelled`，仍尝试关闭 workflow；succeeded/failed 返回 409。响应为 `{ run, workflow: { outcome } }`，outcome 包括 `cancelled`、`terminated`、`not_found`、`already_closed`、`unsupported`（本地或无取消能力）。Temporal 请求失败时应用仍保持 cancelled，记录 `run.cancel.workflow_failed`，返回 **200** 和 `{ outcome: "error", message }`；可再次取消重试。
 
-`POST /api/runs/:id/reconcile` 只有 `{ "source": "temporal", "dry_run": false }` 选择 Temporal 对账，`dry_run` 默认 true；现有 `{ "reason": "..." }` 外部结果核查继续沿用原逻辑。响应 `{ runId, appStatus, workflowStatus, action, applied }` 的 appStatus 是当前状态。对账读取 workflow ID 的最新 execution：TERMINATED/CANCELED 将非终态 Run 标记 cancelled，FAILED/TIMED_OUT/NOT_FOUND/COMPLETED 标记 failed；RUNNING/CONTINUED_AS_NEW 与已终态 Run 保持原状。Apply 保存 `reconciliation` 元数据及 `run.reconciled` 事件，并在写入时重新检查终态。
+`POST /api/runs/:id/reconcile` 只有 `{ "source": "temporal", "dry_run": false }` 选择 Temporal 对账，`dry_run` 默认 true；现有 `{ "reason": "..." }` 外部结果核查继续沿用原逻辑。响应 `{ runId, appStatus, workflowStatus, action, applied }` 的 appStatus 是当前状态。对账读取 workflow ID 的最新 execution：TERMINATED/CANCELED 将非终态 Run 标记 cancelled，FAILED/TIMED_OUT/NOT_FOUND/COMPLETED 标记 failed；RUNNING/CONTINUED_AS_NEW 与已终态 Run 保持原状。Apply 保存 `reconciliation` 元数据及 `run.reconciled` 事件；Run revision 在检查期间变化时跳过写入，提交前在 Run 锁内重新 describe，避免旧结果覆盖已推进或重新启动的执行。终态不会被迟到的模型、Tool、Agent 结果或重启恢复改写。
 
 `POST /api/admin/reconcile` 仅 installation operator 可用，跨 owner/tenant 扫描非终态 Run；接收 `{ dry_run, statuses, limit, run_ids }`，默认 dry_run=true、limit=200，limit 最大 1000。statuses 可筛选 Run 状态，run_ids 可限制具体 Run，limit 限制实际描述的 Run 数量；响应 `{ dry_run, scanned, results }`。单 Run 和 admin Temporal 对账在 dispatcher 不支持 describe 时返回 503。已有 worker-orphan 脚本 `scripts/reconcile-workflows.mjs` 继续处理反方向的遗留 workflow。
 

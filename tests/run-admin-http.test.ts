@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { AgentEngine } from '../src/runtime/engine.js';
+import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { WorkflowStatus } from '../src/runtime/dispatcher.js';
 import type { Principal } from '../src/security/principal.js';
@@ -80,6 +81,44 @@ describe('Run cancel and Temporal reconcile HTTP boundary', () => {
     expect(dispatcher.cancel).not.toHaveBeenCalled();
     expect((await post(`/api/runs/${runId}/cancel`, {}, 'operator')).statusCode).toBe(200);
   });
+  it('allows an operator to reconcile only its own tenant-scoped run', async () => {
+    expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal' }, 'operator')).statusCode).toBe(200);
+    expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal' }, 'ops')).statusCode).toBe(404);
+    expect((await post(`/api/runs/${runId}/cancel`, {}, 'ops')).statusCode).toBe(404);
+    expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal' }, 'agent')).statusCode).toBe(403);
+    expect((await post(`/api/runs/${runId}/resume`, {}, 'operator')).statusCode).toBe(403);
+  });
+  it('does not bypass cancellation validation through an encoded action', async () => {
+    await app.close(); app = buildApp({ repository, dispatcher, engine, principalTokens });
+    await repository.mutate(runId, run => { run.status = 'failed'; });
+    expect((await post(`/api/runs/${runId}/%63ancel`)).statusCode).toBe(409);
+    expect((await repository.get(runId)).status).toBe('failed');
+    expect(dispatcher.notify).not.toHaveBeenCalled();
+  });
+  it.each(['running', 'queued'] as const)('does not apply a stale observation after concurrent progress to %s', async status => {
+    dispatcher.describe.mockImplementationOnce(async () => {
+      await repository.mutate(runId, run => { run.status = status; });
+      return { status: 'TERMINATED' };
+    });
+    expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal', dry_run: false })).json()).toMatchObject({ appStatus: status, action: 'none', applied: false });
+    expect((await repository.get(runId)).events.some(event => event.type === 'run.reconciled')).toBe(false);
+  });
+  it('rechecks Temporal before applying an old closed observation', async () => {
+    dispatcher.describe.mockResolvedValueOnce({ status: 'COMPLETED' }).mockResolvedValue({ status: 'RUNNING' });
+    const before = await repository.get(runId);
+    expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal', dry_run: false })).json()).toMatchObject({ workflowStatus: 'RUNNING', action: 'none', applied: false });
+    expect(await repository.get(runId)).toEqual(before);
+  });
+  it('serializes concurrent cancellation and reconciliation without duplicate events', async () => {
+    await Promise.all(Array.from({ length: 4 }, () => post(`/api/runs/${runId}/cancel`)));
+    expect((await repository.get(runId)).events.filter(event => event.type === 'run.cancelled')).toHaveLength(1);
+    expect(dispatcher.cancel).toHaveBeenCalledTimes(4);
+  });
+  it('applies concurrent reconciliations only once', async () => {
+    const responses = await Promise.all(Array.from({ length: 4 }, () => post(`/api/runs/${runId}/reconcile`, { source: 'temporal', dry_run: false })));
+    expect(responses.filter(response => response.json().applied)).toHaveLength(1);
+    expect((await repository.get(runId)).events.filter(event => event.type === 'run.reconciled')).toHaveLength(1);
+  });
   it('defaults to dry-run and applies reconciliation once with metadata', async () => {
     await repository.mutate(runId, run => { run.status = 'needs_approval'; });
     const before = await repository.get(runId);
@@ -114,6 +153,32 @@ describe('Run cancel and Temporal reconcile HTTP boundary', () => {
     });
     expect((await post(`/api/runs/${runId}/reconcile`, { source: 'temporal', dry_run: false })).json()).toMatchObject({ appStatus: 'succeeded', action: 'none', applied: false });
     expect((await repository.get(runId)).events.some(event => event.type === 'run.reconciled')).toBe(false);
+  });
+  it.each(['completed', 'unknown', 'failed', 'recovered'] as const)('preserves reconciled failure when an in-flight model returns %s', async outcome => {
+    let release!: () => void, entered!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'fixture/1' }, complete: async () => {
+      entered(); await waiting;
+      if (outcome === 'unknown') throw new ModelOutcomeUnknown('Provider disconnected');
+      if (outcome === 'failed') throw new Error('Provider failed');
+      return { value: { summary: 'Plan', nodes: [{ id: 'task', title: 'Task', instruction: 'Do task', dependsOn: [] }] } };
+    } });
+    const tick = engine.advance(runId);
+    await started;
+    dispatcher.describe.mockResolvedValue({ status: 'FAILED' });
+    const response = await post(`/api/runs/${runId}/reconcile`, { source: 'temporal', dry_run: false });
+    expect(response.json()).toMatchObject({ appStatus: 'failed', applied: true });
+    if (outcome === 'recovered') {
+      await engine.recover();
+      expect((await repository.get(runId)).status).toBe('failed');
+    }
+    release();
+    expect(await tick).toBe('failed');
+    const current = await repository.get(runId);
+    expect(current.error).toBe('Temporal workflow failed');
+    expect(current.plans).toEqual([]);
+    if (outcome === 'completed') expect(current.calls[0]?.state).toBe('discarded');
   });
   it('preserves legacy reason reconciliation through engine.command and notify', async () => {
     await app.close(); app = buildApp({ repository, dispatcher, engine, principalTokens });

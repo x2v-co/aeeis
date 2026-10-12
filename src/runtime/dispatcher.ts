@@ -114,9 +114,9 @@ export class TemporalDispatcher implements Dispatcher {
     const describe = () => this.client.withDeadline(deadline, () => handle.describe());
     const closed = (status: string) => status !== 'RUNNING' && status !== 'CONTINUED_AS_NEW';
     try {
-      if (closed(workflowStatus((await describe()).status.name))) return { outcome: 'already_closed' };
-      await this.client.withDeadline(deadline, () => handle.cancel());
       try {
+        if (closed(workflowStatus((await describe()).status.name))) return { outcome: 'already_closed' };
+        await this.client.withDeadline(deadline, () => handle.cancel());
         while (Date.now() < deadline) {
           const status = workflowStatus((await describe()).status.name);
           if (closed(status)) return { outcome: status === 'CANCELED' ? 'cancelled' : status === 'TERMINATED' ? 'terminated' : 'already_closed' };

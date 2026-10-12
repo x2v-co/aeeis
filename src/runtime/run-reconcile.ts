@@ -17,19 +17,41 @@ export function planRunReconcile(run: Pick<AgentRun, 'status'>, workflowStatus: 
   }
 }
 
-export async function reconcileRun(repository: RunRepository, run: AgentRun, workflowStatus: WorkflowStatus, actor: string, dryRun: boolean) {
-  let plan = planRunReconcile(run, workflowStatus);
+// Abort a no-op mutation so neither repository increments the revision or emits
+// change notifications when reconciliation loses a race.
+class UnchangedRun extends Error {
+  constructor(readonly run: AgentRun) { super('Run unchanged'); }
+}
+
+export async function reconcileRun(repository: RunRepository, run: AgentRun, describe: () => Promise<{ status: WorkflowStatus }>, actor: string, dryRun: boolean) {
+  const revision = run.revision;
+  const scope = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+  let { status: workflowStatus } = await describe();
+  run = await repository.get(run.id, scope);
+  let plan = run.revision === revision ? planRunReconcile(run, workflowStatus) : { action: 'none' as const, reason: 'Run changed during reconciliation' };
   let applied = false;
   if (!dryRun && plan.action !== 'none') {
-    run = await repository.mutate(run.id, current => {
-      plan = planRunReconcile(current, workflowStatus);
-      if (plan.action === 'none') return;
-      current.reconciliation = { workflowStatus, previousStatus: current.status, actor, at: new Date().toISOString(), reason: plan.reason };
-      current.status = plan.action === 'cancel' ? 'cancelled' : 'failed';
-      if (plan.action === 'fail') current.error = plan.reason;
-      event(current, 'run.reconciled', { ...current.reconciliation });
+    try {
+      run = await repository.mutate(run.id, async current => {
+        if (current.revision !== revision || isTerminalRun(current)) {
+          plan = { action: 'none', reason: 'Run changed during reconciliation' };
+          throw new UnchangedRun(current);
+        }
+        // A closed workflow ID may have been restarted since the first read.
+        // Refresh under the Run lock, which also excludes application progress.
+        workflowStatus = (await describe()).status;
+        plan = planRunReconcile(current, workflowStatus);
+        if (plan.action === 'none') throw new UnchangedRun(current);
+        current.reconciliation = { workflowStatus, previousStatus: current.status, actor, at: new Date().toISOString(), reason: plan.reason };
+        current.status = plan.action === 'cancel' ? 'cancelled' : 'failed';
+        if (plan.action === 'fail') current.error = plan.reason;
+        event(current, 'run.reconciled', { ...current.reconciliation });
+      }, scope);
       applied = true;
-    }, { owner: run.owner, tenantId: run.tenantId ?? 'local' });
+    } catch (error) {
+      if (!(error instanceof UnchangedRun)) throw error;
+      run = error.run;
+    }
   }
   return { runId: run.id, appStatus: run.status, workflowStatus, action: plan.action, applied };
 }

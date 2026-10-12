@@ -3,16 +3,16 @@ import { createServer, type Server } from 'node:http';
 import { spawn } from 'node:child_process';
 
 describe('run-admin CLI', () => {
-  let server: Server, baseUrl: string, status: number, redirect: boolean;
+  let server: Server, baseUrl: string, status: number, redirect: boolean, responseBody: unknown, rawBody: string | undefined;
   let requests: { path: string; authorization: string | undefined; body: unknown }[];
   const token = 'cli-fixture-token';
   beforeEach(async () => {
-    requests = []; status = 200; redirect = false;
+    requests = []; status = 200; redirect = false; responseBody = { status: 'fixture' }; rawBody = undefined;
     server = createServer(async (request, response) => {
       let body = ''; for await (const chunk of request) body += chunk;
       requests.push({ path: request.url!, authorization: request.headers.authorization, body: JSON.parse(body || '{}') });
       if (redirect) { response.writeHead(302, { location: `${baseUrl}/redirect-target` }); response.end(); return; }
-      response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify({ status: 'fixture' }));
+      response.writeHead(status, { 'content-type': 'application/json' }); response.end(rawBody ?? JSON.stringify(responseBody));
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -39,6 +39,18 @@ describe('run-admin CLI', () => {
   it('prints JSON but returns nonzero on HTTP errors', async () => {
     status = 403; const result = await run(['reconcile', '--all']);
     expect(result.code).toBe(1); expect(JSON.parse(result.stdout)).toEqual({ status: 'fixture' });
+    expect(result.stdout + result.stderr).not.toContain(token);
+  });
+  it.each([200, 403])('redacts credentials echoed in JSON at HTTP %s', async code => {
+    status = code; responseBody = { error: `Bearer ${token}`, nested: [{ [token]: token }] };
+    const result = await run(['cancel', 'run-1']);
+    expect(result.stdout + result.stderr).not.toContain(token);
+    expect(JSON.parse(result.stdout)).toEqual({ error: 'Bearer [REDACTED]', nested: [{ '[REDACTED]': '[REDACTED]' }] });
+  });
+  it('does not leak a credential echoed by a malformed response', async () => {
+    rawBody = token;
+    const result = await run(['cancel', 'run-1']);
+    expect(result.code).toBe(1);
     expect(result.stdout + result.stderr).not.toContain(token);
   });
   it('rejects redirects without forwarding credentials', async () => {

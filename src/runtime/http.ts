@@ -387,7 +387,8 @@ export function buildApp(options: Options) {
       const sharedEditorWrite = request.method === 'POST' && /^\/api\/goals\/[^/]+\/plans(?:\/revise)?$/.test(route);
       const sharedTaskTransition = request.method === 'POST' && /^\/api\/plans\/[^/]+\/tasks\/[^/]+\/transition$/.test(route);
       const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route);
-      const operatorRunAdmin = request.method === 'POST' && /^\/api\/runs\/[^/]+\/(?:cancel|reconcile)$/.test(route) && principal.roles.includes('operator');
+      const operatorRunAdmin = request.method === 'POST' && principal.roles.includes('operator')
+        && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
       if (/^\/api\/(rooms|goals|plans|runs|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
@@ -1558,8 +1559,7 @@ export function buildApp(options: Options) {
     }
     for await (const run of candidates()) {
       if (isTerminalRun(run) || (body.statuses && !body.statuses.includes(run.status))) continue;
-      const workflow = await options.dispatcher.describe(run.id);
-      results.push(await reconcileRun(options.repository, run, workflow.status, actor, body.dry_run));
+      results.push(await reconcileRun(options.repository, run, () => options.dispatcher!.describe!(run.id), actor, body.dry_run));
       if (results.length >= body.limit) break;
     }
     return { dry_run: body.dry_run, scanned: results.length, results };
@@ -1571,8 +1571,7 @@ export function buildApp(options: Options) {
       const run = await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
       const body = z.object({ source: z.literal('temporal'), dry_run: z.boolean().default(true) }).strict().parse(request.body);
       if (!options.dispatcher?.describe) return reply.code(503).send({ error: 'Temporal workflow description is unavailable' });
-      const workflow = await options.dispatcher.describe(id);
-      return reconcileRun(options.repository, run, workflow.status, principal.id, body.dry_run);
+      return reconcileRun(options.repository, run, () => options.dispatcher!.describe!(id), principal.id, body.dry_run);
     }
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     const principal = principalOf(request); await getOwnedRun(options.repository, id, principal.id, principal.tenantId);

@@ -87,6 +87,19 @@ describe('Temporal run cancellation and description', () => {
     await expect(dispatcher.cancel('run-2')).resolves.toEqual({ outcome: 'cancelled' });
     expect(handle.terminate).not.toHaveBeenCalled();
   });
+  it('follows continued-as-new executions while waiting for cancellation', async () => {
+    vi.useFakeTimers();
+    const { handle, client, dispatcher } = fixture();
+    handle.describe.mockResolvedValueOnce({ status: { name: 'RUNNING' } })
+      .mockResolvedValueOnce({ status: { name: 'CONTINUED_AS_NEW' } })
+      .mockResolvedValueOnce({ status: { name: 'RUNNING' } })
+      .mockResolvedValue({ status: { name: 'CANCELLED' } });
+    const cancellation = dispatcher.cancel('run-chain');
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(cancellation).resolves.toEqual({ outcome: 'cancelled' });
+    expect(client.workflow.getHandle).toHaveBeenCalledWith('run-chain');
+    expect(handle.terminate).not.toHaveBeenCalled();
+  });
   it('uses the default 10 second timeout', async () => {
     vi.useFakeTimers(); vi.stubEnv('AEEIS_RUN_CANCEL_TIMEOUT_MS', undefined);
     const { handle, dispatcher } = fixture();
@@ -108,6 +121,13 @@ describe('Temporal run cancellation and description', () => {
     await expect(dispatcher.cancel('run-4')).resolves.toEqual({ outcome: 'not_found' });
     handle.cancel.mockRejectedValueOnce(new WorkflowNotFoundError('already completed', 'run-4', undefined));
     await expect(dispatcher.cancel('run-4')).resolves.toEqual({ outcome: 'not_found' });
+  });
+  it.each(['describe', 'cancel'] as const)('terminates when the initial %s RPC exceeds the deadline', async operation => {
+    const { handle, dispatcher } = fixture();
+    const deadline = Object.assign(new Error('deadline exceeded'), { code: 4, details: 'deadline exceeded', metadata: {} });
+    handle[operation].mockRejectedValueOnce(new Error('RPC failed', { cause: deadline }));
+    await expect(dispatcher.cancel('run-timeout', 'stop')).resolves.toEqual({ outcome: 'terminated' });
+    expect(handle.terminate).toHaveBeenCalledWith('stop');
   });
   it('propagates infrastructure errors', async () => {
     const { handle, dispatcher } = fixture(); handle.cancel.mockRejectedValue(new Error('unavailable'));

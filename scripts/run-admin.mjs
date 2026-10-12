@@ -1,5 +1,13 @@
 const usage = 'Usage: node scripts/run-admin.mjs cancel <runId> [--reason TEXT] | reconcile <runId> [--apply] | reconcile --all [--apply] [--limit N]';
 
+const redact = text => process.env.AEEIS_TOKEN ? text.split(process.env.AEEIS_TOKEN).join('[REDACTED]') : text;
+function redactJson(value) {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map(redactJson);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [redact(key), redactJson(item)]));
+  return value;
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!['cancel', 'reconcile'].includes(command)) throw new Error(usage);
@@ -23,11 +31,11 @@ async function main() {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120_000),
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify(body),
-  });
-  const result = await response.json();
-  console.log(JSON.stringify(result, null, 2));
+  }).catch(() => { throw new Error('Run administration request failed or timed out'); });
+  const result = await response.json().catch(() => { throw new Error(`Invalid JSON response (HTTP ${response.status})`); });
+  console.log(JSON.stringify(redactJson(result), null, 2));
   if (!response.ok) process.exitCode = 1;
 }
 
 try { await main(); }
-catch (error) { console.error(error instanceof Error ? error.message : 'Run administration failed'); process.exitCode = 1; }
+catch (error) { console.error(redact(error instanceof Error ? error.message : 'Run administration failed')); process.exitCode = 1; }
