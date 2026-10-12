@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { FileRunShareStore, PostgresRunShareStore, runSharesMigration, type RunShareStore } from './run-shares.js';
+import { FileThreadShareStore, PostgresThreadShareStore, threadSharesMigration, type ThreadShareStore } from './thread-shares.js';
 import type { AgentRun } from './contracts.js';
 import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
@@ -13,6 +14,7 @@ import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, Fol
 
 export interface RunRepository extends ThreadRepository {
   readonly shares?: RunShareStore;
+  readonly threadShares?: ThreadShareStore;
   create(run: AgentRun): Promise<void>;
   get(id: string, scope?: Ownership): Promise<AgentRun>;
   list(scope?: Ownership, limit?: number): Promise<AgentRun[]>;
@@ -99,6 +101,7 @@ function decodeEventCursor(value: string | undefined): number {
 // Mutations write a complete run aggregate (state, receipts, artifacts) in one replacement.
 export class FileRunRepository implements RunRepository {
   readonly shares: RunShareStore;
+  readonly threadShares: ThreadShareStore;
   private queue: Promise<unknown> = Promise.resolve();
   private lockPath: string;
   private indexPath: string;
@@ -107,7 +110,7 @@ export class FileRunRepository implements RunRepository {
   private threadFailure: unknown;
   private followupLocks = new FollowupLocks();
   private readonly changeSubscribers = new Set<(change: RunChange) => void | Promise<void>>();
-  constructor(private directory: string) { this.shares = new FileRunShareStore(directory); this.lockPath = join(directory, '.writer.lock'); this.indexPath = join(directory, '.runs.index.json'); }
+  constructor(private directory: string) { this.shares = new FileRunShareStore(directory); this.threadShares = new FileThreadShareStore(directory); this.lockPath = join(directory, '.writer.lock'); this.indexPath = join(directory, '.runs.index.json'); }
   async init(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     try {
@@ -597,6 +600,7 @@ export class FileRunRepository implements RunRepository {
 
 export class PostgresRunRepository implements RunRepository {
   readonly shares: RunShareStore;
+  readonly threadShares: ThreadShareStore;
   private pool: pg.Pool;
   private followupLockPool: pg.Pool;
   private readonly changeSubscribers = new Map<(change: RunChange) => void | Promise<void>, PostgresChangeSubscription>();
@@ -604,6 +608,7 @@ export class PostgresRunRepository implements RunRepository {
   private closed = false;
   constructor(connectionString: string) {
     this.pool = new pg.Pool({ connectionString }); this.shares = new PostgresRunShareStore(this.pool);
+    this.threadShares = new PostgresThreadShareStore(this.pool);
     // Session locks use a separate bounded pool. Waiting same-key callers must
     // not exhaust the pool used by the lock holder's checkpoint/read queries.
     this.followupLockPool = new pg.Pool({ connectionString, max: 4 });
@@ -620,6 +625,7 @@ export class PostgresRunRepository implements RunRepository {
       await client.query(runSharesMigration);
       await client.query(threadsMigration);
       await client.query(threadFollowupsMigration);
+      await client.query(threadSharesMigration);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')), updated_at DESC, id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_shared_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (state->>'goalId'), updated_at DESC, id) WHERE COALESCE(state->>'privacy', 'internal') IN ('public', 'internal')`);

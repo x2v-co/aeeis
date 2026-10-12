@@ -92,4 +92,130 @@ describe('run link workbench', () => {
     dom.window.document.getElementById('copy-run-link')!.click();
     await vi.waitFor(() => expect(dom.window.document.querySelector('#run-share-result a')?.textContent).toBe(`http://localhost/share/${token}`));
   });
+  it('renders a thread timeline, paginates, links parents, and retains the key after a lost follow-up response', async () => {
+    const root = fixture(), child = fixture(), threadId = `thread_${randomUUID()}`;
+    root.threadId = child.threadId = threadId; root.threadSequence = 1; child.threadSequence = 2; child.parentRunId = root.id;
+    root.goal = '<img src=x onerror=alert(1)> root';
+    const summaries = [root, child].map(run => ({ id: run.id, threadId, threadSequence: run.threadSequence, parentRunId: run.parentRunId, status: run.status, goal: run.goal, privacy: run.privacy, outputExcerpt: 'Timeline output <script>unsafe</script>' }));
+    let attempts = 0;
+    const fetch = vi.fn(async (url: string, options: any) => {
+      if (url === `/api/threads/${threadId}/runs`) { if (++attempts === 1) throw new Error('Lost response'); return response(child); }
+      if (url.startsWith(`/api/threads/${threadId}?`)) return response({ id: threadId, title: 'Reports', runs: url.endsWith('afterSequence=0') ? [summaries[0]] : [summaries[1]], ...(url.endsWith('afterSequence=0') ? { nextAfterSequence: 1 } : {}) });
+      const run = url.includes(child.id) ? child : root;
+      if (url.endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      return response(run);
+    });
+    start(`/threads/${threadId}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('thread-timeline')?.textContent).toContain(root.goal));
+    expect(doc.querySelector('#thread-timeline img')).toBeNull(); expect(doc.querySelector('#thread-timeline script')).toBeNull();
+    expect(doc.getElementById('thread-timeline')?.textContent).toContain('Timeline output');
+    expect((doc.getElementById('run-thread-link') as HTMLAnchorElement).pathname).toBe(`/threads/${threadId}`);
+    expect(dom.window.location.pathname).toBe(`/threads/${threadId}`);
+    doc.getElementById('thread-more')!.click();
+    await vi.waitFor(() => expect(doc.querySelectorAll('#thread-timeline > li')).toHaveLength(2));
+    expect(doc.querySelector(`#thread-timeline a[href="/runs/${root.id}"]`)).not.toBeNull();
+    expect(doc.querySelectorAll('#thread-parent option')).toHaveLength(2);
+    (doc.getElementById('thread-message') as HTMLTextAreaElement).value = 'Continue the report';
+    const submit = () => doc.getElementById('thread-followup')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    submit(); await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('Lost response'));
+    submit(); await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(child.goal));
+    const posts = fetch.mock.calls.filter(([url]) => url === `/api/threads/${threadId}/runs`);
+    expect(posts).toHaveLength(2);
+    expect(posts[0]![1].headers['Idempotency-Key']).toMatch(/^[a-f0-9-]{36}$/);
+    expect(posts[1]![1].headers['Idempotency-Key']).toBe(posts[0]![1].headers['Idempotency-Key']);
+    expect(JSON.parse(posts[0]![1].body)).toEqual({ request: { goal: 'Continue the report', privacy: 'internal' }, parentRunId: root.id });
+    expect(fetch.mock.calls.every(([, options]) => options.headers.authorization === 'Bearer saved-auth-secret')).toBe(true);
+    expect(dom.window.location.pathname).toBe(`/threads/${threadId}`);
+  });
+  it('shows needs_input with the existing answer control and only terminal follow-up parents', async () => {
+    const root = fixture(), child = fixture(), threadId = `thread_${randomUUID()}`;
+    root.threadId = child.threadId = threadId; root.threadSequence = 1; child.threadSequence = 2; child.parentRunId = root.id;
+    child.status = 'needs_input'; child.question = { text: 'Which report?' };
+    const fetch = vi.fn(async (url: string) => {
+      if (url.startsWith(`/api/threads/${threadId}?`)) return response({ id: threadId, runs: [root, child] });
+      if (url.includes('/events/stream')) return new Promise(() => {});
+      const run = url.includes(root.id) ? root : child;
+      if (url.endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (url.endsWith('/answer')) { child.status = 'running'; return response({}); }
+      return response(run);
+    });
+    start(`/threads/${threadId}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(child.goal));
+    expect(doc.querySelectorAll('#thread-parent option')).toHaveLength(1);
+    expect((doc.getElementById('thread-parent') as HTMLSelectElement).value).toBe(root.id);
+    const answerButton = [...doc.querySelectorAll<HTMLButtonElement>('#thread-timeline button')].find(button => button.textContent === '回答当前问题')!;
+    answerButton.click(); await vi.waitFor(() => expect(doc.getElementById('input-panel')?.hidden).toBe(false));
+    expect(doc.getElementById('question')?.textContent).toBe('Which report?');
+    (doc.getElementById('answer') as HTMLTextAreaElement).value = 'October report';
+    doc.getElementById('answer-form')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([url]) => url === `/api/runs/${child.id}/answer`)).toBe(true));
+  });
+  it('renders thread shares without auth or owner links, and lets readers select each redacted run', async () => {
+    const root = fixture(), child = fixture(), token = 't'.repeat(43), threadId = `thread_${randomUUID()}`;
+    root.threadId = child.threadId = threadId; root.threadSequence = 1; child.threadSequence = 2; child.parentRunId = root.id; child.goal = 'Second report';
+    const fetch = vi.fn(async () => response({ kind: 'thread', thread: { id: threadId, title: 'Shared reports' }, throughSequence: 2, runs: [sharedRunView(root), sharedRunView(child)] }));
+    start(`/share/${token}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(child.goal));
+    expect(doc.querySelectorAll('#thread-timeline > li')).toHaveLength(2);
+    expect(doc.getElementById('thread-meta')?.textContent).toContain('#2');
+    expect(doc.getElementById('thread-followup')?.hidden).toBe(true); expect(doc.getElementById('thread-share-controls')?.hidden).toBe(true);
+    expect(doc.getElementById('run-thread-link')?.hidden).toBe(true);
+    expect(doc.querySelector('#thread-timeline a')).toBeNull(); expect(doc.querySelector('#artifacts a[download]')).toBeNull();
+    (doc.querySelector('#thread-timeline button') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(root.goal));
+    expect(fetch.mock.calls.every(([url, options]: any) => url === `/api/share/${token}` && !options.headers.authorization)).toBe(true);
+    expect(doc.getElementById('controls')?.childElementCount).toBe(0);
+  });
+  it('keeps the root request and key when a lost response is followed by a refreshed nonempty thread', async () => {
+    const root = fixture(), threadId = `thread_${randomUUID()}`;
+    root.threadId = threadId; root.threadSequence = 1;
+    let posted = false, attempts = 0;
+    const fetch = vi.fn(async (url: string, options: any) => {
+      if (url === `/api/threads/${threadId}/runs`) { posted = true; if (++attempts === 1) throw new Error('Lost root response'); return response(root); }
+      if (url.startsWith(`/api/threads/${threadId}?`)) return response({ id: threadId, runs: posted ? [root] : [] });
+      if (url.endsWith('/graphs')) return response(sharedRunView(root).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(root).explanation);
+      return response(root);
+    });
+    start(`/threads/${threadId}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('thread-panel')?.hidden).toBe(false));
+    (doc.getElementById('thread-message') as HTMLTextAreaElement).value = 'First report';
+    const submit = () => doc.getElementById('thread-followup')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    submit(); await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('Lost root response'));
+    doc.getElementById('connect')!.click();
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(root.goal));
+    expect((doc.getElementById('thread-parent') as HTMLSelectElement).value).toBe('');
+    submit(); await vi.waitFor(() => expect((doc.getElementById('thread-message') as HTMLTextAreaElement).value).toBe(''));
+    const posts = fetch.mock.calls.filter(([url]) => url.endsWith('/runs'));
+    expect(posts).toHaveLength(2); expect(posts[0]![1].body).toBe(posts[1]![1].body);
+    expect(JSON.parse(posts[0]![1].body)).not.toHaveProperty('parentRunId');
+    expect(posts[0]![1].headers['Idempotency-Key']).toBe(posts[1]![1].headers['Idempotency-Key']);
+  });
+  it('creates and revokes a thread share with a copyable URL', async () => {
+    const root = fixture(), threadId = `thread_${randomUUID()}`, token = 's'.repeat(43);
+    root.threadId = threadId; root.threadSequence = 1;
+    const fetch = vi.fn(async (url: string, options: any) => {
+      if (url === `/api/threads/${threadId}/share`) return response({ url: `/share/${token}`, id: 'share_one', expiresAt: root.updatedAt, throughSequence: 1 });
+      if (options.method === 'DELETE') return response({});
+      if (url.startsWith(`/api/threads/${threadId}?`)) return response({ id: threadId, runs: [root] });
+      if (url.endsWith('/graphs')) return response(sharedRunView(root).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(root).explanation);
+      return response(root);
+    });
+    start(`/threads/${threadId}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('thread-panel')?.hidden).toBe(false));
+    doc.getElementById('create-thread-share')!.click();
+    await vi.waitFor(() => expect(doc.querySelector('#thread-share-result a')?.textContent).toBe(`http://localhost/share/${token}`));
+    expect(doc.getElementById('thread-share-result')?.textContent).toContain('#1');
+    (doc.querySelector('#thread-share-result button') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(doc.getElementById('thread-share-result')?.textContent).toBe('分享已撤销'));
+    expect(fetch.mock.calls.some(([url, options]) => url === `/api/threads/${threadId}/share/share_one` && options.method === 'DELETE')).toBe(true);
+  });
 });

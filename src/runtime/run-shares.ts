@@ -3,9 +3,10 @@ import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import type pg from 'pg';
 
-export interface RunShare {
-  id: string; tokenHash: string; runId: string; expiresAt: string; revokedAt: string | null; createdAt: string;
+export interface Share {
+  id: string; tokenHash: string; expiresAt: string; revokedAt: string | null; createdAt: string;
 }
+export interface RunShare extends Share { runId: string }
 export interface RunShareStore {
   create(share: RunShare): Promise<void>;
   find(tokenHash: string): Promise<RunShare | undefined>;
@@ -27,30 +28,34 @@ export function newRunShare(runId: string, ttlSeconds: number): { token: string;
   return { token, share: { id: `share_${randomUUID()}`, tokenHash: hashShareToken(token), runId,
     expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(), revokedAt: null, createdAt: new Date().toISOString() } };
 }
-export function activeShare(share: RunShare | undefined): share is RunShare {
+export function activeShare<T extends Share>(share: T | undefined): share is T {
   return Boolean(share && !share.revokedAt && Date.parse(share.expiresAt) > Date.now());
 }
-export class InMemoryRunShareStore implements RunShareStore {
-  private shares = new Map<string, RunShare>();
-  async create(share: RunShare): Promise<void> { this.shares.set(share.tokenHash, structuredClone(share)); }
-  async find(hash: string): Promise<RunShare | undefined> { const share = this.shares.get(hash); return share && structuredClone(share); }
-  async list(runId: string): Promise<RunShare[]> { return [...this.shares.values()].filter(s => s.runId === runId).map(s => structuredClone(s)); }
-  async revoke(runId: string, id: string, at: string): Promise<boolean> {
-    const share = [...this.shares.values()].find(s => s.runId === runId && s.id === id);
+export class InMemoryShareStore<T extends Share> {
+  private shares = new Map<string, T>();
+  constructor(private belongsTo: (share: T, resourceId: string) => boolean) {}
+  async create(share: T): Promise<void> { this.shares.set(share.tokenHash, structuredClone(share)); }
+  async find(hash: string): Promise<T | undefined> { const share = this.shares.get(hash); return share && structuredClone(share); }
+  async list(resourceId: string): Promise<T[]> { return [...this.shares.values()].filter(s => this.belongsTo(s, resourceId)).map(s => structuredClone(s)); }
+  async revoke(resourceId: string, id: string, at: string): Promise<boolean> {
+    const share = [...this.shares.values()].find(s => this.belongsTo(s, resourceId) && s.id === id);
     if (!share) return false;
     share.revokedAt ??= at; return true;
   }
 }
+export class InMemoryRunShareStore extends InMemoryShareStore<RunShare> implements RunShareStore {
+  constructor() { super((share, id) => share.runId === id); }
+}
 /** Shares use the Run repository's single-process writer lock and atomic replacement convention. */
-export class FileRunShareStore implements RunShareStore {
+export class FileShareStore<T extends Share> {
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private directory: string) {}
-  private get path(): string { return join(this.directory, '.run-shares.json'); }
-  private async read(): Promise<RunShare[]> {
-    try { return JSON.parse(await readFile(this.path, 'utf8')) as RunShare[]; }
+  constructor(private directory: string, private filename: string, private belongsTo: (share: T, resourceId: string) => boolean) {}
+  private get path(): string { return join(this.directory, this.filename); }
+  private async read(): Promise<T[]> {
+    try { return JSON.parse(await readFile(this.path, 'utf8')) as T[]; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
   }
-  private mutate<T>(change: (shares: RunShare[]) => T): Promise<T> {
+  private mutate<R>(change: (shares: T[]) => R): Promise<R> {
     const next = this.queue.then(async () => {
       const shares = await this.read(), result = change(shares);
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -64,12 +69,15 @@ export class FileRunShareStore implements RunShareStore {
     });
     this.queue = next.catch(() => undefined); return next;
   }
-  async create(share: RunShare): Promise<void> { await this.mutate(shares => { shares.push(structuredClone(share)); }); }
-  async find(hash: string): Promise<RunShare | undefined> { await this.queue; return (await this.read()).find(s => s.tokenHash === hash); }
-  async list(runId: string): Promise<RunShare[]> { await this.queue; return (await this.read()).filter(s => s.runId === runId); }
-  revoke(runId: string, id: string, at: string): Promise<boolean> {
-    return this.mutate(shares => { const share = shares.find(s => s.runId === runId && s.id === id); if (!share) return false; share.revokedAt ??= at; return true; });
+  async create(share: T): Promise<void> { await this.mutate(shares => { shares.push(structuredClone(share)); }); }
+  async find(hash: string): Promise<T | undefined> { await this.queue; return (await this.read()).find(s => s.tokenHash === hash); }
+  async list(resourceId: string): Promise<T[]> { await this.queue; return (await this.read()).filter(s => this.belongsTo(s, resourceId)); }
+  revoke(resourceId: string, id: string, at: string): Promise<boolean> {
+    return this.mutate(shares => { const share = shares.find(s => this.belongsTo(s, resourceId) && s.id === id); if (!share) return false; share.revokedAt ??= at; return true; });
   }
+}
+export class FileRunShareStore extends FileShareStore<RunShare> implements RunShareStore {
+  constructor(directory: string) { super(directory, '.run-shares.json', (share, id) => share.runId === id); }
 }
 // Adapter bootstrap migrations in this repository run under withPostgresMigrationLock.
 // Keep this SQL in sync with src/adapters/migrations/001-run-shares.sql.

@@ -8,6 +8,7 @@ import { assertFollowupParent, assertUnthreaded, followupParentHash, ThreadConfl
 import { buildThreadHistory, DEFAULT_THREAD_HISTORY_BYTES, MAX_THREAD_HISTORY_BYTES } from '../runtime/thread-history.js';
 import { assertSameFollowup, followupHash, followupRunId, idempotencyKeySchema, type ThreadFollowup } from '../runtime/thread-followups.js';
 import type { AgentRun } from '../runtime/contracts.js';
+import { redactRunData } from '../runtime/run-debug.js';
 
 export const createThreadSchema = z.object({ title: z.string().trim().min(1).max(200).optional(), initialRunId: z.string().min(1).optional() }).strict();
 export const threadRunSchema = z.object({
@@ -41,6 +42,8 @@ export class ThreadService {
     const runs = page.slice(0, limit).map(run => ({
       id: run.id, threadId: id, threadSequence: run.threadSequence!, ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
       goal: run.goal, status: run.status, createdAt: run.createdAt, updatedAt: run.updatedAt,
+      privacy: run.privacy ?? 'internal',
+      ...(run.artifacts.length ? { outputExcerpt: redactRunData(run.artifacts.at(-1)!.content, { credentialSource: run }).slice(0, 1000) } : {}),
       links: { run: `/runs/${run.id}`, api: `/api/runs/${run.id}` },
     }));
     return { ...thread, runs, ...(page.length > limit ? { nextAfterSequence: runs.at(-1)!.threadSequence } : {}) };

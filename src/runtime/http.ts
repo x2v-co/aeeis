@@ -1,4 +1,5 @@
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
+import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { debugBundle, sharedRunView } from './run-debug.js';
 import { artifactFilename } from './artifact-download.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
@@ -345,7 +346,7 @@ export function buildApp(options: Options) {
     const route = request.routeOptions.url ?? '';
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
     const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
-    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id')
+    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id')
       && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
     if (request.headers.origin) {
@@ -1423,22 +1424,35 @@ export function buildApp(options: Options) {
     catch (error) { release(); throw error; }
   });
   const ttl = shareTtlConfig();
+  const shareSchema = z.object({ ttlSeconds: z.number().int().min(1).max(ttl.maxSeconds).optional() }).strict();
   const shareStore = () => { if (!options.repository.shares) throw new Error('Run share storage is unavailable'); return options.repository.shares; };
-  async function readSharedRun(token: string): Promise<AgentRun> {
+  const threadShareStore = () => { if (!options.repository.threadShares) throw new Error('Thread share storage is unavailable'); return options.repository.threadShares; };
+  async function resolveShare(token: string) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFound('Unknown share');
-    const share = await shareStore().find(hashShareToken(token));
-    if (!activeShare(share)) throw new NotFound('Unknown share');
-    return options.repository.get(share.runId);
+    const hash = hashShareToken(token);
+    const runShare = await options.repository.shares?.find(hash);
+    if (activeShare(runShare)) return { kind: 'run' as const, share: runShare };
+    const threadShare = await options.repository.threadShares?.find(hash);
+    if (activeShare(threadShare)) return { kind: 'thread' as const, share: threadShare };
+    throw new NotFound('Unknown share');
+  }
+  async function readSharedRun(token: string): Promise<AgentRun> {
+    const resolved = await resolveShare(token);
+    if (resolved.kind !== 'run') throw new NotFound('Unknown run share');
+    return options.repository.get(resolved.share.runId);
   }
   app.get<{ Params: { id: string } }>('/runs/:id', async (_request, reply) => reply.type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8')));
+  app.get<{ Params: { id: string } }>('/threads/:id', async (_request, reply) => reply.type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8')));
   app.get<{ Params: { token: string } }>('/share/:token', async (request, reply) => {
-    await readSharedRun(request.params.token);
+    const resolved = await resolveShare(request.params.token);
+    if (resolved.kind === 'run') await options.repository.get(resolved.share.runId);
+    else await options.repository.getThread(resolved.share.threadId);
     return reply.header('referrer-policy', 'no-referrer').type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8'));
   });
   app.post<{ Params: { id: string } }>('/api/runs/:id/share', async request => {
     const principal = principalOf(request);
     await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
-    const body = z.object({ ttlSeconds: z.number().int().min(1).max(ttl.maxSeconds).optional() }).strict().parse(request.body ?? {});
+    const body = shareSchema.parse(request.body ?? {});
     const { token, share } = newRunShare(request.params.id, body.ttlSeconds ?? ttl.defaultSeconds);
     await shareStore().create(share);
     return { token, url: `/share/${token}`, expiresAt: share.expiresAt, id: share.id };
@@ -1456,7 +1470,19 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { token: string } }>('/api/share/:token', async (request, reply) => {
     reply.header('referrer-policy', 'no-referrer');
-    return sharedRunView(await readSharedRun(request.params.token));
+    const resolved = await resolveShare(request.params.token);
+    if (resolved.kind === 'run') return { ...sharedRunView(await options.repository.get(resolved.share.runId)), kind: 'run' };
+    const share = resolved.share;
+    const thread = await options.repository.getThread(share.threadId);
+    const runs: AgentRun[] = [];
+    let afterSequence = 0;
+    while (afterSequence < share.throughSequence) {
+      const page = await options.repository.listRunsByThread(thread.id, thread, 100, afterSequence);
+      runs.push(...page.filter(run => run.threadSequence! <= share.throughSequence));
+      if (!page.length) break;
+      afterSequence = page.at(-1)!.threadSequence!;
+    }
+    return sharedThreadView(thread, share.throughSequence, runs);
   });
   app.get<{ Params: { token: string } }>('/api/share/:token/debug-bundle', async (request, reply) => {
     reply.header('referrer-policy', 'no-referrer');
@@ -1518,6 +1544,26 @@ export function buildApp(options: Options) {
   app.get<{ Params: { id: string } }>('/api/threads/:id', async request => {
     const principal = principalOf(request);
     return threads.get(request.params.id, request.query, { owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.post<{ Params: { id: string } }>('/api/threads/:id/share', async request => {
+    const principal = principalOf(request), scope = { owner: principal.id, tenantId: principal.tenantId };
+    await options.repository.getThread(request.params.id, scope);
+    const body = shareSchema.parse(request.body ?? {});
+    const latest = await options.repository.latestRunByThread(request.params.id, scope);
+    const { token, share } = newThreadShare(request.params.id, latest?.threadSequence ?? 0, body.ttlSeconds ?? ttl.defaultSeconds);
+    await threadShareStore().create(share);
+    return { token, url: `/share/${token}`, expiresAt: share.expiresAt, id: share.id, throughSequence: share.throughSequence };
+  });
+  app.get<{ Params: { id: string } }>('/api/threads/:id/shares', async request => {
+    const principal = principalOf(request);
+    await options.repository.getThread(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
+    return (await threadShareStore().list(request.params.id)).map(({ tokenHash: _hash, ...share }) => share);
+  });
+  app.delete<{ Params: { id: string; shareId: string } }>('/api/threads/:id/share/:shareId', async (request, reply) => {
+    const principal = principalOf(request);
+    await options.repository.getThread(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
+    if (!await threadShareStore().revoke(request.params.id, request.params.shareId, new Date().toISOString())) throw new NotFound('Unknown share');
+    return reply.code(204).send();
   });
   app.post<{ Params: { id: string } }>('/api/threads/:id/runs', async (request, reply) => {
     const principal = principalOf(request);

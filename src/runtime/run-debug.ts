@@ -40,7 +40,7 @@ export function capDebugField(value: string): string {
 /** Remove credential fields and scrub recognizable credentials even inside free text.
  * Values found under credential/environment keys are also scrubbed wherever copied.
  * Callers with their own byte budget can defer field capping. */
-export function redactRunData<T>(value: T, options: { capFields?: boolean } = {}): T {
+export function redactRunData<T>(value: T, options: { capFields?: boolean; credentialSource?: unknown } = {}): T {
   const capField = (text: string): string => options.capFields === false ? text : capDebugField(text);
   const secrets = new Set<string>();
   let collected = 0, visited = 0;
@@ -67,6 +67,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean } = {}
     else if (Array.isArray(item)) capArray(item).forEach(child => collect(child, sensitive, depth + 1));
     else if (item && typeof item === 'object') for (const [key, child] of Object.entries(item)) collect(child, sensitive || isSensitive(key), depth + 1);
   };
+  collect(options.credentialSource);
   collect(value);
   const scrub = (text: string): string => {
     let result = redactEnvBlocks(text);
