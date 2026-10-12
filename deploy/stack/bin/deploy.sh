@@ -28,6 +28,7 @@ export AEEIS_ENV_FILE
 # shellcheck source=_images.sh
 . "$STACK_DIR/bin/_images.sh"
 sha="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
+checkout_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
 if [[ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]]; then
   [[ "${AEEIS_ALLOW_DIRTY:-0}" == 1 ]] || { echo "working tree is dirty; commit first (or AEEIS_ALLOW_DIRTY=1)" >&2; exit 2; }
   sha="$sha-dirty$(date +%s)"
@@ -38,12 +39,17 @@ AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" dc config --quiet
 AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" stack_guard
 release_ref="${AEEIS_IMAGE_REGISTRY:+$AEEIS_IMAGE_REGISTRY/}$image"
 if (( build )); then
+  export AEEIS_GIT_COMMIT="${AEEIS_CONFIG_GIT_COMMIT:-$checkout_commit}"
   # shellcheck disable=SC2086
-  docker build ${AEEIS_DOCKER_BUILD_ARGS:-} -t "$release_ref" "$REPO_DIR"
+  docker build ${AEEIS_DOCKER_BUILD_ARGS:-} --build-arg "AEEIS_GIT_COMMIT=$AEEIS_GIT_COMMIT" -t "$release_ref" "$REPO_DIR"
 fi
 # Preload EVERY rendered service image before any container can be replaced.
 AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" prepull_images
 AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" verify_images
+if (( ! build )); then
+  # The deployed image can differ from this checkout. Inspect after preload.
+  export AEEIS_GIT_COMMIT="${AEEIS_CONFIG_GIT_COMMIT:-$(image_git_commit "$release_ref")}"
+fi
 
 # Always invoke the gate. Missing/unreachable Temporal, listing/export errors,
 # malformed output and replay failure all block before replacing containers.
@@ -51,7 +57,7 @@ echo "replay gate: stack=$AEEIS_STACK namespace=${TEMPORAL_NAMESPACE:-aeeis} can
 AEEIS_REPLAY_IMAGE="$release_ref" "$STACK_DIR/bin/replay.sh"
 
 candidate="$CANDIDATE_FILE"
-( umask 077; printf 'AEEIS_STACK=%s\nAEEIS_IMAGE=%s\nAEEIS_BUILD_ID=%s\n' "$AEEIS_STACK" "$image" "$AEEIS_STACK-$sha" > "$candidate" )
+( umask 077; printf 'AEEIS_STACK=%s\nAEEIS_IMAGE=%s\nAEEIS_BUILD_ID=%s\nAEEIS_GIT_COMMIT=%s\n' "$AEEIS_STACK" "$image" "$AEEIS_STACK-$sha" "$AEEIS_GIT_COMMIT" > "$candidate" )
 set -a
 # shellcheck source=/dev/null
 . "$candidate"

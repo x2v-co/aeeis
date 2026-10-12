@@ -144,6 +144,8 @@ services:
         AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-agent}
         AEEIS_TEMPORAL_DEPLOYMENT_NAME: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE}
         AEEIS_BUILD_ID: ${AEEIS_BUILD_ID:?Set AEEIS_BUILD_ID (bin/deploy.sh derives it from the git sha)}
+        # Refuse an empty override of env_file; helpers always resolve a value.
+        AEEIS_GIT_COMMIT: ${AEEIS_GIT_COMMIT:?Set AEEIS_GIT_COMMIT or use bin/deploy.sh / bin/stack.sh}
         AEEIS_TEMPORAL_USE_VERSIONING: "1"
         AEEIS_TRUSTED_INTERNAL_HOSTS: ${AEEIS_TRUSTED_INTERNAL_HOSTS:-api,worker}
         # One worker build per host: replaced builds are never polled again, so

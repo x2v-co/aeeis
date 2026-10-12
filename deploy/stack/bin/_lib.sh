@@ -5,9 +5,13 @@ REPO_DIR="$(cd "$STACK_DIR/../.." && pwd)"
 export REPO_DIR
 ENV_FILE="${AEEIS_ENV_FILE:-$STACK_DIR/stack.env}"
 [[ -r "$ENV_FILE" ]] || { echo "missing $ENV_FILE (copy stack.env.example, chmod 600)" >&2; exit 2; }
+requested_git_commit="${AEEIS_GIT_COMMIT:-}"
 set -a
 # shellcheck source=/dev/null
 . "$ENV_FILE"
+# Explicit shell/systemd settings win, followed by the selected env file.
+# Keep this separate from release state so deploy cannot reuse the old SHA.
+AEEIS_CONFIG_GIT_COMMIT="${requested_git_commit:-${AEEIS_GIT_COMMIT:-}}"
 export AEEIS_STACK="${AEEIS_STACK:-aeeis-cn-prod}"
 [[ "$AEEIS_STACK" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "invalid AEEIS_STACK" >&2; exit 2; }
 # State is isolated even when drill and production use the same checkout.
@@ -36,6 +40,19 @@ if [[ -r "$CURRENT_FILE" ]]; then
   [[ "$AEEIS_STACK" == "$selected_stack" ]] || { echo "state file stack mismatch: $CURRENT_FILE" >&2; exit 2; }
 fi
 set +a
+
+image_git_commit() {
+  local ref="$1" revision tag
+  revision="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  if [[ "$revision" =~ ^[a-fA-F0-9]{7,40}$ ]]; then printf '%s' "$revision"; return; fi
+  tag="${ref##*:}"
+  if [[ "$ref" != *@* && "$tag" =~ ^([a-fA-F0-9]{7,40})(-dirty[0-9]+)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"; return
+  fi
+  printf '%s' unknown
+}
+export AEEIS_GIT_COMMIT="${AEEIS_CONFIG_GIT_COMMIT:-${AEEIS_GIT_COMMIT:-$(image_git_commit "${AEEIS_IMAGE_REGISTRY:+$AEEIS_IMAGE_REGISTRY/}${AEEIS_IMAGE:-aeeis:unknown}")}}"
+[[ "$AEEIS_GIT_COMMIT" =~ ^([a-fA-F0-9]{7,40}|unknown)$ ]] || { echo "AEEIS_GIT_COMMIT must be a git SHA or unknown" >&2; exit 2; }
 # The selected file is also the container env_file. Use an absolute path so
 # callers can select it from any directory. STACK_ENV_FILE is not an AEEIS
 # *_FILE secret (AEEIS_ENV_FILE would collide with AEEIS_ENV at startup).

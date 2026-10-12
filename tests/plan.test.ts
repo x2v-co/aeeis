@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createPlan, transitionTask } from "../src/domain/plan.js";
-import { decisionSchema, requestSchema, validatePlan } from "../src/runtime/contracts.js";
+import { decisionSchema, normalizePlanOutput, requestSchema, validatePlan } from "../src/runtime/contracts.js";
 import { digest } from "../src/runtime/engine.js";
 
 describe("model plan parsing", () => {
@@ -17,6 +17,7 @@ describe("model plan parsing", () => {
   it("unwraps fenced/stringified plans and defaults absent dependencies", () => {
     const { dependsOn: _unused, ...node } = draft.nodes[0]!;
     expect(validatePlan('```json\n' + JSON.stringify({ plan: JSON.stringify({ ...draft, nodes: [node] }) }) + '\n```')).toEqual(draft);
+    expect(validatePlan({ plan: draft, metadata: 'legacy envelope' })).toEqual(draft);
     expect(() => validatePlan({ plan: { ...draft, nodes: [{ ...node, dependsOn: ['missing'] }] } })).toThrow('missing dependency');
   });
 
@@ -26,6 +27,21 @@ describe("model plan parsing", () => {
     expect(() => validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], dependsOn: ["pulse", "pulse"] }] })).toThrow("Duplicate dependency");
     expect(() => validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], dependsOn: ["pulse"] }] })).toThrow("cycle");
     expect(() => validatePlan({ ...draft, nodes: [draft.nodes[0], draft.nodes[0]] })).toThrow("Duplicate task ID");
+  });
+
+  it.each([undefined, null, '', '   '])('fills a missing or empty instruction (%s) from descriptive node fields', instruction => {
+    expect(validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], instruction, description: 'Read the CSV and report totals' }] }).nodes[0]?.instruction).toBe('Read the CSV and report totals');
+    expect(validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], instruction, goal: 'Summarize the project' }] }).nodes[0]?.instruction).toBe('Summarize the project');
+    expect(validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], instruction }] }).nodes[0]?.instruction).toBe('Pulse');
+    expect(normalizePlanOutput({ nodes: [{ instruction, name: 'Read sources' }] })).toEqual({ nodes: [{ instruction: 'Read sources', name: 'Read sources' }] });
+  });
+
+  it('balances braces inside quoted/escaped JSON and preserves executable instructions', () => {
+    const plan = { ...draft, summary: 'Literal { braces } and "quotes"', nodes: [{ ...draft.nodes[0], description: 'Do something else' }] };
+    expect(validatePlan('## Plan\n' + JSON.stringify({ response: { data: plan } }) + '\nTrailing prose {ignored}')).toEqual({ ...draft, summary: plan.summary });
+    expect(() => validatePlan('Prose {"summary":"unfinished"')).toThrow();
+    expect(() => validatePlan({ result: draft, metadata: true })).toThrow();
+    expect(() => validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], instruction: 123 }] })).toThrow();
   });
 });
 

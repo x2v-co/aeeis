@@ -13,6 +13,7 @@ trap 'rm -rf "$test_dir" "$selftest_stack"' EXIT
 cp -a "$STACK_DIR/bin" "$STACK_DIR/systemd" "$selftest_stack/"
 STACK_DIR="$selftest_stack"
 export FAKE_LOG="$test_dir/docker.log" FAKE_IMAGES="$test_dir/images" FAKE_STACK_DIR="$STACK_DIR"
+export FAKE_RELEASE_LOG="$test_dir/releases.log"
 export AEEIS_ENV_FILE="$test_dir/stack.env" AEEIS_CURRENT_FILE="$test_dir/no-current.env"
 export AEEIS_ALLOW_DIRTY=1 COMPOSE_PROJECT_NAME=aeeis-cn
 cat > "$AEEIS_ENV_FILE" <<'ENV'
@@ -28,6 +29,9 @@ from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as f:
     f.write(json.dumps(args) + '\n')
+if args[0] == 'build' or (args[0] == 'compose' and 'up' in args):
+    with open(os.environ['FAKE_RELEASE_LOG'], 'a') as f:
+        f.write(json.dumps({'args': args, 'commit': os.getenv('AEEIS_GIT_COMMIT')}) + '\n')
 images = Path(os.environ['FAKE_IMAGES'])
 local = set(images.read_text().splitlines())
 registry = os.getenv('AEEIS_IMAGE_REGISTRY', '')
@@ -82,7 +86,12 @@ elif args[0] == 'inspect':
     name = 'aeeis-cn-prod-postgres' if os.getenv('FAKE_LEGACY') == 'shared' else 'old-postgres'
     print(json.dumps([{'Name': '/old-api', 'Mounts': [{'Type': 'volume', 'Name': name}]}]))
 elif args[:2] == ['image', 'inspect']:
+    if '--format' in args and args[2] in local: print(os.getenv('FAKE_REVISION', ''))
     sys.exit(0 if args[2] in local else 1)
+elif args[0] == 'build':
+    assert '--build-arg' in args and args[args.index('--build-arg')+1].startswith('AEEIS_GIT_COMMIT='), args
+    local.add(args[args.index('-t')+1])
+    images.write_text('\n'.join(sorted(local)) + '\n')
 elif args[0] == 'pull':
     ref = args[1]
     if mode == 'all-fail' or (mode == 'postgres-fail' and 'postgres:' in ref): sys.exit(1)
@@ -114,7 +123,8 @@ chmod +x "$test_dir/bin/docker"
 export PATH="$test_dir/bin:$PATH"
 reset_fake() {
   : > "$FAKE_LOG"; : > "$FAKE_IMAGES"
-  unset FAKE_MODE FAKE_VOLUME_OWNER FAKE_LEGACY FAKE_TARGET_CONTAINER AEEIS_IMAGE_REGISTRY AEEIS_LEGACY_STACK
+  : > "$FAKE_RELEASE_LOG"
+  unset FAKE_MODE FAKE_VOLUME_OWNER FAKE_LEGACY FAKE_TARGET_CONTAINER FAKE_REVISION AEEIS_IMAGE_REGISTRY AEEIS_LEGACY_STACK
 }
 expect_failure() {
   if "$@" > "$test_dir/output" 2>&1; then echo "unexpected success: $*" >&2; exit 1; fi
@@ -269,6 +279,45 @@ sed -i 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.current.a
 sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
 echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate and stack state isolation passed'
+
+# Release identity: explicit shell > selected env file > image label > hex tag.
+# The old state SHA must never leak into a new --no-build deployment.
+reset_fake
+export FAKE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+deploy > "$test_dir/output" 2>&1
+grep -Fxq "AEEIS_GIT_COMMIT=$FAKE_REVISION" "$STACK_DIR/.current.aeeis-drill.env"
+python3 - <<'PY'
+import json,os
+calls=list(map(json.loads,open(os.environ['FAKE_RELEASE_LOG'])))
+assert calls and all(c['commit']==os.environ['FAKE_REVISION'] for c in calls), calls
+PY
+reset_fake
+AEEIS_DEPLOY_IMAGE=aeeis:bbbbbbb "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" --no-build > "$test_dir/output" 2>&1
+grep -Fxq 'AEEIS_GIT_COMMIT=bbbbbbb' "$STACK_DIR/.current.aeeis-drill.env"
+printf 'AEEIS_GIT_COMMIT=ccccccc\n' >> "$AEEIS_ENV_FILE"
+reset_fake
+export FAKE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+deploy > "$test_dir/output" 2>&1
+grep -Fxq 'AEEIS_GIT_COMMIT=ccccccc' "$STACK_DIR/.current.aeeis-drill.env"
+AEEIS_GIT_COMMIT=ddddddd deploy > "$test_dir/output" 2>&1
+grep -Fxq 'AEEIS_GIT_COMMIT=ddddddd' "$STACK_DIR/.current.aeeis-drill.env"
+sed -i '/^AEEIS_GIT_COMMIT=/d' "$AEEIS_ENV_FILE"
+reset_fake
+"$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" > "$test_dir/output" 2>&1
+export FAKE_EXPECT_COMMIT="$(git -C "$STACK_DIR/../.." rev-parse HEAD)"
+python3 - <<'PY'
+import json,os
+calls=list(map(json.loads,open(os.environ['FAKE_RELEASE_LOG'])))
+build=next(c for c in calls if c['args'][0]=='build')
+assert 'AEEIS_GIT_COMMIT='+os.environ['FAKE_EXPECT_COMMIT'] in build['args'], build
+assert all(c['commit']==os.environ['FAKE_EXPECT_COMMIT'] for c in calls), calls
+PY
+"$STACK_DIR/bin/stack.sh" start > "$test_dir/output" 2>&1
+python3 - <<'PY'
+import json,os
+assert list(map(json.loads,open(os.environ['FAKE_RELEASE_LOG'])))[-1]['commit']==os.environ['FAKE_EXPECT_COMMIT']
+PY
+echo 'stack selftest: git commit build, label/tag fallback, env precedence and restart persistence passed'
 
 # Run the real backup entrypoints with fake Docker and PostgreSQL clients.
 export FAKE_PG_LOG="$test_dir/pg.log"

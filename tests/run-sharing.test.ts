@@ -124,14 +124,17 @@ describe('durable model failure diagnostics', () => {
   it('persists planning schema errors, raw output and bundle diagnostics across restart', async () => {
     const bad: ModelAdapter = { pin, complete: async () => ({ value: { summary: 'Invalid plan', apiKey: 'planning-secret', extra: 'a'.repeat(20000) }, rawOutput: '{"summary":"Invalid plan","apiKey":"planning-secret"}' }) };
     const { engine, run, repo, directory } = await setup(bad);
-    expect(await engine.advance(run.id)).toBe('failed');
+    // The first invalid plan schedules one durable repair attempt.
+    let status = await engine.advance(run.id);
+    for (let i = 0; i < 3 && status !== 'failed'; i++) status = await engine.advance(run.id);
+    expect(status).toBe('failed');
     const persisted = JSON.parse(await readFile(join(directory, `${run.id}.json`), 'utf8'));
     expect(persisted.calls[0].validationErrors).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'nodes' })]));
     expect(persisted.calls[0].rawOutput).toContain('Invalid plan');
     expect(persisted.calls[0].rawOutput).not.toContain('planning-secret');
     expect(persisted.events.find((e: any) => e.type === 'run.failed').data).toHaveProperty('rawOutput');
     await repo.close(); await repo.init();
-    expect(debugBundle(await repo.get(run.id)).validationErrors).toHaveLength(1);
+    expect(debugBundle(await repo.get(run.id)).validationErrors).toHaveLength(2);
   });
   it('records invalid JSON provider output and validation errors', async () => {
     const bad: ModelAdapter = { pin, complete: async () => { throw new ModelResponseRejected('Model response did not contain valid JSON', { inputTokens: 1, outputTokens: 2 }, 'Not JSON api_key=provider-secret'); } };

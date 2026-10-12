@@ -1,5 +1,6 @@
 import { condition, continueAsNew, defineSignal, patched, proxyActivities, setHandler } from '@temporalio/workflow';
 import type { AdvanceReminderActivityResult, AdvanceRunActivityResult } from './activity.js';
+import { decideRunAdvance } from './run-advance.js';
 
 const retry = {
   initialInterval: '1 second', backoffCoefficient: 2, maximumInterval: '30 seconds', maximumAttempts: 5,
@@ -14,23 +15,35 @@ const { advanceRun } = proxyActivities<{
 const { advanceReminder } = proxyActivities<{
   advanceReminder(id: string): Promise<AdvanceReminderActivityResult>;
 }>({ startToCloseTimeout: '2 minutes', scheduleToCloseTimeout: '3 minutes', retry });
-export async function agentRunWorkflow(runId: string): Promise<void> {
+export async function agentRunWorkflow(runId: string, pollState?: { previousProgress?: string; stalled: number }): Promise<void> {
   let wake = false;
+  let previousProgress = pollState?.previousProgress;
+  let stalled = pollState?.stalled ?? 0;
   setHandler(defineSignal('wake'), () => { wake = true; });
   for (let ticks = 0; ticks < 100; ticks++) {
     wake = false;
-    let status: string;
-    try { status = (await advanceRun(runId)).status; }
+    let result: AdvanceRunActivityResult;
+    try { result = await advanceRun(runId); }
     catch (error) {
       // Permanent auth/config/protocol failures wait for an explicit wake after
       // operator correction. Transport failures get a durable timer retry.
       await condition(() => wake, hasNonRetryableCause(error) ? undefined : '30 seconds');
       continue;
     }
+    const status = result.status;
     if (['succeeded', 'cancelled'].includes(status)) return;
     // Preserve old histories that already emitted a wait command for failed.
     if (status === 'failed' && patched('terminal-failed-run-v1')) return;
-    if (!['queued', 'planning', 'running', 'reviewing'].includes(status)) {
+    if (patched('run-advance-progress-backoff-v1')) {
+      const decision = decideRunAdvance(result, previousProgress, stalled);
+      previousProgress = result.progress;
+      stalled = decision.stalled;
+      if (decision.kind === 'terminal') return;
+      if (decision.kind === 'wait') await condition(() => wake);
+      else if (decision.delayMs) await condition(() => wake, decision.delayMs);
+      // An explicit wake authorizes a fresh bounded series of advances.
+      if (wake) { stalled = 0; previousProgress = undefined; }
+    } else if (!['queued', 'planning', 'running', 'reviewing'].includes(status)) {
       // Approval, input, external reconciliation
       // are business states owned by AEEIS. Polling them every 30 seconds
       // creates needless Activity load and can hide a stuck long-running Run;
@@ -38,7 +51,9 @@ export async function agentRunWorkflow(runId: string): Promise<void> {
       await condition(() => wake);
     }
   }
-  await continueAsNew<typeof agentRunWorkflow>(runId);
+  if (patched('run-advance-progress-backoff-v1')) {
+    await continueAsNew<typeof agentRunWorkflow>(runId, { stalled, ...(previousProgress === undefined ? {} : { previousProgress }) });
+  } else await continueAsNew<typeof agentRunWorkflow>(runId);
 }
 
 /**

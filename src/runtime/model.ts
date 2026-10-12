@@ -6,6 +6,8 @@ export interface ModelRequest {
   system: string; input: unknown; idempotencyKey?: string;
   /** Include provider text for durable Runtime diagnostics. */
   includeRawOutput?: boolean;
+  /** Delegate completed text output to the caller's schema/format validation. */
+  allowTextOutput?: boolean;
   /** Overrides the pin's initial output allowance. */
   maxTokens?: number;
   /** Check cumulative billable usage before an internal length retry. */
@@ -162,7 +164,10 @@ export class HttpModelAdapter implements ModelAdapter {
       if (choice.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage, choice.message.content);
       let value: unknown;
       try { value = JSON.parse(choice.message.content); }
-      catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage, choice.message.content); }
+      catch {
+        if (!request.allowTextOutput) throw new ModelResponseRejected('Model response did not contain valid JSON', usage, choice.message.content);
+        value = choice.message.content;
+      }
       return { value, ...(request.includeRawOutput ? { rawOutput: choice.message.content } : {}), ...(usage ? { usage } : {}) };
     }
     throw new ModelResponseRejected('Model response is incomplete', usage);

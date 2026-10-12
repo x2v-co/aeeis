@@ -39,9 +39,9 @@ describe('AEEIS Temporal workflow', () => {
   }, 120_000);
 
   afterAll(async () => {
-    await worker.shutdown();
+    await worker?.shutdown();
     await workerRun;
-    await environment.teardown();
+    await environment?.teardown();
   }, 120_000);
 
   it('finishes when the activity reports a terminal status', async () => {
@@ -138,13 +138,13 @@ describe('AEEIS Temporal workflow', () => {
     }
   }, 120_000);
 
-  it('does not poll a business wait state until the API signals progress', async () => {
+  it.each(['needs_approval', 'unknown'])('does not poll %s until the API signals progress', async status => {
     let calls = 0;
     let firstCallResolve!: () => void;
     let secondCallResolve!: () => void;
     const firstCall = new Promise<void>(resolve => { firstCallResolve = resolve; });
     const secondCall = new Promise<void>(resolve => { secondCallResolve = resolve; });
-    const queue = `${taskQueue}-business-wait`;
+    const queue = `${taskQueue}-business-wait-${status}`;
     const localWorker = await Worker.create({
       connection: environment.nativeConnection,
       namespace: environment.namespace,
@@ -153,7 +153,7 @@ describe('AEEIS Temporal workflow', () => {
       activities: {
         advanceRun: async () => {
           calls += 1;
-          if (calls === 1) { firstCallResolve(); return { status: 'needs_approval' }; }
+          if (calls === 1) { firstCallResolve(); return { status }; }
           secondCallResolve();
           return { status: 'succeeded' };
         },
@@ -162,10 +162,10 @@ describe('AEEIS Temporal workflow', () => {
     const localRun = localWorker.run();
     try {
       const handle = await environment.client.workflow.start('agentRunWorkflow', {
-        workflowId: 'temporal-business-wait', taskQueue: queue, args: ['run-business-wait'],
+        workflowId: `temporal-business-wait-${status}`, taskQueue: queue, args: ['run-business-wait'],
       });
       await firstCall;
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await environment.sleep(60_000);
       expect(calls).toBe(1);
       await handle.signal('wake');
       await secondCall;
@@ -205,6 +205,44 @@ describe('AEEIS Temporal workflow', () => {
       await localWorker.shutdown();
       await localRun;
     }
+  }, 120_000);
+
+  it('uses bounded durable backoff for unchanged active results, parks, and resets on wake', async () => {
+    let calls = 0;
+    let finish = false;
+    const queue = `${taskQueue}-stalled`;
+    const localWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
+      activities: { advanceRun: async () => {
+        calls++;
+        return { status: finish ? 'succeeded' : 'planning', progress: 'unchanged' };
+      } },
+    });
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', {
+        workflowId: 'temporal-stalled', taskQueue: queue, args: ['run-stalled'],
+      });
+      try {
+        await environment.sleep(120_000);
+        // First observation establishes progress, then eight unchanged attempts.
+        expect(calls).toBe(9);
+        const history = await handle.fetchHistory();
+        const timers = history.events?.flatMap(event => {
+          const timeout = event.timerStartedEventAttributes?.startToFireTimeout;
+          return timeout ? [Number(timeout.seconds)] : [];
+        });
+        expect(timers).toEqual([1, 2, 4, 8, 16, 30, 30]);
+        await environment.sleep(300_000);
+        expect(calls).toBe(9);
+        expect((await handle.describe()).status.name).toBe('RUNNING');
+        finish = true;
+        await handle.signal('wake');
+        await expect(handle.result()).resolves.toBeUndefined();
+        expect(calls).toBe(10);
+      } finally {
+        if ((await handle.describe()).status.name === 'RUNNING') await handle.terminate('test cleanup');
+      }
+    });
   }, 120_000);
 
   it('retries transient Reminder activity failures without duplicating the workflow', async () => {
@@ -319,7 +357,7 @@ describe('AEEIS Temporal workflow', () => {
       activities: {
         advanceRun: async () => {
           calls += 1;
-          return { status: calls > 100 ? 'succeeded' : 'queued' };
+          return { status: calls > 100 ? 'succeeded' : 'queued', progress: `tick-${calls}` };
         },
       },
     });
@@ -355,6 +393,34 @@ describe('AEEIS Temporal workflow', () => {
         await new Promise(resolve => setTimeout(resolve, 100));
         expect((await handle.describe()).status.name).toBe('RUNNING');
         await expect(Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId)).resolves.toBeUndefined();
+      } finally { await handle.terminate('test cleanup'); }
+    });
+  }, 120_000);
+
+  it('replays an old active loop without introducing progress timers into its history', async () => {
+    const queue = `${taskQueue}-active-history`;
+    let calls = 0;
+    let parked!: () => void;
+    const waiting = new Promise<void>(resolve => { parked = resolve; });
+    const oldWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace,
+      taskQueue: queue, workflowBundle: preTerminalBundle,
+      activities: { advanceRun: async () => {
+        calls++;
+        if (calls === 4) { parked(); return { status: 'unknown' }; }
+        return { status: 'planning' };
+      } },
+    });
+    await oldWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', {
+        workflowId: 'temporal-pre-backoff-history', taskQueue: queue, args: ['active-run'],
+      });
+      try {
+        await waiting;
+        await environment.sleep(60_000);
+        const history = await handle.fetchHistory();
+        expect(history.events?.some(event => event.timerStartedEventAttributes)).toBe(false);
+        await expect(Worker.runReplayHistory({ workflowBundle }, history, handle.workflowId)).resolves.toBeUndefined();
       } finally { await handle.terminate('test cleanup'); }
     });
   }, 120_000);
