@@ -231,6 +231,8 @@ export interface AgentRun {
   taskExecution?: { domainPlanId: string; taskId: string; requestHash: string };
   followUpPlanId?: string;
   status: RunStatus; createdAt: string; updatedAt: string;
+  cancellation?: { reason: string; actor: string; at: string; source: 'api' };
+  reconciliation?: { workflowStatus: string; previousStatus: RunStatus; actor: string; at: string; reason: string };
   context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;

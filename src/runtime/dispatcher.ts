@@ -1,4 +1,5 @@
-import { Client, Connection, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
+import { Client, Connection, isGrpcDeadlineError, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { AgentEngine } from './engine.js';
 import { validateInternalEndpoint } from '../internal-endpoint.js';
 
@@ -43,8 +44,25 @@ export async function notifyTemporalRunWorkflow(client: TemporalRunWorkflowClien
 export const BOOT_RECOVERABLE_RUN_STATUSES: readonly string[] = ['queued', 'planning', 'running', 'reviewing'];
 export function isBootRecoverableRun(status: string): boolean { return BOOT_RECOVERABLE_RUN_STATUSES.includes(status); }
 
+export type WorkflowStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELED' | 'TERMINATED' | 'TIMED_OUT' | 'CONTINUED_AS_NEW' | 'NOT_FOUND';
+export interface WorkflowCancellation { outcome: 'cancelled' | 'terminated' | 'not_found' | 'already_closed' | 'unsupported' }
+function workflowStatus(name: string): WorkflowStatus {
+  // The TypeScript SDK spells this status CANCELLED; the API uses CANCELED.
+  if (name === 'CANCELLED') return 'CANCELED';
+  if (['RUNNING', 'COMPLETED', 'FAILED', 'CANCELED', 'TERMINATED', 'TIMED_OUT', 'CONTINUED_AS_NEW', 'NOT_FOUND'].includes(name)) return name as WorkflowStatus;
+  throw new Error(`Unknown Temporal workflow status: ${name}`);
+}
+function cancelTimeoutMs(): number {
+  const value = Number(process.env.AEEIS_RUN_CANCEL_TIMEOUT_MS ?? 10_000);
+  if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('AEEIS_RUN_CANCEL_TIMEOUT_MS must be a positive integer');
+  return value;
+}
+
 export interface Dispatcher {
   notify(id: string): Promise<void>;
+  cancel?(id: string, reason?: string): Promise<WorkflowCancellation>;
+  /** Describe the latest execution of a workflow ID, without pinning a run ID. */
+  describe?(id: string): Promise<{ status: WorkflowStatus }>;
   /** Wake or start the durable timer workflow for a Reminder when supported. */
   notifyReminder?(id: string): Promise<void>;
   close(): Promise<void>;
@@ -67,6 +85,7 @@ export class LocalDispatcher implements Dispatcher {
     void work.catch(error => console.error('Local run driver failed', error instanceof Error ? error.name : 'Error'));
   }
   async close(): Promise<void> { this.closing = true; await Promise.allSettled(this.jobs.values()); }
+  async cancel(_id: string, _reason?: string): Promise<WorkflowCancellation> { return { outcome: 'unsupported' }; }
   async health(): Promise<{ ready: boolean; detail: string }> { return { ready: !this.closing, detail: this.closing ? 'local dispatcher is closing' : 'LocalDispatcher ready' }; }
 }
 export class TemporalDispatcher implements Dispatcher {
@@ -78,6 +97,41 @@ export class TemporalDispatcher implements Dispatcher {
   }
   async notify(id: string): Promise<void> {
     await notifyTemporalRunWorkflow(this.client, this.taskQueue, id);
+  }
+  async describe(id: string): Promise<{ status: WorkflowStatus }> {
+    try {
+      const description = await this.client.withDeadline(Date.now() + 10_000, () => this.client.workflow.getHandle(id).describe());
+      return { status: workflowStatus(description.status.name) };
+    } catch (error) {
+      if (error instanceof WorkflowNotFoundError) return { status: 'NOT_FOUND' };
+      throw error;
+    }
+  }
+  async cancel(id: string, reason?: string): Promise<WorkflowCancellation> {
+    const timeoutMs = cancelTimeoutMs();
+    const handle = this.client.workflow.getHandle(id);
+    const deadline = Date.now() + timeoutMs;
+    const describe = () => this.client.withDeadline(deadline, () => handle.describe());
+    const closed = (status: string) => status !== 'RUNNING' && status !== 'CONTINUED_AS_NEW';
+    try {
+      if (closed(workflowStatus((await describe()).status.name))) return { outcome: 'already_closed' };
+      await this.client.withDeadline(deadline, () => handle.cancel());
+      try {
+        while (Date.now() < deadline) {
+          const status = workflowStatus((await describe()).status.name);
+          if (closed(status)) return { outcome: status === 'CANCELED' ? 'cancelled' : status === 'TERMINATED' ? 'terminated' : 'already_closed' };
+          await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+        }
+      } catch (error) {
+        if (!isGrpcDeadlineError(error)) throw error;
+      }
+      await this.client.withDeadline(Date.now() + timeoutMs, () => handle.terminate(reason));
+      return { outcome: 'terminated' };
+    } catch (error) {
+      // Temporal also reports already-completed executions as not found.
+      if (error instanceof WorkflowNotFoundError) return { outcome: 'not_found' };
+      throw error;
+    }
   }
   async notifyReminder(id: string): Promise<void> {
     const workflowId = `aeeis-reminder-${id}`;
