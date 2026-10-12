@@ -17,7 +17,7 @@ import { createContextPack, delegationGrantSchema } from '../protocol.js';
 import type { PendingDelegation } from './contracts.js';
 import { normalizeKnowledgeSearchResult, validateKnowledgeHits, type KnowledgeProvider } from '../knowledge.js';
 import { projectSourceSyncReceiptSchema, synchronizeProjectSources, validateProjectSources, type ProjectSourceCheckpointStore, type ProjectSourceProvider, type ProjectSourceSyncReceipt } from '../project-sources.js';
-import { claimDigest, type BrainPersistence, type GovernedBrain, type BrainSemanticSearcher } from '../brain.js';
+import { claimDigest, type BrainAudit, type BrainClaim, type BrainPersistence, type GovernedBrain, type BrainSemanticSearcher } from '../brain.js';
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
@@ -552,12 +552,19 @@ export class AgentEngine {
     }
     if (request.brainScope && !this.brain) throw new Error('brainScope was requested but Brain is not configured');
     if (request.brainScope && this.brain) {
-      const claims = await prepare('brain', async () => {
-        const result = request.brainQuery
+      const retrieved = await prepare<BrainClaim[] | { claims: BrainClaim[]; audit: BrainAudit[] }>('brain', async () => {
+        const auditStart = this.brain!.auditLog().length;
+        const claims = request.brainQuery
           ? await this.brain!.searchSemantic(request.brainScope!, request.brainQuery, principal, request.privacy, request.brainMaxItems, this.brainSemanticSearcher)
           : this.brain!.read(request.brainScope!, principal, request.privacy);
-        if (this.brainPersistence) await this.brainPersistence.save(this.brain!);
-        return result;
+        return { claims, audit: this.brain!.auditLog().slice(auditStart) };
+      });
+      // Legacy claim-only checkpoints already persisted their audit. New ones
+      // freeze retrieval before saving, so a failed save cannot repeat a search.
+      const claims = Array.isArray(retrieved) ? retrieved : retrieved.claims;
+      if (this.brainPersistence && !Array.isArray(retrieved)) await prepare('brain-persistence', async () => {
+        this.brain!.restoreAudit(retrieved.audit);
+        await this.brainPersistence!.save(this.brain!);
       });
       for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim), contentHash: materialContentHash(claim.content), kind: 'brain', classification: claim.classification });
     }

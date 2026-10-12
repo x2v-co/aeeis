@@ -201,7 +201,7 @@ export function threadFollowupContract(name: string, setup: () => Promise<{ repo
       await expect(service.followUp(thread.id, input, threadScope)).rejects.toThrow('interrupted before prepared checkpoint');
       const reservation = (await repository.getThreadFollowup(thread.id, followupHash(key), threadScope))!;
       expect(reservation.contextSnapshot.run).toBeUndefined();
-      expect(reservation.contextSnapshot.preparation?.brain).toEqual({ state: 'completed', value: [first] });
+      expect(reservation.contextSnapshot.preparation?.brain).toEqual({ state: 'completed', value: { claims: [first], audit: brain.auditLog().filter(entry => entry.action === 'read') } });
       await expect(repository.get(reservation.runId)).rejects.toThrow(NotFound);
       const later = addClaim('Evidence added between attempts'); hits = [...hits, { claimId: later.id, score: 0.9 }];
       checkpoint.mockRestore();
@@ -214,6 +214,58 @@ export function threadFollowupContract(name: string, setup: () => Promise<{ repo
       expect(mode === 'semantic' ? search : read).toHaveBeenCalledOnce();
       expect(persistence.save).toHaveBeenCalledOnce();
       expect(await repository.listRunsByThread(thread.id)).toHaveLength(2);
+    });
+    it.each([
+      ['read', 'retry'], ['read', 'recovery'], ['semantic', 'retry'], ['semantic', 'recovery'],
+    ])('preserves Brain %s retrieval and audit after a persistence failure through %s', async (mode, path) => {
+      const brain = new GovernedBrain(), principal = { id: threadScope.owner, tenantId: threadScope.tenantId, roles: ['owner'] };
+      const claimInput = { ...threadScope, scope: 'project' as const, scopeRef: 'project', classification: 'internal' as const, kind: 'fact' as const, content: 'Original evidence', sourceRefs: [], confidence: 1 };
+      const first = brain.addClaim(claimInput, principal);
+      let persisted = brain.state(), hits = [{ claimId: first.id, score: 1 }];
+      const search = vi.fn(async () => hits), read = vi.spyOn(brain, 'read');
+      const persistence = {
+        init: vi.fn(), load: vi.fn(async () => GovernedBrain.fromState(persisted)), close: vi.fn(),
+        save: vi.fn(async (current: GovernedBrain) => { persisted = current.state(); }).mockRejectedValueOnce(new Error('Brain persistence unavailable')),
+      };
+      const services = { model: followupModel(), brain, brainPersistence: persistence, brainSemanticSearcher: { search } };
+      service = new ThreadService(repository, new AgentEngine(repository, services));
+      const input = { ...body, request: { goal: 'next', brainScope: 'project', ...(mode === 'semantic' ? { brainQuery: 'evidence' } : {}) } };
+      await expect(service.followUp(thread.id, input, threadScope)).rejects.toThrow('Brain persistence unavailable');
+      const reservation = (await repository.getThreadFollowup(thread.id, followupHash(key), threadScope))!;
+      await expect(repository.get(reservation.runId)).rejects.toThrow(NotFound);
+      const audit = brain.auditLog().filter(entry => entry.action === 'read');
+      expect(audit).toHaveLength(1);
+      // Simulate boot from durable Brain state, where the failed save left no read audit.
+      const restored = await persistence.load(), restoredRead = vi.spyOn(restored, 'read');
+      const later = restored.addClaim({ ...claimInput, content: 'Evidence added between attempts' }, principal);
+      persisted = restored.state(); hits = [...hits, { claimId: later.id, score: 0.9 }];
+      service = new ThreadService(repository, new AgentEngine(repository, { ...services, brain: restored }));
+      if (path === 'recovery') await service.recover();
+      const run = await service.followUp(thread.id, input, threadScope);
+      expect(mode === 'semantic' ? search : read).toHaveBeenCalledOnce();
+      expect(restoredRead).not.toHaveBeenCalled();
+      expect(run.context.sources.filter(source => source.kind === 'brain')).toMatchObject([{ id: first.id, content: first.content }]);
+      expect(persisted.audit.filter(entry => entry.action === 'read')).toEqual(audit);
+      expect(persisted.claims.map(claim => claim.id)).toEqual([first.id, later.id]);
+      await service.recover(); await service.followUp(thread.id, input, threadScope);
+      expect(persistence.save).toHaveBeenCalledTimes(2);
+      expect(await repository.listRunsByThread(thread.id)).toHaveLength(2);
+    });
+    it('reuses legacy claim-only Brain checkpoints without another read or audit save', async () => {
+      const brain = new GovernedBrain(), principal = { id: threadScope.owner, tenantId: threadScope.tenantId, roles: ['owner'] };
+      const first = brain.addClaim({ ...threadScope, scope: 'project', scopeRef: 'project', classification: 'internal', kind: 'fact', content: 'Original evidence', sourceRefs: [], confidence: 1 }, principal);
+      const input = { ...body, request: { goal: 'next', brainScope: 'project' } };
+      await expect(new ThreadService(repository).followUp(thread.id, input, threadScope)).rejects.toThrow('Model runtime is not configured');
+      const reservation = (await repository.getThreadFollowup(thread.id, followupHash(key), threadScope))!;
+      reservation.contextSnapshot.preparation = { brain: { state: 'completed', value: [first] } };
+      await repository.saveThreadFollowup(reservation, threadScope);
+      brain.addClaim({ ...threadScope, scope: 'project', scopeRef: 'project', classification: 'internal', kind: 'fact', content: 'Later evidence', sourceRefs: [], confidence: 1 }, principal);
+      const read = vi.spyOn(brain, 'read'), persistence = { init: vi.fn(), load: vi.fn(), save: vi.fn(), close: vi.fn() };
+      service = new ThreadService(repository, new AgentEngine(repository, { model: followupModel(), brain, brainPersistence: persistence }));
+      await service.recover();
+      const run = await service.followUp(thread.id, input, threadScope);
+      expect(run.context.sources.filter(source => source.kind === 'brain')).toMatchObject([{ id: first.id, content: first.content }]);
+      expect(read).not.toHaveBeenCalled(); expect(persistence.save).not.toHaveBeenCalled();
     });
     it('keeps an unpublished connector result reserved and never automatically resends it', async () => {
       const search = vi.fn(async () => []);
