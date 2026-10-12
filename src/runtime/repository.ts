@@ -160,10 +160,12 @@ export class FileRunRepository implements RunRepository {
     const file = await open(temp, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(run)); await file.sync(); } finally { await file.close(); }
     await rename(temp, path);
+    // Keep cached summaries aligned with the canonical commit even if a
+    // later projection write fails; retries may not call save again.
+    this.summaries?.set(run.id, this.summary(run));
     // The event file is a disposable projection. If this write fails, the
     // canonical aggregate remains authoritative and eventsPage falls back to it.
     await this.saveEvents(run);
-    this.summaries?.set(run.id, this.summary(run));
     // The index is a disposable acceleration structure. Canonical Run and
     // event files are already durable; if index publication fails, the next
     // process rebuilds it from those files.
