@@ -1,7 +1,7 @@
 # AEEIS single-host full stack: API + Temporal Worker + Temporal (PostgreSQL
 # persistence) + AEEIS PostgreSQL. One copy runs per region (ADR-0001):
-#   AEEIS-CN on kk-cn   -> AEEIS_STACK=aeeis-cn, AEEIS_TASK_QUEUE=aeeis-cn
-#   AEEIS-SG on aeeis-sg -> AEEIS_STACK=aeeis-sg, AEEIS_TASK_QUEUE=aeeis-sg
+#   AEEIS-CN on kk-cn   -> AEEIS_STACK=aeeis-cn-prod, AEEIS_TASK_QUEUE=aeeis-agent
+#   AEEIS-SG on aeeis-sg -> AEEIS_STACK=aeeis-sg-prod, AEEIS_TASK_QUEUE=aeeis-agent
 #
 # Network design
 # --------------
@@ -21,10 +21,10 @@
 # STACK_ENV_FILE must be supplied by that explicitly selected env file;
 # there is deliberately no automatic stack.env fallback in Compose.
 
-name: ${AEEIS_STACK:?Set AEEIS_STACK, e.g. aeeis-cn or aeeis-sg}
+name: ${AEEIS_STACK:-aeeis-cn-prod}
 
 x-aeeis-image: &aeeis-image
-  image: ${AEEIS_IMAGE:-aeeis:local}
+  image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_IMAGE:-aeeis:local}
   init: true
   restart: unless-stopped
   logging:
@@ -35,7 +35,7 @@ services:
   netns:
     # Independently pinned (NOT the release image) so upgrades never recreate
     # the namespace holder underneath a draining API/Worker.
-    image: ${AEEIS_NETNS_IMAGE:-alpine:3.20}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_NETNS_IMAGE:-alpine:3.20}
     init: true
     restart: unless-stopped
     command: ["sleep", "infinity"]
@@ -47,7 +47,7 @@ services:
     networks: [aeeis]
 
   temporal-postgres:
-    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_USER: temporal
@@ -67,8 +67,12 @@ services:
 
   temporal:
     # auto-setup creates/upgrades the Temporal SQL schema and the namespace on
-    # every start (idempotent). Pin the tag; upgrade one minor at a time.
-    image: ${AEEIS_TEMPORAL_IMAGE:-temporalio/auto-setup:1.29.7}
+    # every start (idempotent), for BOTH persistence and visibility.
+    # Migration checkpoints: 1.24.2 -> 1.25.2 -> 1.27.4 -> 1.29.7.
+    # At EACH hop update both schemas with that image, start only Temporal,
+    # verify health/schema versions and allow shard migration before proceeding.
+    # Rehearse on restored volumes; see the runbook for sequential-minor caveats.
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_TEMPORAL_IMAGE:-temporalio/auto-setup:1.29.7}
     restart: unless-stopped
     depends_on:
       temporal-postgres:
@@ -99,7 +103,7 @@ services:
     logging: *small-logs
 
   postgres:
-    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_USER: aeeis
@@ -137,7 +141,7 @@ services:
         AEEIS_RUNNER: temporal
         TEMPORAL_ADDRESS: temporal:7233
         TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}
-        AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-cn}
+        AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-agent}
         AEEIS_TEMPORAL_DEPLOYMENT_NAME: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE}
         AEEIS_BUILD_ID: ${AEEIS_BUILD_ID:?Set AEEIS_BUILD_ID (bin/deploy.sh derives it from the git sha)}
         AEEIS_TEMPORAL_USE_VERSIONING: "1"
@@ -198,7 +202,7 @@ services:
 
   # One-shot backup job: `docker compose run --rm backup` (bin/backup.sh).
   backup:
-    image: ${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
     profiles: [ops]
     restart: "no"
     depends_on:
@@ -221,8 +225,8 @@ networks:
 
 volumes:
   aeeis-postgres:
-    name: ${AEEIS_POSTGRES_VOLUME:-${AEEIS_STACK}_aeeis-postgres}
+    name: ${AEEIS_POSTGRES_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-postgres}
   aeeis-data:
-    name: ${AEEIS_DATA_VOLUME:-${AEEIS_STACK}_aeeis-data}
+    name: ${AEEIS_DATA_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-data}
   temporal-postgres:
-    name: ${AEEIS_TEMPORAL_POSTGRES_VOLUME:-${AEEIS_STACK}_temporal-postgres}
+    name: ${AEEIS_TEMPORAL_POSTGRES_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-temporal-postgres}

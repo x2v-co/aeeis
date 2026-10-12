@@ -3,7 +3,7 @@
 Run one independent stack on `aeeis-sg` (SG) and one on `kk-cn` (CN).
 **For existing installations, follow the [production migration runbook](../../docs/runbooks/aeeis-production-migration.md)
 before starting this stack.** It covers draining workflows, preserving tokens,
-backing up both Postgres clusters and application data, restoring/reusing volumes,
+backing up both Postgres clusters and application data, restoring into fresh volumes,
 verification with a real model and schema-aware rollback.
 
 ## Production configuration
@@ -31,9 +31,20 @@ must set `STACK_ENV_FILE` to its own path relative to `compose.yml` (templates
 use `./stack.env`) or an absolute path. Supply the recorded image/build file too:
 
 ```bash
-docker compose -f compose.yml --env-file stack.env --env-file .current.env config --quiet
-docker compose -f compose.yml --env-file stack.env --env-file .current.env up -d --remove-orphans
+set -a; . ./stack.env; set +a
+export AEEIS_STACK="${AEEIS_STACK:-aeeis-cn-prod}"
+docker compose -p "$AEEIS_STACK" -f compose.yml --env-file stack.env --env-file .current.env config --quiet
+./bin/stack.sh start  # guard + preload all images + up --pull never
 ```
+
+The default project is `aeeis-cn-prod`; `AEEIS_STACK` overrides it. Every helper
+passes an explicit `-p`. Set `AEEIS_LEGACY_STACK` to the inventoried old project
+(default `aeeis-cn`). Startup refuses that project name, volumes labeled for a
+different Compose project, and target volumes/container names/writable bind mounts
+referenced by legacy containers, even stopped ones. Restore into fresh volumes.
+Defaults are `<project>-postgres`, `<project>-temporal-postgres`, and
+`<project>-data`. The existing CN queue is `aeeis-agent`; queue and project names
+are independent. Preserve the inventoried queue during migration.
 
 The env file is also sourced by bash helpers, so single-quote JSON and values
 with spaces. Runtime secrets support `*_FILE`, but direct and file variants
@@ -98,12 +109,12 @@ allowlist; configure it independently if switching to service URLs.
   Restore the three databases together plus application data as needed.
 - `systemd/` supplies stack, backup and health units for `/opt/<instance>/aeeis`.
   Install after successful acceptance; leave old units disabled. The stack unit
-  uses explicit `--env-file stack.env --env-file .current.env` at boot and waits
-  for the tailnet address. Backup and health timers run daily and every 5 minutes.
+  uses `bin/stack.sh` with project/volume guards and image preflight at boot,
+  reads `stack.env` and `.current.env`, and waits for the tailnet address.
+  Backup and health timers run daily and every 5 minutes.
 - Optional `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and
-  `AEEIS_DATA_VOLUME` select inventoried existing volumes. Otherwise volumes use
-  the stack project prefix. Back up and inspect named volumes before reuse;
-  never mount one PG data directory into old and new servers concurrently.
+  `AEEIS_DATA_VOLUME` override the explicit volume names. Foreign project labels
+  and legacy-container mounts are rejected; use isolated restored volumes.
 
 For normal operations:
 
@@ -114,6 +125,44 @@ AEEIS_ENV_FILE=/REPLACE_WITH_ENV_PATH ./bin/health.sh
 # Upgrade after checking out the reviewed commit:
 ./bin/deploy.sh --env-file ./stack.env
 ```
+
+## Image preload and CN registry fallback
+
+`bin/images.sh list` prints all refs from Compose config with every profile
+enabled (`--profile '*' config --images`), including ops and smoke services. `prepull` tries local images,
+`AEEIS_IMAGE_REGISTRY` (if set), `AEEIS_IMAGE_MIRROR` (default `m.daocloud.io`),
+then upstream, retagging to the exact Compose ref. A mirror failure never counts
+as success. Set `AEEIS_IMAGE_MIRROR=` to skip mirrors. `verify` checks every image
+locally; deploy completes both checks before any `up` or container replacement.
+Startup uses `--pull never`, so missing images cannot trigger a late pull.
+
+```bash
+# Use the same reviewed release and image pins on SG/dev and CN.
+AEEIS_ENV_FILE=/REPLACE_WITH_ENV_PATH AEEIS_IMAGE=aeeis:REPLACE_WITH_COMMIT ./bin/images.sh prepull
+AEEIS_ENV_FILE=/REPLACE_WITH_ENV_PATH AEEIS_IMAGE=aeeis:REPLACE_WITH_COMMIT ./bin/images.sh save /tmp/aeeis-images.tar
+scp /tmp/aeeis-images.tar kk-cn:/tmp/aeeis-images.tar
+# On CN, with the production env selected:
+AEEIS_IMAGE=aeeis:REPLACE_WITH_COMMIT ./bin/images.sh load /tmp/aeeis-images.tar
+```
+
+`images.sh` honors explicit image/registry variables over the selected env and
+`.current.env`, so a preload can select the candidate release or upgrade hop.
+`save` requires all images already local. `load` runs Docker load, retags local
+upstream refs when a registry prefix is selected, and verifies the complete set
+without pulling. Image tarballs contain code only; never transfer CN data/secrets
+overseas. Include each Temporal upgrade-hop image in separate tarballs before
+cutover; see the [runbook](../../docs/runbooks/aeeis-production-migration.md).
+
+For TCR, set `AEEIS_IMAGE_REGISTRY=ccr.ccs.tencentyun.com/x2v-co` in the selected
+env. Compose prefixes each image repository; leave pins and
+`AEEIS_DEPLOY_IMAGE` as repository:tag (e.g. `aeeis:<commit>`). Without a prefix,
+fully qualified upstream release refs also work. Publish all repositories under
+the selected prefix using the same paths/tags, log in with `docker login`, and
+prepull before the maintenance window. Prefixes must have no trailing slash.
+Local upstream tarballs can be retagged for TCR without network access.
+
+Run `./bin/selftest.sh` for the mocked project/volume and image failure tests.
+The normal `npm run verify` unit tests also run this selftest.
 
 ## Fixture smoke in CI only
 
@@ -128,7 +177,7 @@ overlay's fixture URLs. Do not use this path to verify SG/CN production.
 CI=true AEEIS_STACK_SMOKE=1 ./bin/deploy.sh --env-file ./stack.env
 CI=true ./bin/smoke.sh
 # Teardown this disposable CI project only:
-CI=true docker compose -f compose.yml -f compose.smoke.yml \
+CI=true docker compose -p "$AEEIS_STACK" -f compose.yml -f compose.smoke.yml \
   --env-file stack.env --env-file .current.env down -v
 ```
 

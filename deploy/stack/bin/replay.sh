@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # Temporal replay gate: export workflow histories from this stack and replay
 # them against the workflow bundle in an image (default: the deployed one; set
 # AEEIS_REPLAY_IMAGE to a candidate image before rolling it out).
 #   bin/replay.sh <workflowId> [<workflowId> ...]
 set -euo pipefail
+# shellcheck source=_lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 (( $# > 0 )) || { echo "usage: $0 <workflowId>..." >&2; exit 2; }
-image="${AEEIS_REPLAY_IMAGE:-${AEEIS_IMAGE:?no AEEIS_IMAGE; set AEEIS_REPLAY_IMAGE}}"
+image="${AEEIS_REPLAY_IMAGE:-${AEEIS_IMAGE_REGISTRY:+$AEEIS_IMAGE_REGISTRY/}${AEEIS_IMAGE:?no AEEIS_IMAGE; set AEEIS_REPLAY_IMAGE}}"
 umask 077
 dir="$(mktemp -d)"; trap 'rm -rf "$dir"' EXIT
 for id in "$@"; do
