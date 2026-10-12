@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import type { AgentRun } from './contracts.js';
 import type { ThreadFollowup, ThreadFollowupRepository } from './thread-followups.js';
+import { digestProtocol } from '../protocol.js';
+import { redactRunData } from './run-debug.js';
 
 export const threadSchema = z.object({
   id: z.string().regex(/^thread_[a-f0-9-]{36}$/),
@@ -19,8 +21,9 @@ export interface ThreadRepository extends ThreadFollowupRepository {
   listRunsByThread(id: string, scope?: Ownership, limit?: number, afterSequence?: number): Promise<AgentRun[]>;
   latestRunByThread(id: string, scope?: Ownership): Promise<AgentRun | undefined>;
   /** Persist a fully prepared run and its membership together, before dispatch.
-   * The parent revision binds the commit to the frozen history read. */
-  createRunInThread(run: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number, followup?: ThreadFollowup): Promise<AgentRun>;
+   * The parent content hash binds the commit to the frozen history read.
+   * Numeric revisions are accepted for legacy reservations. */
+  createRunInThread(run: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun>;
   /** First member has no parent; later members require an existing same-thread parent.
    * Sequence is allocated under the adapter lock. Repeating the same attachment is a no-op. */
   attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun>;
@@ -29,8 +32,23 @@ export class ThreadConflict extends Error {}
 export function validateThreadSequence(afterSequence: number): void {
   if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || afterSequence > 2147483647) throw new RangeError('Invalid thread sequence cursor');
 }
-export function assertFollowupParent(parent: AgentRun | undefined, revision?: number): void {
-  if (parent && (!['succeeded', 'failed', 'cancelled'].includes(parent.status) || (revision !== undefined && parent.revision !== revision)))
+/** Bind history content, access, classification and isolation inputs while
+ * allowing terminal bookkeeping (events, timestamps and Skill receipts).
+ * Redact with the entire Run, as the history builder does: credentials in
+ * otherwise excluded fields can still affect the copied prose. */
+export function followupParentHash(run: AgentRun): string {
+  const history = {
+    id: run.id, owner: run.owner, tenantId: run.tenantId, goalId: run.goalId,
+    threadId: run.threadId, parentRunId: run.parentRunId, threadSequence: run.threadSequence,
+    goal: run.goal, privacy: run.privacy, context: run.context,
+    plans: run.plans, review: run.review, answers: run.answers, artifacts: run.artifacts,
+    toolReceipts: run.toolReceipts, delegationOutcomes: run.delegationOutcomes,
+  };
+  return digestProtocol({ history, redacted: redactRunData({ history, sourceValue: run }, { capFields: false }).history });
+}
+export function assertFollowupParent(parent: AgentRun | undefined, snapshot?: string | number): void {
+  const unchanged = !parent || snapshot === undefined || (typeof snapshot === 'string' ? followupParentHash(parent) === snapshot : parent.revision === snapshot);
+  if (parent && (!['succeeded', 'failed', 'cancelled'].includes(parent.status) || !unchanged))
     throw new ThreadConflict('Parent must be terminal and unchanged since the history snapshot; answer live questions through /answer');
 }
 type Membership = { threadId?: string | undefined; parentRunId?: string | undefined; threadSequence?: number | undefined };

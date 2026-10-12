@@ -22,9 +22,10 @@ export interface ThreadFollowup {
   parentRunId?: string;
   parentRevision?: number;
   contextSnapshot: {
+    parentHistoryHash?: string;
     history?: ThreadHistory;
     run?: AgentRun;
-    preparation?: Record<string, { state: 'started' | 'completed'; value?: unknown }>;
+    preparation?: Record<string, { state: 'started' | 'failed' | 'completed'; value?: unknown }>;
   };
   createdAt: string;
 }
@@ -53,6 +54,7 @@ export function assertFollowupCheckpoint(before: ThreadFollowup | undefined, aft
   if (before.state === 'completed') throw new ThreadConflict('Follow-up is already completed');
   const identity = ({ contextSnapshot: _snapshot, ...record }: ThreadFollowup) => record;
   if (followupHash(identity(before)) !== followupHash(identity(after))) throw new ThreadConflict('Follow-up reservation identity is immutable');
+  if (before.contextSnapshot.parentHistoryHash !== after.contextSnapshot.parentHistoryHash) throw new ThreadConflict('Parent history hash is immutable');
   // JSONB reorders object keys; compare canonical contents rather than the
   // serialization order used by in-place Run mutation checks.
   if (before.contextSnapshot.history && (!after.contextSnapshot.history || followupHash(before.contextSnapshot.history) !== followupHash(after.contextSnapshot.history))) throw new ThreadConflict('Thread history snapshot is immutable');

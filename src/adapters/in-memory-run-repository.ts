@@ -67,7 +67,7 @@ export class InMemoryRunRepository implements RunRepository {
       return latest && structuredClone(latest);
     });
   }
-  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number, followup?: ThreadFollowup): Promise<AgentRun> {
+  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     return this.serial(async () => {
       const thread = await this.getThread(threadId, scope), run = structuredClone(input);
       if (followup) {
@@ -75,11 +75,12 @@ export class InMemoryRunRepository implements RunRepository {
         if (!reservation) throw new ThreadConflict('Missing follow-up reservation');
         assertSameFollowup(reservation, followup.requestHash);
         assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
       }
       assertUnthreaded(run);
       if (this.runs.has(run.id)) throw new ThreadConflict('Run already exists');
       const parent = parentRunId === undefined ? undefined : await this.get(parentRunId, thread);
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       const last = [...this.runs.values()].filter(item => item.threadId === threadId).reduce((max, item) => Math.max(max, item.threadSequence!), 0);
       prepareAttachment(run, thread, parent, last);
       this.runs.set(run.id, structuredClone(run));

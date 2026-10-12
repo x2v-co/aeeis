@@ -1,7 +1,8 @@
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NotFound, PostgresRunRepository } from '../src/runtime/repository.js';
-import { ThreadConflict } from '../src/runtime/threads.js';
+import { followupParentHash, ThreadConflict } from '../src/runtime/threads.js';
+import { event } from '../src/runtime/engine.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 import { requestSchema } from '../src/runtime/contracts.js';
 import { followupHash, type ThreadFollowup } from '../src/runtime/thread-followups.js';
@@ -32,7 +33,7 @@ describe('PostgreSQL thread transaction boundary', () => {
     const reservation: ThreadFollowup = {
       threadId: f.thread.id, keyHash: followupHash('key'), requestHash: followupHash('request'), runId: child.id, state: 'reserved',
       request: { request: requestSchema.parse({ goal: child.goal }), contextBudgetBytes: 32768 },
-      parentRunId: f.run.id, parentRevision: f.run.revision, contextSnapshot: { run: structuredClone(child) }, createdAt: new Date().toISOString(),
+      parentRunId: f.run.id, parentRevision: f.run.revision, contextSnapshot: { parentHistoryHash: followupParentHash(f.run), run: structuredClone(child) }, createdAt: new Date().toISOString(),
     };
     const row = { thread_id: reservation.threadId, key_hash: reservation.keyHash, request_hash: reservation.requestHash, run_id: reservation.runId, state: reservation.state, request: reservation.request, parent_run_id: reservation.parentRunId, parent_revision: reservation.parentRevision, context_snapshot: reservation.contextSnapshot, created_at: new Date(reservation.createdAt) };
     const query = f.query.getMockImplementation()!;
@@ -66,6 +67,24 @@ describe('PostgreSQL thread transaction boundary', () => {
     const statements = query.mock.calls.map(([sql]) => sql);
     expect(statements).toContain('ROLLBACK');
     expect(statements.some(sql => sql === 'COMMIT' || sql.startsWith('UPDATE aeeis_thread_followups') || sql.includes('pg_notify'))).toBe(false);
+    await repository.close();
+  });
+  it.each(['skill.recorded', 'run.cancel.workflow_failed'])('checks the stored parent content hash under lock after %s', async type => {
+    const { repository, query, thread, run, child, reservation } = followupFixture();
+    if (type === 'skill.recorded') run.skillOutcome = { outcome: 'success', receiptRef: 'receipt.late' };
+    event(run, type, { receiptRef: 'receipt.late' }); run.revision++;
+    const result = await repository.createRunInThread(child, thread.id, run.id, threadScope, reservation.parentRevision, reservation);
+    expect(result.threadSequence).toBe(2);
+    expect(query.mock.calls.some(([sql]) => sql.includes('aeeis_runs WHERE id=$1 FOR SHARE'))).toBe(true);
+    expect(query.mock.calls.map(([sql]) => sql)).toContain('COMMIT');
+    await repository.close();
+  });
+  it('rejects changed parent content using the stored hash even if the caller supplies a new hash', async () => {
+    const { repository, query, thread, run, child, reservation } = followupFixture();
+    run.goal = 'changed historical content'; run.revision++;
+    await expect(repository.createRunInThread(child, thread.id, run.id, threadScope, followupParentHash(run), reservation)).rejects.toThrow('unchanged since the history snapshot');
+    expect(query.mock.calls.map(([sql]) => sql)).toContain('ROLLBACK');
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO aeeis_runs') || sql.includes('pg_notify'))).toBe(false);
     await repository.close();
   });
   it('rejects a reservation/run mismatch before publishing any run', async () => {

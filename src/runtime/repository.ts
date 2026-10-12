@@ -307,7 +307,7 @@ export class FileRunRepository implements RunRepository {
       return latest ? this.get(latest.id, thread) : undefined;
     });
   }
-  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number, followup?: ThreadFollowup): Promise<AgentRun> {
+  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     return this.serial(async () => {
       const thread = await this.getThread(threadId, scope), run = structuredClone(input);
       if (followup) {
@@ -315,12 +315,13 @@ export class FileRunRepository implements RunRepository {
         if (!reservation) throw new ThreadConflict('Missing follow-up reservation');
         assertSameFollowup(reservation, followup.requestHash);
         assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
       }
       assertUnthreaded(run);
       try { await this.get(run.id); throw new ThreadConflict('Run already exists'); }
       catch (error) { if (!(error instanceof NotFound)) throw error; }
       const parent = parentRunId === undefined ? undefined : await this.get(parentRunId, thread);
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       await this.ensureSummaries();
       const last = [...this.summaries!.values()].filter(item => item.threadId === threadId).reduce((max, item) => Math.max(max, item.threadSequence!), 0);
       prepareAttachment(run, thread, parent, last);
@@ -785,7 +786,7 @@ export class PostgresRunRepository implements RunRepository {
     const result = await this.pool.query<{ state: AgentRun }>("SELECT state FROM aeeis_runs WHERE thread_id=$1 AND COALESCE(state->>'owner','owner')=$2 AND COALESCE(state->>'tenantId','local')=$3 ORDER BY thread_sequence DESC LIMIT 1", [id, thread.owner, thread.tenantId]);
     return result.rows[0]?.state;
   }
-  async createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number, followup?: ThreadFollowup): Promise<AgentRun> {
+  async createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     validateId(input.id); validateThreadId(threadId);
     if (parentRunId !== undefined) validateId(parentRunId);
     const run = structuredClone(input);
@@ -803,6 +804,7 @@ export class PostgresRunRepository implements RunRepository {
         const reservation = followupFromRow(result.rows[0]);
         assertSameFollowup(reservation, followup.requestHash);
         assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
       }
       let parent: AgentRun | undefined;
       if (parentRunId !== undefined) {
@@ -810,7 +812,7 @@ export class PostgresRunRepository implements RunRepository {
         parent = parents.rows[0]?.state;
         if (!parent || !isOwnedBy(parent, thread)) throw new NotFound('Unknown run');
       }
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       const last = await client.query<{ seq: number }>('SELECT COALESCE(MAX(thread_sequence),0) AS seq FROM aeeis_runs WHERE thread_id=$1', [threadId]);
       prepareAttachment(run, thread, parent, last.rows[0]!.seq);
       const inserted = await client.query('INSERT INTO aeeis_runs(id,revision,state,updated_at,thread_id,parent_run_id,thread_sequence) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING', [run.id, run.revision, run, run.updatedAt, threadId, parentRunId ?? null, run.threadSequence]);

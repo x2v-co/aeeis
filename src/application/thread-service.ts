@@ -4,7 +4,7 @@ import type { Ownership } from '../security/principal.js';
 import { requestSchema } from '../runtime/contracts.js';
 import type { AgentEngine, CreateRunCheckpoint } from '../runtime/engine.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
-import { assertFollowupParent, assertUnthreaded, ThreadConflict, type Thread } from '../runtime/threads.js';
+import { assertFollowupParent, assertUnthreaded, followupParentHash, ThreadConflict, type Thread } from '../runtime/threads.js';
 import { buildThreadHistory, DEFAULT_THREAD_HISTORY_BYTES, MAX_THREAD_HISTORY_BYTES } from '../runtime/thread-history.js';
 import { assertSameFollowup, followupHash, followupRunId, idempotencyKeySchema, type ThreadFollowup } from '../runtime/thread-followups.js';
 import type { AgentRun } from '../runtime/contracts.js';
@@ -66,7 +66,7 @@ export class ThreadService {
         record = {
           threadId: id, keyHash, requestHash, runId: followupRunId(id, keyHash, scope), state: 'reserved', request,
           ...(parent ? { parentRunId: parent.id, parentRevision: parent.revision } : {}),
-          contextSnapshot: {}, createdAt: new Date().toISOString(),
+          contextSnapshot: parent ? { parentHistoryHash: followupParentHash(parent) } : {}, createdAt: new Date().toISOString(),
         };
         await this.repository.saveThreadFollowup(record, scope);
       }
@@ -78,12 +78,13 @@ export class ThreadService {
     if (!this.engine) throw new Error('Model runtime is not configured');
     const engine = this.engine;
     const parent = record.parentRunId === undefined ? undefined : await this.repository.get(record.parentRunId, scope);
-    assertFollowupParent(parent, record.parentRevision);
+    const parentSnapshot = record.contextSnapshot.parentHistoryHash ?? record.parentRevision;
+    assertFollowupParent(parent, parentSnapshot);
     if (!record.contextSnapshot.history) {
       record.contextSnapshot.history = await buildThreadHistory(this.repository, record.threadId, parent, scope, record.request.request.privacy, record.request.contextBudgetBytes, (run, access) => engine.authorizeThreadHistory(run, scope, access));
       await this.repository.saveThreadFollowup(record, scope);
     } else if (parent) await engine.authorizeThreadHistory(parent, scope, record.contextSnapshot.history.accessProvenance);
-    const commit = (run: AgentRun) => this.repository.createRunInThread(run, record.threadId, record.parentRunId, scope, record.parentRevision, record);
+    const commit = (run: AgentRun) => this.repository.createRunInThread(run, record.threadId, record.parentRunId, scope, parentSnapshot, record);
     if (record.contextSnapshot.run) return commit(record.contextSnapshot.run);
     const checkpoint: CreateRunCheckpoint = async <T>(stage: string, operation: () => Promise<T>): Promise<T> => {
       const stages = record.contextSnapshot.preparation ??= {};
@@ -91,10 +92,18 @@ export class ThreadService {
       if (previous?.state === 'completed') return structuredClone(previous.value) as T;
       // A crash between a provider call and checkpoint publication is ambiguous.
       // Keep the request reserved for explicit recovery instead of resending it.
-      if (previous) throw new ThreadConflict(`Follow-up preparation ${stage} has an unknown outcome; reconcile before retrying`);
+      if (previous?.state === 'started') throw new ThreadConflict(`Follow-up preparation ${stage} has an unknown outcome; reconcile before retrying`);
       stages[stage] = { state: 'started' };
       await this.repository.saveThreadFollowup(record, scope);
-      const value = await operation();
+      let value: T;
+      try { value = await operation(); }
+      catch (error) {
+        // Preparation has not committed a Run. Preserve completed snapshots,
+        // but allow a failed retrieval/selection to be retried with this key.
+        stages[stage] = { state: 'failed' };
+        await this.repository.saveThreadFollowup(record, scope);
+        throw error;
+      }
       stages[stage] = { state: 'completed', ...(value === undefined ? {} : { value }) };
       await this.repository.saveThreadFollowup(record, scope);
       return value;

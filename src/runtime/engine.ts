@@ -552,11 +552,14 @@ export class AgentEngine {
     }
     if (request.brainScope && !this.brain) throw new Error('brainScope was requested but Brain is not configured');
     if (request.brainScope && this.brain) {
-      const claims = request.brainQuery
-        ? await this.brain.searchSemantic(request.brainScope, request.brainQuery, principal, request.privacy, request.brainMaxItems, this.brainSemanticSearcher)
-        : this.brain.read(request.brainScope, principal, request.privacy);
+      const claims = await prepare('brain', async () => {
+        const result = request.brainQuery
+          ? await this.brain!.searchSemantic(request.brainScope!, request.brainQuery, principal, request.privacy, request.brainMaxItems, this.brainSemanticSearcher)
+          : this.brain!.read(request.brainScope!, principal, request.privacy);
+        if (this.brainPersistence) await this.brainPersistence.save(this.brain!);
+        return result;
+      });
       for (const claim of claims) sources.push({ id: claim.id, title: `${claim.kind} · ${request.brainScope}`, content: claim.content, source: `brain:${request.brainScope}`, hash: claimDigest(claim), contentHash: materialContentHash(claim.content), kind: 'brain', classification: claim.classification });
-      if (this.brainPersistence) await this.brainPersistence.save(this.brain);
     }
     if (request.knowledgeQuery && !this.knowledge) throw new Error('knowledgeQuery was requested but no Knowledge Provider is configured');
     if (request.knowledgeQuery && this.knowledge) {
