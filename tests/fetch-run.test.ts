@@ -46,7 +46,7 @@ describe('fetch-run CLI', () => {
         const result = await exec(process.execPath, [cli, input], { cwd: root, env: { ...process.env, AEEIS_TOKEN: '', AEEIS_BASE_URL: '', ...env } });
         expect(result.stdout.trim()).toBe(`run-${run.id}.debug.json`);
         const bundle = JSON.parse(await readFile(join(root, `run-${run.id}.debug.json`), 'utf8'));
-        expect(bundle).toMatchObject({ schemaVersion: 'aeeis-debug-bundle/1', run: { id: run.id, goal: 'Fetch this run' } });
+        expect(bundle).toMatchObject({ schemaVersion: 'aeeis-debug-bundle/2', run: { id: run.id, goal: 'Fetch this run' } });
       }
     } finally { await app.close(); await repo.close(); await rm(root, { recursive: true, force: true }); }
   });

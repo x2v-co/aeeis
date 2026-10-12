@@ -114,7 +114,10 @@ export function sharedRunView(run: AgentRun) {
   return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
 }
 export function debugBundle(run: AgentRun) {
-  return redactRunData({ schemaVersion: 'aeeis-debug-bundle/1', id: run.id, run, plans: run.plans,
+  // Events, plans and steps (taskAttempts) are emitted once at the top level. Embedding them
+  // again under `run` made every lifecycle event appear twice in the bundle.
+  const { events: _events, plans: _plans, steps: _steps, ...runSummary } = run;
+  return redactRunData({ schemaVersion: 'aeeis-debug-bundle/2', id: run.id, run: runSummary, plans: run.plans,
     taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
     modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
     validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
