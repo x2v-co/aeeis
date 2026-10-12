@@ -4,7 +4,7 @@ import { collaborationPricesSchema, type CollaborationPrices } from './collabora
 import { FileRunRepository, PostgresRunRepository } from './runtime/repository.js';
 import { AgentpayModelAdapter, HttpModelAdapter, modelTransportConfig } from './runtime/model.js';
 import { AgentEngine, digest } from './runtime/engine.js';
-import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
+import { LocalDispatcher, TemporalDispatcher, isBootRecoverableRun } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
 import type { ModelCatalog } from './integrations.js';
 import { buildApp } from './runtime/http.js';
@@ -800,13 +800,13 @@ try {
       let throughId: string | undefined;
       do {
         const page = await repository.scanPage({ limit: 50, ...(afterId ? { afterId } : {}), ...(throughId ? { throughId } : {}) });
-        for (const run of page.runs) if (!['succeeded', 'cancelled', 'unknown', 'waiting_external', 'needs_input', 'needs_approval', 'paused'].includes(run.status)) await dispatcher.notify(run.id);
+        for (const run of page.runs) if (isBootRecoverableRun(run.status)) await dispatcher.notify(run.id);
         throughId = page.throughId;
         afterId = page.runs.at(-1)?.id;
         if (page.done) break;
       } while (throughId && afterId);
     } else {
-      for (const run of await repository.list()) if (!['succeeded', 'cancelled', 'unknown', 'waiting_external', 'needs_input', 'needs_approval', 'paused'].includes(run.status)) await dispatcher.notify(run.id);
+      for (const run of await repository.list()) if (isBootRecoverableRun(run.status)) await dispatcher.notify(run.id);
     }
   }
   const close = async () => {
