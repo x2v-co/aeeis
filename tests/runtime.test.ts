@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { reconcileRun } from '../src/runtime/run-reconcile.js';
 import { AgentEngine, digest } from '../src/runtime/engine.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
@@ -559,6 +560,28 @@ describe('AEEIS runtime', () => {
     await repo.close();
   });
 
+  it('does not enter review from a stale snapshot after cancellation', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, new PlanningFixture());
+    const run = await engine.create({ goal: 'Cancel before review' });
+    await engine.advance(run.id);
+    await repo.mutate(run.id, current => {
+      current.approval = { planHash: current.plans[0]!.hash, approved: true, actor: 'owner', at: new Date().toISOString() };
+      current.status = 'running';
+      for (const step of current.steps) step.status = 'succeeded';
+    });
+    const get = repo.get.bind(repo);
+    const spy = vi.spyOn(repo, 'get').mockImplementationOnce(async id => {
+      const snapshot = await get(id);
+      await engine.command(id, 'cancel', {});
+      return snapshot;
+    });
+    expect(await engine.advance(run.id)).toBe('cancelled');
+    expect((await repo.get(run.id)).events.some(event => event.type === 'review.requested')).toBe(false);
+    spy.mockRestore();
+    await repo.close();
+  });
+
   it('checkpoints a plan returned while paused and resumes into approval', async () => {
     const repo = await repository();
     const response = deferred<{ value: unknown }>(), entered = deferred<void>();
@@ -749,6 +772,53 @@ describe('AEEIS runtime', () => {
     current = await repo.get(run.id);
     expect(current.toolReceipts).toHaveLength(1);
     expect(current.pendingTool).toBeUndefined();
+    await repo.close();
+  });
+
+  it('discards a tool result arriving after Temporal reconciliation fails the Run', async () => {
+    const repo = await repository();
+    const tools = new BlockingInvokeGateway();
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
+    const run = await engine.create({ goal: 'Late tool result', allowedTools: ['fixture.lookup@1'] });
+    await engine.advance(run.id);
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.advance(run.id);
+    const tick = engine.advance(run.id);
+    await tools.started.promise;
+    await reconcileRun(repo, await repo.get(run.id), async () => ({ status: 'FAILED' }), 'owner', false);
+    tools.release.resolve();
+    expect(await tick).toBe('failed');
+    const current = await repo.get(run.id);
+    expect(current.error).toBe('Temporal workflow failed');
+    expect(current.steps[0]!.observations).toEqual([]);
+    expect(current.toolReceipts.at(-1)?.authorization?.decision).toBe('isolated');
+    expect(current.events.some(event => event.type === 'tool.result_discarded')).toBe(true);
+    await repo.close();
+  });
+
+  it.each(['unknown', 'rejected'] as const)('preserves reconciled failure after a delayed %s budget reservation', async outcome => {
+    const repo = await repository();
+    const tools = new CapabilityGateway();
+    const ledger = new InMemoryGlobalBudgetLedger(); await ledger.init();
+    const globalBudget = { ledger, select: createGlobalBudgetSelector([{ tenantId: 'local', window: 'day' as const, budget: { calls: 20 } }]) };
+    const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools, globalBudget });
+    const run = await engine.create({ goal: 'Late budget result', allowedTools: ['fixture.lookup@1'] });
+    await engine.advance(run.id);
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.advance(run.id);
+    const entered = deferred<void>(), release = deferred<void>();
+    const reservation = vi.spyOn(ledger, 'reserve').mockImplementationOnce(async () => {
+      entered.resolve(); await release.promise;
+      if (outcome === 'rejected') throw new Error('Budget unavailable');
+      return { reserved: false, state: 'unknown' };
+    });
+    const tick = engine.advance(run.id);
+    await entered.promise;
+    await reconcileRun(repo, await repo.get(run.id), async () => ({ status: 'FAILED' }), 'owner', false);
+    release.resolve();
+    expect(await tick).toBe('failed');
+    expect((await repo.get(run.id)).error).toBe('Temporal workflow failed');
+    reservation.mockRestore();
     await repo.close();
   });
 
@@ -1081,6 +1151,32 @@ describe('AEEIS runtime', () => {
     expect(await engine.advance(run.id)).toBe('running');
     expect(await engine.advance(run.id)).toBe('failed');
     expect((await repo.get(run.id)).error).toContain('Agent Card changed');
+    await repo.close();
+  });
+
+  it('discards an Agent acceptance arriving after Temporal reconciliation fails the Run', async () => {
+    const repo = await repository();
+    const card: AgentCard = { schemaVersion: 'agent-card/1', agentId: 'agent.partner', name: 'Partner', owner: 'partner', protocols: ['aeeis-task/1'], capabilities: ['research'], inputSchemas: ['task-brief/1'], outputSchemas: ['result-envelope/1'], auth: ['local'], privacy: { dataRetention: 'session', regions: ['local'] }, pricing: { unit: 'run' }, cardVersion: '1' };
+    const directory = new AgentDirectory(); directory.register(card);
+    const entered = deferred<void>(), release = deferred<void>();
+    const agents = new AgentGateway(directory, { submit: async (_card, request) => {
+      entered.resolve(); await release.promise;
+      return { status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: { schemaVersion: 'context-ack/1', taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true } };
+    } });
+    const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
+    const run = await engine.create({ goal: 'Late Agent acceptance', allowedAgents: ['agent.partner'] });
+    await engine.advance(run.id);
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.advance(run.id);
+    const tick = engine.advance(run.id);
+    await entered.promise;
+    await reconcileRun(repo, await repo.get(run.id), async () => ({ status: 'FAILED' }), 'owner', false);
+    release.resolve();
+    expect(await tick).toBe('failed');
+    const current = await repo.get(run.id);
+    expect(current.error).toBe('Temporal workflow failed');
+    expect(current.events.some(event => event.type === 'agent.result_discarded')).toBe(true);
+    expect(current.pendingDelegation?.receiptRef).toBe('receipt.accepted');
     await repo.close();
   });
 

@@ -354,6 +354,26 @@ RSI candidate API 只管理有证据的变更候选：低风险候选可以在 `
 
 竞争 API 把候选结果和独立评测拆成两个阶段，并持久化成本、评分、选定候选和 `partial` 状态；评测者不能是参赛 Agent。启用 `blindEvaluation` 时，评测视图只暴露 `candidate_1` 这类匿名键，最终映射只保存在 AEEIS 状态中。Participant 和 evaluator 都有带 input hash、状态和结果的 durable attempt；服务重启后不会重复调用，必须通过 `reconcile-attempt` 或 `reconcile-evaluator` 明确恢复。Debate API 持久化房间和消息，强制参与者、轮次、单 Agent 消息数、总消息数和上下文版本边界。新增 Collaboration Trigger Policy：owner 可通过 `/api/collaborations/triggers/policies` 按事件类型、来源、风险下限、审核置信度上限和 required diversity 配置 Competition/Debate，动作的 `dispatch` 可选 `create` 或 `run`；`POST /api/collaborations/triggers/evaluate` 接收带 owner/tenant、上下文版本和 evidence refs 的事件，`/internal/collaborations/triggers/evaluate` 供 Worker、Feishu/Hermes bridge 使用；Run 内部的任务完成、失败和 review 事件会由可重放的 Trigger Pump 自动转成同一协议事件，并用 Run 的 `allowedAgents` 限制协作参与者；`GET /api/collaborations/triggers/decisions` 查看耐久决策，`POST /api/collaborations/triggers/decisions/:id/reconcile` 支持 `resource_created`、`failed`、`dispatch_completed`、`dispatch_failed` 四种显式恢复。策略与 policy/event 决策以 File 或 PostgreSQL 持久化，重复事件只返回原 resource，跨租户事件会被拒绝；`run` 会复用现有模型池、Attempt、预算和 unknown/reconcile 边界，模型池未配置或派发结果不明时会把 `dispatchState` 留在 durable decision 中。Projection outbox 只发送带 hash 和幂等键的结构化快照，渠道投递失败会保留 failed 状态并可重试；PostgreSQL outbox 在外部 sink 调用期间持有跨进程 advisory lock，多个 pump 不会重复发送同一事件，进程崩溃后连接释放锁并由恢复流程继续处理；渠道消息不是 canonical 状态。
 
+## Run 取消与对账 (cancel / reconcile)
+
+`scripts/run-admin.mjs` 使用 `AEEIS_BASE_URL`（默认 `http://127.0.0.1:4323`）和 `AEEIS_TOKEN`（Bearer token），请求禁止重定向并设有 120 秒超时，输出 JSON，并脱敏响应中的 AEEIS_TOKEN；HTTP 错误时退出码非零。
+
+```bash
+export AEEIS_BASE_URL=http://127.0.0.1:4323
+# AEEIS_TOKEN 通过环境注入，不要写入命令历史。
+node scripts/run-admin.mjs cancel run_3cd8b75a --reason 'SRE requested cancellation'
+node scripts/run-admin.mjs reconcile run_becb254a          # dry-run
+node scripts/run-admin.mjs reconcile run_becb254a --apply
+node scripts/run-admin.mjs reconcile --all --limit 200     # operator，dry-run
+node scripts/run-admin.mjs reconcile --all --apply --limit 200
+```
+
+`POST /api/runs/:id/cancel` 接收 `{ "reason": "..." }`（可省略，最多 2000 字符），沿用 Run 的 owner/operator 角色与 ownership 校验。先持久化 `cancelled`、`cancellation` 元数据和 `run.cancelled` 事件，再请求 Temporal 取消；`AEEIS_RUN_CANCEL_TIMEOUT_MS` 默认 10000，等待 workflow 关闭超时后 terminate。重复取消返回 200，不重复写 `run.cancelled`，仍尝试关闭 workflow；succeeded/failed 返回 409。响应为 `{ run, workflow: { outcome } }`，outcome 包括 `cancelled`、`terminated`、`not_found`、`already_closed`、`unsupported`（本地或无取消能力）。Temporal 请求失败时应用仍保持 cancelled，记录 `run.cancel.workflow_failed`，返回 **200** 和 `{ outcome: "error", message }`；可再次取消重试。
+
+`POST /api/runs/:id/reconcile` 只有 `{ "source": "temporal", "dry_run": false }` 选择 Temporal 对账，`dry_run` 默认 true；现有 `{ "reason": "..." }` 外部结果核查继续沿用原逻辑。响应 `{ runId, appStatus, workflowStatus, action, applied }` 的 appStatus 是当前状态。对账读取 workflow ID 的最新 execution：TERMINATED/CANCELED 将非终态 Run 标记 cancelled，FAILED/TIMED_OUT/NOT_FOUND/COMPLETED 标记 failed；RUNNING/CONTINUED_AS_NEW 与已终态 Run 保持原状。Apply 保存 `reconciliation` 元数据及 `run.reconciled` 事件；Run revision 在检查期间变化时跳过写入，提交前在 Run 锁内重新 describe，避免旧结果覆盖已推进或重新启动的执行。终态不会被迟到的模型、Tool、Agent 结果或重启恢复改写。
+
+`POST /api/admin/reconcile` 仅 installation operator 可用，跨 owner/tenant 扫描非终态 Run；接收 `{ dry_run, statuses, limit, run_ids }`，默认 dry_run=true、limit=200，limit 最大 1000。statuses 可筛选 Run 状态，run_ids 可限制具体 Run，limit 限制实际描述的 Run 数量；响应 `{ dry_run, scanned, results }`。单 Run 和 admin Temporal 对账在 dispatcher 不支持 describe 时返回 503。已有 worker-orphan 脚本 `scripts/reconcile-workflows.mjs` 继续处理反方向的遗留 workflow。
+
 ## 设计边界
 
 AEEIS 自己持有 Goal、Plan Graph、Execution Graph、Evidence Graph、权限、Context Manifest、Receipt 和 RSI Candidate 的语义。Temporal 只负责耐久执行；toolkit_new 提供工具能力；ownhow 提供 Skill 治理；planprice 提供模型目录和价格数据。所有外部结果先经过版本、授权、证据和 Receipt 校验。

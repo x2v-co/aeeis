@@ -13,6 +13,7 @@ import { AgentEngine, Conflict, digest, event } from './engine.js';
 import { encodeRunEventCursor, NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { AgentRun } from './contracts.js';
+import { isTerminalRun, NON_TERMINAL_RUN_STATUSES, reconcileRun, scanReconcileRuns } from './run-reconcile.js';
 import { BrainAccessDenied, BrainConflict, brainBundleContentHash, brainBundleSchema, brainClaimInputSchema, brainClassificationSchema, brainGrantInputSchema, type GovernedBrain, type BrainPersistence, type BrainSemanticIndexMaintenance } from '../brain.js';
 import { EvolutionNotFound, type RsiService } from '../rsi.js';
 import { baselineVersions } from '../evolution-activation.js';
@@ -376,7 +377,7 @@ export function buildApp(options: Options) {
       }
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
-      const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex';
+      const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile';
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
@@ -386,7 +387,9 @@ export function buildApp(options: Options) {
       const sharedEditorWrite = request.method === 'POST' && /^\/api\/goals\/[^/]+\/plans(?:\/revise)?$/.test(route);
       const sharedTaskTransition = request.method === 'POST' && /^\/api\/plans\/[^/]+\/tasks\/[^/]+\/transition$/.test(route);
       const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route);
-      if (/^\/api\/(rooms|goals|plans|runs|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead) return reply.code(403).send({ error: 'Resource owner role required' });
+      const operatorRunAdmin = request.method === 'POST' && principal.roles.includes('operator')
+        && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
+      if (/^\/api\/(rooms|goals|plans|runs|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
   app.addHook('onResponse', async (request, reply) => {
@@ -1518,9 +1521,59 @@ export function buildApp(options: Options) {
     const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body }, principal.id, principal.tenantId);
     await notify(run.id); return reply.code(202).send({ id: run.id, goalId: goal.id });
   });
+  app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async request => {
+    const { id } = request.params;
+    const principal = principalOf(request);
+    const before = await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
+    const { reason = '' } = z.object({ reason: z.string().max(2000).optional() }).strict().parse(request.body ?? {});
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    let run = before.status === 'cancelled' ? before : await options.repository.mutate(id, current => {
+      if (current.status === 'cancelled') return;
+      if (isTerminalRun(current)) throw new Conflict('Run already finished');
+      current.status = 'cancelled';
+      current.cancellation = { reason, actor: principal.id, at: new Date().toISOString(), source: 'api' };
+      event(current, 'run.cancelled', { reason, actor: principal.id });
+    }, scope);
+    try {
+      const workflow = options.dispatcher?.cancel ? await options.dispatcher.cancel(id, reason) : { outcome: 'unsupported' as const };
+      return { run, workflow };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Workflow cancellation failed';
+      run = await options.repository.mutate(id, current => event(current, 'run.cancel.workflow_failed', { reason, actor: principal.id, message }), scope);
+      return { run, workflow: { outcome: 'error', message } };
+    }
+  });
+  app.post('/api/admin/reconcile', async (request, reply) => {
+    const body = z.object({
+      dry_run: z.boolean().default(true),
+      statuses: z.array(z.enum([...NON_TERMINAL_RUN_STATUSES, 'succeeded', 'failed', 'cancelled'])).optional(),
+      limit: z.number().int().min(1).max(1000).default(200),
+      run_ids: z.array(z.string().min(1).max(200)).max(1000).optional(),
+    }).strict().parse(request.body ?? {});
+    if (!options.dispatcher?.describe) return reply.code(503).send({ error: 'Temporal workflow description is unavailable' });
+    const actor = principalOf(request).id;
+    const results = [];
+    async function* candidates() {
+      if (body.run_ids) { for (const id of new Set(body.run_ids)) yield await options.repository.get(id); }
+      else yield* scanReconcileRuns(options.repository);
+    }
+    for await (const run of candidates()) {
+      if (isTerminalRun(run) || (body.statuses && !body.statuses.includes(run.status))) continue;
+      results.push(await reconcileRun(options.repository, run, () => options.dispatcher!.describe!(run.id), actor, body.dry_run));
+      if (results.length >= body.limit) break;
+    }
+    return { dry_run: body.dry_run, scanned: results.length, results };
+  });
   app.post<{ Params: { id: string; action: string } }>('/api/runs/:id/:action', async (request, reply) => {
-    if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     const { id, action } = request.params;
+    if (action === 'reconcile' && (request.body as { source?: unknown } | null)?.source === 'temporal') {
+      const principal = principalOf(request);
+      const run = await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
+      const body = z.object({ source: z.literal('temporal'), dry_run: z.boolean().default(true) }).strict().parse(request.body);
+      if (!options.dispatcher?.describe) return reply.code(503).send({ error: 'Temporal workflow description is unavailable' });
+      return reconcileRun(options.repository, run, () => options.dispatcher!.describe!(id), principal.id, body.dry_run);
+    }
+    if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     const principal = principalOf(request); await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
     if (action === 'model-reconcile') await options.engine.reconcileModelCall(id, request.body);
     else if (action === 'reconcile-cancelled') await options.engine.reconcileCancelledExternal(id, request.body);
