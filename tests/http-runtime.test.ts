@@ -473,6 +473,19 @@ describe('AEEIS HTTP boundary', () => {
     } finally { await app.close(); await repo.close(); }
   });
 
+  it('exposes only Run status to authenticated internal reconciliation without advancing it', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-reconcile-status-'))); await repo.init();
+    const get = vi.spyOn(repo, 'get').mockResolvedValue({ status: 'failed', error: 'private provider body' } as any);
+    const app = buildApp({ repository: repo, workerToken: 'worker-secret' });
+    try {
+      expect((await app.inject({ method: 'GET', url: '/internal/runs/run-1/status' })).statusCode).toBe(401);
+      const response = await app.inject({ method: 'GET', url: '/internal/runs/run-1/status', headers: { authorization: 'Bearer worker-secret' } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: 'failed' });
+      expect(get).toHaveBeenCalledTimes(1);
+    } finally { await app.close(); await repo.close(); }
+  });
+
   it('allows only explicitly configured internal hosts for worker requests', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-host-runs-'))); await repo.init();
     const app = buildApp({ repository: repo, workerToken: 'worker-secret', trustedHosts: ['aeeis'] });

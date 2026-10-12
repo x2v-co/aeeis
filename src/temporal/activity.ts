@@ -16,7 +16,9 @@ const reminderResponseSchema = z.object({ protocol: z.literal('aeeis-reminder-ad
  * after an activity failure.
  */
 export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (id: string) => Promise<AdvanceRunActivityResult> {
-  const timeoutMs = options.timeoutMs ?? 90_000;
+  // Two length attempts, each with three 180s transport tries, fit inside
+  // this deadline. The workflow's activity timeout remains slightly longer.
+  const timeoutMs = options.timeoutMs ?? 20 * 60_000;
   return async (id: string): Promise<AdvanceRunActivityResult> => {
     let response: Response;
     try {

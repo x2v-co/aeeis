@@ -8,3 +8,7 @@ stack.env.*
 backups/
 secrets/*
 !secrets/.gitkeep
+
+.current.*.env
+.previous.*.env
+.candidate.*.env

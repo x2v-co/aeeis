@@ -24,6 +24,84 @@ function fixture(body: unknown, status = 200): Promise<string> {
 }
 
 describe('HttpModelAdapter', () => {
+  it.each([429, 500, 502, 503])('retries ARK HTTP %s with structured diagnostics and a stable key', async status => {
+    const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'ProviderBusy', message: 'Bearer secret' } }), { status, headers: { 'x-request-id': 'ark-request-1' } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] })));
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret', undefined, 1000, undefined, false, undefined, { retryBaseMs: 0 });
+      await expect(adapter.complete({ system: 's', input: {}, idempotencyKey: 'ark-key' })).resolves.toEqual({ value: { ok: true } });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['ark-key', 'ark-key']);
+      const log = JSON.parse(logs.mock.calls[0]![0]);
+      expect(log).toMatchObject({ status, requestId: 'ark-request-1', attempt: 1, errorCode: 'ProviderBusy', willRetry: true });
+      expect(log.elapsedMs).toBeGreaterThanOrEqual(0);
+      expect(log.bodyExcerpt).not.toContain('secret');
+    } finally { logs.mockRestore(); }
+  });
+
+  it.each([400, 401, 403, 404, 408, 422])('does not retry ARK HTTP %s', async status => {
+    const fetch = vi.fn(async () => new Response('invalid request', { status }));
+    vi.stubGlobal('fetch', fetch);
+    const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret');
+    await expect(adapter.complete({ system: 's', input: {} })).rejects.toThrow(`HTTP ${status}`);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a known 401 when its error body times out', async () => {
+    let requests = 0;
+    const port = await new Promise<string>(resolve => {
+      const server = createServer((_request, response) => { requests++; response.statusCode = 401; response.flushHeaders(); });
+      servers.push(server);
+      server.listen(0, '127.0.0.1', () => resolve(String((server.address() as { port: number }).port)));
+    });
+    await expect(new HttpModelAdapter(`http://127.0.0.1:${port}`, 'model', '', 'ark', 40)
+      .complete({ system: 's', input: {} })).rejects.toThrow('HTTP 401');
+    expect(requests).toBe(1);
+  });
+
+  it('retries network failures, caps attempts and preserves unknown outcomes on exhaustion', async () => {
+    const fetch = vi.fn(async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }) }); });
+    vi.stubGlobal('fetch', fetch);
+    const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', '', undefined, 1000, undefined, false, undefined, { retryBaseMs: 0 });
+    await expect(adapter.complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([false, true])('retries ARK timeouts including stalled bodies (headers=%s)', async headersSent => {
+    let requests = 0;
+    const port = await new Promise<string>(resolve => {
+      const server = createServer((_request, response) => {
+        requests++;
+        if (headersSent) response.flushHeaders();
+      });
+      servers.push(server);
+      server.listen(0, '127.0.0.1', () => resolve(String((server.address() as { port: number }).port)));
+    });
+    const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'model', '', 'ark', 40, undefined, false, undefined, { retryBaseMs: 0 });
+    await expect(adapter.complete({ system: 's', input: {} })).rejects.toThrow('timed out after 40ms');
+    expect(requests).toBe(3);
+  });
+
+  it('uses capped exponential backoff with jitter between retries', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const fetch = vi.fn(async () => new Response('busy', { status: 503 }));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'model', '', undefined, 1000, undefined, false, undefined, { maxAttempts: 4, retryBaseMs: 100, retryMaxMs: 150 });
+      const done = expect(adapter.complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+      await vi.advanceTimersByTimeAsync(49); expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1); expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(74); expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1); expect(fetch).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(75); expect(fetch).toHaveBeenCalledTimes(4);
+      await done;
+    } finally { random.mockRestore(); vi.useRealTimers(); }
+  });
+
   it.each([
     { pin: {}, call: {}, expected: 16384 },
     { pin: { maxTokens: 8192 }, call: {}, expected: 8192 },

@@ -1,7 +1,7 @@
 import type { ModelDecision, ModelCatalog, ModelSelectionRequest } from '../integrations.js';
 import { selectModel } from '../integrations.js';
 import type { ModelAdapter, ModelHealth } from './model.js';
-import { HttpModelAdapter } from './model.js';
+import { HttpModelAdapter, type ModelTransportOptions } from './model.js';
 import type { ModelPin } from './contracts.js';
 import { createHash } from 'node:crypto';
 
@@ -116,7 +116,7 @@ export class CatalogModelResolver implements ModelResolver {
 }
 
 export class HttpCatalogModelFactory implements CatalogModelFactory {
-  constructor(private readonly apiKeys: Readonly<Record<string, string>> = {}, private readonly healthUrls: Readonly<Record<string, string>> = {}, private readonly allowInsecureHttp = false, private readonly mappings: readonly { offeringId: string; endpointRef: string; requestModel: string; providerId: string; channelId: string; mappingVersion?: string }[] = []) {}
+  constructor(private readonly apiKeys: Readonly<Record<string, string>> = {}, private readonly healthUrls: Readonly<Record<string, string>> = {}, private readonly allowInsecureHttp = false, private readonly mappings: readonly { offeringId: string; endpointRef: string; requestModel: string; providerId: string; channelId: string; mappingVersion?: string }[] = [], private readonly timeoutMs = 180_000, private readonly transport: ModelTransportOptions = {}) {}
   create(model: string, endpoint: string, provider?: string, pin?: ModelPin): ModelAdapter {
     if (!endpoint) throw new Error(`No provider endpoint configured for catalog model ${model}`);
     let requestedEndpoint = endpoint;
@@ -130,7 +130,7 @@ export class HttpCatalogModelFactory implements CatalogModelFactory {
       provider = mapping.providerId;
     }
     const base = requestedEndpoint.endsWith('/chat/completions') ? requestedEndpoint.slice(0, -'/chat/completions'.length) : requestedEndpoint;
-    const adapter = new HttpModelAdapter(base, model, this.apiKeys[provider ?? ''] ?? this.apiKeys[model] ?? '', provider, 60_000, this.healthUrls[provider ?? ''] ?? this.healthUrls[model], this.allowInsecureHttp, pin);
+    const adapter = new HttpModelAdapter(base, model, this.apiKeys[provider ?? ''] ?? this.apiKeys[model] ?? '', provider, this.timeoutMs, this.healthUrls[provider ?? ''] ?? this.healthUrls[model], this.allowInsecureHttp, pin, this.transport);
     if (pin?.routingMode === 'catalog' && adapter.pin.endpoint !== pin.endpoint) throw new Error('Pinned model endpoint changed; migrate the run before resuming');
     return adapter;
   }

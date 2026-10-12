@@ -7,9 +7,14 @@ STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 mkdir -p "$test_dir/bin"
+# Same repository root, isolated deploy state. Never write real release files.
+selftest_stack="$(mktemp -d "$STACK_DIR/../.selftest.XXXXXX")"
+trap 'rm -rf "$test_dir" "$selftest_stack"' EXIT
+cp -a "$STACK_DIR/bin" "$selftest_stack/"
+STACK_DIR="$selftest_stack"
 export FAKE_LOG="$test_dir/docker.log" FAKE_IMAGES="$test_dir/images"
 export AEEIS_ENV_FILE="$test_dir/stack.env" AEEIS_CURRENT_FILE="$test_dir/no-current.env"
-export AEEIS_ALLOW_DIRTY=1 AEEIS_SKIP_REPLAY=1 COMPOSE_PROJECT_NAME=aeeis-cn
+export AEEIS_ALLOW_DIRTY=1 COMPOSE_PROJECT_NAME=aeeis-cn
 cat > "$AEEIS_ENV_FILE" <<'ENV'
 AEEIS_STACK=aeeis-cn-prod
 AEEIS_TASK_QUEUE=aeeis-agent
@@ -38,6 +43,23 @@ if args[0] == 'compose':
         elif '--format' in args:
             print(json.dumps({'services': {'api': {'container_name': os.getenv('FAKE_TARGET_CONTAINER', 'new-api')}},
                               'volumes': {'pg': {'name': 'aeeis-cn-prod-postgres'}}}))
+    elif 'ps' in args and '-q' in args:
+        print('temporal-id')
+    elif 'workflow' in args and 'list' in args:
+        if mode == 'list-fail': sys.exit(1)
+        if mode == 'malformed': print('{bad'); sys.exit(0)
+        if mode == 'empty-output': sys.exit(0)
+        query = args[args.index('--query') + 1]
+        running = 'ExecutionStatus="Running"' in query
+        if running: assert '--limit' not in args, args
+        rows = [{'type': {'name': 'agentRunWorkflow'}, 'execution': {'workflowId': 'run-' + str(i), 'runId': 'execution-' + str(i)}} for i in range(4)] if running and mode != 'no-histories' else []
+        print(json.dumps(rows))
+    elif 'workflow' in args and 'show' in args:
+        if mode == 'export-fail': sys.exit(1)
+        assert '--run-id' in args, args
+        print('{"events": [{}]}')
+    elif 'deployment' in args and 'describe' in args:
+        print(json.dumps({'currentVersion': {'buildId': os.environ['AEEIS_BUILD_ID']}}))
     sys.exit(0)
 if args[:2] == ['volume', 'ls']:
     if mode == 'daemon-fail': sys.exit(1)
@@ -63,6 +85,13 @@ elif args[0] == 'tag':
     assert args[1] in local
     local.add(args[2])
     images.write_text('\n'.join(sorted(local)) + '\n')
+elif args[0] == 'run':
+    workflow_id = next(x.split('=',1)[1] for x in args if x.startswith('AEEIS_TEMPORAL_WORKFLOW_ID='))
+    if mode == 'no-marker': print('no replay evidence'); sys.exit(0)
+    print(json.dumps({'protocol':'aeeis-temporal-replay/1', 'status':'passed', 'workflowId':workflow_id}))
+    if mode == 'replay-fail':
+        print('candidate replay nondeterminism', file=sys.stderr)
+        sys.exit(1)
 elif args[0] == 'save':
     assert set(args[3:]) == set(refs), args
     Path(args[2]).write_text('\n'.join(args[3:]) + '\n')
@@ -178,4 +207,56 @@ python3 - <<'PYTEST'
 import json,os
 assert not any(a[0]=='pull' for a in map(json.loads,open(os.environ['FAKE_LOG'])))
 PYTEST
-echo 'stack selftest: project/volume guards, pull failures, offline transport and registry fallback passed'
+# Gate is exercised through deploy, including failure after a success marker.
+for mode in list-fail malformed empty-output export-fail replay-fail no-marker; do
+  reset_fake
+  export FAKE_MODE="$mode"
+  expect_failure deploy
+  no_container_mutation
+  grep -q 'replay gate:' "$test_dir/output"
+  if [[ "$mode" == replay-fail ]]; then grep -q 'candidate replay nondeterminism' "$test_dir/output"; fi
+done
+reset_fake
+deploy > "$test_dir/output" 2>&1
+grep -q 'running executions=4' "$test_dir/output"
+grep -q 'PASSED checked=4' "$test_dir/output"
+python3 - <<'PYTEST'
+import json,os
+calls=list(map(json.loads,open(os.environ['FAKE_LOG'])))
+replays=[a for a in calls if a[0]=='run']
+assert len(replays)==4, replays
+assert all('aeeis:test' in a for a in replays), replays
+up=next(a for a in calls if a[0]=='compose' and 'up' in a)
+assert all(calls.index(a)<calls.index(up) for a in replays)
+PYTEST
+reset_fake
+export FAKE_MODE=no-histories
+deploy > "$test_dir/output" 2>&1
+grep -q 'PASSED checked=0' "$test_dir/output"
+# Per-stack selection and backward-compatible legacy reads.
+unset AEEIS_CURRENT_FILE
+printf 'AEEIS_STACK=aeeis-cn-prod\nAEEIS_IMAGE=aeeis:legacy\nAEEIS_BUILD_ID=aeeis-cn-prod-old\n' > "$STACK_DIR/.current.env"
+read_image() { bash -euo pipefail -c '. "$1/bin/_lib.sh"; printf "%s\n" "$AEEIS_IMAGE"' image "$STACK_DIR"; }
+[[ "$(read_image)" == aeeis:legacy ]]
+printf 'AEEIS_IMAGE=aeeis:legacy-prefix\nAEEIS_BUILD_ID=aeeis-cn-prod-old\n' > "$STACK_DIR/.current.env"
+[[ "$(read_image)" == aeeis:legacy-prefix ]]
+sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
+[[ "$(read_image)" == aeeis:test ]]
+reset_fake
+deploy > "$test_dir/output" 2>&1
+[[ -r "$STACK_DIR/.current.aeeis-drill.env" ]]
+[[ ! -e "$STACK_DIR/.candidate.aeeis-drill.env" ]]
+[[ "$(read_image)" == aeeis:test ]]
+sed -i 's/AEEIS_STACK=aeeis-drill/AEEIS_STACK=aeeis-cn-prod/' "$AEEIS_ENV_FILE"
+[[ "$(read_image)" == aeeis:legacy-prefix ]]
+reset_fake
+deploy > "$test_dir/output" 2>&1
+[[ -r "$STACK_DIR/.current.aeeis-cn-prod.env" ]]
+grep -q 'aeeis:legacy-prefix' "$STACK_DIR/.previous.aeeis-cn-prod.env"
+[[ -r "$STACK_DIR/.current.aeeis-drill.env" ]]
+# New keyed state takes precedence over legacy, including a different image.
+sed -i 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.current.aeeis-cn-prod.env"
+[[ "$(read_image)" == aeeis:prod ]]
+sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
+[[ "$(read_image)" == aeeis:test ]]
+echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate and stack state isolation passed'
