@@ -7,8 +7,9 @@ import { FileRunShareStore, PostgresRunShareStore, runSharesMigration, type RunS
 import type { AgentRun } from './contracts.js';
 import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
+import { assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, threadsMigration, ThreadConflict, type Thread, type ThreadRepository } from './threads.js';
 
-export interface RunRepository {
+export interface RunRepository extends ThreadRepository {
   readonly shares?: RunShareStore;
   create(run: AgentRun): Promise<void>;
   get(id: string, scope?: Ownership): Promise<AgentRun>;
@@ -58,8 +59,11 @@ export class NotFound extends Error {}
 function validateId(id: string): void {
   if (!/^run_[a-f0-9-]{36}$/.test(id)) throw new NotFound('Unknown run');
 }
+function validateThreadId(id: string): void {
+  if (!/^thread_[a-f0-9-]{36}$/.test(id)) throw new NotFound('Unknown thread');
+}
 type PageKey = { updatedAt: string; id: string };
-type FileRunSummary = { id: string; owner: string; tenantId: string; updatedAt: string; eventCount: number; privacy: AgentRun['privacy']; goalId?: string; lastEventId?: string; lastEventSeq?: number; needsRecovery: boolean };
+type FileRunSummary = { id: string; owner: string; tenantId: string; updatedAt: string; eventCount: number; privacy: AgentRun['privacy']; goalId?: string; lastEventId?: string; lastEventSeq?: number; needsRecovery: boolean; threadId?: string; threadSequence?: number };
 function encodePageKey(key: PageKey): string { return Buffer.from(JSON.stringify({ updatedAt: key.updatedAt, id: key.id }), 'utf8').toString('base64url'); }
 function decodePageKey(value: string | undefined): PageKey | undefined {
   if (value === undefined) return undefined;
@@ -140,7 +144,7 @@ export class FileRunRepository implements RunRepository {
     const temp = `${this.indexPath}.${randomUUID()}.tmp`;
     const file = await open(temp, 'wx', 0o600);
     try {
-      await file.writeFile(JSON.stringify({ version: 2, entries }));
+      await file.writeFile(JSON.stringify({ version: 3, entries }));
       await file.sync();
     } finally { await file.close(); }
     await rename(temp, this.indexPath);
@@ -156,10 +160,12 @@ export class FileRunRepository implements RunRepository {
     const file = await open(temp, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(run)); await file.sync(); } finally { await file.close(); }
     await rename(temp, path);
+    // Keep cached summaries aligned with the canonical commit even if a
+    // later projection write fails; retries may not call save again.
+    this.summaries?.set(run.id, this.summary(run));
     // The event file is a disposable projection. If this write fails, the
     // canonical aggregate remains authoritative and eventsPage falls back to it.
     await this.saveEvents(run);
-    this.summaries?.set(run.id, this.summary(run));
     // The index is a disposable acceleration structure. Canonical Run and
     // event files are already durable; if index publication fails, the next
     // process rebuilds it from those files.
@@ -174,6 +180,7 @@ export class FileRunRepository implements RunRepository {
   }
   create(run: AgentRun): Promise<void> {
     return this.serial(async () => {
+      assertUnthreaded(run);
       try { await this.get(run.id); throw new Error('Run already exists'); }
       catch (e) { if (!(e instanceof NotFound)) throw e; }
       await this.save(run);
@@ -187,6 +194,48 @@ export class FileRunRepository implements RunRepository {
     }
     catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound('Unknown run'); throw e; }
   }
+  private threadPath(id: string): string { validateThreadId(id); return join(this.directory, `${id}.json`); }
+  createThread(thread: Thread): Promise<void> {
+    return this.serial(async () => {
+      const record = threadSchema.parse(thread);
+      try { await this.getThread(record.id); throw new ThreadConflict('Thread already exists'); }
+      catch (error) { if (!(error instanceof NotFound)) throw error; }
+      const path = this.threadPath(record.id), temp = `${path}.${randomUUID()}.tmp`;
+      const file = await open(temp, 'wx', 0o600);
+      try { await file.writeFile(JSON.stringify(record)); await file.sync(); } finally { await file.close(); }
+      await rename(temp, path);
+      const dir = await open(this.directory, 'r');
+      try { await dir.sync(); } finally { await dir.close(); }
+    });
+  }
+  async getThread(id: string, scope?: Ownership): Promise<Thread> {
+    try {
+      const thread = JSON.parse(await readFile(this.threadPath(id), 'utf8')) as Thread;
+      if (scope && !isOwnedBy(thread, scope)) throw new NotFound('Unknown thread');
+      return thread;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound('Unknown thread'); throw error; }
+  }
+  listRunsByThread(id: string, scope?: Ownership, limit?: number): Promise<AgentRun[]> {
+    return this.serial(async () => {
+      validateCollectionLimit(limit);
+      const thread = await this.getThread(id, scope);
+      await this.ensureSummaries();
+      const selected = [...this.summaries!.values()].filter(run => run.threadId === id && isOwnedBy(run, thread))
+        .sort((a, b) => a.threadSequence! - b.threadSequence!).slice(0, limit);
+      return Promise.all(selected.map(run => this.get(run.id, thread)));
+    });
+  }
+  attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> {
+    return this.serial(async () => {
+      const thread = await this.getThread(threadId, scope);
+      const run = await this.get(runId, thread);
+      const parent = parentRunId === undefined ? undefined : await this.get(parentRunId, thread);
+      await this.ensureSummaries();
+      const lastSequence = [...this.summaries!.values()].filter(item => item.threadId === threadId).reduce((max, item) => Math.max(max, item.threadSequence!), 0);
+      if (prepareAttachment(run, thread, parent, lastSequence)) await this.save(run);
+      return run;
+    });
+  }
   private summary(run: AgentRun): FileRunSummary {
     const needsRecovery = run.calls.some(call => call.state === 'started')
       || Boolean(run.pendingTool && (!run.pendingTool.receiptId || run.pendingTool.executionToken || run.pendingTool.reconcileInFlight === true))
@@ -198,7 +247,7 @@ export class FileRunRepository implements RunRepository {
       || Boolean(run.status === 'succeeded' && run.goalId && (run.builtinSkill === 'project-pulse/1' || run.projectSourceQuery)
         && !run.events.some(item => item.type === 'project-pulse.next-actions.projected'));
     const privacy: AgentRun['privacy'] = run.privacy ?? 'internal';
-    return { id: run.id, owner: run.owner ?? 'owner', tenantId: run.tenantId ?? 'local', updatedAt: run.updatedAt, eventCount: run.events.length, privacy, ...(run.goalId ? { goalId: run.goalId } : {}), needsRecovery, ...(run.events.length ? { lastEventId: run.events.at(-1)!.id, lastEventSeq: run.events.at(-1)!.seq } : { lastEventSeq: 0 }) };
+    return { id: run.id, owner: run.owner ?? 'owner', tenantId: run.tenantId ?? 'local', updatedAt: run.updatedAt, eventCount: run.events.length, privacy, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.threadId ? { threadId: run.threadId, threadSequence: run.threadSequence! } : {}), needsRecovery, ...(run.events.length ? { lastEventId: run.events.at(-1)!.id, lastEventSeq: run.events.at(-1)!.seq } : { lastEventSeq: 0 }) };
   }
   private async ensureSummaries(): Promise<void> {
     if (this.summaries) return;
@@ -220,7 +269,7 @@ export class FileRunRepository implements RunRepository {
   private async loadIndex(ids: string[]): Promise<Map<string, FileRunSummary> | undefined> {
     let raw: unknown;
     try { raw = JSON.parse(await readFile(this.indexPath, 'utf8')); } catch { return undefined; }
-    if (!raw || typeof raw !== 'object' || (raw as { version?: unknown }).version !== 2 || !Array.isArray((raw as { entries?: unknown }).entries)) return undefined;
+    if (!raw || typeof raw !== 'object' || (raw as { version?: unknown }).version !== 3 || !Array.isArray((raw as { entries?: unknown }).entries)) return undefined;
     const entries = (raw as { entries: unknown[] }).entries;
     if (entries.length !== ids.length) return undefined;
     const byId = new Map<string, FileRunSummary>();
@@ -233,6 +282,8 @@ export class FileRunRepository implements RunRepository {
         || !Number.isSafeInteger(value.eventCount) || (value.eventCount as number) < 0
         || !['public', 'internal', 'confidential', 'private'].includes(String(value.privacy))
         || (value.goalId !== undefined && typeof value.goalId !== 'string')
+        || (value.threadId !== undefined && (typeof value.threadId !== 'string' || !/^thread_[a-f0-9-]{36}$/.test(value.threadId) || !Number.isSafeInteger(value.threadSequence) || (value.threadSequence as number) < 1))
+        || (value.threadId === undefined && value.threadSequence !== undefined)
         || typeof value.needsRecovery !== 'boolean' || !Number.isFinite(value.size as number)
         || !Number.isFinite(value.mtimeMs as number) || byId.has(value.id)) return undefined;
       const file = await stat(this.path(value.id)).catch(() => undefined);
@@ -243,6 +294,7 @@ export class FileRunRepository implements RunRepository {
         eventCount: value.eventCount as number,
         privacy,
         ...(typeof value.goalId === 'string' ? { goalId: value.goalId } : {}),
+        ...(typeof value.threadId === 'string' ? { threadId: value.threadId, threadSequence: value.threadSequence as number } : {}),
         needsRecovery: value.needsRecovery,
         ...(typeof value.lastEventId === 'string' ? { lastEventId: value.lastEventId } : {}),
         ...(Number.isSafeInteger(value.lastEventSeq) ? { lastEventSeq: value.lastEventSeq as number } : {}),
@@ -369,7 +421,9 @@ export class FileRunRepository implements RunRepository {
     return this.serial(async () => {
       const run = await this.get(id, scope);
       const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+      const membership = { threadId: run.threadId, parentRunId: run.parentRunId, threadSequence: run.threadSequence };
       await change(run);
+      assertMembershipUnchanged(membership, run);
       if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable'); run.revision++; run.updatedAt = new Date().toISOString();
       await this.save(run); return run;
     });
@@ -394,6 +448,7 @@ export class PostgresRunRepository implements RunRepository {
         updated_at timestamptz NOT NULL DEFAULT now()
       )`);
       await client.query(runSharesMigration);
+      await client.query(threadsMigration);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')), updated_at DESC, id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_shared_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (state->>'goalId'), updated_at DESC, id) WHERE COALESCE(state->>'privacy', 'internal') IN ('public', 'internal')`);
@@ -419,6 +474,7 @@ export class PostgresRunRepository implements RunRepository {
     await this.pool.query('SELECT 1');
   }
   async create(run: AgentRun): Promise<void> {
+    assertUnthreaded(run);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -512,6 +568,55 @@ export class PostgresRunRepository implements RunRepository {
     const result = await this.pool.query(`SELECT state FROM aeeis_runs WHERE id=$1${scope ? " AND COALESCE(state->>'owner', 'owner')=$2 AND COALESCE(state->>'tenantId', 'local')=$3" : ''}`, scope ? [id, scope.owner, scope.tenantId] : [id]);
     if (!result.rows[0]) throw new NotFound('Unknown run');
     return result.rows[0].state as AgentRun;
+  }
+  async createThread(thread: Thread): Promise<void> {
+    const record = threadSchema.parse(thread);
+    const result = await this.pool.query('INSERT INTO aeeis_threads(id,owner,tenant_id,title,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING', [record.id, record.owner, record.tenantId, record.title ?? null, record.createdAt]);
+    if (!result.rowCount) throw new ThreadConflict('Thread already exists');
+  }
+  async getThread(id: string, scope?: Ownership): Promise<Thread> {
+    validateThreadId(id);
+    const result = await this.pool.query<ThreadRow>(`SELECT * FROM aeeis_threads WHERE id=$1${scope ? ' AND owner=$2 AND tenant_id=$3' : ''}`, scope ? [id, scope.owner, scope.tenantId] : [id]);
+    if (!result.rows[0]) throw new NotFound('Unknown thread');
+    return threadFromRow(result.rows[0]);
+  }
+  async listRunsByThread(id: string, scope?: Ownership, limit?: number): Promise<AgentRun[]> {
+    validateCollectionLimit(limit);
+    const thread = await this.getThread(id, scope);
+    const values: unknown[] = [id, thread.owner, thread.tenantId];
+    if (limit !== undefined) values.push(limit);
+    const result = await this.pool.query<{ state: AgentRun }>(`SELECT state FROM aeeis_runs WHERE thread_id=$1 AND COALESCE(state->>'owner','owner')=$2 AND COALESCE(state->>'tenantId','local')=$3 ORDER BY thread_sequence ASC${limit === undefined ? '' : ' LIMIT $4'}`, values);
+    return result.rows.map(row => row.state);
+  }
+  async attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> {
+    validateId(runId); validateThreadId(threadId);
+    if (parentRunId !== undefined) validateId(parentRunId);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Lock the thread first: every append, including across processes, uses
+      // this order. Existing parent membership cannot change through mutate.
+      const threads = await client.query<ThreadRow>('SELECT * FROM aeeis_threads WHERE id=$1 FOR UPDATE', [threadId]);
+      const row = threads.rows[0];
+      if (!row || (scope && !isOwnedBy({ owner: row.owner, tenantId: row.tenant_id }, scope))) throw new NotFound('Unknown thread');
+      const thread = threadFromRow(row);
+      const runs = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1 FOR UPDATE', [runId]);
+      const run = runs.rows[0]?.state;
+      if (!run || !isOwnedBy(run, thread)) throw new NotFound('Unknown run');
+      let parent: AgentRun | undefined;
+      if (parentRunId !== undefined) {
+        const parents = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1', [parentRunId]);
+        parent = parents.rows[0]?.state;
+        if (!parent || !isOwnedBy(parent, thread)) throw new NotFound('Unknown run');
+      }
+      const last = await client.query<{ seq: number }>('SELECT COALESCE(MAX(thread_sequence),0) AS seq FROM aeeis_runs WHERE thread_id=$1', [threadId]);
+      const changed = prepareAttachment(run, thread, parent, last.rows[0]!.seq);
+      if (changed) await client.query('UPDATE aeeis_runs SET thread_id=$2,parent_run_id=$3,thread_sequence=$4,revision=$5,state=$6,updated_at=$7 WHERE id=$1', [runId, threadId, parentRunId ?? null, run.threadSequence, run.revision, run, run.updatedAt]);
+      await client.query('COMMIT');
+      if (changed) await this.notifyChange(client, run);
+      return run;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   }
   async list(scope?: Ownership, limit?: number): Promise<AgentRun[]> {
     validateCollectionLimit(limit);
@@ -647,7 +752,9 @@ export class PostgresRunRepository implements RunRepository {
       const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
       const eventCount = run.events.length;
       const eventIds = run.events.map(item => item.id);
+      const membership = { threadId: run.threadId, parentRunId: run.parentRunId, threadSequence: run.threadSequence };
       await change(run);
+      assertMembershipUnchanged(membership, run);
       if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable');
       if (run.events.length < eventCount || eventIds.some((id, index) => run.events[index]?.id !== id)) throw new Error('Run events are append-only');
       run.revision++; run.updatedAt = new Date().toISOString();
@@ -659,6 +766,11 @@ export class PostgresRunRepository implements RunRepository {
     finally { client.release(); }
   }
   async close(): Promise<void> { if (this.closed) return; this.closed = true; const entries = [...this.changeSubscribers.entries()]; await Promise.all(entries.map(([handler, subscription]) => this.stopChangeSubscription(handler, subscription))); await this.pool.end(); }
+}
+
+type ThreadRow = { id: string; owner: string; tenant_id: string; title: string | null; created_at: Date };
+function threadFromRow(row: ThreadRow): Thread {
+  return { id: row.id, owner: row.owner, tenantId: row.tenant_id, ...(row.title === null ? {} : { title: row.title }), createdAt: row.created_at.toISOString() };
 }
 
 interface PostgresChangeSubscription {

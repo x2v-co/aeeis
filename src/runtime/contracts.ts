@@ -224,6 +224,8 @@ export interface Step {
 }
 export interface AgentRun {
   schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;
+  /** Optional cross-run conversation membership, assigned by the repository. */
+  threadId?: string; parentRunId?: string; threadSequence?: number;
   goal: string; goalId?: string; domainPlanId?: string;
   /** When present, this Run is the execution receipt for one existing domain task. */
   taskExecution?: { domainPlanId: string; taskId: string; requestHash: string };
