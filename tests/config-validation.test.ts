@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import { validateRuntimeConfig } from '../src/config-validation.js';
 
+const development = { AEEIS_ACCESS_TOKEN: 'development-token' };
+
 const production = {
   AEEIS_ENV: 'production',
   DATABASE_URL: 'postgresql://aeeis@db/aeeis',
@@ -11,8 +13,62 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it.each([
+    {},
+    { AEEIS_ENV: 'development' },
+    { NODE_ENV: 'test' },
+    { AEEIS_ENV: 'development', NODE_ENV: 'production' },
+    { AEEIS_AUTH_DISABLED: '0' },
+    { AEEIS_ACCESS_TOKEN: '' },
+    { AEEIS_ACCESS_TOKEN: '   ' },
+    { ...production, AEEIS_ACCESS_TOKEN: undefined },
+    { ...production, AEEIS_ACCESS_TOKEN: '' },
+    { ...production, AEEIS_ACCESS_TOKEN: '   ' },
+  ])('requires API authentication without an explicit opt-out: %j', env => {
+    expect(() => validateRuntimeConfig(env)).toThrow('API authentication requires');
+  });
+
+  it.each([undefined, '127.0.0.1', 'localhost', '::1'])('allows an explicit auth opt-out on loopback host %s', host => {
+    expect(() => validateRuntimeConfig({ AEEIS_ENV: 'development', AEEIS_AUTH_DISABLED: '1', AEEIS_HOST: host })).not.toThrow();
+  });
+
+  it.each(['0.0.0.0', '::', '192.168.1.2', 'api.example', ''])('rejects disabling auth on non-loopback host %s', host => {
+    expect(() => validateRuntimeConfig({ AEEIS_AUTH_DISABLED: '1', AEEIS_HOST: host })).toThrow('requires a loopback AEEIS_HOST');
+  });
+
+  it.each([
+    { AEEIS_ACCESS_TOKEN: 'secret-token' },
+    { AEEIS_PRINCIPAL_TOKENS: '{}' },
+    { AEEIS_OIDC_ISSUER: 'https://issuer.example' },
+    { AEEIS_OIDC_AUDIENCE: 'aeeis' },
+    { AEEIS_OIDC_JWKS_URL: 'https://issuer.example/jwks' },
+    { AEEIS_OIDC_ISSUER: 'https://issuer.example', AEEIS_OIDC_AUDIENCE: 'aeeis', AEEIS_OIDC_JWKS_URL: 'https://issuer.example/jwks' },
+  ])('rejects combining disabled auth with credentials: %j', auth => {
+    expect(() => validateRuntimeConfig({ AEEIS_AUTH_DISABLED: '1', ...auth })).toThrow('cannot be combined');
+  });
+
+  it('treats a blank access token as missing when auth is explicitly disabled', () => {
+    expect(() => validateRuntimeConfig({ AEEIS_AUTH_DISABLED: '1', AEEIS_ACCESS_TOKEN: '   ' })).not.toThrow();
+  });
+
+  it.each(['true', 'yes', ''])('rejects invalid auth opt-out value %s', value => {
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AUTH_DISABLED: value })).toThrow('AEEIS_AUTH_DISABLED must be 0 or 1');
+  });
+
+  it('accepts principal tokens and complete OIDC in development', () => {
+    expect(() => validateRuntimeConfig({ AEEIS_PRINCIPAL_TOKENS: JSON.stringify({ token: { id: 'alice', tenantId: 'team', roles: ['owner'] } }) })).not.toThrow();
+    expect(() => validateRuntimeConfig({ AEEIS_ACCESS_TOKEN: '   ', AEEIS_OIDC_ISSUER: 'https://issuer.example', AEEIS_OIDC_AUDIENCE: 'aeeis', AEEIS_OIDC_JWKS_URL: 'https://issuer.example/jwks' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ AEEIS_OIDC_ISSUER: 'https://issuer.example' })).toThrow('issuer, audience, and JWKS URL together');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PRINCIPAL_TOKENS: '{}' })).toThrow('cannot both be configured');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_OIDC_ISSUER: 'https://issuer.example', AEEIS_OIDC_AUDIENCE: 'aeeis', AEEIS_OIDC_JWKS_URL: 'https://issuer.example/jwks' })).toThrow('cannot be combined');
+  });
+
+  it('retains production database checks when auth is disabled on loopback', () => {
+    expect(() => validateRuntimeConfig({ AEEIS_ENV: 'production', AEEIS_AUTH_DISABLED: '1' })).toThrow('requires DATABASE_URL');
+  });
+
   it('limits local execution tools to a single-owner loopback development runtime', () => {
-    const env = { AEEIS_LOCAL_TOOLS_CONFIG: 'tools.json' };
+    const env = { ...development, AEEIS_LOCAL_TOOLS_CONFIG: 'tools.json' };
     expect(() => validateRuntimeConfig(env)).not.toThrow();
     for (const extra of [{ AEEIS_ENV: 'production' }, { NODE_ENV: 'production' }, { AEEIS_HOST: '0.0.0.0' }, { AEEIS_RUNNER: 'temporal' }, { AEEIS_PRINCIPAL_TOKENS: '{}' }, { AEEIS_OIDC_ISSUER: 'https://issuer.example' }]) {
       expect(() => validateRuntimeConfig({ ...env, ...extra })).toThrow('AEEIS_LOCAL_TOOLS_CONFIG');
@@ -20,9 +76,9 @@ describe('runtime configuration validation', () => {
   });
 
   it('accepts a longer model timeout and rejects invalid or unbounded deadlines', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_TIMEOUT_MS: '180000' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_TIMEOUT_MS: '180000' })).not.toThrow();
     for (const value of ['0', '-1', 'NaN', '1.5', '600001']) {
-      expect(() => validateRuntimeConfig({ AEEIS_MODEL_TIMEOUT_MS: value })).toThrow('AEEIS_MODEL_TIMEOUT_MS');
+      expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_TIMEOUT_MS: value })).toThrow('AEEIS_MODEL_TIMEOUT_MS');
     }
   });
   it('accepts a production database and authenticated local deployment', () => {
@@ -75,14 +131,14 @@ describe('runtime configuration validation', () => {
   });
 
   it('rejects an invalid Planprice catalog cache TTL', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_CACHE_TTL_MS: '-1' })).toThrow('AEEIS_PLANPRICE_CACHE_TTL_MS');
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_CACHE_TTL_MS: 'not-a-number' })).toThrow('AEEIS_PLANPRICE_CACHE_TTL_MS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_CACHE_TTL_MS: '-1' })).toThrow('AEEIS_PLANPRICE_CACHE_TTL_MS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_CACHE_TTL_MS: 'not-a-number' })).toThrow('AEEIS_PLANPRICE_CACHE_TTL_MS');
   });
 
   it('validates the explicit private-data provider policy', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_PRIVATE_DATA_ALLOWED: JSON.stringify({ provider: true }) })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_PRIVATE_DATA_ALLOWED: JSON.stringify({ provider: 'yes' }) })).toThrow('AEEIS_MODEL_PRIVATE_DATA_ALLOWED');
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_PRIVATE_DATA_ALLOWED: '[]' })).toThrow('AEEIS_MODEL_PRIVATE_DATA_ALLOWED');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_PRIVATE_DATA_ALLOWED: JSON.stringify({ provider: true }) })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_PRIVATE_DATA_ALLOWED: JSON.stringify({ provider: 'yes' }) })).toThrow('AEEIS_MODEL_PRIVATE_DATA_ALLOWED');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_PRIVATE_DATA_ALLOWED: '[]' })).toThrow('AEEIS_MODEL_PRIVATE_DATA_ALLOWED');
   });
 
   it('allows the explicit development signature verification escape hatch', () => {
@@ -100,18 +156,19 @@ describe('runtime configuration validation', () => {
   });
 
   it('validates model, Planprice and evaluator endpoints before startup', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_BASE_URL: 'https://model.example/v1?token=secret', AEEIS_MODEL: 'model/1' })).toThrow('AEEIS_MODEL_BASE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_HEALTH_URL: 'https://model.example/health#secret' })).toThrow('AEEIS_MODEL_HEALTH_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_URL: 'http://planprice.example' })).toThrow('AEEIS_PLANPRICE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_HEALTH_URL: 'https://planprice.example/health' })).toThrow('requires AEEIS_PLANPRICE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_URL: 'https://planprice.example', AEEIS_PLANPRICE_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_PLANPRICE_HEALTH_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PLANPRICE_URL: 'https://planprice.example', AEEIS_PLANPRICE_HEALTH_URL: 'https://planprice.example/health' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate?token=secret' })).toThrow('AEEIS_RSI_EVALUATOR_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://evaluator.example/health' })).toThrow('requires AEEIS_RSI_EVALUATOR_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate', AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_RSI_EVALUATOR_HEALTH_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate', AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://evaluator.example/health' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_PROVIDER_ENDPOINTS: JSON.stringify({ provider: 'http://provider.example/v1' }) })).toThrow('AEEIS_MODEL_PROVIDER_ENDPOINTS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_BASE_URL: 'https://model.example/v1?token=secret', AEEIS_MODEL: 'model/1' })).toThrow('AEEIS_MODEL_BASE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_HEALTH_URL: 'https://model.example/health#secret' })).toThrow('AEEIS_MODEL_HEALTH_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_URL: 'http://planprice.example' })).toThrow('AEEIS_PLANPRICE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_HEALTH_URL: 'https://planprice.example/health' })).toThrow('requires AEEIS_PLANPRICE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_URL: 'https://planprice.example', AEEIS_PLANPRICE_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_PLANPRICE_HEALTH_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PLANPRICE_URL: 'https://planprice.example', AEEIS_PLANPRICE_HEALTH_URL: 'https://planprice.example/health' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate?token=secret' })).toThrow('AEEIS_RSI_EVALUATOR_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://evaluator.example/health' })).toThrow('requires AEEIS_RSI_EVALUATOR_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate', AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_RSI_EVALUATOR_HEALTH_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_EVALUATOR_URL: 'https://evaluator.example/evaluate', AEEIS_RSI_EVALUATOR_HEALTH_URL: 'https://evaluator.example/health' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_PROVIDER_ENDPOINTS: JSON.stringify({ provider: 'http://provider.example/v1' }) })).toThrow('AEEIS_MODEL_PROVIDER_ENDPOINTS');
     expect(() => validateRuntimeConfig({
+      ...development,
       AEEIS_PLANPRICE_URL: 'http://planprice.example',
       AEEIS_PLANPRICE_ALLOW_INSECURE_HTTP: '1',
       AEEIS_MODEL_PROVIDER_ENDPOINTS: JSON.stringify({ provider: 'http://provider.example/v1' }),
@@ -120,75 +177,76 @@ describe('runtime configuration validation', () => {
       AEEIS_RSI_EVALUATOR_URL: 'http://evaluator.example/evaluate',
       AEEIS_RSI_EVALUATOR_ALLOW_INSECURE_HTTP: '1',
     })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_MODEL_PROVIDER_ENDPOINTS: '{}' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_PROVIDER_ENDPOINTS: '{}' })).not.toThrow();
   });
 
   it('validates integration endpoints before opening stores', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_KNOWLEDGE_URL: 'http://knowledge.example/search' })).toThrow('AEEIS_KNOWLEDGE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PROJECT_SOURCES_URL: 'https://sources.example/search?token=secret' })).toThrow('AEEIS_PROJECT_SOURCES_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events#secret' })).toThrow('AEEIS_PROJECTION_SINK_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://sink.example/health' })).toThrow('requires AEEIS_PROJECTION_SINK_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events', AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_PROJECTION_SINK_HEALTH_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events', AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://sink.example/health' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_BRAIN_EMBEDDING_URL: 'http://127.0.0.1:8081/embeddings' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://embed.example/health' })).toThrow('requires AEEIS_BRAIN_EMBEDDING_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_BRAIN_EMBEDDING_URL: 'https://embed.example/v1/embeddings', AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_BRAIN_EMBEDDING_HEALTH_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_BRAIN_EMBEDDING_URL: 'https://embed.example/v1/embeddings', AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://embed.example/health' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_KNOWLEDGE_URL: 'ftp://localhost/knowledge' })).toThrow('must use HTTPS');
-    expect(() => validateRuntimeConfig({ AEEIS_FEISHU_API_BASE_URL: 'https://open.feishu.cn?token=secret' })).toThrow('AEEIS_FEISHU_API_BASE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_TOOLKIT_MANIFEST_URL: 'https://toolkit.example/manifest' })).toThrow('configured together');
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_CLI_PATH: 'hermes', AEEIS_HERMES_CLI_TIMEOUT_MS: '499' })).toThrow('AEEIS_HERMES_CLI_TIMEOUT_MS');
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_CLI_PATH: 'hermes', AEEIS_HERMES_CLI_TIMEOUT_MS: '30000' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_KNOWLEDGE_URL: 'http://knowledge.example/search' })).toThrow('AEEIS_KNOWLEDGE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PROJECT_SOURCES_URL: 'https://sources.example/search?token=secret' })).toThrow('AEEIS_PROJECT_SOURCES_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events#secret' })).toThrow('AEEIS_PROJECTION_SINK_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://sink.example/health' })).toThrow('requires AEEIS_PROJECTION_SINK_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events', AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_PROJECTION_SINK_HEALTH_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PROJECTION_SINK_URL: 'https://sink.example/events', AEEIS_PROJECTION_SINK_HEALTH_URL: 'https://sink.example/health' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_BRAIN_EMBEDDING_URL: 'http://127.0.0.1:8081/embeddings' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://embed.example/health' })).toThrow('requires AEEIS_BRAIN_EMBEDDING_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_BRAIN_EMBEDDING_URL: 'https://embed.example/v1/embeddings', AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://other.example/health' })).toThrow('AEEIS_BRAIN_EMBEDDING_HEALTH_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_BRAIN_EMBEDDING_URL: 'https://embed.example/v1/embeddings', AEEIS_BRAIN_EMBEDDING_HEALTH_URL: 'https://embed.example/health' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_KNOWLEDGE_URL: 'ftp://localhost/knowledge' })).toThrow('must use HTTPS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_FEISHU_API_BASE_URL: 'https://open.feishu.cn?token=secret' })).toThrow('AEEIS_FEISHU_API_BASE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_TOOLKIT_MANIFEST_URL: 'https://toolkit.example/manifest' })).toThrow('configured together');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_CLI_PATH: 'hermes', AEEIS_HERMES_CLI_TIMEOUT_MS: '499' })).toThrow('AEEIS_HERMES_CLI_TIMEOUT_MS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_CLI_PATH: 'hermes', AEEIS_HERMES_CLI_TIMEOUT_MS: '30000' })).not.toThrow();
   });
 
   it('validates the direct Hermes Debate bridge contract', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_SIGNING_KEYS: '', AEEIS_HERMES_DEBATE_ROUTES: '', AEEIS_HERMES_SENDER_AGENTS: '' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_SIGNING_KEYS: '', AEEIS_HERMES_DEBATE_ROUTES: '', AEEIS_HERMES_SENDER_AGENTS: '' })).not.toThrow();
     const keys = JSON.stringify({ local: 'hermes-signing-key-123' });
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_SIGNING_KEYS: keys })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_DEBATE_ROUTES: '[]' })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_SIGNING_KEYS: '{}' })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_SIGNING_KEYS: JSON.stringify({ local: 'short' }) })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
-    expect(() => validateRuntimeConfig({ AEEIS_HERMES_SIGNING_KEYS: keys, AEEIS_HERMES_DEBATE_ROUTES: '{' })).toThrow('AEEIS_HERMES_DEBATE_ROUTES');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_SIGNING_KEYS: keys })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_DEBATE_ROUTES: '[]' })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_SIGNING_KEYS: '{}' })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_SIGNING_KEYS: JSON.stringify({ local: 'short' }) })).toThrow('AEEIS_HERMES_SIGNING_KEYS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_HERMES_SIGNING_KEYS: keys, AEEIS_HERMES_DEBATE_ROUTES: '{' })).toThrow('AEEIS_HERMES_DEBATE_ROUTES');
   });
 
   it('validates external Agent and connector JSON endpoints', () => {
     const card = JSON.stringify([{ endpoint: 'https://agent.example/task' }]);
-    expect(() => validateRuntimeConfig({ AEEIS_AGENT_CARDS: card })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_AGENT_CARDS: JSON.stringify([{ endpoint: 'http://agent.example/task' }]) })).toThrow('AEEIS_AGENT_CARDS');
-    expect(() => validateRuntimeConfig({ AEEIS_AGENT_CARDS: JSON.stringify([{ endpoint: 'http://127.0.0.1:4390/task' }]), AEEIS_AGENT_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_AGENT_OAUTH_CONFIG: JSON.stringify({ 'agent.one': { tokenUrl: 'https://issuer.example/token', clientId: 'id', clientSecret: 'secret' } }) })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_AGENT_OAUTH_CONFIG: JSON.stringify({ 'agent.one': { tokenUrl: 'https://issuer.example/token?secret=x', clientId: 'id', clientSecret: 'secret' } }) })).toThrow('tokenUrl');
-    expect(() => validateRuntimeConfig({ AEEIS_LINEAR_PROJECT_SOURCES: JSON.stringify([{ id: 'linear', endpoint: 'http://linear.example/graphql', apiKey: 'key', tenantId: 'team' }]) })).toThrow('AEEIS_LINEAR_PROJECT_SOURCES');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AGENT_CARDS: card })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AGENT_CARDS: JSON.stringify([{ endpoint: 'http://agent.example/task' }]) })).toThrow('AEEIS_AGENT_CARDS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AGENT_CARDS: JSON.stringify([{ endpoint: 'http://127.0.0.1:4390/task' }]), AEEIS_AGENT_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AGENT_OAUTH_CONFIG: JSON.stringify({ 'agent.one': { tokenUrl: 'https://issuer.example/token', clientId: 'id', clientSecret: 'secret' } }) })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_AGENT_OAUTH_CONFIG: JSON.stringify({ 'agent.one': { tokenUrl: 'https://issuer.example/token?secret=x', clientId: 'id', clientSecret: 'secret' } }) })).toThrow('tokenUrl');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_LINEAR_PROJECT_SOURCES: JSON.stringify([{ id: 'linear', endpoint: 'http://linear.example/graphql', apiKey: 'key', tenantId: 'team' }]) })).toThrow('AEEIS_LINEAR_PROJECT_SOURCES');
   });
 
   it('validates the optional principal directory boundary', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_PRINCIPAL_DIRECTORY_URL: 'https://directory.example/lookup', AEEIS_PRINCIPAL_DIRECTORY_TOKEN: 'secret' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_PRINCIPAL_DIRECTORY_URL: 'http://directory.example/lookup' })).toThrow('AEEIS_PRINCIPAL_DIRECTORY_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_PRINCIPAL_DIRECTORY_URL: 'http://127.0.0.1:4811/lookup', AEEIS_PRINCIPAL_DIRECTORY_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_PRINCIPAL_DIRECTORY_URL: 'https://directory.example/lookup?token=secret' })).toThrow('AEEIS_PRINCIPAL_DIRECTORY_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PRINCIPAL_DIRECTORY_URL: 'https://directory.example/lookup', AEEIS_PRINCIPAL_DIRECTORY_TOKEN: 'secret' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PRINCIPAL_DIRECTORY_URL: 'http://directory.example/lookup' })).toThrow('AEEIS_PRINCIPAL_DIRECTORY_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PRINCIPAL_DIRECTORY_URL: 'http://127.0.0.1:4811/lookup', AEEIS_PRINCIPAL_DIRECTORY_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_PRINCIPAL_DIRECTORY_URL: 'https://directory.example/lookup?token=secret' })).toThrow('AEEIS_PRINCIPAL_DIRECTORY_URL');
   });
 
   it('validates the optional Channel Identity boundary', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_CHANNEL_IDENTITY_URL: 'https://identity.example/lookup', AEEIS_CHANNEL_IDENTITY_TOKEN: 'secret' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_CHANNEL_IDENTITY_URL: 'http://identity.example/lookup' })).toThrow('AEEIS_CHANNEL_IDENTITY_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_CHANNEL_IDENTITY_URL: 'http://127.0.0.1:4812/lookup', AEEIS_CHANNEL_IDENTITY_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_CHANNEL_IDENTITY_URL: 'https://identity.example/lookup?token=secret' })).toThrow('AEEIS_CHANNEL_IDENTITY_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_CHANNEL_IDENTITY_TIMEOUT_MS: '99' })).toThrow('AEEIS_CHANNEL_IDENTITY_TIMEOUT_MS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_CHANNEL_IDENTITY_URL: 'https://identity.example/lookup', AEEIS_CHANNEL_IDENTITY_TOKEN: 'secret' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_CHANNEL_IDENTITY_URL: 'http://identity.example/lookup' })).toThrow('AEEIS_CHANNEL_IDENTITY_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_CHANNEL_IDENTITY_URL: 'http://127.0.0.1:4812/lookup', AEEIS_CHANNEL_IDENTITY_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_CHANNEL_IDENTITY_URL: 'https://identity.example/lookup?token=secret' })).toThrow('AEEIS_CHANNEL_IDENTITY_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_CHANNEL_IDENTITY_TIMEOUT_MS: '99' })).toThrow('AEEIS_CHANNEL_IDENTITY_TIMEOUT_MS');
   });
 
   it('validates OwnHow runtime and RSI proposal synthesis boundaries', () => {
-    expect(() => validateRuntimeConfig({ AEEIS_OWNHOW_ENABLED: '1' })).toThrow('AEEIS_OWNHOW_RUNTIME');
-    expect(() => validateRuntimeConfig({ AEEIS_OWNHOW_RUNTIME: 'codex' })).toThrow('AEEIS_OWNHOW_ENABLED');
-    expect(() => validateRuntimeConfig({ AEEIS_OWNHOW_ENABLED: '1', AEEIS_OWNHOW_RUNTIME: 'codex' })).not.toThrow();
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '2' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '1' })).toThrow('fixed model or AEEIS_PLANPRICE_URL');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '1', AEEIS_MODEL_BASE_URL: 'https://model.example/v1' })).toThrow('AEEIS_MODEL_BASE_URL and AEEIS_MODEL');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_PRIVACY: 'public,unknown' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_PRIVACY');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_CALLS: '0' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_CALLS');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_TOKENS: 'not-an-int' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_TOKENS');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_INTERVAL_MS: '500' })).toThrow('AEEIS_RSI_PROPOSAL_INTERVAL_MS');
-    expect(() => validateRuntimeConfig({ AEEIS_RSI_PROPOSAL_INTERVAL_MS: '0' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_OWNHOW_ENABLED: '1' })).toThrow('AEEIS_OWNHOW_RUNTIME');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_OWNHOW_RUNTIME: 'codex' })).toThrow('AEEIS_OWNHOW_ENABLED');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_OWNHOW_ENABLED: '1', AEEIS_OWNHOW_RUNTIME: 'codex' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '2' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '1' })).toThrow('fixed model or AEEIS_PLANPRICE_URL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '1', AEEIS_MODEL_BASE_URL: 'https://model.example/v1' })).toThrow('AEEIS_MODEL_BASE_URL and AEEIS_MODEL');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_PRIVACY: 'public,unknown' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_PRIVACY');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_CALLS: '0' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_CALLS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_TOKENS: 'not-an-int' })).toThrow('AEEIS_RSI_PROPOSAL_SYNTHESIS_MAX_TOKENS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_INTERVAL_MS: '500' })).toThrow('AEEIS_RSI_PROPOSAL_INTERVAL_MS');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_RSI_PROPOSAL_INTERVAL_MS: '0' })).not.toThrow();
     expect(() => validateRuntimeConfig({
+      ...development,
       AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED: '1',
       AEEIS_MODEL_BASE_URL: 'https://model.example/v1',
       AEEIS_MODEL: 'model/1',
@@ -220,9 +278,10 @@ describe('runtime configuration validation', () => {
     expect(() => validateRuntimeConfig(temporal)).not.toThrow();
   });
 
-  it('keeps development defaults available for local fixture work', () => {
-    expect(() => validateRuntimeConfig({ NODE_ENV: 'test' })).not.toThrow();
-    expect(() => validateRuntimeConfig({})).not.toThrow();
-    expect(() => validateRuntimeConfig({ NODE_ENV: 'production', AEEIS_ENV: 'development', AEEIS_MODEL_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
+  it('keeps development defaults available for explicitly unauthenticated local fixture work', () => {
+    const local = { AEEIS_AUTH_DISABLED: '1' };
+    expect(() => validateRuntimeConfig({ ...local, NODE_ENV: 'test' })).not.toThrow();
+    expect(() => validateRuntimeConfig(local)).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...local, NODE_ENV: 'production', AEEIS_ENV: 'development', AEEIS_MODEL_ALLOW_INSECURE_HTTP: '1' })).not.toThrow();
   });
 });

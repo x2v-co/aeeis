@@ -90,6 +90,7 @@ const environment = {
   ...inheritedEnvironment,
   NODE_ENV: 'development',
   AEEIS_ENV: 'development',
+  AEEIS_AUTH_DISABLED: '1',
   AEEIS_HOST: '127.0.0.1',
   PORT: String(apiPort),
   AEEIS_DEMO_MODE: '1',

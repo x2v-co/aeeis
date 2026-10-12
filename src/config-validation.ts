@@ -440,16 +440,32 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
       validateServiceUrls(healthUrls, 'AEEIS_MODEL_PROVIDER_HEALTH_URLS', env.AEEIS_MODEL_PROVIDER_ALLOW_INSECURE_HTTP === '1');
     }
   }
+  // API authentication is required in every environment. Only an explicit
+  // loopback opt-out may use the local owner principal without credentials.
+  if (env.AEEIS_AUTH_DISABLED !== undefined && !['0', '1'].includes(env.AEEIS_AUTH_DISABLED)) throw new Error('AEEIS_AUTH_DISABLED must be 0 or 1');
+  const authDisabled = env.AEEIS_AUTH_DISABLED === '1';
+  const hasAccessToken = Boolean(env.AEEIS_ACCESS_TOKEN?.trim());
+  const hasPrincipalTokens = Boolean(env.AEEIS_PRINCIPAL_TOKENS?.trim());
+  const oidcFields = ['AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL'];
+  const presentOidc = oidcFields.filter(name => Boolean(env[name]?.trim())).length;
+  if (authDisabled) {
+    if (!['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1')) {
+      throw new Error('AEEIS_AUTH_DISABLED=1 requires a loopback AEEIS_HOST (127.0.0.1, localhost, or ::1)');
+    }
+    if (hasAccessToken || hasPrincipalTokens || presentOidc) {
+      throw new Error('AEEIS_AUTH_DISABLED=1 cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or OIDC authentication');
+    }
+  } else {
+    if (presentOidc !== 0 && presentOidc !== oidcFields.length) throw new Error('OIDC configuration requires issuer, audience, and JWKS URL together');
+    if (!hasAccessToken && !hasPrincipalTokens && presentOidc !== oidcFields.length) {
+      throw new Error('API authentication requires AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or complete OIDC authentication; use AEEIS_AUTH_DISABLED=1 only for loopback development');
+    }
+    if (hasPrincipalTokens && hasAccessToken) throw new Error('AEEIS_ACCESS_TOKEN and AEEIS_PRINCIPAL_TOKENS cannot both be configured');
+    if (presentOidc && (hasAccessToken || hasPrincipalTokens)) throw new Error('OIDC cannot be combined with static token authentication');
+  }
   if (!production) return;
 
   if (!env.DATABASE_URL) throw new Error('Production configuration requires DATABASE_URL');
-  const hasAuthentication = Boolean(env.AEEIS_ACCESS_TOKEN || env.AEEIS_PRINCIPAL_TOKENS || env.AEEIS_OIDC_ISSUER || env.AEEIS_OIDC_AUDIENCE || env.AEEIS_OIDC_JWKS_URL);
-  if (!hasAuthentication) throw new Error('Production configuration requires AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or complete OIDC authentication');
-  const oidcFields = ['AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL'];
-  const presentOidc = oidcFields.filter(name => Boolean(env[name])).length;
-  if (presentOidc !== 0 && presentOidc !== oidcFields.length) throw new Error('Production OIDC configuration requires issuer, audience, and JWKS URL together');
-  if (env.AEEIS_PRINCIPAL_TOKENS && env.AEEIS_ACCESS_TOKEN) throw new Error('AEEIS_ACCESS_TOKEN and AEEIS_PRINCIPAL_TOKENS cannot both be configured');
-  if (presentOidc && (env.AEEIS_ACCESS_TOKEN || env.AEEIS_PRINCIPAL_TOKENS)) throw new Error('OIDC cannot be combined with static token authentication');
 
   const runner = env.AEEIS_RUNNER ?? 'local';
   if (!['local', 'temporal'].includes(runner)) throw new Error(`Unsupported AEEIS_RUNNER: ${runner}`);

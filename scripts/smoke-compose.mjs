@@ -2,11 +2,16 @@ const baseUrl = (process.env.AEEIS_BASE_URL ?? 'http://127.0.0.1:4323').replace(
 const workerUrl = (process.env.AEEIS_WORKER_URL ?? `${new URL(baseUrl).protocol}//${new URL(baseUrl).hostname}:4324`).replace(/\/$/, '');
 const timeoutMs = Number(process.env.AEEIS_SMOKE_TIMEOUT_MS ?? 120_000);
 const startedAt = Date.now();
+const accessToken = process.env.AEEIS_ACCESS_TOKEN || 'compose-access-token';
 
 async function request(path, init = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+    headers: {
+      'content-type': 'application/json',
+      ...(path.startsWith('/api/') ? { authorization: `Bearer ${accessToken}` } : {}),
+      ...(init.headers ?? {}),
+    },
   });
   const text = await response.text();
   let body;

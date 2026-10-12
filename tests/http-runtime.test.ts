@@ -31,6 +31,31 @@ import { InMemoryStore } from '../src/adapters/in-memory-store.js';
 import { InMemoryGrantLedger } from '../src/agent-ledger.js';
 
 describe('AEEIS HTTP boundary', () => {
+  it('requires the configured local bearer token for API calls and keeps probes open', async () => {
+    const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-auth-')));
+    await repo.init();
+    const app = buildApp({ repository: repo, token: 'secret-token' });
+    try {
+      const missing = await app.inject({ method: 'GET', url: '/api/runs' });
+      expect(missing.statusCode).toBe(401);
+      expect(missing.json().error).toContain('Local access token');
+      const wrong = await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer wrong-token' } });
+      expect(wrong.statusCode).toBe(401);
+      expect(wrong.json().error).toContain('Local access token');
+      const authorized = await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer secret-token' } });
+      expect(authorized.statusCode).toBe(200);
+      expect(authorized.json()).toEqual([]);
+      // This minimal app has no model or dispatcher, so readiness returns 503.
+      for (const [url, statusCode, protocol] of [['/health', 200, 'aeeis-health/1'], ['/readyz', 503, 'aeeis-readiness/1']] as const) {
+        for (const headers of [{}, { authorization: 'Bearer wrong-token' }]) {
+          const probe = await app.inject({ method: 'GET', url, headers });
+          expect(probe.statusCode).toBe(statusCode);
+          expect(probe.json().protocol).toBe(protocol);
+        }
+      }
+    } finally { await app.close(); await repo.close(); }
+  });
+
   it('downloads exact Markdown with a Unicode filename and enforces Run access', async () => {
     const repo = new FileRunRepository(await mkdtemp(join(tmpdir(), 'aeeis-artifact-download-'))); await repo.init();
     const app = buildApp({ repository: repo, principalTokens: {
