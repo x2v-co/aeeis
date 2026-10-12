@@ -1,10 +1,12 @@
 # /etc/systemd/system/aeeis-health@.service  (+ .timer, every 5 min)
-# Fails (-> notify-failure) when API /readyz or Worker /readyz is not ready.
+# Fails (-> aeeis-notify@) when API /readyz or Worker /readyz is not ready.
 [Unit]
 Description=AEEIS stack readiness probe (%i)
+OnFailure=aeeis-notify@%i.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/%i/aeeis/deploy/stack
-ExecStart=/opt/%i/aeeis/deploy/stack/bin/health.sh
+Environment=AEEIS_DEPLOY_DIR=/opt/aeeis/deploy/stack
+EnvironmentFile=-/etc/aeeis/%i.env
+ExecStart=/bin/bash -ec 'cd "$${AEEIS_DEPLOY_DIR}"; exec ./bin/health.sh'
 TimeoutStartSec=60

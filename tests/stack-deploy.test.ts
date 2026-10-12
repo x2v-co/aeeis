@@ -2,11 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { expect, test } from 'vitest';
 
-test('production stack guards and image preflight fail closed', () => {
+test('production stack deployment, online backup, notifications and systemd paths', () => {
   const output = execFileSync('bash', [resolve('deploy/stack/bin/selftest.sh')], {
     encoding: 'utf8', timeout: 60_000,
   });
-  expect(output).toContain('stack selftest:');
+  expect(output).toContain('replay gate and stack state isolation passed');
+  expect(output).toContain('online atomic backups, failure exits, retention, notifications and configurable systemd paths passed');
 }, 65_000);
 
 

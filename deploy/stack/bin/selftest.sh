@@ -10,9 +10,9 @@ mkdir -p "$test_dir/bin"
 # Same repository root, isolated deploy state. Never write real release files.
 selftest_stack="$(mktemp -d "$STACK_DIR/../.selftest.XXXXXX")"
 trap 'rm -rf "$test_dir" "$selftest_stack"' EXIT
-cp -a "$STACK_DIR/bin" "$selftest_stack/"
+cp -a "$STACK_DIR/bin" "$STACK_DIR/systemd" "$selftest_stack/"
 STACK_DIR="$selftest_stack"
-export FAKE_LOG="$test_dir/docker.log" FAKE_IMAGES="$test_dir/images"
+export FAKE_LOG="$test_dir/docker.log" FAKE_IMAGES="$test_dir/images" FAKE_STACK_DIR="$STACK_DIR"
 export AEEIS_ENV_FILE="$test_dir/stack.env" AEEIS_CURRENT_FILE="$test_dir/no-current.env"
 export AEEIS_ALLOW_DIRTY=1 COMPOSE_PROJECT_NAME=aeeis-cn
 cat > "$AEEIS_ENV_FILE" <<'ENV'
@@ -23,7 +23,7 @@ AEEIS_BUILD_ID=test
 ENV
 cat > "$test_dir/bin/docker" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as f:
@@ -60,6 +60,15 @@ if args[0] == 'compose':
         print('{"events": [{}]}')
     elif 'deployment' in args and 'describe' in args:
         print(json.dumps({'currentVersion': {'buildId': os.environ['AEEIS_BUILD_ID']}}))
+    elif 'run' in args and args[-1] == 'backup':
+        assert '--no-deps' in args and '--pull' in args and 'never' in args, args
+        if mode == 'backup-run-fail': sys.exit(42)
+        env = dict(os.environ, AEEIS_BACKUP_ROOT=os.environ['AEEIS_BACKUP_DIR'],
+                   AEEIS_POSTGRES_PASSWORD='test-aeeis', TEMPORAL_POSTGRES_PASSWORD='test-temporal')
+        result = subprocess.run(['sh', os.environ['FAKE_STACK_DIR'] + '/bin/pg-dump-all.sh'], env=env)
+        if result.returncode: sys.exit(result.returncode)
+        if mode == 'backup-corrupt':
+            (Path(env['AEEIS_BACKUP_ROOT']) / env['BACKUP_STAMP'] / 'aeeis.dump').write_text('corrupt')
     sys.exit(0)
 if args[:2] == ['volume', 'ls']:
     if mode == 'daemon-fail': sys.exit(1)
@@ -260,3 +269,176 @@ sed -i 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.current.a
 sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
 echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate and stack state isolation passed'
+
+# Run the real backup entrypoints with fake Docker and PostgreSQL clients.
+export FAKE_PG_LOG="$test_dir/pg.log"
+cat > "$test_dir/bin/pg_dump" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+command = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with open(os.environ['FAKE_PG_LOG'], 'a') as f:
+    f.write(json.dumps([command] + args) + '\n')
+root = Path(os.environ['AEEIS_BACKUP_ROOT'])
+assert not (root / os.environ['BACKUP_STAMP']).exists(), 'published before validation'
+mode = os.getenv('FAKE_MODE', '')
+if command == 'pg_dump':
+    assert '-Fc' in args and '--no-owner' in args, args
+    db = args[args.index('-d') + 1]
+    host = args[args.index('-h') + 1]
+    user = args[args.index('-U') + 1]
+    expected = ('postgres', 'aeeis', 'test-aeeis') if db == 'aeeis' else ('temporal-postgres', 'temporal', 'test-temporal')
+    assert (host, user, os.environ['PGPASSWORD']) == expected
+    assert db in ('aeeis', 'temporal', 'temporal_visibility'), args
+    Path(args[args.index('-f') + 1]).write_text('archive ' + db)
+    if mode == 'dump-fail' and db == 'temporal': sys.exit(43)
+else:
+    assert args[0] == '--list' and Path(args[1]).read_text().startswith('archive '), args
+    if mode == 'restore-fail': sys.exit(44)
+PY
+chmod +x "$test_dir/bin/pg_dump"
+ln -s pg_dump "$test_dir/bin/pg_restore"
+no_service_changes() {
+  python3 - <<'PY'
+import json,os
+calls = list(map(json.loads, open(os.environ['FAKE_LOG'])))
+assert not any(a[0] == 'compose' and any(x in a for x in ['stop','down','up','restart','start']) for a in calls), calls
+PY
+}
+reset_backup() {
+  reset_fake
+  : > "$FAKE_PG_LOG"
+  export AEEIS_BACKUP_DIR="$test_dir/backups with spaces"
+  rm -rf "$AEEIS_BACKUP_DIR"
+  mkdir -p "$AEEIS_BACKUP_DIR/20000101T000000Z"
+  touch -d '30 days ago' "$AEEIS_BACKUP_DIR/20000101T000000Z"
+}
+reset_backup
+# A legacy quiesce setting must not cause an outage.
+export AEEIS_BACKUP_QUIESCE=full AEEIS_BACKUP_KEEP_DAYS=14
+"$STACK_DIR/bin/backup.sh" > "$test_dir/output" 2>&1
+no_service_changes
+python3 - <<'PY'
+import json,os,stat
+from pathlib import Path
+root = Path(os.environ['AEEIS_BACKUP_DIR'])
+backups = list(root.iterdir())
+assert len(backups) == 1 and backups[0].name != '20000101T000000Z', backups
+assert stat.S_IMODE(backups[0].stat().st_mode) == 0o700
+assert {p.name for p in backups[0].iterdir()} == {'aeeis.dump','temporal.dump','temporal_visibility.dump','SHA256SUMS'}
+calls = list(map(json.loads, open(os.environ['FAKE_PG_LOG'])))
+assert [a[a.index('-d')+1] for a in calls if a[0]=='pg_dump'] == ['aeeis','temporal','temporal_visibility'], calls
+assert sum(a[0]=='pg_restore' for a in calls) == 3, calls
+PY
+# No partial final directory or temp files; failures must not prune old backups.
+for mode in backup-run-fail dump-fail restore-fail; do
+  reset_backup
+  export FAKE_MODE="$mode"
+  expect_failure "$STACK_DIR/bin/backup.sh"
+  no_service_changes
+  python3 - <<'PY'
+import os
+from pathlib import Path
+assert [p.name for p in Path(os.environ['AEEIS_BACKUP_DIR']).iterdir()] == ['20000101T000000Z']
+PY
+done
+# The host rechecks hashes before retention/upload, even after container success.
+reset_backup
+export FAKE_MODE=backup-corrupt
+expect_failure "$STACK_DIR/bin/backup.sh"
+no_service_changes
+test -d "$AEEIS_BACKUP_DIR/20000101T000000Z"
+reset_backup
+export AEEIS_BACKUP_UPLOAD_CMD='exit 45'
+expect_failure "$STACK_DIR/bin/backup.sh"
+no_service_changes
+unset AEEIS_BACKUP_UPLOAD_CMD AEEIS_BACKUP_QUIESCE
+
+# Webhook handling uses a JSON payload, bounds requests, and never fails hard.
+export FAKE_CURL_LOG="$test_dir/curl.json"
+cat > "$test_dir/bin/curl" <<'PY'
+#!/usr/bin/env python3
+import json,os,sys
+args = sys.argv[1:]
+assert args[args.index('--connect-timeout')+1] == '5'
+assert args[args.index('--max-time')+1] == '15'
+assert '--fail' in args
+payload = json.loads(args[args.index('--data-binary')+1])
+assert isinstance(payload['text'], str)
+with open(os.environ['FAKE_CURL_LOG'], 'w') as f: json.dump({'args':args,'payload':payload}, f)
+sys.exit(int(os.getenv('FAKE_CURL_EXIT', '0')))
+PY
+chmod +x "$test_dir/bin/curl"
+export AEEIS_NOTIFY_WEBHOOK=
+"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
+grep -q 'journal only' "$test_dir/output"
+test ! -e "$FAKE_CURL_LOG"
+printf '\nAEEIS_NOTIFY_WEBHOOK=https://notify.invalid/stack-hook\n' >> "$AEEIS_ENV_FILE"
+export AEEIS_NOTIFY_WEBHOOK=https://notify.invalid/inherited-hook
+export MONITOR_UNIT='aeeis-health@aeeis-cn-prod.service' MONITOR_SERVICE_RESULT=exit-code
+"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
+python3 - <<'PY'
+import json,os
+call = json.load(open(os.environ['FAKE_CURL_LOG']))
+assert call['args'][-1] == 'https://notify.invalid/stack-hook'
+assert os.environ['MONITOR_UNIT'] in call['payload']['text']
+assert 'result=exit-code' in call['payload']['text']
+PY
+export FAKE_CURL_EXIT=22
+"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
+grep -q 'webhook delivery failed' "$test_dir/output"
+AEEIS_ENV_FILE="$test_dir/missing.env" "$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
+grep -q 'stack env unavailable' "$test_dir/output"
+printf 'exit 99\n' > "$test_dir/broken.env"
+AEEIS_ENV_FILE="$test_dir/broken.env" "$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
+grep -q 'handler error' "$test_dir/output"
+unset AEEIS_NOTIFY_WEBHOOK MONITOR_UNIT MONITOR_SERVICE_RESULT FAKE_CURL_EXIT
+
+# Execute the unit shell commands with an overridden checkout containing spaces.
+# This also checks that all commands cd into the configured deploy directory.
+export FAKE_UNIT_DIR="$test_dir/custom deploy"
+mkdir -p "$FAKE_UNIT_DIR/bin"
+cat > "$FAKE_UNIT_DIR/bin/probe" <<'SH'
+#!/bin/sh
+test "$PWD" = "$AEEIS_DEPLOY_DIR" || exit 1
+printf '%s\n' "$0 $*" >> "$AEEIS_DEPLOY_DIR/commands"
+SH
+chmod +x "$FAKE_UNIT_DIR/bin/probe"
+for entrypoint in backup health notify stack; do
+  ln -s probe "$FAKE_UNIT_DIR/bin/$entrypoint.sh"
+done
+printf 'AEEIS_BIND_IP=100.64.0.1\n' > "$FAKE_UNIT_DIR/stack.env"
+printf '#!/bin/sh\nprintf "inet 100.64.0.1/32\\n"\n' > "$test_dir/bin/ip"
+chmod +x "$test_dir/bin/ip"
+python3 - <<'PY'
+import os,shlex,subprocess
+from pathlib import Path
+units = Path(os.environ['FAKE_STACK_DIR']) / 'systemd'
+env = dict(os.environ, AEEIS_DEPLOY_DIR=os.environ['FAKE_UNIT_DIR'],
+           AEEIS_ENV_FILE=os.environ['FAKE_UNIT_DIR'] + '/stack.env')
+for name in ('backup','health','notify','stack'):
+    text = (units / ('aeeis-' + name + '@.service')).read_text()
+    assert 'Environment=AEEIS_DEPLOY_DIR=/opt/aeeis/deploy/stack' in text
+    assert 'EnvironmentFile=-/etc/aeeis/%i.env' in text
+    assert '/opt/%i/aeeis' not in text
+    if name in ('backup','health'): assert 'OnFailure=aeeis-notify@%i.service' in text
+    if name == 'notify': assert 'OnFailure=' not in text
+    for line in text.splitlines():
+        if line.startswith(('ExecStart=', 'ExecStartPre=', 'ExecStop=')):
+            command = line.split('=',1)[1].removeprefix('-').replace('$$','$').replace('%i','aeeis-cn-prod')
+            subprocess.run(shlex.split(command), env=env, check=True, timeout=5)
+commands = (Path(env['AEEIS_DEPLOY_DIR']) / 'commands').read_text()
+assert 'notify.sh aeeis-cn-prod' in commands and 'stack.sh start' in commands and 'stack.sh stop' in commands, commands
+PY
+# Stub external dependencies so verify also works on hosts without Docker units.
+if command -v systemd-analyze >/dev/null; then
+  mkdir -p "$test_dir/systemd"
+  cp "$STACK_DIR"/systemd/* "$test_dir/systemd/"
+  for dependency in docker tailscaled; do
+    printf '[Unit]\nDescription=Selftest dependency\n[Service]\nExecStart=/bin/true\n' > "$test_dir/systemd/$dependency.service"
+  done
+  SYSTEMD_UNIT_PATH="$test_dir/systemd:" systemd-analyze verify \
+    "$test_dir"/systemd/aeeis-*.service "$test_dir"/systemd/aeeis-*.timer
+fi
+echo 'stack selftest: online atomic backups, failure exits, retention, notifications and configurable systemd paths passed'
