@@ -121,16 +121,25 @@ allowlist; configure it independently if switching to service URLs.
 - State files use `AEEIS_STACK`: `.current.<stack>.env`, `.previous.<stack>.env`
   and `.candidate.<stack>.env`. Legacy `.current.env` is read only if its
   `AEEIS_STACK` or build ID identifies this exact stack. New releases use keyed files.
-- `bin/backup.sh` defaults to stopping API/worker/Temporal while dumping AEEIS,
-  Temporal persistence and visibility databases as a coordinated set. It checks
-  hashes, restores services, applies retention and can upload off-host. CN
+- `bin/backup.sh` dumps AEEIS, Temporal persistence and visibility databases
+  online with `pg_dump -Fc`; API, worker and Temporal keep running. Each database
+  has a consistent snapshot, but the three snapshots are taken at different
+  instants. Archives and hashes are checked in a temporary directory before
+  atomic publication; failures exit nonzero. It applies retention and can upload off-host. CN
   backups stay in approved CN storage; SG backups use the approved SG destination.
   Restore the three databases together plus application data as needed.
-- `systemd/` supplies stack, backup and health units for `/opt/<instance>/aeeis`.
+- `systemd/` supplies stack, backup, health and notification units. The default
+  deploy directory is `/opt/aeeis/deploy/stack`; override `AEEIS_DEPLOY_DIR` in
+  `/etc/aeeis/<instance>.env` (and `AEEIS_ENV_FILE` for a custom stack env).
   Install after successful acceptance; leave old units disabled. The stack unit
   uses `bin/stack.sh` with project/volume guards and image preflight at boot,
   reads `stack.env` and `.current.<stack>.env`, and waits for the tailnet address.
   Backup and health timers run daily and every 5 minutes.
+  Both services use `OnFailure=aeeis-notify@<instance>.service`; set
+  `AEEIS_NOTIFY_WEBHOOK` in the protected stack env to receive JSON `text`
+  messages. Unset webhooks log to the journal; delivery failures are best effort.
+  Follow the runbook's installation steps, including removing the old
+  `10-notify.conf` drop-ins now that notifications are in the repo units.
 - Optional `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and
   `AEEIS_DATA_VOLUME` override the explicit volume names. Foreign project labels
   and legacy-container mounts are rejected; use isolated restored volumes.
@@ -180,7 +189,8 @@ the selected prefix using the same paths/tags, log in with `docker login`, and
 prepull before the maintenance window. Prefixes must have no trailing slash.
 Local upstream tarballs can be retagged for TCR without network access.
 
-Run `./bin/selftest.sh` for the mocked project/volume and image failure tests.
+Run `./bin/selftest.sh` for the mocked deployment, online backup, notification
+and systemd checks (including `systemd-analyze verify` when available).
 The normal `npm run verify` unit tests also run this selftest.
 
 ## Fixture smoke in CI only

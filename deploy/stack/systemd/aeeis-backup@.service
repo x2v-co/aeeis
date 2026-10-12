@@ -3,9 +3,11 @@
 Description=AEEIS stack backup (%i)
 Requires=docker.service
 After=docker.service
+OnFailure=aeeis-notify@%i.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/%i/aeeis/deploy/stack
-ExecStart=/opt/%i/aeeis/deploy/stack/bin/backup.sh
+Environment=AEEIS_DEPLOY_DIR=/opt/aeeis/deploy/stack
+EnvironmentFile=-/etc/aeeis/%i.env
+ExecStart=/bin/bash -ec 'cd "$${AEEIS_DEPLOY_DIR}"; exec ./bin/backup.sh'
 TimeoutStartSec=3600

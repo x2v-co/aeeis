@@ -1,0 +1,11 @@
+# Best-effort notification handler for backup/health failures; never recurses.
+[Unit]
+Description=AEEIS failure notification (%i)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AEEIS_DEPLOY_DIR=/opt/aeeis/deploy/stack
+EnvironmentFile=-/etc/aeeis/%i.env
+ExecStart=-/bin/bash -ec 'cd "$${AEEIS_DEPLOY_DIR}"; exec ./bin/notify.sh "%i"'
+TimeoutStartSec=30

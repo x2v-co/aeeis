@@ -44,7 +44,7 @@ OLD_REPO='/REPLACE_WITH_OLD_CHECKOUT'
 OLD_PROJECT='REPLACE_WITH_EXISTING_COMPOSE_PROJECT'
 OLD_OVERRIDE='aeeis-sg.override.yml'  # kk-cn: aeeis-cn.override.yml
 OLD_NAMESPACE='REPLACE_WITH_EXISTING_NAMESPACE'
-NEW_REPO='/REPLACE_WITH_PRODUCTION_CHECKOUT'
+NEW_REPO='/opt/aeeis'  # Separate production checkout; adjust if already occupied.
 STACK_ENV="$NEW_REPO/deploy/stack/stack.env"
 migration_backup='/REPLACE_WITH_REGION_LOCAL_BACKUP_DIRECTORY/migration'
 mkdir -p "$migration_backup"
@@ -494,7 +494,47 @@ Record the run ID, model identity and Temporal workflow execution. Verify actual
 provider usage from the provider console/response evidence. Fixtures and a 200
 health response do not satisfy this acceptance check. Reopen upstream traffic
 only after all checks pass; confirm existing callers can still list their runs.
-Run a new coordinated backup and schedule a restore drill after acceptance.
+Run `AEEIS_ENV_FILE="$STACK_ENV" ./bin/backup.sh` and schedule a restore drill
+after acceptance. Routine backups use online `pg_dump -Fc` against the running
+databases; API, worker and Temporal remain running. Each database has a consistent
+snapshot, but AEEIS, Temporal persistence and visibility snapshots are taken at
+different instants. This does not replace the drained migration snapshot in
+section 3. Test recovery of workflows across these snapshot times. Archives and
+checksums are verified before the temporary directory is atomically renamed;
+failures exit nonzero, and retention/upload run only after a valid backup.
+
+### Install the systemd units after acceptance
+
+Install every repo template, including the notification handler. All services
+default to `/opt/aeeis/deploy/stack`, matching `NEW_REPO` above. For a different
+checkout or stack env path, the per-instance environment file selects the paths:
+
+```bash
+sudo install -d -m 0755 /etc/aeeis
+# Write only the paths here; webhook credentials stay in the protected STACK_ENV.
+printf 'AEEIS_DEPLOY_DIR="%s"\nAEEIS_ENV_FILE="%s"\n' \
+  "$NEW_REPO/deploy/stack" "$STACK_ENV" \
+  | sudo tee "/etc/aeeis/$AEEIS_STACK.env" >/dev/null
+sudo chmod 0600 "/etc/aeeis/$AEEIS_STACK.env"
+sudo install -m 0644 "$NEW_REPO"/deploy/stack/systemd/* /etc/systemd/system/
+# SRE's hand-added notification routing is now in the repo service units.
+# Remove only the superseded 10-notify.conf files; preserve other drop-ins.
+for migration_unit in aeeis-backup aeeis-health; do
+  sudo rm -f "/etc/systemd/system/$migration_unit@.service.d/10-notify.conf" \
+    "/etc/systemd/system/$migration_unit@$AEEIS_STACK.service.d/10-notify.conf"
+done
+sudo systemctl daemon-reload
+sudo systemctl enable --now "aeeis-stack@$AEEIS_STACK.service" \
+  "aeeis-backup@$AEEIS_STACK.timer" "aeeis-health@$AEEIS_STACK.timer"
+```
+
+Set `AEEIS_NOTIFY_WEBHOOK` in `STACK_ENV` to an approved regional webhook that
+accepts JSON `{"text":"..."}`. Backup/health failures trigger
+`aeeis-notify@<instance>.service`; an unset webhook logs to its journal, and
+delivery errors never fail hard. Check with
+`sudo systemctl start "aeeis-notify@$AEEIS_STACK.service"` and
+`sudo journalctl -u "aeeis-notify@$AEEIS_STACK.service" -n 20`. A manual check
+sends a test failure message. Keep the legacy auto-start units disabled.
 
 ## 6. Roll back
 
