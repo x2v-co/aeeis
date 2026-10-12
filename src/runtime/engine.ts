@@ -1,3 +1,4 @@
+import { modelRawOutput, redactRunData } from './run-debug.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { principalAudience, validatePrincipal } from '../security/principal.js';
@@ -39,6 +40,11 @@ function validationDetails(error: unknown): { issues: Array<{ path: string; code
 }
 function failureReason(error: unknown, fallback: string): string {
   return error instanceof z.ZodError ? 'Model output failed schema validation' : error instanceof Error ? error.message : fallback;
+}
+function recordTaskFailure(run: AgentRun, taskId?: string): void {
+  if (!run.error || !(run.status === 'failed' || (run.status === 'paused' && run.resumeStatus === 'failed'))) return;
+  const step = taskId ? run.steps.find(step => step.taskId === taskId) : run.steps.find(step => step.status === 'running');
+  if (step && step.status !== 'succeeded') { step.error = run.error; step.failureReason = run.error; }
 }
 export function taskRunIdFor(owner: string, tenantId: string, task: { domainPlanId: string; taskId: string }): string {
   const hex = digest({ tenantId, owner, ...task });
@@ -187,6 +193,10 @@ function normalizeFinishOutput(value: unknown): unknown {
 }
 
 function requestFinishRepair(run: AgentRun, step: Step, candidate: unknown, reason: string): void {
+  const call = run.calls.at(-1);
+  const errors = [{ path: 'finish.structured', code: 'invalid_artifact', message: reason }];
+  if (call) { call.rawOutput ??= modelRawOutput(candidate); call.validationErrors = redactRunData(errors); }
+  event(run, 'model.validation_failed', { callId: call?.id, taskId: step.taskId, rawOutput: call?.rawOutput ?? modelRawOutput(candidate), validation: redactRunData({ issues: errors }) });
   if (step.finishRepair) throw new Error(`Model artifact repair failed: ${reason}. Retry or replan the Run with a model that follows the finish output contract.`);
   step.finishRepair = { reason, candidate };
   event(run, 'artifact.repair_requested', { taskId: step.taskId, reason });
@@ -739,6 +749,7 @@ export class AgentEngine {
         }
         if (action !== 'reconcile') assertExternalSettlement(run);
         run.status = run.plans.length === 0 ? 'queued' : run.steps.every(s => s.status === 'succeeded') ? 'reviewing' : 'running';
+        for (const step of run.steps) { delete step.error; delete step.failureReason; }
         delete run.error; event(run, 'run.retry_requested');
       } else if (action === 'replan') {
         if (run.taskExecution) throw new Conflict('Bound task instructions are immutable; retry this Run or create a revised domain Plan');
@@ -797,6 +808,7 @@ export class AgentEngine {
         if (run.status === 'paused') run.resumeStatus = 'failed';
         else run.status = 'failed';
         run.error = failureReason(error, 'Execution failed');
+        recordTaskFailure(run);
         event(run, 'run.failed', { reason: run.error, ...(validationDetails(error) ? { validation: validationDetails(error) } : {}) });
       });
     }
@@ -900,6 +912,7 @@ export class AgentEngine {
         }
         delete current.resumeModelCallId; delete current.reconciledModelCall; delete current.reconcileDisposition;
         current.modelUsage = deriveModelUsage(current);
+        recordTaskFailure(current, currentCall.taskId);
         event(current, 'model.reconciled', { callId: currentCall.id, outcome: 'failed', reason: body.reason });
         return;
       }
@@ -1012,7 +1025,7 @@ export class AgentEngine {
       globalReservation = await this.globalBudget.ledger.reserve(globalSelection, this.modelGlobalKey(run.id, callId));
       if (!globalReservation.reserved && globalReservation.state === 'rejected') throw new Conflict('Global model budget reservation was rejected');
     }
-    const requestWithKey: ModelRequest = { ...request, idempotencyKey, beforeRetry: async usage => {
+    const requestWithKey: ModelRequest = { ...request, includeRawOutput: true, idempotencyKey, beforeRetry: async usage => {
       const current = await this.repository.get(run.id);
       if (!runnable.has(current.status)) throw new Conflict('Run is no longer runnable');
       const call = current.calls.find(item => item.id === callId)!;
@@ -1057,6 +1070,8 @@ export class AgentEngine {
       }
       current.modelUsage = deriveModelUsage(current);
       delete current.resumeModelCallId;
+      const step = current.steps.find(step => step.taskId === taskId);
+      if (step) { delete step.error; delete step.failureReason; }
       if (phase === 'planner') current.status = 'planning';
       event(current, 'model.started', { callId, phase, taskId: taskId ?? null }); reserved = true;
     });
@@ -1081,7 +1096,9 @@ export class AgentEngine {
           current.reconcileDisposition = 'cancelled';
         }
         current.modelUsage = deriveModelUsage(current);
-        event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId });
+        call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
+        if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
+        event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
@@ -1091,7 +1108,7 @@ export class AgentEngine {
     const completed = result;
     await this.repository.mutate(run.id, current => {
       const call = current.calls.find(c => c.id === callId)!;
-      call.state = 'completed'; call.endedAt = now(); call.outputHash = digest(completed.value);
+      call.state = 'completed'; call.endedAt = now(); call.outputHash = digest(completed.value); call.rawOutput = modelRawOutput(completed.rawOutput ?? completed.value);
       if (validModelUsage(completed.usage)) call.usage = completed.usage;
       event(current, 'model.completed', { callId });
       current.modelUsage = deriveModelUsage(current);
@@ -1105,6 +1122,7 @@ export class AgentEngine {
         if (current.status === 'paused') current.resumeStatus = 'failed';
         else current.status = 'failed';
         current.error = budgetError;
+        recordTaskFailure(current, taskId);
         event(current, 'model.budget_stopped', { callId, reason: budgetError });
         return;
       }
@@ -1114,7 +1132,9 @@ export class AgentEngine {
       catch (error) {
         current.status = 'failed';
         current.error = failureReason(error, 'Invalid model output');
-        event(current, 'run.failed', { reason: current.error, ...(validationDetails(error) ? { validation: validationDetails(error) } : {}) });
+        call.validationErrors = redactRunData([...(call.validationErrors ?? []), ...(validationDetails(error)?.issues ?? [{ path: '$', code: 'invalid_output', message: current.error }])]);
+        recordTaskFailure(current, taskId);
+        event(current, 'run.failed', { callId, taskId, reason: current.error, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
       }
       if (paused) { current.resumeStatus = current.status; current.status = 'paused'; }
     });
@@ -1442,6 +1462,7 @@ export class AgentEngine {
             if (current.status === 'paused') current.resumeStatus = 'failed';
             else if (current.status !== 'cancelled') current.status = 'failed';
             current.error = error instanceof Error ? error.message : 'Global external budget reservation failed';
+            recordTaskFailure(current, pending!.taskId);
             event(current, 'external.budget_reservation_failed', { taskId: pending!.taskId, toolId: pending!.toolId, reason: current.error });
           });
           return;
@@ -1533,12 +1554,14 @@ export class AgentEngine {
         delete current.pendingTool;
         current.status = 'failed';
         current.error = 'External tool execution failed';
+        recordTaskFailure(current, pending.taskId);
         event(current, previous ? 'tool.reconciled' : 'tool.failed', { taskId: pending.taskId, toolId: pending.toolId, receiptId: settledReceipt.receiptId, outcome: 'failed', authorization: authorization!.decision });
       } else {
         delete current.pendingTool;
         current.externalUsage = deriveExternalUsage(current);
         if (budgetError || authorization!.decision === 'isolated') {
           current.status = 'failed'; current.error = budgetError ?? `External tool result was isolated (${authorization!.reason})`;
+          recordTaskFailure(current, pending.taskId);
           event(current, budgetError ? 'external.budget_stopped' : 'tool.result_isolated', { taskId: pending.taskId, toolId: pending.toolId, receiptId: settledReceipt.receiptId, reason: budgetError ?? authorization!.reason, authorization: authorization!.decision });
         } else {
           current.status = 'running'; delete current.error;
@@ -1581,6 +1604,7 @@ export class AgentEngine {
             if (current.status === 'paused') current.resumeStatus = 'failed';
             else if (current.status !== 'cancelled') current.status = 'failed';
             current.error = error instanceof Error ? error.message : 'Global external budget reservation failed';
+            recordTaskFailure(current, pending!.taskBrief.taskId);
             event(current, 'external.budget_reservation_failed', { taskId: pending!.taskBrief.taskId, agentId: pending!.agentId, reason: current.error });
           });
           return;
@@ -1626,6 +1650,7 @@ export class AgentEngine {
           if (current.status === 'paused') current.resumeStatus = 'failed';
           else if (current.status !== 'cancelled') current.status = 'failed';
           current.error = error instanceof Error ? error.message : 'Agent admission failed';
+          recordTaskFailure(current, pending!.taskBrief.taskId);
           event(current, 'agent.admission_failed', { agentId: pending!.agentId, reason: current.error });
         });
         return;
@@ -1702,6 +1727,7 @@ export class AgentEngine {
           else delete current.pendingDelegation;
           current.status = unresolved ? 'unknown' : 'failed';
           current.error = 'External Agent authorization was withdrawn; result isolated. Existing provider effects are not cancelled.';
+          recordTaskFailure(current, pending.taskBrief.taskId);
           event(current, 'agent.result_isolated', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef, remoteStatus: outcome.status });
           return;
         }
@@ -1724,6 +1750,7 @@ export class AgentEngine {
         const budgetError = globalError?.message ?? externalSettlementError(current);
         if (budgetError) {
           current.status = 'failed'; current.error = budgetError;
+          recordTaskFailure(current, pending.taskBrief.taskId);
           event(current, 'external.budget_stopped', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef, reason: budgetError });
           return;
         }
@@ -1733,6 +1760,7 @@ export class AgentEngine {
           current.status = 'needs_input';
         } else if (['failed', 'rejected'].includes(outcome.status)) {
           current.status = 'failed'; current.error = 'External Agent delegation failed';
+          recordTaskFailure(current, pending.taskBrief.taskId);
         } else { current.status = 'running'; delete current.error; }
         event(current, pending.reconcileRequested ? 'agent.reconciled' : 'agent.completed', { taskId: pending.taskBrief.taskId, agentId: pending.agentId, receiptRef: outcome.receipt.receiptRef, outcome: outcome.status });
       } finally { if (paused) { current.resumeStatus = current.status; current.status = 'paused'; } }

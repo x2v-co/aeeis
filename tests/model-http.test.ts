@@ -142,7 +142,7 @@ describe('HttpModelAdapter', () => {
     ]);
     const result = new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} });
     await expect(result).rejects.toBeInstanceOf(ModelResponseRejected);
-    await expect(result).rejects.toMatchObject({ usage: { inputTokens: 22, outputTokens: 50 } });
+    await expect(result).rejects.toMatchObject({ rawOutput: 'not-json', usage: { inputTokens: 22, outputTokens: 50 } });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(JSON.parse((fetch.mock.calls[1] as unknown as [string, RequestInit])[1].body as string).max_tokens).toBe(32768);
   });
@@ -246,6 +246,14 @@ describe('HttpModelAdapter', () => {
     const port = await fixture({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 5 } });
     const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', 'secret');
     await expect(adapter.complete({ system: 's', input: { x: 1 } })).resolves.toEqual({ value: { ok: true }, usage: { inputTokens: 3, outputTokens: 5 } });
+  });
+  it('preserves provider text when diagnostics are requested and when a length retry is refused', async () => {
+    const content = ' { "ok": true } ';
+    const fetch = sequence([{ reason: 'stop', content }, { reason: 'length', content: '{"partial":' }]);
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '');
+    await expect(adapter.complete({ system: 's', input: {}, includeRawOutput: true })).resolves.toEqual({ value: { ok: true }, rawOutput: content });
+    await expect(adapter.complete({ system: 's', input: {}, beforeRetry: () => { throw new Error('Budget exhausted'); } })).rejects.toMatchObject({ message: 'Budget exhausted', rawOutput: '{"partial":' });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
   it('rejects incomplete provider responses and unsafe endpoint URLs', async () => {
     const port = await fixture({ choices: [{ message: { content: '{}' }, finish_reason: 'length' }] });

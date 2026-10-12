@@ -45,7 +45,7 @@ interface RunView extends RunSummary {
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
   privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; resourceSnapshot?: { plugin?: { id: string; version: string; interface: string; digest: string; channel?: string }; skill?: { id: string; version: string; interface: string; digest: string; channel?: string }; workflow?: { id: string; version: string; interface: string; digest: string; channel?: string }; tools?: Array<{ id: string; version: string; interface: string; digest: string; channel?: string }>; lockfileDigest: string; policyDigest: string; resolvedAt: string; resolverVersion: string }; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
   plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
-  steps: Array<{ taskId: string; status: string }>;
+  steps: Array<{ taskId: string; status: string; error?: string; failureReason?: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
   model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
   events: Array<{ seq: number; type: string; at: string; data?: { validation?: { issues?: Array<{ path?: string; message?: string }> } } }>;
@@ -103,13 +103,17 @@ interface RunExplanation {
   review?: { verdict: string; confidence?: number; issueCount: number; summary: string };
 }
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
-let currentId = localStorage.getItem('aeeis.run') ?? '';
+const shareToken = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43})\/?$/)?.[1];
+const linkedRunId = window.location.pathname.match(/^\/runs\/(run_[a-f0-9-]{36})\/?$/)?.[1];
+const readOnlyShare = Boolean(shareToken);
+document.body.classList.toggle('shared-run', readOnlyShare);
+let currentId = linkedRunId ?? (readOnlyShare ? '' : localStorage.getItem('aeeis.run') ?? '');
 let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 type InputPanelMode = 'answer' | 'reconcile' | 'reconcile-cancelled';
 let inputPanelMode: InputPanelMode = 'answer';
 let cancelArmedRunId = '';
-const minimalMode = localStorage.getItem('aeeis.minimal-mode') !== '0';
+const minimalMode = !readOnlyShare && localStorage.getItem('aeeis.minimal-mode') !== '0';
 document.body.classList.toggle('minimal-mode', minimalMode);
 let quickRunReady = false;
 let intentPresetsOpen = false;
@@ -643,7 +647,8 @@ window.addEventListener('keydown', event => {
   }
 });
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'): Promise<T> {
-  const token = sessionStorage.getItem('aeeis.token');
+  if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
+  const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
   const response = await fetch(`/api${path}`, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
@@ -902,6 +907,22 @@ function setSystemSignal(state: 'loading' | 'connected' | 'attention' | 'offline
   if (label) label.textContent = labels[state];
 }
 async function refresh(): Promise<void> {
+  if (readOnlyShare) {
+    try {
+      const run = await api<RunView & { explanation: RunExplanation }>(`/share/${shareToken}`);
+      currentId = run.id; current = run;
+      setCurrentRunOpen(true); setRunDetailsMode(true);
+      render(run); renderExplanation(run.explanation);
+      $('controls').replaceChildren();
+      $('decision-review-actions').replaceChildren();
+      $('decision-next-button').hidden = true;
+      $('input-panel').hidden = true;
+    } catch (error) {
+      current = undefined; $('detail').hidden = true;
+      throw error;
+    }
+    return;
+  }
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
   const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
@@ -1984,6 +2005,9 @@ function renderRunDecision(run: RunView): void {
   }
 }
 function render(run: RunView): void {
+  const shareResult = $('run-share-result');
+  if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
+  if (!readOnlyShare && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
   $('run-title').textContent = run.goal;
   $('run-status').textContent = runStatusLabel(run.status);
   $('run-status').className = `status ${run.status}`;
@@ -2111,13 +2135,17 @@ function render(run: RunView): void {
     }
     canvas.append(svg);
     for (const node of plan.nodes) {
-      const p = positions.get(node.id)!; const status = run.steps.find(s => s.taskId === node.id)?.status ?? 'pending';
+      const p = positions.get(node.id)!; const step = run.steps.find(s => s.taskId === node.id); const status = step?.error ? 'failed' : step?.status ?? 'pending';
       const card = element('article', '', `node ${status}`); card.style.left = `${p.x}px`; card.style.top = `${p.y}px`;
       card.append(element('small', runStatusLabel(status)), element('strong', node.title), element('small', node.id));
       if (node.evidenceRefs?.length) card.append(element('small', `证据：${node.evidenceRefs.join(', ')}${node.evidenceRunId ? ` · Run ${node.evidenceRunId}` : ''}`));
+      if (step?.error) card.title = `${step.error} · ${step.failureReason ?? step.error}`;
       canvas.append(card);
     }
     graph.append(canvas);
+    const failures = element('div', '', 'task-failures');
+    for (const step of run.steps.filter(step => step.error)) failures.append(element('p', `${step.taskId} · 失败 · ${step.error} · 原因：${step.failureReason ?? step.error}`, 'failure'));
+    graph.append(failures);
   }
   renderGraphList($('execution-graph'), run.graphs?.execution, '执行图尚无节点');
   renderGraphList($('evidence-graph'), run.graphs?.evidence, '证据图尚无节点');
@@ -2126,12 +2154,12 @@ function render(run: RunView): void {
   for (const artifact of run.artifacts) {
     const box = element('details'); box.open = true;
     const actions = element('div', '', 'artifact-actions');
-    actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
+    if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
     box.append(element('summary', `${artifact.title}${artifact.artifactType ? ` · ${artifact.artifactType}` : ''}`), actions, renderArtifactMarkdown(artifact.content));
     if (isProjectPulseArtifact(artifact.structured)) appendProjectPulse(box, artifact.structured, run);
     else if (artifact.structured) box.append(element('small', '结构化产物'), element('pre', JSON.stringify(artifact.structured, null, 2)));
     box.append(element('small', `证据：${artifact.evidenceRefs.join(', ') || '无外部来源引用'}`)); artifacts.append(box);
-    if (run.goalId && artifact.evidenceRefs.length) box.append(memoryWritebackForm(run, artifact));
+    if (!readOnlyShare && run.goalId && artifact.evidenceRefs.length) box.append(memoryWritebackForm(run, artifact));
     if (evolutionConfigured) box.append(correctionForm(run, artifact));
     for (const correction of run.corrections ?? []) {
       if (!correction.sourceRefs.includes(artifact.id)) continue;
@@ -2148,18 +2176,20 @@ function render(run: RunView): void {
   $('review').textContent = run.review ? `${run.review.verdict}: ${run.review.summary}\n${run.review.issues.join('\n')}` : '';
   const timeline = $('timeline'); timeline.replaceChildren();
   renderTimelineFilterState();
-  const timelineEvents = run.events.slice(-80).filter(event => timelineMatchesFilter(event.type)).sort((a, b) => a.seq - b.seq);
+  const timelineEvents = run.events.filter(event => timelineMatchesFilter(event.type)).sort((a, b) => a.seq - b.seq);
   if (!timelineEvents.length) timeline.append(element('li', '尚无执行事件', 'muted'));
   for (const e of timelineEvents) {
     const item = element('li', '', `timeline-item timeline-${timelineTone(e.type)}`);
     item.title = e.type;
     item.append(element('time', new Date(e.at).toLocaleString()), element('strong', eventLabel(e.type)), element('small', `#${e.seq}`));
+    const details = element('details'); details.append(element('summary', '事件详情'), element('pre', JSON.stringify(e.data ?? {}, null, 2))); item.append(details);
     timeline.append(item);
   }
   const events = $('events'); events.replaceChildren();
   for (const e of run.events.slice(-60).reverse()) {
     const item = element('li', `${new Date(e.at).toLocaleTimeString()} · ${eventLabel(e.type)}`);
     item.title = e.type;
+    const details = element('details'); details.append(element('summary', '事件详情'), element('pre', JSON.stringify(e.data ?? {}, null, 2))); item.append(details);
     events.append(item);
   }
   const reportedTokens = run.modelUsage?.tokens ?? run.calls.reduce((sum,c) => sum+(c.usage?.inputTokens ?? 0)+(c.usage?.outputTokens ?? 0),0);
@@ -2362,7 +2392,8 @@ function renderDeliveryArtifact(run: RunView): void {
   });
   open.className = 'quiet-button delivery-artifact-open';
   const actions = element('div', '', 'artifact-actions');
-  actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }), open);
+  if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
+  actions.append(open);
   box.insertBefore(actions, content);
 }
 
@@ -2370,7 +2401,7 @@ function renderFollowUpPlan(run: RunView): void {
   const box = $('follow-up-plan');
   box.replaceChildren();
   box.hidden = !run.followUpPlanId;
-  if (!run.followUpPlanId) return;
+  if (readOnlyShare || !run.followUpPlanId) { box.hidden = true; return; }
   box.append(
     element('strong', '已生成后续计划'),
     element('small', `Plan ${run.followUpPlanId} · 下一步行动已从本次交付的证据中冻结`),
@@ -2564,6 +2595,11 @@ $('connect').onclick = () => {
   void initialize().finally(() => { connect.disabled = false; connect.classList.remove('is-busy'); });
 };
 async function initialize(): Promise<void> {
+  if (readOnlyShare) {
+    $('instance-mode').textContent = '只读分享 · Read-only';
+    await refresh().catch(error => message(errorMessage(error)));
+    return;
+  }
   try {
     const status = await api<RuntimeStatus>('/status');
     const toolHelp = $('tool-config-summary');
@@ -2643,6 +2679,32 @@ async function initialize(): Promise<void> {
     message(errorMessage(e));
   }
 }
+if (linkedRunId || readOnlyShare) { setCurrentRunOpen(true); setRunDetailsMode(true); }
+($('copy-run-link') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  const url = readOnlyShare ? window.location.href : new URL(`/runs/${currentId}`, window.location.origin).href;
+  void copyRunLink(url).then(() => message('链接已复制')).catch(() => {
+    const link = element('a', url); link.href = url;
+    $('run-share-result').replaceChildren(link);
+    message('请选择并复制链接');
+  });
+});
+async function copyRunLink(url: string): Promise<void> { await navigator.clipboard.writeText(url); }
+($('create-run-share') as HTMLButtonElement | null)?.addEventListener('click', async event => {
+  const button = event.currentTarget as HTMLButtonElement;
+  const runId = currentId;
+  button.disabled = true;
+  try {
+    const share = await api<{ url: string; expiresAt: string }>(`/runs/${runId}/share`, {});
+    const url = new URL(share.url, window.location.origin).href;
+    if (currentId !== runId) return;
+    const result = $('run-share-result');
+    result.replaceChildren();
+    const link = element('a', url); link.href = url;
+    result.append(link, element('small', ` · 到期：${new Date(share.expiresAt).toLocaleString()}`));
+    await copyRunLink(url).catch(() => undefined);
+  } catch (error) { message(errorMessage(error)); }
+  finally { button.disabled = false; }
+});
 void initialize();
 setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh().catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {

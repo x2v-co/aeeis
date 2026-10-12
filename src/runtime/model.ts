@@ -4,12 +4,14 @@ import type { ModelPin } from './contracts.js';
 
 export interface ModelRequest {
   system: string; input: unknown; idempotencyKey?: string;
+  /** Include provider text for durable Runtime diagnostics. */
+  includeRawOutput?: boolean;
   /** Overrides the pin's initial output allowance. */
   maxTokens?: number;
   /** Check cumulative billable usage before an internal length retry. */
   beforeRetry?: (usage: ModelResponse['usage']) => void | Promise<void>;
 }
-export interface ModelResponse { value: unknown; usage?: { inputTokens: number; outputTokens: number } }
+export interface ModelResponse { value: unknown; rawOutput?: string; usage?: { inputTokens: number; outputTokens: number } }
 export interface ModelHealth {
   ready: boolean;
   detail: string;
@@ -27,7 +29,7 @@ export interface ModelAdapter {
 export class ModelOutcomeUnknown extends Error {}
 /** A completed provider response may be billable even if its output is unusable. */
 export class ModelResponseRejected extends Error {
-  constructor(message: string, readonly usage?: ModelResponse['usage']) { super(message); }
+  constructor(message: string, readonly usage?: ModelResponse['usage'], readonly rawOutput?: string) { super(message); }
 }
 
 /** Model transport backed by Toolkit's Agentpay credit MCP tool. */
@@ -75,7 +77,7 @@ export class AgentpayModelAdapter implements ModelAdapter {
     let parsed: unknown = value;
     if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { /* preserve text output */ } }
     const usage = data?.usage && Number.isInteger(data.usage.inputTokens) && Number.isInteger(data.usage.outputTokens) ? data.usage : undefined;
-    return { value: parsed, ...(usage ? { usage } : {}) };
+    return { value: parsed, ...(request.includeRawOutput ? { rawOutput: typeof value === 'string' ? value : JSON.stringify(value) } : {}), ...(usage ? { usage } : {}) };
   }
 }
 const envelope = z.object({
@@ -140,7 +142,7 @@ export class HttpModelAdapter implements ModelAdapter {
       catch (error) {
         if (error instanceof ModelResponseRejected && attempt > 0) {
           const total = usage && error.usage ? { inputTokens: usage.inputTokens + error.usage.inputTokens, outputTokens: usage.outputTokens + error.usage.outputTokens } : undefined;
-          throw new ModelResponseRejected(error.message, total);
+          throw new ModelResponseRejected(error.message, total, error.rawOutput);
         }
         throw error;
       }
@@ -153,15 +155,15 @@ export class HttpModelAdapter implements ModelAdapter {
       const choice = raw.choices[0]!;
       if (choice.finish_reason === 'length' && attempt === 0) {
         try { await request.beforeRetry?.(usage); }
-        catch (error) { throw new ModelResponseRejected(error instanceof Error ? error.message : 'Model retry budget check failed', usage); }
+        catch (error) { throw new ModelResponseRejected(error instanceof Error ? error.message : 'Model retry budget check failed', usage, choice.message.content); }
         maxTokens = Math.min(maxTokens * 2, cap);
         continue;
       }
-      if (choice.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage);
+      if (choice.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage, choice.message.content);
       let value: unknown;
       try { value = JSON.parse(choice.message.content); }
-      catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage); }
-      return { value, ...(usage ? { usage } : {}) };
+      catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage, choice.message.content); }
+      return { value, ...(request.includeRawOutput ? { rawOutput: choice.message.content } : {}), ...(usage ? { usage } : {}) };
     }
     throw new ModelResponseRejected('Model response is incomplete', usage);
   }

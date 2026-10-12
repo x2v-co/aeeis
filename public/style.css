@@ -796,3 +796,13 @@ body.minimal-mode:not(.details-mode) .minimal-recent-runs {
     flex-wrap: wrap;
   }
 }
+
+.run-link-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.run-link-actions p { overflow-wrap: anywhere; }
+.task-failures { overflow-wrap: anywhere; }
+body.shared-run .orientation, body.shared-run .workbench-nav, body.shared-run #command-center,
+body.shared-run .control-rail, body.shared-run .system-status, body.shared-run #access-panel,
+body.shared-run #configuration, body.shared-run #config-action, body.shared-run #attention-inbox,
+body.shared-run #run-queue, body.shared-run #create-run-share, body.shared-run #controls,
+body.shared-run #input-panel, body.shared-run #decision-review-actions, body.shared-run #decision-next-button { display: none !important; }
+body.shared-run .layout { display: block; }

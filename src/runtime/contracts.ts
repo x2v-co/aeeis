@@ -198,6 +198,8 @@ export interface ModelUsage { tokens: number; moneyUsd?: number; unreportedCalls
 export interface ExternalBudget { calls?: number; tokens?: number; moneyUsd?: number }
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
+  rawOutput?: string;
+  validationErrors?: Array<{ path: string; code: string; message: string }>;
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
   /** Provider idempotency key. Unknown calls reuse this key after reconcile. */
   idempotencyKey?: string;
@@ -214,6 +216,7 @@ export interface ReconciledModelCall { callId: string; value: unknown; usage?: {
 export interface Event { id: string; seq: number; type: string; at: string; data: Record<string, unknown> }
 export interface RunCorrection { id: string; text: string; candidateId?: string; sourceRefs: string[]; createdAt: string }
 export interface Step {
+  error?: string; failureReason?: string;
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
   /** One bounded, durable model attempt to repair a candidate finish object. */

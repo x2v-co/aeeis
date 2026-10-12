@@ -46,14 +46,19 @@ export function comparePlans(before: PlanSnapshot, after: PlanSnapshot): PlanCom
 export function projectRunGraphs(run: AgentRun): RunGraphs {
   const toPlanGraph = (plan: AgentRun['plans'][number]): PlanGraph => ({
     kind: 'plan' as const, runId: run.id, version: plan.version, hash: plan.hash,
-    nodes: plan.nodes.map(node => ({ id: node.id, type: 'task', label: node.title, metadata: { instruction: node.instruction }, ...(plan === run.plans.at(-1) ? { status: run.steps.find(step => step.taskId === node.id)?.status ?? 'pending' } : {}) })),
+    nodes: plan.nodes.map(node => {
+      const step = plan === run.plans.at(-1) ? run.steps.find(step => step.taskId === node.id) : undefined;
+      return { id: node.id, type: 'task', label: node.title,
+        metadata: { instruction: node.instruction, ...(step?.error ? { error: step.error, failureReason: step.failureReason ?? step.error } : {}) },
+        ...(plan === run.plans.at(-1) ? { status: step?.error ? 'failed' : step?.status ?? 'pending' } : {}) };
+    }),
     edges: plan.nodes.flatMap(node => node.dependsOn.map(dependency => ({ from: dependency, to: node.id, type: 'depends_on' }))),
   });
   const planHistory = run.plans.map(toPlanGraph);
   const planGraph = planHistory.at(-1);
   const planComparisons = run.plans.slice(1).map((plan, index) => comparePlans(run.plans[index]!, plan));
 
-  const executionNodes: GraphNode[] = run.steps.map(step => ({ id: `step:${step.taskId}`, type: 'step', label: step.taskId, status: step.status, metadata: { attempts: step.attempts } }));
+  const executionNodes: GraphNode[] = run.steps.map(step => ({ id: `step:${step.taskId}`, type: 'step', label: step.taskId, status: step.error ? 'failed' : step.status, metadata: { attempts: step.attempts, ...(step.error ? { error: step.error, failureReason: step.failureReason ?? step.error } : {}) } }));
   const executionEdges: GraphEdge[] = [];
   for (const call of run.calls) {
     const nodeId = `call:${call.id}`;

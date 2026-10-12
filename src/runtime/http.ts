@@ -1,3 +1,5 @@
+import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
+import { debugBundle, sharedRunView } from './run-debug.js';
 import { artifactFilename } from './artifact-download.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
@@ -323,23 +325,26 @@ export function buildApp(options: Options) {
     const host = request.headers.host ?? '';
     const route = request.routeOptions.url ?? '';
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
+    const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
+    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id')
+      && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
     if (request.headers.origin) {
       const origin = request.headers.origin.trim();
       const sameOrigin = isLoopbackHost(host) && origin === `http://${host}`;
       if (!sameOrigin && !trustedOrigins.has(origin)) return reply.code(403).send({ error: 'Cross-origin access denied' });
     }
-    if (request.headers['sec-fetch-site'] === 'cross-site') return reply.code(403).send({ error: 'Cross-site access denied' });
+    if (request.headers['sec-fetch-site'] === 'cross-site' && !runLinkNavigation) return reply.code(403).send({ error: 'Cross-site access denied' });
     if (route.startsWith('/internal/')) {
       if (!matches(options.workerToken, request.headers.authorization)) return reply.code(401).send({ error: 'Worker authentication required' });
-    } else if (route.startsWith('/api/') && options.token && !matches(options.token, request.headers.authorization)) {
+    } else if (route.startsWith('/api/') && !shareReadRoute && options.token && !matches(options.token, request.headers.authorization)) {
       return reply.code(401).send({ error: 'Local access token required' });
     }
     // /health and /readyz are liveness/readiness probes (the container
     // healthcheck and Tailscale Serve call them without credentials): they must
     // stay reachable when an access token is configured. Only /api/ routes and
     // /metrics resolve a principal.
-    if (!agentCallbackRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
+    if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
       if (options.token && !matches(options.token, request.headers.authorization)) return reply.code(401).send({ error: 'Local access token required' });
       const principal = await resolvePrincipal(request.headers.authorization);
       if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
@@ -1396,6 +1401,47 @@ export function buildApp(options: Options) {
     try { return reply.type('text/event-stream').header('cache-control', 'no-cache').header('connection', 'keep-alive').send(stream); }
     catch (error) { release(); throw error; }
   });
+  const ttl = shareTtlConfig();
+  const shareStore = () => { if (!options.repository.shares) throw new Error('Run share storage is unavailable'); return options.repository.shares; };
+  async function readSharedRun(token: string): Promise<AgentRun> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFound('Unknown share');
+    const share = await shareStore().find(hashShareToken(token));
+    if (!activeShare(share)) throw new NotFound('Unknown share');
+    return options.repository.get(share.runId);
+  }
+  app.get<{ Params: { id: string } }>('/runs/:id', async (_request, reply) => reply.type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8')));
+  app.get<{ Params: { token: string } }>('/share/:token', async (request, reply) => {
+    await readSharedRun(request.params.token);
+    return reply.header('referrer-policy', 'no-referrer').type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8'));
+  });
+  app.post<{ Params: { id: string } }>('/api/runs/:id/share', async request => {
+    const principal = principalOf(request);
+    await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    const body = z.object({ ttlSeconds: z.number().int().min(1).max(ttl.maxSeconds).optional() }).strict().parse(request.body ?? {});
+    const { token, share } = newRunShare(request.params.id, body.ttlSeconds ?? ttl.defaultSeconds);
+    await shareStore().create(share);
+    return { token, url: `/share/${token}`, expiresAt: share.expiresAt, id: share.id };
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/shares', async request => {
+    const principal = principalOf(request);
+    await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    return (await shareStore().list(request.params.id)).map(({ tokenHash: _hash, ...share }) => share);
+  });
+  app.delete<{ Params: { id: string; shareId: string } }>('/api/runs/:id/share/:shareId', async (request, reply) => {
+    const principal = principalOf(request);
+    await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    if (!await shareStore().revoke(request.params.id, request.params.shareId, new Date().toISOString())) throw new NotFound('Unknown share');
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { token: string } }>('/api/share/:token', async (request, reply) => {
+    reply.header('referrer-policy', 'no-referrer');
+    return sharedRunView(await readSharedRun(request.params.token));
+  });
+  app.get<{ Params: { token: string } }>('/api/share/:token/debug-bundle', async (request, reply) => {
+    reply.header('referrer-policy', 'no-referrer');
+    return debugBundle(await readSharedRun(request.params.token));
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/debug-bundle', async request => debugBundle(await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request))));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => { const principal = principalOf(request); return getReadableRun(options.repository, options.domain, request.params.id, principal); });
   app.get<{ Params: { id: string; artifactId: string } }>('/api/runs/:id/artifacts/:artifactId/download', async (request, reply) => {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
