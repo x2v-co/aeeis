@@ -6,6 +6,7 @@ import { AgentEngine } from '../src/runtime/engine.js';
 import { buildApp } from '../src/runtime/http.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ProjectPulseArtifact } from '../src/runtime/contracts.js';
+import { materialContentHash } from '../src/runtime/materials.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -14,7 +15,7 @@ const plan = { summary: 'Pulse', nodes: [{ id: 'pulse', title: 'Project Pulse', 
 const pulse = (ref: string): ProjectPulseArtifact => ({ schemaVersion: 'project-pulse/1', progress: [{ text: 'Migration is blocked.', evidenceRefs: [ref] }], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [] });
 const finish = (ref: string) => ({ type: 'finish', title: 'Project Pulse', content: 'Migration is blocked.', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse(ref) });
 
-async function setup(output: (ref: string, input: Record<string, unknown>) => unknown, options: { maxModelCalls?: number } = {}) {
+async function setup(output: (ref: string, input: Record<string, unknown>) => unknown, options: { maxModelCalls?: number } = {}, uploads?: Array<{ title: string; source: string; content: string }>) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-pulse-execution-'));
   const repository = new FileRunRepository(directory); await repository.init();
   cleanup.push(async () => { await repository.close(); await rm(directory, { recursive: true, force: true }); });
@@ -23,7 +24,7 @@ async function setup(output: (ref: string, input: Record<string, unknown>) => un
     if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Verified', issues: [] }, usage: { inputTokens: 10, outputTokens: 5 } };
     const input = request.input as Record<string, unknown> & { sourceCatalog: Array<{ id: string }>; observations: unknown[] };
     const ref = input.sourceCatalog[0]!.id;
-    if (!input.observations.length) return { value: { type: 'tool', tool: 'sources.read', argument: ref }, usage: { inputTokens: 10, outputTokens: 5 } };
+    if (!uploads && !input.observations.length) return { value: { type: 'tool', tool: 'sources.read', argument: ref }, usage: { inputTokens: 10, outputTokens: 5 } };
     return { value: output(ref, input), usage: { inputTokens: 10, outputTokens: 5 } };
   });
   const model: ModelAdapter = { pin: { model: 'ark-shape-fixture', endpoint: 'http://127.0.0.1:1', promptVersion: 'test' }, complete };
@@ -31,7 +32,7 @@ async function setup(output: (ref: string, input: Record<string, unknown>) => un
   const app = buildApp({ repository, engine, dispatcher: { notify: async () => {}, close: async () => {} } }); cleanup.push(async () => { await app.close(); });
   // This is the payload produced by the workbench's runOptions(), including
   // each supported upload format. All are source text, never model instructions.
-  const materials = [
+  const materials = uploads ?? [
     { title: '用户提供的项目资料', source: 'user-input', content: 'Migration is blocked.' },
     ...['txt', 'md', 'csv', 'json'].map(extension => ({ title: `brief.${extension}`, source: `browser-file:brief.${extension}`, content: extension === 'json' ? '{"status":"blocked"}' : 'Migration is blocked.' })),
   ];
@@ -55,6 +56,42 @@ async function completeRun(engine: AgentEngine, repository: FileRunRepository, i
 }
 
 describe('Project Pulse finish output', () => {
+  it('delivers the whole uploaded CSV to the executor and accepts without a source read', async () => {
+    const rows = ['id,task,status,owner', ...Array.from({ length: 160 }, (_, i) => `${i},Migration task ${i},blocked,Owner ${i}`)];
+    const csv = rows.join('\n');
+    expect(csv.length).toBeGreaterThan(1200);
+    const { engine, repository, run } = await setup((ref, input) => {
+      const presented = (input.presentedSources as Array<Record<string, unknown>>)[0]!;
+      expect(presented).toMatchObject({ id: ref, format: 'csv', truncated: false, totalChars: csv.length, totalRows: rows.length, presentedRows: rows.length });
+      expect(presented.content).toContain(rows[0]);
+      expect(presented.content).toContain(rows.at(-1));
+      expect(presented.content).toContain(csv);
+      return finish(ref);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: csv }]);
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.review?.verdict).toBe('accepted');
+    expect(completed.steps[0]?.observations).toHaveLength(0);
+  });
+
+  it('uses CSV-aware source search with a hash of the exact excerpt', async () => {
+    const rows = ['id,task,status', ...Array.from({ length: 160 }, (_, i) => `${i},${i === 155 ? 'needle' : 'Migration task ' + i},blocked`)];
+    const { engine, repository, run } = await setup((ref, input) => {
+      const observations = input.observations as Array<{ result: Array<{ excerpt: string; contentHash: string; format: string; truncated: boolean }> }>;
+      if (!observations.length) return { type: 'tool', tool: 'sources.search', argument: 'needle' };
+      const result = observations[0]!.result[0]!;
+      expect(result).toMatchObject({ format: 'csv', truncated: true });
+      const text = result.excerpt.split('\n').slice(1, -1).join('\n');
+      expect(text.startsWith(rows[0]! + '\n')).toBe(true);
+      expect(text).toContain(rows[156]);
+      expect(result.contentHash).toBe(materialContentHash(text));
+      expect(result.excerpt).toContain(`hash="${result.contentHash}"`);
+      return finish(ref);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: rows.join('\n') }]);
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+  });
+
   it.each(['structured-string', 'structuredData', 'structured_data', 'data', 'answer', 'whole-json-string'] as const)('preserves and validates %s from workbench materials', async shape => {
     const { engine, repository, complete, run } = await setup(ref => {
       const value = finish(ref);

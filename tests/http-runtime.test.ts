@@ -749,7 +749,7 @@ describe('AEEIS HTTP boundary', () => {
       invoke: async () => { throw new Error('unused'); },
       health: async () => ({ ready: false, detail: 'tool registry unavailable', checkedAt: new Date().toISOString() }),
     };
-    const app = buildApp({ repository: repo, tools });
+    const app = buildApp({ repository: repo, tools, readinessToolsGraceMs: 0 });
     try {
       const ready = await app.inject('/readyz');
       expect(ready.statusCode).toBe(503);

@@ -2,7 +2,7 @@ import { modelRawOutput, redactRunData } from './run-debug.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { principalAudience, validatePrincipal } from '../security/principal.js';
-import { decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, validatePlan, websiteBuilderArtifactSchema } from './contracts.js';
+import { decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema } from './contracts.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -21,7 +21,7 @@ import { claimDigest, type BrainPersistence, type GovernedBrain, type BrainSeman
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
-import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt } from './materials.js';
+import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, materialExcerpt, presentedMaterialExcerpts } from './materials.js';
 import type { ResourceRegistry, ResourceResolution } from './resources.js';
 
 /** JSONB and other stores may reorder object keys. Hash the canonical form so
@@ -167,25 +167,20 @@ const catalogExecutorPrompt = executorPrompt.replace('listed in the approved all
 /** Normalize finish encodings only. Artifact schemas, evidence validation and
  * capability authorization still validate the normalized candidate. */
 function normalizeFinishOutput(value: unknown): unknown {
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { return value; }
-  }
+  value = normalizeModelJson(value, 'decision', 'type');
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const candidate = { ...value } as Record<string, unknown>;
   if (candidate.type !== undefined && candidate.type !== 'finish') return value;
   if (candidate.structured === undefined) {
     for (const key of ['structuredData', 'structured_data', 'data']) {
-      let structured = candidate[key];
-      if (typeof structured === 'string') { try { structured = JSON.parse(structured); } catch { /* validated below */ } }
+      const structured = normalizeModelJson(candidate[key], 'artifact', 'schemaVersion');
       // Generic data is an alias only when it declares a supported artifact contract.
       if (key === 'data' && (!structured || typeof structured !== 'object' || !('schemaVersion' in structured)
         || !['project-pulse/1', 'website-builder/1'].includes(String(structured.schemaVersion)))) continue;
       if (structured !== undefined) { candidate.structured = structured; delete candidate[key]; break; }
     }
   }
-  if (typeof candidate.structured === 'string') {
-    try { candidate.structured = JSON.parse(candidate.structured); } catch { /* strict artifact validation requests repair */ }
-  }
+  if (candidate.structured !== undefined) candidate.structured = normalizeModelJson(candidate.structured, 'artifact', 'schemaVersion');
   const structured = candidate.structured;
   if (candidate.artifactType === undefined && structured && typeof structured === 'object' && 'schemaVersion' in structured
     && ['project-pulse/1', 'website-builder/1'].includes(String(structured.schemaVersion))) candidate.artifactType = structured.schemaVersion;
@@ -359,6 +354,16 @@ function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
  * only that malformed proposal so a successful Run is not lost to auxiliary
  * RSI text. Any invalid required review field remains a hard failure. */
 function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
+  value = normalizeModelJson(normalizeModelJson(value, 'decision', 'verdict'), 'review', 'verdict');
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const candidate = { ...value } as Record<string, unknown>;
+    if (typeof candidate.verdict === 'string') {
+      const verdict = candidate.verdict.trim().toLowerCase().replace(/[ -]+/g, '_');
+      const synonyms: Record<string, string> = { accepted: 'accepted', accept: 'accepted', approved: 'accepted', needs_revision: 'needs_revision', revise: 'needs_revision', revision_required: 'needs_revision' };
+      candidate.verdict = synonyms[verdict] ?? candidate.verdict;
+    }
+    value = candidate;
+  }
   try { return reviewSchema.parse(value); }
   catch (error) {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -1212,9 +1217,10 @@ export class AgentEngine {
     const expectedArtifactType = terminal ? usesProjectPulse(run) ? 'project-pulse/1' : usesWebsiteBuilder(run) ? 'website-builder/1' : undefined : undefined;
     // IDs/titles alone are not source evidence. Present bounded, explicitly
     // untrusted excerpts and hash the exact text the task receives.
-    const presentedSources = run.context.sources.map(source => {
-      const content = relevantMaterialExcerpt(source.content, materialQueryTerms(`${run.goal} ${node.instruction}`));
-      return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), truncated: content !== source.content };
+    const excerpts = presentedMaterialExcerpts(run.context.sources, materialQueryTerms(`${run.goal} ${node.instruction}`));
+    const presentedSources = run.context.sources.map((source, index) => {
+      const { content, ...metadata } = excerpts[index]!;
+      return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), ...metadata };
     });
     const presentedReceipts = (run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated');
     const observed = new Set(presentedSources.map(source => source.id));
@@ -1257,12 +1263,16 @@ export class AgentEngine {
         } else {
           const terms = materialQueryTerms(decision.argument);
           result = current.context.sources.filter(s => terms.length === 0 || terms.some(t => `${s.title} ${s.content}`.toLocaleLowerCase().includes(t)))
-            .slice(0, 8).map(source => ({
-              id: source.id, sourceRef: source.id, title: source.title, source: source.source,
-              excerpt: `<external_source ref="${escapeMaterialRef(source.id)}" hash="${source.contentHash ?? materialContentHash(source.content)}">\n${relevantMaterialExcerpt(source.content, terms)}\n</external_source>`,
-              hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content),
-              ...(source.classification ? { classification: source.classification } : {}),
-            }));
+            .slice(0, 8).map(source => {
+              const { content, ...metadata } = materialExcerpt(source, terms);
+              const contentHash = materialContentHash(content);
+              return {
+                id: source.id, sourceRef: source.id, title: source.title, source: source.source, ...metadata,
+                excerpt: `<external_source ref="${escapeMaterialRef(source.id)}" hash="${contentHash}">\n${content}\n</external_source>`,
+                hash: source.hash, contentHash,
+                ...(source.classification ? { classification: source.classification } : {}),
+              };
+            });
         }
         live.observations.push({ tool: decision.tool, argument: decision.argument, result });
         event(current, 'tool.completed', { taskId: node.id, tool: decision.tool, inputHash: digest(decision.argument), outputHash: digest(result), contextId: current.context.id });

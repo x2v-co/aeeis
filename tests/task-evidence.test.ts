@@ -38,8 +38,8 @@ describe('task evidence visibility', () => {
       expect(source.id).toBe(input.sourceCatalog[0]!.id);
       expect(source.content).toContain('Migration is blocked.');
       expect(source.content).toContain('<external_source');
-      expect(source.content.length).toBeLessThan(1500);
-      expect(source.truncated).toBe(true);
+      expect(source.content.length).toBeLessThan(48_000);
+      expect(source.truncated).toBe(false);
       const excerpt = source.content.split('\n').slice(1, -1).join('\n');
       expect(source.contentHash).toBe(materialContentHash(excerpt));
       expect(input.availableEvidenceRefs).toContain(source.id);
