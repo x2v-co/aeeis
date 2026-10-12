@@ -143,8 +143,9 @@ describe('Project Pulse source provider', () => {
       const proposed = await repository.get(run.id);
       await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
       expect(await engine.advance(run.id)).toBe('running');
+      expect(await engine.advance(run.id)).toBe('running'); // one bounded finish repair
       expect(await engine.advance(run.id)).toBe('failed');
-      expect((await repository.get(run.id)).error).toContain('final Project Pulse artifact');
+      expect((await repository.get(run.id)).error).toContain('final artifact must include artifactType "project-pulse/1"');
     } finally { await repository.close(); }
   });
 

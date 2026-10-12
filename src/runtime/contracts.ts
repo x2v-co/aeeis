@@ -216,6 +216,8 @@ export interface RunCorrection { id: string; text: string; candidateId?: string;
 export interface Step {
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
+  /** One bounded, durable model attempt to repair a candidate finish object. */
+  finishRepair?: { reason: string; candidate: unknown };
 }
 export interface AgentRun {
   schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;
