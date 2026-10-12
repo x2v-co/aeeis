@@ -2667,6 +2667,7 @@ async function initialize(): Promise<void> {
     evolutionConfigured = status.evolutionConfigured;
     modelConfigured = status.modelConfigured;
     taskSchedulerConfigured = status.taskSchedulerConfigured;
+    authRequired = false;
     quickRunReady = status.modelConfigured && status.modelHealth?.ready !== false;
     syncConfigurationNotice();
     syncDetailsToggleLabel();
