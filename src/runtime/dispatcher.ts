@@ -33,6 +33,16 @@ export async function notifyTemporalRunWorkflow(client: TemporalRunWorkflowClien
   }
 }
 
+/**
+ * Boot recovery wakes only Runs a worker can still advance. Terminal Runs
+ * (including `failed`) must not be notified: Temporal allows a closed
+ * workflow ID to be started again, so every API restart would otherwise
+ * start a fresh, immediately-returning workflow for every historical failed
+ * Run. Waiting states resume through their own signal/approval paths.
+ */
+export const BOOT_RECOVERABLE_RUN_STATUSES: readonly string[] = ['queued', 'planning', 'running', 'reviewing'];
+export function isBootRecoverableRun(status: string): boolean { return BOOT_RECOVERABLE_RUN_STATUSES.includes(status); }
+
 export interface Dispatcher {
   notify(id: string): Promise<void>;
   /** Wake or start the durable timer workflow for a Reminder when supported. */
