@@ -42,4 +42,19 @@ describe('Temporal Worker startup configuration', () => {
     expect(() => parseTemporalWorkerConfig({ ...base, AEEIS_ENV: 'production', AEEIS_WORKER_ALLOW_INSECURE_HTTP: '0', AEEIS_INTERNAL_URL: 'https://aeeis.internal', AEEIS_TEMPORAL_USE_VERSIONING: undefined })).toThrow('AEEIS_TEMPORAL_USE_VERSIONING');
     expect(parseTemporalWorkerConfig({ ...base, AEEIS_ENV: 'production', AEEIS_WORKER_ALLOW_INSECURE_HTTP: '0', AEEIS_INTERNAL_URL: 'https://aeeis.internal', AEEIS_TEMPORAL_USE_VERSIONING: '1' })).toMatchObject({ api: 'https://aeeis.internal' });
   });
+
+  const production = { ...base, AEEIS_ENV: 'production', AEEIS_WORKER_ALLOW_INSECURE_HTTP: '0', AEEIS_TEMPORAL_USE_VERSIONING: '1', AEEIS_TRUSTED_INTERNAL_HOSTS: 'api,worker', AEEIS_INTERNAL_URL: 'http://api:4323' };
+
+  it('allows a trusted internal API in production without an insecure override', () => {
+    expect(parseTemporalWorkerConfig(production)).toMatchObject({ api: 'http://api:4323' });
+    expect(() => parseTemporalWorkerConfig({ ...production, AEEIS_WORKER_ALLOW_INSECURE_HTTP: '1' })).toThrow('cannot enable insecure HTTP');
+  });
+
+  it.each(['http://unlisted:4323', 'http://api.example:4323', 'http://10.0.0.2:4323', 'ftp://api:4323', 'http://api:4323?token=secret', 'http://user:pass@api:4323', 'http://api:4323#fragment'])('rejects unsafe internal API %s', api => {
+    expect(() => parseTemporalWorkerConfig({ ...production, AEEIS_INTERNAL_URL: api })).toThrow('AEEIS_INTERNAL_URL');
+  });
+
+  it('validates the trusted host list in the Worker as well as the API', () => {
+    expect(() => parseTemporalWorkerConfig({ ...production, AEEIS_TRUSTED_INTERNAL_HOSTS: 'api.example' })).toThrow('AEEIS_TRUSTED_INTERNAL_HOSTS');
+  });
 });

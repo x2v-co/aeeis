@@ -1,4 +1,7 @@
 stack.env
+stack.env.*
+!stack.env.*.example
+!stack.env.example.*
 .current.env
 .previous.env
 .candidate.env

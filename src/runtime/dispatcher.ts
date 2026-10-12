@@ -1,5 +1,6 @@
 import { Client, Connection, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import type { AgentEngine } from './engine.js';
+import { validateInternalEndpoint } from '../internal-endpoint.js';
 
 export interface TemporalRunWorkflowClient {
   workflow: {
@@ -61,6 +62,7 @@ export class LocalDispatcher implements Dispatcher {
 export class TemporalDispatcher implements Dispatcher {
   private constructor(private client: Client, private connection: Connection, private taskQueue: string, private readonly workerHealthUrl?: string) {}
   static async connect(address: string, taskQueue: string, namespace = 'default', workerHealthUrl?: string): Promise<TemporalDispatcher> {
+    validateInternalEndpoint(workerHealthUrl, 'AEEIS_TEMPORAL_WORKER_HEALTH_URL', process.env, process.env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1');
     const connection = await Connection.connect({ address });
     return new TemporalDispatcher(new Client({ connection, namespace }), connection, taskQueue, workerHealthUrl);
   }
@@ -104,8 +106,9 @@ export class TemporalDispatcher implements Dispatcher {
  * Temporal cluster without a polling Worker cannot make long-running Runs
  * progress, so configured deployments fail closed until /readyz reports a
  * RUNNING Worker. The response body is deliberately ignored. */
-export async function checkWorkerHealth(endpoint: string, timeoutMs = 3_000): Promise<{ ready: boolean; detail: string }> {
+export async function checkWorkerHealth(endpoint: string, timeoutMs = 3_000, env: NodeJS.ProcessEnv = process.env): Promise<{ ready: boolean; detail: string }> {
   try {
+    validateInternalEndpoint(endpoint, 'AEEIS_TEMPORAL_WORKER_HEALTH_URL', env, env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1');
     const response = await fetch(endpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { accept: 'application/json' } });
     await response.body?.cancel();
     return { ready: response.ok, detail: response.ok ? 'Temporal Worker ready' : `Temporal Worker returned HTTP ${response.status}` };

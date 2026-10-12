@@ -7,7 +7,14 @@ ENV_FILE="${AEEIS_ENV_FILE:-$STACK_DIR/stack.env}"
 CURRENT_FILE="${AEEIS_CURRENT_FILE:-$STACK_DIR/.current.env}"
 [[ -r "$ENV_FILE" ]] || { echo "missing $ENV_FILE (copy stack.env.example, chmod 600)" >&2; exit 2; }
 set -a; . "$ENV_FILE"; [[ -r "$CURRENT_FILE" ]] && . "$CURRENT_FILE"; set +a
+# The selected file is also the container env_file. Use an absolute path so
+# callers can select it from any directory. STACK_ENV_FILE is not an AEEIS
+# *_FILE secret (AEEIS_ENV_FILE would collide with AEEIS_ENV at startup).
+export STACK_ENV_FILE="$ENV_FILE"
 compose_files=(-f "$STACK_DIR/compose.yml")
+if [[ "${AEEIS_STACK_SMOKE:-0}" == 1 && "${CI:-}" != true && "${CI:-}" != 1 ]]; then
+  echo "fixture smoke is for isolated CI only (CI=true required)" >&2; exit 2
+fi
 [[ "${AEEIS_STACK_SMOKE:-0}" == 1 ]] && compose_files+=(-f "$STACK_DIR/compose.smoke.yml")
 env_args=(--env-file "$ENV_FILE")
 [[ -r "$CURRENT_FILE" ]] && env_args+=(--env-file "$CURRENT_FILE")

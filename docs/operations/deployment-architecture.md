@@ -116,7 +116,7 @@ API 和 Worker 镜像使用同一不可变 image digest；通过 `AEEIS_BUILD_ID
 
 1. **核心必需配置**：`AEEIS_ENV=production`、`AEEIS_HOST=0.0.0.0`、`AEEIS_PUBLIC_HOSTS`、`DATABASE_URL`、`AEEIS_RUNNER=temporal`、`TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE`、`AEEIS_TASK_QUEUE`、`AEEIS_BUILD_ID`、`AEEIS_TEMPORAL_USE_VERSIONING=1`。
 2. **认证配置**：优先 OIDC 的 `AEEIS_OIDC_ISSUER`、`AEEIS_OIDC_AUDIENCE`、`AEEIS_OIDC_JWKS_URL`；静态 token 仅用于受限安装或迁移窗口。OIDC 和静态 token 不能同时启用。
-3. **内部信任配置**：`AEEIS_WORKER_TOKEN`、`AEEIS_INTERNAL_URL`、`AEEIS_TEMPORAL_WORKER_HEALTH_URL`、`AEEIS_TRUSTED_HOSTS`、`AEEIS_TRUSTED_ORIGINS`。Worker health URL 和内部 API 在生产必须使用 HTTPS。
+3. **内部信任配置**：`AEEIS_WORKER_TOKEN`、`AEEIS_INTERNAL_URL`、`AEEIS_TEMPORAL_WORKER_HEALTH_URL`、`AEEIS_TRUSTED_HOSTS`、`AEEIS_TRUSTED_ORIGINS`。Worker health URL 和内部 API 在生产使用 HTTPS，或仅对 loopback / `AEEIS_TRUSTED_INTERNAL_HOSTS` 中的精确单标签 Docker service 名允许 HTTP；模型/provider URL 仍要求 HTTPS（loopback 例外不变）。
 4. **外部依赖凭证**：模型 Provider/API key、Planprice、toolkit Registry token 和 root public JWK、OwnHow runtime、RSI Evaluator、Feishu/Hermes、Agent OAuth/HMAC、Knowledge/Project Source 凭证。每个依赖单独的 Secret、访问范围和轮换周期。
 
 所有 Secret 通过外部 Secret Manager 或 Kubernetes External Secrets 注入。代码支持的 `_FILE` 形式优先用于长 Secret；直接环境变量只用于不敏感配置。Secret 轮换采用双 key 窗口：先发布同时接受旧/新 key 的版本，再切换调用方，最后撤销旧 key。Agent grant、callback HMAC、toolkit root key 和 Feishu/Hermes signing key 必须保留审计记录。
@@ -306,7 +306,7 @@ Internet / VPN
 2. 安装 Docker Engine 和 Compose plugin，创建独立部署目录；生产 `.env`、token、数据库密码和 TLS 相关文件权限设为 `600`。
 3. 从 AEEIS 镜像启动 PostgreSQL，创建 `aeeis` 和 `temporal` 两个数据库及各自用户；先执行数据库迁移，再启动 API。
 4. 启动 Temporal Server 和 Worker，检查 namespace、task queue、`AEEIS_BUILD_ID`、API `/readyz` 和 Worker `/readyz`。
-5. 配置 Caddy 反向代理和 Let's Encrypt；API 只绑定 VPS 私网/回环地址，4324、5432 和 Temporal gRPC 端口不加入公网防火墙放行列表。生产配置下 `AEEIS_INTERNAL_URL` 和 `AEEIS_TEMPORAL_WORKER_HEALTH_URL` 仍使用 HTTPS，可让 Worker 通过 Caddy 的私有 hostname 回环到 API，不能打开 `AEEIS_WORKER_ALLOW_INSECURE_HTTP`。
+5. 配置 Caddy 反向代理和 Let's Encrypt；API 只绑定 VPS 私网/回环地址，4324、5432 和 Temporal gRPC 端口不加入公网防火墙放行列表。生产配置下 `AEEIS_INTERNAL_URL` 和 `AEEIS_TEMPORAL_WORKER_HEALTH_URL` 使用 HTTPS，或使用 loopback / `AEEIS_TRUSTED_INTERNAL_HOSTS` 明确列出的单标签 Docker service 名；不能打开 `AEEIS_WORKER_ALLOW_INSECURE_HTTP`。单机栈与迁移步骤见 [production migration runbook](../runbooks/aeeis-production-migration.md)。
 6. 运行一个最小 synthetic Run：创建 Goal → Plan → DAG Task → Temporal 执行 → Receipt/Evidence → Review，并重启 API/Worker 验证恢复。
 7. 设置每日 `pg_dump` 和 AEEIS 备份，备份完成后由个人电脑或另一台已有设备定期拉取；每月在临时数据库执行一次恢复检查。
 

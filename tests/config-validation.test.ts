@@ -85,6 +85,47 @@ describe('runtime configuration validation', () => {
     expect(() => validateRuntimeConfig(production)).not.toThrow();
   });
 
+  const internal = {
+    ...production,
+    AEEIS_RUNNER: 'temporal', TEMPORAL_ADDRESS: 'temporal:7233',
+    AEEIS_WORKER_TOKEN: 'worker-token-123456', AEEIS_BUILD_ID: 'worker-v1', AEEIS_TEMPORAL_USE_VERSIONING: '1',
+    AEEIS_TRUSTED_INTERNAL_HOSTS: 'api, worker',
+    AEEIS_INTERNAL_URL: 'http://api:4323', AEEIS_TEMPORAL_WORKER_HEALTH_URL: 'http://worker:4324/readyz',
+  };
+
+  it('allows exact trusted service hosts for internal production endpoints', () => {
+    expect(() => validateRuntimeConfig(internal)).not.toThrow();
+  });
+
+  it.each(['api.example', '*.internal', '127.0.0.1', '10.0.0.2', '::1', '[::1]', '2130706433', '0x7f000001', 'API', 'api_worker', 'api,,worker', `a${'b'.repeat(63)}`])('rejects invalid trusted internal host list %s', hosts => {
+    expect(() => validateRuntimeConfig({ ...internal, AEEIS_TRUSTED_INTERNAL_HOSTS: hosts })).toThrow('AEEIS_TRUSTED_INTERNAL_HOSTS');
+  });
+
+  it.each(['http://unlisted:4323', 'http://api.example:4323', 'http://api.:4323', 'http://10.0.0.2:4323', 'http://[fd00::2]:4323'])('rejects untrusted internal HTTP endpoint %s', endpoint => {
+    expect(() => validateRuntimeConfig({ ...internal, AEEIS_INTERNAL_URL: endpoint })).toThrow('AEEIS_INTERNAL_URL');
+    expect(() => validateRuntimeConfig({ ...internal, AEEIS_TEMPORAL_WORKER_HEALTH_URL: endpoint })).toThrow('AEEIS_TEMPORAL_WORKER_HEALTH_URL');
+  });
+
+  it.each(['localhost', '127.0.0.1', '[::1]'])('keeps loopback HTTP available without a trusted host list: %s', host => {
+    expect(() => validateRuntimeConfig({ ...internal, AEEIS_TRUSTED_INTERNAL_HOSTS: undefined, AEEIS_INTERNAL_URL: `http://${host}:4323`, AEEIS_TEMPORAL_WORKER_HEALTH_URL: `http://${host}:4324/readyz` })).not.toThrow();
+  });
+
+  it.each([
+    ['AEEIS_MODEL_BASE_URL', { AEEIS_MODEL_BASE_URL: 'http://api:4323/v1', AEEIS_MODEL: 'real-model' }],
+    ['AEEIS_MODEL_HEALTH_URL', { AEEIS_MODEL_HEALTH_URL: 'http://worker:4324/health' }],
+    ['AEEIS_COMPETITION_AGENT_MODELS', { AEEIS_COMPETITION_AGENT_MODELS: JSON.stringify({ agent: { baseUrl: 'http://api:4323/v1', model: 'real-model' } }) }],
+    ['AEEIS_MODEL_PROVIDER_ENDPOINTS', { AEEIS_MODEL_PROVIDER_ENDPOINTS: JSON.stringify({ provider: 'http://api:4323/v1' }) }],
+    ['AEEIS_MODEL_PROVIDER_HEALTH_URLS', { AEEIS_MODEL_PROVIDER_HEALTH_URLS: JSON.stringify({ provider: 'http://worker:4324/health' }) }],
+    ['AEEIS_PLANPRICE_URL', { AEEIS_PLANPRICE_URL: 'http://api:4323' }],
+    ['AEEIS_PROJECTION_SINK_URL', { AEEIS_PROJECTION_SINK_URL: 'http://api:4323/events' }],
+  ])('does not extend internal HTTP trust to %s', (label, config) => {
+    expect(() => validateRuntimeConfig({ ...internal, ...config })).toThrow(label);
+  });
+
+  it('retains the external model loopback exception in production', () => {
+    expect(() => validateRuntimeConfig({ ...internal, AEEIS_MODEL_BASE_URL: 'http://127.0.0.1:4399/v1', AEEIS_MODEL: 'local-model' })).not.toThrow();
+  });
+
   it.each([
     ['DATABASE_URL', { ...production, DATABASE_URL: undefined }],
     ['authentication', { ...production, AEEIS_ACCESS_TOKEN: undefined }],

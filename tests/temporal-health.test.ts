@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { request as httpRequest } from 'node:http';
 import type { Server, IncomingMessage } from 'node:http';
 import { closeWorkerHealthServer, startWorkerHealthServer } from '../src/temporal/health.js';
 import { checkWorkerHealth } from '../src/runtime/dispatcher.js';
 
 const servers: Server[] = [];
-afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
 
 function worker(state: string) { return { getState: () => state } as never; }
 async function request(port: number, path: string): Promise<{ status: number; body: any }> {
@@ -18,6 +18,22 @@ async function request(port: number, path: string): Promise<{ status: number; bo
 }
 
 describe('Temporal worker health surface', () => {
+  const production = { AEEIS_ENV: 'production', AEEIS_TRUSTED_INTERNAL_HOSTS: 'api,worker' };
+
+  it('probes trusted worker HTTP with redirects disabled in production', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    await expect(checkWorkerHealth('http://worker:4324/readyz', 100, production)).resolves.toMatchObject({ ready: true });
+    expect(fetch).toHaveBeenCalledWith('http://worker:4324/readyz', expect.objectContaining({ redirect: 'error' }));
+  });
+
+  it.each(['http://unlisted:4324/readyz', 'http://worker.example:4324/readyz', 'http://10.0.0.2:4324/readyz', 'http://worker:4324/readyz?token=secret', 'ftp://worker:4324/readyz'])('rejects unsafe worker health before fetching %s', endpoint => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    return checkWorkerHealth(endpoint, 100, production).then(result => {
+      expect(result.ready).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
   it('distinguishes process liveness from worker readiness', async () => {
     const server = await startWorkerHealthServer(worker('INITIALIZED'), { host: '127.0.0.1', port: 0, taskQueue: 'aeeis-test', buildId: 'test-build' });
     servers.push(server);

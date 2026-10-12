@@ -17,7 +17,9 @@
 # inside the namespace) is not published; bin/health.sh probes it in-namespace.
 # Temporal gRPC is not published at all. Nothing listens publicly.
 #
-# Usage: see deploy/stack/README.md (bin/deploy.sh wraps build + up + promote).
+# Usage: bin/deploy.sh --env-file ./stack.env (build + up + promote).
+# STACK_ENV_FILE must be supplied by that explicitly selected env file;
+# there is deliberately no automatic stack.env fallback in Compose.
 
 name: ${AEEIS_STACK:?Set AEEIS_STACK, e.g. aeeis-cn or aeeis-sg}
 
@@ -124,31 +126,36 @@ services:
       temporal:
         condition: service_healthy
     env_file:
-      - ${AEEIS_ENV_FILE:-./stack.env}
-    environment: &aeeis-runtime
-      AEEIS_ENV: production
-      AEEIS_HOST: 0.0.0.0
-      PORT: 4323
-      AEEIS_DATA_DIR: /app/data/runs
-      DATABASE_URL: postgresql://aeeis:${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}@postgres:5432/aeeis
-      AEEIS_RUNNER: temporal
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}
-      AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-cn}
-      AEEIS_TEMPORAL_DEPLOYMENT_NAME: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE}
-      AEEIS_BUILD_ID: ${AEEIS_BUILD_ID:?Set AEEIS_BUILD_ID (bin/deploy.sh derives it from the git sha)}
-      AEEIS_TEMPORAL_USE_VERSIONING: "1"
-      # One worker build per host: replaced builds are never polled again, so
-      # workflows must follow the current build (guarded by the replay gate).
-      AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR: AUTO_UPGRADE
-      AEEIS_WORKER_TOKEN: ${AEEIS_WORKER_TOKEN:?Set AEEIS_WORKER_TOKEN}
-      AEEIS_INTERNAL_URL: http://127.0.0.1:4323
-      AEEIS_TEMPORAL_WORKER_HEALTH_URL: http://127.0.0.1:4324/readyz
-      AEEIS_PUBLIC_HOSTS: ${AEEIS_PUBLIC_HOSTS:?Set AEEIS_PUBLIC_HOSTS (tailnet IP and MagicDNS name)}
-      AEEIS_TRUSTED_HOSTS: ${AEEIS_TRUSTED_HOSTS:-}
-      AEEIS_TRUSTED_ORIGINS: ${AEEIS_TRUSTED_ORIGINS:-}
-      AEEIS_REMINDER_INTERVAL_MS: ${AEEIS_REMINDER_INTERVAL_MS:-0}
-      AEEIS_DEMO_MODE: "0"
+      - ${STACK_ENV_FILE:?Pass --env-file stack.env and set STACK_ENV_FILE in that file}
+    environment:
+      <<: &aeeis-runtime
+        AEEIS_ENV: production
+        AEEIS_HOST: 0.0.0.0
+        PORT: 4323
+        AEEIS_DATA_DIR: /app/data/runs
+        DATABASE_URL: postgresql://aeeis:${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}@postgres:5432/aeeis
+        AEEIS_RUNNER: temporal
+        TEMPORAL_ADDRESS: temporal:7233
+        TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}
+        AEEIS_TASK_QUEUE: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE, e.g. aeeis-cn}
+        AEEIS_TEMPORAL_DEPLOYMENT_NAME: ${AEEIS_TASK_QUEUE:?Set AEEIS_TASK_QUEUE}
+        AEEIS_BUILD_ID: ${AEEIS_BUILD_ID:?Set AEEIS_BUILD_ID (bin/deploy.sh derives it from the git sha)}
+        AEEIS_TEMPORAL_USE_VERSIONING: "1"
+        AEEIS_TRUSTED_INTERNAL_HOSTS: ${AEEIS_TRUSTED_INTERNAL_HOSTS:-api,worker}
+        # One worker build per host: replaced builds are never polled again, so
+        # workflows must follow the current build (guarded by the replay gate).
+        AEEIS_TEMPORAL_DEFAULT_VERSIONING_BEHAVIOR: AUTO_UPGRADE
+        AEEIS_WORKER_TOKEN: ${AEEIS_WORKER_TOKEN:?Set AEEIS_WORKER_TOKEN}
+        AEEIS_INTERNAL_URL: http://127.0.0.1:4323
+        AEEIS_TEMPORAL_WORKER_HEALTH_URL: http://127.0.0.1:4324/readyz
+        AEEIS_PUBLIC_HOSTS: ${AEEIS_PUBLIC_HOSTS:?Set AEEIS_PUBLIC_HOSTS (tailnet IP and MagicDNS name)}
+        AEEIS_TRUSTED_HOSTS: ${AEEIS_TRUSTED_HOSTS:-}
+        AEEIS_TRUSTED_ORIGINS: ${AEEIS_TRUSTED_ORIGINS:-}
+        AEEIS_REMINDER_INTERVAL_MS: ${AEEIS_REMINDER_INTERVAL_MS:-0}
+        AEEIS_DEMO_MODE: "0"
+      AEEIS_ACCESS_TOKEN: ${AEEIS_ACCESS_TOKEN:?Copy the existing AEEIS_ACCESS_TOKEN into the selected env file}
+      AEEIS_MODEL_BASE_URL: ${AEEIS_MODEL_BASE_URL:?Set a real HTTPS OpenAI-compatible provider URL}
+      AEEIS_MODEL: ${AEEIS_MODEL:?Set the real provider model or endpoint ID}
     # Model calls may take AEEIS_MODEL_TIMEOUT_MS (180s); let in-flight work
     # finish and persist before SIGKILL.
     stop_grace_period: 200s
@@ -214,5 +221,8 @@ networks:
 
 volumes:
   aeeis-postgres:
+    name: ${AEEIS_POSTGRES_VOLUME:-${AEEIS_STACK}_aeeis-postgres}
   aeeis-data:
+    name: ${AEEIS_DATA_VOLUME:-${AEEIS_STACK}_aeeis-data}
   temporal-postgres:
+    name: ${AEEIS_TEMPORAL_POSTGRES_VOLUME:-${AEEIS_STACK}_temporal-postgres}

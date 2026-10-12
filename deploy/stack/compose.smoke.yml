@@ -1,8 +1,7 @@
 # Smoke-test overlay: adds a Fixture Model and a Fixture Projection Sink inside
 # the shared network namespace (loopback, so production validation stays ON:
-# AEEIS_ENV=production, no insecure-HTTP switches). Never use on a real host
-# after go-live; bin/smoke.sh brings it up only for the duration of the test.
-#   docker compose -f compose.yml -f compose.smoke.yml --env-file stack.env up -d
+# AEEIS_ENV=production, no insecure-HTTP switches). For isolated CI only.
+#   CI=true docker compose -f compose.yml -f compose.smoke.yml --env-file stack.env up -d
 services:
   fixture-model:
     image: ${AEEIS_IMAGE:-aeeis:local}
@@ -10,6 +9,7 @@ services:
     network_mode: service:netns
     command: ["node", "scripts/fixture-model.mjs"]
     environment:
+      CI: ${CI:?The fixture overlay is for isolated CI only; set CI=true}
       AEEIS_FIXTURE_MODEL_HOST: 127.0.0.1
       AEEIS_FIXTURE_MODEL_PORT: 4399
     depends_on:

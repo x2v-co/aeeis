@@ -3,18 +3,33 @@
 # replay gate against it, start/upgrade the stack, wait for Worker readiness,
 # promote the build to the Worker Deployment's Current Version, wait for API
 # readiness, and only then record it in .current.env.
-#   bin/deploy.sh                                   # build aeeis:<sha> from this checkout
-#   AEEIS_DEPLOY_IMAGE=registry/aeeis:<sha> bin/deploy.sh --no-build
+#   bin/deploy.sh --env-file ./stack.env             # build aeeis:<sha> from this checkout
+#   AEEIS_DEPLOY_IMAGE=registry/aeeis:<sha> bin/deploy.sh --env-file ./stack.env --no-build
 # Env: AEEIS_SKIP_REPLAY=1 (first deploy / emergency only), AEEIS_ALLOW_DIRTY=1.
 set -euo pipefail
+build=1
+deploy_env_file=
+while (( $# )); do
+  case "$1" in
+    --env-file)
+      [[ -n "${2:-}" && "$2" != --* ]] || { echo "--env-file requires a readable file path" >&2; exit 2; }
+      deploy_env_file="$2"; shift 2 ;;
+    --no-build) build=0; shift ;;
+    *) echo "usage: $0 --env-file <path> [--no-build]" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$deploy_env_file" ]] || { echo "an explicit --env-file <path> is required; no default env file is selected" >&2; exit 2; }
+[[ -f "$deploy_env_file" && -r "$deploy_env_file" ]] || { echo "--env-file must name a readable regular file" >&2; exit 2; }
+export AEEIS_ENV_FILE="$(cd "$(dirname "$deploy_env_file")" && pwd)/$(basename "$deploy_env_file")"
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
-build=1; [[ "${1:-}" == "--no-build" ]] && build=0
 sha="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
 if [[ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]]; then
   [[ "${AEEIS_ALLOW_DIRTY:-0}" == 1 ]] || { echo "working tree is dirty; commit first (or AEEIS_ALLOW_DIRTY=1)" >&2; exit 2; }
   sha="$sha-dirty$(date +%s)"
 fi
 image="${AEEIS_DEPLOY_IMAGE:-aeeis:$sha}"
+# Fail missing production settings before building, pulling, or starting.
+AEEIS_IMAGE="$image" AEEIS_BUILD_ID="$AEEIS_STACK-$sha" dc config --quiet
 if (( build )); then
   # shellcheck disable=SC2086
   docker build ${AEEIS_DOCKER_BUILD_ARGS:-} -t "$image" "$REPO_DIR"
