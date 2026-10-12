@@ -40,6 +40,13 @@ export class PostgresThreadShareStore implements ThreadShareStore {
   async revoke(threadId: string, id: string, at: string): Promise<boolean> { return Boolean((await this.pool.query('UPDATE aeeis_thread_shares SET revoked_at=COALESCE(revoked_at,$3) WHERE thread_id=$1 AND id=$2', [threadId, id, at])).rowCount); }
 }
 
+function shareableSource(value: unknown): value is { id: string } {
+  if (!value || typeof value !== 'object') return false;
+  const source = value as Record<string, unknown>;
+  return typeof source.id === 'string' && !source.id.startsWith('history:') && !source.origin
+    && source.classification !== 'private' && source.classification !== 'confidential';
+}
+
 export function sharedThreadView(thread: Thread, throughSequence: number, runs: AgentRun[]) {
   const visible = runs.filter(run => run.threadSequence! <= throughSequence && ['public', 'internal'].includes(run.privacy ?? 'internal'));
   const ids = new Set(visible.map(run => run.id));
@@ -47,7 +54,21 @@ export function sharedThreadView(thread: Thread, throughSequence: number, runs: 
     const copy = structuredClone(run);
     // History is owner evidence, including ancestry outside this share's view.
     delete copy.context.threadHistory;
-    copy.context.sources = copy.context.sources.filter(source => !source.id.startsWith('history:') && !source.origin && !['private', 'confidential'].includes(source.classification ?? 'internal'));
+    copy.context.sources = copy.context.sources.filter(shareableSource);
+    const sourceIds = new Set(copy.context.sources.map(source => source.id));
+    const visibleResult = (result: unknown) => shareableSource(result) && sourceIds.has(result.id);
+    // Source tools copy history and restricted content into durable observations.
+    // Search results lack origin metadata, so also require a retained catalog ID.
+    for (const step of copy.steps) step.observations = step.observations.flatMap(observation => {
+      if (observation.tool === 'sources.read') return visibleResult(observation.result) ? [observation] : [];
+      if (observation.tool === 'sources.search') {
+        if (!Array.isArray(observation.result)) return [];
+        const result = observation.result.filter(visibleResult);
+        if (observation.result.length && !result.length) return [];
+        return [{ ...observation, result }];
+      }
+      return [observation];
+    });
     if (copy.parentRunId && !ids.has(copy.parentRunId)) delete copy.parentRunId;
     return [run.id, sharedRunView(copy)];
   }));

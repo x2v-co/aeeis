@@ -9,6 +9,8 @@ import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.
 import { activeShare, hashShareToken } from '../src/runtime/run-shares.js';
 import { FileThreadShareStore, newThreadShare, sharedThreadView, threadSharesMigration } from '../src/runtime/thread-shares.js';
 import { buildThreadHistory } from '../src/runtime/thread-history.js';
+import { threadHistorySources } from '../src/runtime/thread-context.js';
+import { materialForModel } from '../src/runtime/materials.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 import { isolatedPostgres } from './support/postgres.js';
 
@@ -63,6 +65,64 @@ describe('thread shares', () => {
     const hidden = await app.inject({ url: `/api/share/${token.token}` });
     expect(hidden.json().runs.map((run: { id: string }) => run.id)).toEqual([child.id]);
     expect(hidden.body).not.toContain(root.id);
+  });
+
+  it.each(['private', 'confidential'] as const)('omits historical and restricted source observations when the parent becomes %s', async privacy => {
+    const { repo, app, thread, root, share } = await setup();
+    const parentText = 'PRIVATE PARENT ARTIFACT TEXT brief';
+    await repo.mutate(root.id, run => { run.artifacts[0]!.content = parentText; });
+    const child = threadRun();
+    child.context.threadHistory = await buildThreadHistory(repo, thread.id, await repo.get(root.id), threadScope, 'internal', 4096);
+    const historySource = threadHistorySources(child).find(source => source.origin?.ref === root.artifacts[0]!.id)!;
+    const visibleSource = child.context.sources[0]!;
+    const hiddenSources = [
+      historySource,
+      { ...historySource, id: 'origin-source' },
+      { ...visibleSource, id: `history:${root.id}:legacy`, content: 'LEGACY HISTORY TEXT brief' },
+      { ...visibleSource, id: 'private-source', classification: 'private' as const, content: 'PRIVATE SOURCE TEXT brief' },
+      { ...visibleSource, id: 'confidential-source', classification: 'confidential' as const, content: 'CONFIDENTIAL SOURCE TEXT brief' },
+    ];
+    child.context.sources.push(...hiddenSources.slice(1));
+    // Search returns refs and excerpts without the read result's origin metadata.
+    const searchResults = [visibleSource, ...hiddenSources].map(source => ({
+      id: source.id, sourceRef: source.id, title: source.title, source: source.source, hash: source.hash,
+      excerpt: materialForModel(source).content, ...(source.classification ? { classification: source.classification } : {}),
+    }));
+    const visibleRead = { tool: 'sources.read', argument: visibleSource.id, result: materialForModel(visibleSource) };
+    const otherObservation = { tool: 'example.lookup', argument: 'current', result: { content: 'CURRENT TOOL RESULT' } };
+    child.steps = [{ taskId: 'task_1', status: 'succeeded', attempts: 1, observations: [
+      visibleRead,
+      ...hiddenSources.map(source => ({ tool: 'sources.read', argument: source.id, result: materialForModel(source) })),
+      { tool: 'sources.search', argument: 'brief', result: searchResults },
+      otherObservation,
+    ] }, { taskId: 'task_2', status: 'succeeded', attempts: 1, observations: [
+      { tool: 'sources.search', argument: 'parent', result: searchResults.slice(1, 3) },
+    ] }];
+    await repo.createRunInThread(child, thread.id, root.id, threadScope);
+    await repo.mutate(root.id, run => { run.privacy = privacy; });
+    const original = await repo.get(child.id);
+    const token = (await share()).json();
+
+    const view = await app.inject({ url: `/api/share/${token.token}` });
+    expect(view.statusCode).toBe(200);
+    expect(view.json().runs.map((run: { id: string }) => run.id)).toEqual([child.id]);
+    for (const value of [root.id, parentText, 'LEGACY HISTORY TEXT', 'PRIVATE SOURCE TEXT', 'CONFIDENTIAL SOURCE TEXT', 'threadHistory', 'origin-source']) expect(view.body).not.toContain(value);
+    const shared = view.json().runs[0];
+    expect(shared.context.sources).toEqual([visibleSource]);
+    expect(shared.steps[0].observations).toEqual([
+      visibleRead, { tool: 'sources.search', argument: 'brief', result: [searchResults[0]] }, otherObservation,
+    ]);
+    expect(shared.steps[1].observations).toEqual([]);
+
+    const debug = await app.inject({ url: `/api/share/${token.token}/debug-bundle` });
+    expect(debug.statusCode).toBe(404);
+    expect(debug.body).not.toContain(parentText);
+    expect(debug.body).not.toContain(root.id);
+    expect((await app.inject({ url: `/api/runs/${child.id}/debug-bundle` })).statusCode).toBe(401);
+    const ownerDebug = await app.inject({ url: `/api/runs/${child.id}/debug-bundle`, headers: auth });
+    expect(ownerDebug.statusCode).toBe(200);
+    expect(ownerDebug.json().taskAttempts[0].observations).toEqual(original.steps[0]!.observations);
+    expect(await repo.get(child.id)).toEqual(original);
   });
 
   it('serves thread deep links and shares with the existing SPA and security headers', async () => {
