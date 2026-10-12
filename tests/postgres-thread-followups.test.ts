@@ -26,7 +26,9 @@ describe.skipIf(!databaseUrl)('cross-process follow-up reservations', () => {
         const locks = await pool.query(`SELECT a.state,a.xact_start FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
           WHERE l.locktype='advisory' AND l.granted AND a.datname=current_database()`);
         expect(locks.rows.length).toBeGreaterThan(0);
-        for (const row of locks.rows) { expect(row.state).toBe('idle'); expect(row.xact_start).toBeNull(); }
+        // A holder may briefly run another statement (state 'active'); the invariant is that no
+        // transaction stays open across the connector call.
+        for (const row of locks.rows) expect(row.state).not.toMatch(/^idle in transaction/);
         return [];
       });
       const services = [first, second].map(repository => new ThreadService(repository, new AgentEngine(repository, { model: followupModel(), knowledge: { search } })));
