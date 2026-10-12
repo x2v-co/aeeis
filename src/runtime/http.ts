@@ -1,4 +1,5 @@
 import { artifactFilename } from './artifact-download.js';
+import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
@@ -47,7 +48,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; maxSseConnections?: number }
+interface Options { localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -65,7 +66,7 @@ function cursorCollectionLimit(query: unknown): number | undefined {
 }
 
 const requestLatencyBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
-const readinessCheckTimeoutMs = 5_000;
+const readinessCheckTimeoutMs = 500;
 type HttpMetricRoute = {
   durationCount: number;
   durationSum: number;
@@ -157,7 +158,9 @@ export function buildApp(options: Options) {
   };
   const readinessTimeoutMs = options.readinessCheckTimeoutMs ?? readinessCheckTimeoutMs;
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) throw new Error('readinessCheckTimeoutMs must be a positive finite number');
-  class ProbeTimeout extends Error {}
+  const healthProbes = new HealthProbes({ timeoutMs: readinessTimeoutMs, ...(options.readinessCacheTtlMs === undefined ? {} : { cacheTtlMs: options.readinessCacheTtlMs }), ...(options.readinessLastGoodGraceMs === undefined ? {} : { lastGoodGraceMs: options.readinessLastGoodGraceMs }) });
+  const healthProbe = <T extends { ready: boolean; detail: string }>(name: string, operation: () => T | Promise<T>) => healthProbes.get(name, operation);
+  class ProbeTimeout extends HealthProbeTimeout {}
   // A timed-out adapter may still be running. Keep at most one underlying
   // operation per collector until it settles, without retaining its result.
   const probes = new Map<string, Promise<unknown>>();
@@ -179,66 +182,66 @@ export function buildApp(options: Options) {
   };
   const skillGovernanceHealth = async () => {
     if (!options.skills?.health) return { ready: false, detail: options.skills ? 'Skill governance health probe unavailable' : 'Skill governance not configured', checkedAt: new Date().toISOString() };
-    try { return await bounded('skillGovernance', () => options.skills!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Skill governance health probe timed out' : 'Skill governance health probe failed', checkedAt: new Date().toISOString() }; }
+    try { return await healthProbe('skillGovernance', () => options.skills!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Skill governance health probe timed out' : 'Skill governance health probe failed', checkedAt: new Date().toISOString() }; }
   };
   const principalDirectoryReadiness = async () => {
     if (!options.principalDirectory) return { ready: true, detail: 'principal directory not configured' };
     if (!options.principalDirectory.health) return { ready: false, detail: 'Principal directory health probe unavailable' };
-    try { return await bounded('principalDirectory', () => options.principalDirectory!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Principal directory health probe timed out' : 'Principal directory health probe failed' }; }
+    try { return await healthProbe('principalDirectory', () => options.principalDirectory!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Principal directory health probe timed out' : 'Principal directory health probe failed' }; }
   };
   const channelIdentityReadiness = async () => {
     if (!options.channelIdentityResolver) return { ready: true, detail: 'channel identity resolver not configured' };
     if (!options.channelIdentityResolver.health) return { ready: false, detail: 'Channel identity resolver health probe unavailable' };
-    try { return await bounded('channelIdentity', () => options.channelIdentityResolver!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Channel identity resolver health probe timed out' : 'Channel identity resolver health probe failed' }; }
+    try { return await healthProbe('channelIdentity', () => options.channelIdentityResolver!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Channel identity resolver health probe timed out' : 'Channel identity resolver health probe failed' }; }
   };
   const knowledgeProviderReadiness = async () => {
     if (!options.knowledgeProvider) return { ready: true, detail: 'knowledge provider not configured' };
     if (!options.knowledgeProvider.health) return { ready: false, detail: 'Knowledge provider health probe unavailable' };
-    try { return await bounded('knowledgeProvider', () => options.knowledgeProvider!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Knowledge provider health probe timed out' : 'Knowledge provider health probe failed' }; }
+    try { return await healthProbe('knowledgeProvider', () => options.knowledgeProvider!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Knowledge provider health probe timed out' : 'Knowledge provider health probe failed' }; }
   };
   const projectSourcesReadiness = async () => {
     if (!options.projectSourcesProvider) return { ready: true, detail: 'project sources not configured' };
     if (!options.projectSourcesProvider.health) return { ready: false, detail: 'Project source health probe unavailable' };
-    try { return await bounded('projectSourcesProvider', () => options.projectSourcesProvider!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Project source health probe timed out' : 'Project source health probe failed' }; }
+    try { return await healthProbe('projectSourcesProvider', () => options.projectSourcesProvider!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Project source health probe timed out' : 'Project source health probe failed' }; }
   };
   const brainSemanticReadiness = async () => {
     if (!options.brainSemanticIndex) return { ready: true, detail: 'Brain semantic index not configured' };
     if (!options.brainSemanticIndex.health) return { ready: false, detail: 'Brain semantic index health probe unavailable' };
-    try { return await bounded('brainSemanticIndex', () => options.brainSemanticIndex!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Brain semantic index health probe timed out' : 'Brain semantic index health probe failed' }; }
+    try { return await healthProbe('brainSemanticIndex', () => options.brainSemanticIndex!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Brain semantic index health probe timed out' : 'Brain semantic index health probe failed' }; }
   };
   const toolsReadiness = async () => {
     if (!options.tools) return { ready: true, detail: 'tool gateway not configured' };
     if (!options.tools.health) return { ready: false, detail: 'Tool gateway health probe unavailable' };
-    try { return await bounded('tools', () => options.tools!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Tool gateway health probe timed out' : 'Tool gateway health probe failed' }; }
+    try { return await healthProbe('tools', () => options.tools!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Tool gateway health probe timed out' : 'Tool gateway health probe failed' }; }
   };
   const agentRegistryReadiness = async () => {
     if (!options.agentDirectory) return { ready: true, detail: 'agent registry not configured' };
     if (!options.agentDirectory.health) return { ready: false, detail: 'Agent Registry health probe unavailable' };
-    try { return await bounded('agentRegistry', () => options.agentDirectory!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Agent Registry health probe timed out' : 'Agent Registry health probe failed' }; }
+    try { return await healthProbe('agentRegistry', () => options.agentDirectory!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Agent Registry health probe timed out' : 'Agent Registry health probe failed' }; }
   };
   const projectionSinkReadiness = async () => {
     if (!options.projectionSink) return { ready: true, detail: 'projection sink not configured' };
     if (!options.projectionSink.health) return { ready: false, detail: 'Projection sink health probe unavailable' };
-    try { return await bounded('projectionSink', () => options.projectionSink!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'Projection sink health probe timed out' : 'Projection sink health probe failed' }; }
+    try { return await healthProbe('projectionSink', () => options.projectionSink!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Projection sink health probe timed out' : 'Projection sink health probe failed' }; }
   };
   const rsiEvaluatorReadiness = async () => {
     if (!options.rsiHarness) return { ready: true, detail: 'RSI evaluator not configured' };
     if (!options.rsiHarness.health) return { ready: false, detail: 'RSI evaluator health probe unavailable' };
-    try { return await bounded('rsiEvaluator', () => options.rsiHarness!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'RSI evaluator health probe timed out' : 'RSI evaluator health probe failed' }; }
+    try { return await healthProbe('rsiEvaluator', () => options.rsiHarness!.health!()); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'RSI evaluator health probe timed out' : 'RSI evaluator health probe failed' }; }
   };
   const statusHealth = async (name: string, operation: () => Promise<{ ready: boolean; detail: string }>) => {
-    try { return await bounded(name, operation); }
-    catch (error) { return { ready: false, detail: error instanceof ProbeTimeout ? 'dependency check timed out' : 'dependency check failed', checkedAt: new Date().toISOString() }; }
+    try { return await healthProbe(name, operation); }
+    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'dependency check timed out' : 'dependency check failed', checkedAt: new Date().toISOString() }; }
   };
   type ReadinessCheck = { name: string; ready: boolean; required: boolean; detail: string };
   type ReadinessSnapshot = { ready: boolean; checks: ReadinessCheck[]; reindex?: KnowledgeEmbeddingReindexStatus; knowledgeCollected: boolean };
@@ -250,7 +253,7 @@ export function buildApp(options: Options) {
       let knowledgeCollected = false;
       const check = async (name: string, required: boolean, operation: () => Promise<{ ready: boolean; detail: string }>): Promise<ReadinessCheck> => {
         try { return { name, required, ...await operation() }; }
-        catch (error) { return { name, ready: false, required, detail: error instanceof ProbeTimeout ? 'dependency check timed out' : 'dependency check failed' }; }
+        catch (error) { return { name, ready: false, required, detail: error instanceof HealthProbeTimeout ? 'dependency check timed out' : 'dependency check failed' }; }
       };
       const checks = await Promise.all([
         check('repository', true, async () => {
@@ -259,10 +262,10 @@ export function buildApp(options: Options) {
           return { ready: true, detail: 'run repository reachable' };
         }),
         check('model', true, () => options.engine
-          ? bounded('model', () => options.engine!.modelHealth())
+          ? healthProbe('model', () => options.engine!.modelHealth())
           : Promise.resolve({ ready: false, detail: 'model configuration required' })),
         check('dispatcher', true, () => options.engine && options.dispatcher?.health
-          ? bounded('dispatcher', () => options.dispatcher!.health!())
+          ? healthProbe('dispatcher', () => options.dispatcher!.health!())
           : Promise.resolve({ ready: Boolean(options.engine && options.dispatcher), detail: options.dispatcher?.constructor.name ?? 'dispatcher unavailable' })),
         check('skillGovernance', Boolean(options.skills?.health), skillGovernanceHealth),
         ...(options.principalDirectory ? [check('principalDirectory', true, principalDirectoryReadiness)] : []),

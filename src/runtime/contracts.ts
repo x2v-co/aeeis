@@ -76,11 +76,13 @@ export const nodeSchema = z.object({
   title: z.string().min(1).max(200),
   instruction: z.string().min(1).max(4000),
   dependsOn: z.array(z.string()).max(20),
-}).strict();
+}).strip();
+// Model planning metadata is not part of the executable plan. Strip it before
+// graph validation and hashing; request/decision/authorization schemas stay strict.
 export const planSchema = z.object({
   summary: z.string().min(1).max(4000),
   nodes: z.array(nodeSchema).min(1).max(12),
-}).strict();
+}).strip();
 export const decisionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strict(),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strict(),
@@ -214,6 +216,8 @@ export interface RunCorrection { id: string; text: string; candidateId?: string;
 export interface Step {
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
+  /** One bounded, durable model attempt to repair a candidate finish object. */
+  finishRepair?: { reason: string; candidate: unknown };
 }
 export interface AgentRun {
   schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;

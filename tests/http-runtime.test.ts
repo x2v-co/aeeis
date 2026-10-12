@@ -868,7 +868,7 @@ describe('AEEIS HTTP boundary', () => {
       complete: async () => ({ value: {} }),
       health: async () => { calls += 1; if (calls === 1) throw new Error('provider unavailable'); return { ready: true, detail: 'fixture ready', checkedAt: new Date().toISOString() }; },
     };
-    const app = buildApp({ repository: repo, engine: new AgentEngine(repo, model), readinessCheckTimeoutMs: 100 });
+    const app = buildApp({ repository: repo, engine: new AgentEngine(repo, model), readinessCheckTimeoutMs: 100, readinessCacheTtlMs: 0 });
     try {
       const failed = await app.inject('/readyz');
       expect(failed.statusCode).toBe(503);
