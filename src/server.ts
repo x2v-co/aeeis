@@ -529,6 +529,7 @@ try {
     ...(channelIdentityResolver ? { channelIdentityResolver } : {}),
     sessionEvents,
     deviceSessions,
+    ...(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES !== undefined ? { threadContextBudgetBytes: Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES) } : {}),
     ...(process.env.AEEIS_MAX_SSE_CONNECTIONS ? { maxSseConnections: Number(process.env.AEEIS_MAX_SSE_CONNECTIONS) } : {}),
   });
   const compactRun = (run: AgentRun): unknown => ({

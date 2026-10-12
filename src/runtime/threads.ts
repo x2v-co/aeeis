@@ -11,15 +11,27 @@ export const threadSchema = z.object({
 }).strict();
 export type Thread = z.infer<typeof threadSchema>;
 export interface ThreadRepository {
-  createThread(thread: Thread): Promise<void>;
+  /** Optionally attach an existing unthreaded root in the same transaction. */
+  createThread(thread: Thread, initialRunId?: string): Promise<void>;
   getThread(id: string, scope?: Ownership): Promise<Thread>;
   /** Sequence order, ascending; ownership is checked before applying limit. */
-  listRunsByThread(id: string, scope?: Ownership, limit?: number): Promise<AgentRun[]>;
+  listRunsByThread(id: string, scope?: Ownership, limit?: number, afterSequence?: number): Promise<AgentRun[]>;
+  latestRunByThread(id: string, scope?: Ownership): Promise<AgentRun | undefined>;
+  /** Persist a fully prepared run and its membership together, before dispatch.
+   * The parent revision binds the commit to the frozen history read. */
+  createRunInThread(run: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number): Promise<AgentRun>;
   /** First member has no parent; later members require an existing same-thread parent.
    * Sequence is allocated under the adapter lock. Repeating the same attachment is a no-op. */
   attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun>;
 }
 export class ThreadConflict extends Error {}
+export function validateThreadSequence(afterSequence: number): void {
+  if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || afterSequence > 2147483647) throw new RangeError('Invalid thread sequence cursor');
+}
+export function assertFollowupParent(parent: AgentRun | undefined, revision?: number): void {
+  if (parent && (!['succeeded', 'failed', 'cancelled'].includes(parent.status) || (revision !== undefined && parent.revision !== revision)))
+    throw new ThreadConflict('Parent must be terminal and unchanged since the history snapshot; answer live questions through /answer');
+}
 type Membership = { threadId?: string | undefined; parentRunId?: string | undefined; threadSequence?: number | undefined };
 export function assertMembershipUnchanged(before: Membership, after: Membership): void {
   if (before.threadId !== after.threadId || before.parentRunId !== after.parentRunId || before.threadSequence !== after.threadSequence)

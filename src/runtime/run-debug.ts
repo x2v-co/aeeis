@@ -38,8 +38,10 @@ export function capDebugField(value: string): string {
   return Buffer.from(value, 'utf8').subarray(0, MAX_DEBUG_FIELD_BYTES - Buffer.byteLength(marker)).toString('utf8').replace(/\uFFFD$/, '') + marker;
 }
 /** Remove credential fields and scrub recognizable credentials even inside free text.
- * Values found under credential/environment keys are also scrubbed wherever copied. */
-export function redactRunData<T>(value: T): T {
+ * Values found under credential/environment keys are also scrubbed wherever copied.
+ * Callers with their own byte budget can defer field capping. */
+export function redactRunData<T>(value: T, options: { capFields?: boolean } = {}): T {
+  const capField = (text: string): string => options.capFields === false ? text : capDebugField(text);
   const secrets = new Set<string>();
   let collected = 0, visited = 0;
   const collect = (item: unknown, sensitive = false, depth = 0): void => {
@@ -86,14 +88,14 @@ export function redactRunData<T>(value: T): T {
       .replace(/([?&](?:sig|signature|x-amz-[\w-]+|key|apikey|api_key|code|auth|token|access_token|refresh_token|id_token)=)[^&#\s"'<>]+/gi, '$1[REDACTED]')
       .replace(/\btk_[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
       .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitive(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
-    return capDebugField(redactEnvBlocks(result));
+    return capField(redactEnvBlocks(result));
   };
   const visit = (item: unknown, depth = 0): unknown => {
     if (depth > 40 || ++visited > MAX_DEBUG_NODES) return '[truncated]';
     if (typeof item === 'string') {
       // JSON embedded in model raw output/materials still receives key-based redaction.
       if (/^\s*[\[{]/.test(item)) {
-        try { const parsed: unknown = JSON.parse(item); collect(parsed); return capDebugField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
+        try { const parsed: unknown = JSON.parse(item); collect(parsed); return capField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
       }
       return scrub(item);
     }

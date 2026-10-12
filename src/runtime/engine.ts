@@ -416,7 +416,7 @@ export class AgentEngine {
     return { ready: false, detail: 'model configuration required', checkedAt: now() };
   }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
-  async create(input: unknown, owner = 'owner', tenantId = 'local'): Promise<AgentRun> {
+  async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>): Promise<AgentRun> {
     const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
@@ -595,7 +595,8 @@ export class AgentEngine {
     if (resolution.decision) event(run, 'model.selected', { decision: resolution.decision });
     if (skillSelection) event(run, 'skill.selected', { methodId: skillSelection.methodId ?? null, version: skillSelection.version ?? null, receiptRef: skillSelection.receiptRef ?? null });
     if (activeEvolution.length || evolutionSelection.traffic.length) event(run, 'evolution.snapshot', { candidateIds: activeEvolution.map(item => item.candidateId), versionDigest: digest(activeEvolution), ...(evolutionSelection.traffic.length ? { traffic: evolutionSelection.traffic } : {}) });
-    try { await this.repository.create(run); }
+    let committed = run;
+    try { if (commit) committed = await commit(run); else await this.repository.create(run); }
     catch (error) {
       const duplicate = error instanceof Error && error.message === 'Run already exists' || (error as { code?: string }).code === '23505';
       if (!taskRunId || !duplicate) throw error;
@@ -604,7 +605,7 @@ export class AgentEngine {
       return existing;
     }
     this.adapters.set(run.id, selectedModel);
-    return run;
+    return committed;
   }
   async recover(): Promise<void> {
     if (this.repository.scanRecoveryPage) {

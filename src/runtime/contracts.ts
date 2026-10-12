@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ThreadHistory } from './thread-history.js';
 import type { Receipt, ToolInvocation } from '../integrations.js';
 import type { ProjectSourceSyncReceipt } from '../project-sources.js';
 import type { AgentFailure, AgentProgressEvent, ApprovedAgent, DelegationReceipt, DelegationRequest } from '../agent-gateway.js';
@@ -233,7 +234,7 @@ export interface AgentRun {
   status: RunStatus; createdAt: string; updatedAt: string;
   cancellation?: { reason: string; actor: string; at: string; source: 'api' };
   reconciliation?: { workflowStatus: string; previousStatus: RunStatus; actor: string; at: string; reason: string };
-  context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
+  context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; threadHistory?: ThreadHistory; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;
   builtinSkill?: TaskRequest['builtinSkill'];

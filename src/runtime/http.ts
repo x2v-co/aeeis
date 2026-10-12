@@ -24,6 +24,8 @@ import { externalBudgetSchema, modelBudgetSchema, requestSchema } from './contra
 import { projectRunGraphs } from './graphs.js';
 import { explainRun } from './explanation.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
+import { ThreadService } from '../application/thread-service.js';
+import { ThreadConflict } from './threads.js';
 import type { RsiEvaluationHarness } from '../evaluation.js';
 import { ProjectionNotFound, type ProjectionOutbox, type ProjectionSink } from '../collaboration-projection.js';
 import type { SkillGovernance, ToolGateway } from '../integrations.js';
@@ -51,7 +53,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -121,6 +123,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
   return [...lines, ...gauges, ...histograms];
 }
 export function buildApp(options: Options) {
+  const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
@@ -389,7 +392,7 @@ export function buildApp(options: Options) {
       const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route);
       const operatorRunAdmin = request.method === 'POST' && principal.roles.includes('operator')
         && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
-      if (/^\/api\/(rooms|goals|plans|runs|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
+      if (/^\/api\/(rooms|goals|plans|runs|threads|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
   app.addHook('onResponse', async (request, reply) => {
@@ -410,7 +413,7 @@ export function buildApp(options: Options) {
     if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound || error instanceof CollaborationTriggerNotFound || error instanceof ProjectionNotFound || error instanceof ReminderNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof ReminderConflict) return reply.code(409).send({ error: error.message });
-    if (error instanceof Conflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof Conflict || error instanceof ThreadConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof RangeError) return reply.code(400).send({ error: error.message });
     const e = error as { statusCode?: number };
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send({ error: 'Invalid HTTP request' });
@@ -1507,6 +1510,23 @@ export function buildApp(options: Options) {
     try { await options.dispatcher?.notifyReminder?.(id); }
     catch (error) { console.error('AEEIS reminder timer notification failed', id, error instanceof Error ? error.message : error); }
   }
+  app.post('/api/threads', async (request, reply) => {
+    const principal = principalOf(request);
+    return reply.code(201).send(await threads.create(request.body, { owner: principal.id, tenantId: principal.tenantId }));
+  });
+  app.get<{ Params: { id: string } }>('/api/threads/:id', async request => {
+    const principal = principalOf(request);
+    return threads.get(request.params.id, request.query, { owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.post<{ Params: { id: string } }>('/api/threads/:id/runs', async (request, reply) => {
+    const principal = principalOf(request);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    await options.repository.getThread(request.params.id, scope);
+    if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a model and dispatcher before starting a thread run' });
+    const run = await threads.followUp(request.params.id, request.body, scope);
+    await notify(run.id);
+    return reply.code(202).send({ id: run.id, threadId: run.threadId, ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}), threadSequence: run.threadSequence, context: run.context });
+  });
   app.post('/api/runs', async (request, reply) => {
     if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a pinned model or AEEIS_PLANPRICE_URL with provider endpoints before starting an agent run' });
     const body = requestSchema.omit({ goalId: true, taskExecution: true }).parse(request.body);
