@@ -1,14 +1,19 @@
-import { condition, continueAsNew, defineSignal, proxyActivities, setHandler } from '@temporalio/workflow';
+import { condition, continueAsNew, defineSignal, patched, proxyActivities, setHandler } from '@temporalio/workflow';
 import type { AdvanceReminderActivityResult, AdvanceRunActivityResult } from './activity.js';
 
-const { advanceRun, advanceReminder } = proxyActivities<{
+const retry = {
+  initialInterval: '1 second', backoffCoefficient: 2, maximumInterval: '30 seconds', maximumAttempts: 5,
+  nonRetryableErrorTypes: ['AeeisPermanentError', 'AeeisProtocolError'],
+};
+const { advanceRun } = proxyActivities<{
   advanceRun(id: string): Promise<AdvanceRunActivityResult>;
-  advanceReminder(id: string): Promise<AdvanceReminderActivityResult>;
 }>({
-  startToCloseTimeout: '2 minutes', scheduleToCloseTimeout: '3 minutes',
-  // Unknown outcomes are reconciled by the domain, not blindly retried by the execution engine.
-  retry: { initialInterval: '1 second', backoffCoefficient: 2, maximumInterval: '30 seconds', maximumAttempts: 5, nonRetryableErrorTypes: ['AeeisPermanentError', 'AeeisProtocolError'] },
+  // Outlive the HTTP activity's 20 minute deadline, including model retries.
+  startToCloseTimeout: '25 minutes', scheduleToCloseTimeout: '2 hours', retry,
 });
+const { advanceReminder } = proxyActivities<{
+  advanceReminder(id: string): Promise<AdvanceReminderActivityResult>;
+}>({ startToCloseTimeout: '2 minutes', scheduleToCloseTimeout: '3 minutes', retry });
 export async function agentRunWorkflow(runId: string): Promise<void> {
   let wake = false;
   setHandler(defineSignal('wake'), () => { wake = true; });
@@ -23,8 +28,10 @@ export async function agentRunWorkflow(runId: string): Promise<void> {
       continue;
     }
     if (['succeeded', 'cancelled'].includes(status)) return;
+    // Preserve old histories that already emitted a wait command for failed.
+    if (status === 'failed' && patched('terminal-failed-run-v1')) return;
     if (!['queued', 'planning', 'running', 'reviewing'].includes(status)) {
-      // Approval, input, external reconciliation, failure and cancellation
+      // Approval, input, external reconciliation
       // are business states owned by AEEIS. Polling them every 30 seconds
       // creates needless Activity load and can hide a stuck long-running Run;
       // the API signals the same workflow after the durable state changes.

@@ -32,6 +32,7 @@
     "backup:verify": "node scripts/verify-backup.mjs",
     "backup:restore": "node scripts/restore-postgres.mjs",
     "recovery:postgres": "npm run build && node scripts/recovery-drill.mjs",
+    "temporal:reconcile": "node scripts/reconcile-workflows.mjs",
     "temporal:replay": "npm run build && node scripts/replay-temporal-history.mjs",
     "start": "node dist/server.js",
     "test": "vitest run",

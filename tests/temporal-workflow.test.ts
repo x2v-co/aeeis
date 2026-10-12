@@ -13,6 +13,10 @@ const previousWorkflowBundle = await bundleWorkflowCode({
   workflowsPath: fileURLToPath(new URL('./fixtures/temporal-v1-workflows.ts', import.meta.url)),
 });
 
+const preTerminalBundle = await bundleWorkflowCode({
+  workflowsPath: fileURLToPath(new URL('./fixtures/temporal-pre-terminal-workflows.ts', import.meta.url)),
+});
+
 describe('AEEIS Temporal workflow', () => {
   let environment: TestWorkflowEnvironment;
   let worker: Worker;
@@ -27,7 +31,7 @@ describe('AEEIS Temporal workflow', () => {
       taskQueue,
       workflowBundle,
       activities: {
-        advanceRun: async () => ({ status: 'succeeded' }),
+        advanceRun: async (id: string) => ({ status: id.startsWith('run-terminal-') ? id.slice('run-terminal-'.length) : 'succeeded' }),
         advanceReminder: async () => ({ status: 'projected', terminal: true }),
       },
     });
@@ -45,6 +49,12 @@ describe('AEEIS Temporal workflow', () => {
       workflowId: 'temporal-terminal',
       taskQueue,
       args: ['run-terminal'],
+    })).resolves.toBeUndefined();
+  });
+
+  it.each(['failed', 'cancelled', 'succeeded'])('completes terminal %s Runs without needing another wake', async status => {
+    await expect(environment.client.workflow.execute('agentRunWorkflow', {
+      workflowId: `temporal-terminal-${status}`, taskQueue, args: [`run-terminal-${status}`],
     })).resolves.toBeUndefined();
   });
 
@@ -325,6 +335,28 @@ describe('AEEIS Temporal workflow', () => {
       await localWorker.shutdown();
       await localRun;
     }
+  }, 120_000);
+
+  it('replays pre-fix history that already waited indefinitely on failed', async () => {
+    const queue = `${taskQueue}-failed-history`;
+    let called!: () => void;
+    const firstCall = new Promise<void>(resolve => { called = resolve; });
+    const oldWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace,
+      taskQueue: queue, workflowBundle: preTerminalBundle,
+      activities: { advanceRun: async () => { called(); return { status: 'failed' }; } },
+    });
+    await oldWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', {
+        workflowId: 'temporal-pre-fix-failed-history', taskQueue: queue, args: ['failed-run'],
+      });
+      try {
+        await firstCall;
+        await new Promise(resolve => setTimeout(resolve, 100));
+        expect((await handle.describe()).status.name).toBe('RUNNING');
+        await expect(Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId)).resolves.toBeUndefined();
+      } finally { await handle.terminate('test cleanup'); }
+    });
   }, 120_000);
 
   it('replays history produced by the previous workflow bundle', async () => {

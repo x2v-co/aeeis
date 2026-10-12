@@ -160,7 +160,7 @@ AEEIS_ENV_FILE="$STACK_ENV" ./bin/images.sh verify
 ```
 
 `images.sh` honors explicitly supplied image/registry variables over `stack.env`
-and `.current.env`, so each bundle uses the selected release and hop. Build the
+and `.current.<stack>.env`, so each bundle uses the selected release and hop. Build the
 release on SG/dev first if it is not published.
 `load` verifies/retags locally and never pulls. `save` includes every service
 image, including ops profiles. `prepull` tries local -> registry prefix -> mirror
@@ -323,12 +323,14 @@ AEEIS_DEPLOY_IMAGE="$AEEIS_IMAGE" ./bin/deploy.sh --env-file "$STACK_ENV" --no-b
 ```
 
 The script waits for the correct build's worker to be RUNNING, promotes it to
-Current Version, waits for API readiness, then records `.current.env`. A failed
+Current Version, waits for API readiness, then records `.current.<stack>.env`. A failed
 deploy may already have started containers or migrated schemas even though
-`.current.env` was not updated: keep ingress blocked and use the rollback steps.
+`.current.<stack>.env` was not updated: keep ingress blocked and use the rollback steps.
 On an initial migration, the old Compose project is not the new script's replay
-source; perform the replay/restore rehearsal before cutover. Do not skip replay
-on later upgrades. Install/enable the new stack, backup and health systemd units
+source; perform the replay/restore rehearsal before cutover. Start the restored
+Temporal server in section 4a before deploying: the gate always queries Temporal
+and blocks when it is unavailable. `AEEIS_SKIP_REPLAY` no longer bypasses the gate.
+The gate checks every Running AEEIS execution plus a recent closed sample. Install/enable the new stack, backup and health systemd units
 only after verification; keep the old units disabled while the new stack owns
 these volumes and ports.
 
@@ -347,8 +349,10 @@ skip 1.26 and 1.28: include reviewed/rehearsed 1.26.x and 1.28.x images and the
 same schema/health steps between checkpoints unless your release-specific
 compatibility review explicitly supports those jumps. Preload any additional
 images before draining. Do not infer skip compatibility from successful SQL
-migration alone. Allow at least ten minutes per server version for shards to
-load and migrate, and review the release notes before proceeding.
+migration alone. Wait until the health check passes and both expected schema versions are
+confirmed before advancing each hop, with a minimum observation period of about
+one minute for shards to load. Continue waiting if those checks have not passed;
+review the release notes before proceeding.
 
 Each checkpoint runs the schema/server/health commands below with this target:
 
@@ -382,16 +386,21 @@ new_dc run --rm -T --no-deps --pull never --entrypoint sh temporal -ec '
     -d /etc/temporal/schema/postgresql/v12/visibility/versioned
 '
 # auto-setup also checks/updates both schemas idempotently on startup.
+temporal_hop_started=$SECONDS
 new_dc up -d --no-deps --pull never temporal
 # Poll until the server reports healthy. Earlier tags may ship tctl rather
 # than the temporal CLI; use the CLI present in that image.
-new_dc exec -T temporal sh -ec '
+until new_dc exec -T temporal sh -ec '
   if command -v temporal >/dev/null; then
     temporal operator cluster health --address temporal:7233
   else
     tctl --address temporal:7233 cluster health
   fi
-'
+'; do
+  sleep 5
+done
+# At least about one minute of observation per hop; continue longer as needed.
+while (( SECONDS - temporal_hop_started < 60 )); do sleep 5; done
 for temporal_db in temporal temporal_visibility; do
   new_dc exec -T temporal-postgres psql -X -v ON_ERROR_STOP=1 \
     -U temporal -d "$temporal_db" \
@@ -399,7 +408,8 @@ for temporal_db in temporal temporal_visibility; do
 done
 new_dc logs --tail 200 temporal
 # Check for errors, namespace/history visibility and expected release schema
-# versions; allow shard migration time before the next hop. Save evidence.
+# versions against the target release migrations. Do not advance until health
+# passes AND both expected schema versions are confirmed. Save evidence.
 ```
 
 Abort on any schema/health failure. Preserve the failed volumes for diagnosis;
@@ -450,9 +460,36 @@ volumes or migration failures without copying secrets into incident channels.
 
 Complete **one real run end to end** with a small approved, non-sensitive input:
 create via the existing workbench or authenticated `POST /api/runs` (body contains
-`goal` and `materials`), inspect its generated plan, approve its exact `planHash`
+`goal` and `materials`), inspect its generated plan, approve its exact `approval.planHash`
 with `POST /api/runs/:id/approve`, then observe `GET /api/runs/:id` until
 `status=succeeded`, review `verdict=accepted`, and inspect a real artifact.
+Each material must contain `title`, `content`, and `source`. For example:
+
+```json
+{
+  "goal": "Summarize the approved migration drill notes",
+  "materials": [{
+    "title": "Drill notes",
+    "content": "The isolated restore completed and checksums matched.",
+    "source": "sre://migration-drill/approved-notes"
+  }]
+}
+```
+
+Read `approval.planHash` from `GET /api/runs/:id` once `status=needs_approval`
+and submit that exact value in the approval request (the request field is still
+`planHash`):
+
+```javascript
+const run = await (await fetch(`${base}/api/runs/${runId}`, { headers })).json();
+if (run.status !== 'needs_approval' || !run.approval?.planHash) throw new Error('Run is not ready for approval');
+const response = await fetch(`${base}/api/runs/${runId}/approve`, {
+  method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+  body: JSON.stringify({ planHash: run.approval.planHash }),
+});
+if (!response.ok) throw new Error(`Approval failed: HTTP ${response.status}`);
+```
+
 Record the run ID, model identity and Temporal workflow execution. Verify actual
 provider usage from the provider console/response evidence. Fixtures and a 200
 health response do not satisfy this acceptance check. Reopen upstream traffic
@@ -466,7 +503,7 @@ Run a new coordinated backup and schedule a restore drill after acceptance.
    restoring the pre-cutover snapshot loses writes made afterward.
 2. Stop the new stack and disable its auto-start units:
    `new_dc stop worker api temporal postgres temporal-postgres`. Do not remove
-   volumes. A `.previous.env` image rollback alone is insufficient for a
+   volumes. A `.previous.<stack>.env` image rollback alone is insufficient for a
    schema-changing migration from the old root stack.
 3. If you restored into fresh volumes and old volumes remain untouched, retain
    the new volumes for investigation and select the original old volumes.

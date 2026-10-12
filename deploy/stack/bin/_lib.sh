@@ -1,17 +1,40 @@
+# shellcheck shell=bash
 # Shared helpers for deploy/stack/bin/*.sh (sourced, not executed).
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="$(cd "$STACK_DIR/../.." && pwd)"
 export REPO_DIR
 ENV_FILE="${AEEIS_ENV_FILE:-$STACK_DIR/stack.env}"
-# Written by bin/deploy.sh only after a successful deploy: AEEIS_IMAGE and
-# AEEIS_BUILD_ID of the running build (.previous.env keeps the one before).
-CURRENT_FILE="${AEEIS_CURRENT_FILE:-$STACK_DIR/.current.env}"
 [[ -r "$ENV_FILE" ]] || { echo "missing $ENV_FILE (copy stack.env.example, chmod 600)" >&2; exit 2; }
 set -a
 # shellcheck source=/dev/null
 . "$ENV_FILE"
-# shellcheck source=/dev/null
-[[ ! -r "$CURRENT_FILE" ]] || . "$CURRENT_FILE"
+export AEEIS_STACK="${AEEIS_STACK:-aeeis-cn-prod}"
+[[ "$AEEIS_STACK" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "invalid AEEIS_STACK" >&2; exit 2; }
+# State is isolated even when drill and production use the same checkout.
+CURRENT_FILE="${AEEIS_CURRENT_FILE:-$STACK_DIR/.current.$AEEIS_STACK.env}"
+# shellcheck disable=SC2034
+PREVIOUS_FILE="$STACK_DIR/.previous.$AEEIS_STACK.env"
+# shellcheck disable=SC2034
+CANDIDATE_FILE="$STACK_DIR/.candidate.$AEEIS_STACK.env"
+# Read legacy state only with explicit ownership evidence. Old files without
+# AEEIS_STACK may identify their stack by the '<stack>-<sha>' build ID prefix.
+if [[ ! -r "$CURRENT_FILE" && -z "${AEEIS_CURRENT_FILE:-}" && -r "$STACK_DIR/.current.env" ]]; then
+  # shellcheck source=/dev/null
+  legacy_stack="$( ( unset AEEIS_BUILD_ID; . "$STACK_DIR/.current.env"; printf '%s' "${AEEIS_BUILD_ID:-}" ) )"
+  legacy_stack="${legacy_stack%-dirty[0-9]*}"
+  legacy_stack="${legacy_stack%-*}"
+  # shellcheck source=/dev/null
+  legacy_owner="$( ( unset AEEIS_STACK; . "$STACK_DIR/.current.env"; printf '%s' "${AEEIS_STACK:-}" ) )"
+  if [[ "$legacy_owner" == "$AEEIS_STACK" || ( -z "$legacy_owner" && "$legacy_stack" == "$AEEIS_STACK" ) ]]; then
+    CURRENT_FILE="$STACK_DIR/.current.env"
+  fi
+fi
+if [[ -r "$CURRENT_FILE" ]]; then
+  selected_stack="$AEEIS_STACK"
+  # shellcheck source=/dev/null
+  . "$CURRENT_FILE"
+  [[ "$AEEIS_STACK" == "$selected_stack" ]] || { echo "state file stack mismatch: $CURRENT_FILE" >&2; exit 2; }
+fi
 set +a
 # The selected file is also the container env_file. Use an absolute path so
 # callers can select it from any directory. STACK_ENV_FILE is not an AEEIS

@@ -2,7 +2,7 @@ import { LocalToolGateway, CombinedToolGateway } from './local-tools.js';
 import { resolveToolDefaults } from './tool-defaults.js';
 import { collaborationPricesSchema, type CollaborationPrices } from './collaboration-budget.js';
 import { FileRunRepository, PostgresRunRepository } from './runtime/repository.js';
-import { AgentpayModelAdapter, HttpModelAdapter } from './runtime/model.js';
+import { AgentpayModelAdapter, HttpModelAdapter, modelTransportConfig } from './runtime/model.js';
 import { AgentEngine, digest } from './runtime/engine.js';
 import { LocalDispatcher, TemporalDispatcher } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
@@ -381,7 +381,7 @@ try {
     const model = new AgentpayModelAdapter(process.env.AEEIS_AGENTPAY_MCP_URL, process.env.AEEIS_AGENTPAY_TOKEN, process.env.AEEIS_MODEL, maxCredits, 120_000, process.env.AEEIS_PLANPRICE_URL, process.env.AEEIS_PLANPRICE_BEARER_TOKEN);
     modelServices = { model }; rsiModelResolver = new StaticModelResolver(model);
   } else if (process.env.AEEIS_MODEL_BASE_URL && process.env.AEEIS_MODEL) {
-    const model = new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '', undefined, Number(process.env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), process.env.AEEIS_MODEL_HEALTH_URL, process.env.AEEIS_MODEL_ALLOW_INSECURE_HTTP === '1');
+    const model = new HttpModelAdapter(process.env.AEEIS_MODEL_BASE_URL, process.env.AEEIS_MODEL, process.env.AEEIS_MODEL_API_KEY ?? '', undefined, Number(process.env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), process.env.AEEIS_MODEL_HEALTH_URL, process.env.AEEIS_MODEL_ALLOW_INSECURE_HTTP === '1', undefined, modelTransportConfig(process.env));
     modelServices = { model }; rsiModelResolver = new StaticModelResolver(model);
   } else if (process.env.AEEIS_PLANPRICE_URL) {
     let endpoints: Record<string, string> = {};
@@ -438,7 +438,7 @@ try {
         return [key, value];
       }));
     }
-    const resolver = new CatalogModelResolver(catalog, new HttpCatalogModelFactory(providerKeys, providerHealthUrls, process.env.AEEIS_MODEL_PROVIDER_ALLOW_INSECURE_HTTP === '1', planpriceMappings));
+    const resolver = new CatalogModelResolver(catalog, new HttpCatalogModelFactory(providerKeys, providerHealthUrls, process.env.AEEIS_MODEL_PROVIDER_ALLOW_INSECURE_HTTP === '1', planpriceMappings, Number(process.env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), modelTransportConfig(process.env)));
     modelServices = { resolver }; rsiModelResolver = resolver;
   }
   if (process.env.AEEIS_RSI_PROPOSAL_SYNTHESIS_ENABLED === '1') {

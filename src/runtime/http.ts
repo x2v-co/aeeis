@@ -1464,6 +1464,9 @@ export function buildApp(options: Options) {
     else if (action !== 'dispatch') await options.engine.command(id, action, request.body);
     await notify(id); return getOwnedRun(options.repository, id, principal.id, principal.tenantId);
   });
+  app.get<{ Params: { id: string } }>('/internal/runs/:id/status', async request => {
+    return { status: (await options.repository.get(request.params.id)).status };
+  });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     return { status: await options.engine.advance(request.params.id) };

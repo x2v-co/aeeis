@@ -33,7 +33,7 @@ use `./stack.env`) or an absolute path. Supply the recorded image/build file too
 ```bash
 set -a; . ./stack.env; set +a
 export AEEIS_STACK="${AEEIS_STACK:-aeeis-cn-prod}"
-docker compose -p "$AEEIS_STACK" -f compose.yml --env-file stack.env --env-file .current.env config --quiet
+docker compose -p "$AEEIS_STACK" -f compose.yml --env-file stack.env --env-file ".current.$AEEIS_STACK.env" config --quiet
 ./bin/stack.sh start  # guard + preload all images + up --pull never
 ```
 
@@ -89,19 +89,38 @@ allowlist; configure it independently if switching to service URLs.
 ## Release and operations
 
 - `bin/deploy.sh` builds the checked-out release (or uses `--no-build`), replays
-  sampled existing workflow histories on the candidate image, starts the stack,
+  all Running AEEIS histories plus a closed sample on the candidate image, starts the stack,
   waits for that build's RUNNING worker, promotes the Worker Deployment Current
-  Version, then waits for API readiness. `.current.env` is written only after
-  success; `.previous.env` records the preceding release. A failed deploy may
+  Version, then waits for API readiness. `.current.<stack>.env` is written only after
+  success; `.previous.<stack>.env` records the preceding release. A failed deploy may
   already have changed running containers or schemas.
 - Worker Deployment name equals `AEEIS_TASK_QUEUE`. `AUTO_UPGRADE` keeps workflows
   following the current worker on this single-worker host. Candidate histories
-  must replay before ordinary upgrades; `AEEIS_SKIP_REPLAY=1` is an emergency
-  override. Migration from an old Compose project needs a separate rehearsal.
+  must replay before upgrades. The gate cannot be bypassed with
+  `AEEIS_SKIP_REPLAY`; bootstrap Temporal before the first deploy. Migration
+  from an old Compose project needs a separate rehearsal.
 - `bin/health.sh` checks API readiness, worker RUNNING and the tailnet API listener.
   `bin/replay.sh <workflow-id>...` exports histories and replays them with the
   current image (or `AEEIS_REPLAY_IMAGE`). Helpers accept `AEEIS_ENV_FILE` to
   select a nondefault env file; the deploy entrypoint always requires its flag.
+- `AEEIS_ENV_FILE=/absolute/path/stack.env bin/reconcile-workflows.sh` lists
+  Running run workflows with terminal app Runs in dry-run mode. Add `--apply`
+  to terminate the exact listed executions. Pause operator retries while applying;
+  unknown, paused and waiting Runs are preserved. Status lookup or termination
+  failures abort the tool. The API image must include the new internal status route.
+- Model transport uses `AEEIS_MODEL_TIMEOUT_MS` for each request, including
+  response bodies, and `AEEIS_MODEL_MAX_ATTEMPTS` (default 3). Retryable failures
+  are network errors/timeouts, 429 and 5xx; other 4xx fail immediately. Backoff
+  uses `AEEIS_MODEL_RETRY_BASE_MS` / `AEEIS_MODEL_RETRY_MAX_MS` with jitter.
+  The run activity allows 20 minutes, with a 25 minute Temporal deadline, so
+  the default 180s requests, transport retries and one length retry can finish.
+  Keep custom retry/timeout combinations within that overall activity budget.
+  Inspect `aeeis-model-error/1` logs for status, request ID, attempt, elapsed time,
+  code and a bounded body excerpt. Exhausted network/5xx failures remain unknown;
+  retrying the same idempotency key can still incur additional provider charges.
+- State files use `AEEIS_STACK`: `.current.<stack>.env`, `.previous.<stack>.env`
+  and `.candidate.<stack>.env`. Legacy `.current.env` is read only if its
+  `AEEIS_STACK` or build ID identifies this exact stack. New releases use keyed files.
 - `bin/backup.sh` defaults to stopping API/worker/Temporal while dumping AEEIS,
   Temporal persistence and visibility databases as a coordinated set. It checks
   hashes, restores services, applies retention and can upload off-host. CN
@@ -110,7 +129,7 @@ allowlist; configure it independently if switching to service URLs.
 - `systemd/` supplies stack, backup and health units for `/opt/<instance>/aeeis`.
   Install after successful acceptance; leave old units disabled. The stack unit
   uses `bin/stack.sh` with project/volume guards and image preflight at boot,
-  reads `stack.env` and `.current.env`, and waits for the tailnet address.
+  reads `stack.env` and `.current.<stack>.env`, and waits for the tailnet address.
   Backup and health timers run daily and every 5 minutes.
 - Optional `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and
   `AEEIS_DATA_VOLUME` override the explicit volume names. Foreign project labels
@@ -146,7 +165,7 @@ AEEIS_IMAGE=aeeis:REPLACE_WITH_COMMIT ./bin/images.sh load /tmp/aeeis-images.tar
 ```
 
 `images.sh` honors explicit image/registry variables over the selected env and
-`.current.env`, so a preload can select the candidate release or upgrade hop.
+`.current.<stack>.env`, so a preload can select the candidate release or upgrade hop.
 `save` requires all images already local. `load` runs Docker load, retags local
 upstream refs when a registry prefix is selected, and verifies the complete set
 without pulling. Image tarballs contain code only; never transfer CN data/secrets
@@ -178,7 +197,7 @@ CI=true AEEIS_STACK_SMOKE=1 ./bin/deploy.sh --env-file ./stack.env
 CI=true ./bin/smoke.sh
 # Teardown this disposable CI project only:
 CI=true docker compose -p "$AEEIS_STACK" -f compose.yml -f compose.smoke.yml \
-  --env-file stack.env --env-file .current.env down -v
+  --env-file stack.env --env-file ".current.$AEEIS_STACK.env" down -v
 ```
 
 The fixture smoke checks a Temporal Run, a Reminder/projection delivery and
