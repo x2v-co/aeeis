@@ -23,6 +23,6 @@ dump aeeis postgres aeeis aeeis "$AEEIS_POSTGRES_PASSWORD"
 dump temporal temporal-postgres temporal temporal "$TEMPORAL_POSTGRES_PASSWORD"
 dump temporal_visibility temporal-postgres temporal temporal_visibility "$TEMPORAL_POSTGRES_PASSWORD"
 (cd "$tmp" && sha256sum aeeis.dump temporal.dump temporal_visibility.dump > SHA256SUMS \
-  && sha256sum -c --quiet SHA256SUMS)
+  && sha256sum -c SHA256SUMS >/dev/null)
 mv -T "$tmp" "$out"
 echo "backup ok: $out ($(du -sh "$out" | cut -f1))"
