@@ -79,7 +79,8 @@ export function threadContract(name: string, setup: () => Promise<{ repository: 
       for (const cursor of [-1, 0.5, NaN, 2147483648]) await expect(repository.listRunsByThread(thread.id, threadScope, 2, cursor)).rejects.toThrow(RangeError);
     });
     it('preserves the frozen history through normal mutations and refuses replacing, editing or removing it', async () => {
-      const root = await repository.createRunInThread(threadRun(), thread.id, undefined, threadScope);
+      const initial = threadRun(); initial.goalId = 'restricted-goal';
+      const root = await repository.createRunInThread(initial, thread.id, undefined, threadScope);
       const child = threadRun();
       child.context.threadHistory = await buildThreadHistory(repository, thread.id, root, threadScope, 'internal', 32768);
       const attached = await repository.createRunInThread(child, thread.id, root.id, threadScope);
@@ -88,6 +89,7 @@ export function threadContract(name: string, setup: () => Promise<{ repository: 
       for (const change of [
         (run: AgentRun) => { delete run.context.threadHistory; },
         (run: AgentRun) => { run.context.threadHistory!.entries[0]!.excerpts[0]!.text = 'changed'; },
+        (run: AgentRun) => { run.context.threadHistory!.accessProvenance!.pop(); },
       ]) await expect(repository.mutate(child.id, change)).rejects.toThrow(ThreadConflict);
       expect((await repository.get(child.id)).context.threadHistory).toEqual(attached.context.threadHistory);
     });

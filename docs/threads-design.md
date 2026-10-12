@@ -99,6 +99,10 @@ serialize included entries chronologically. Count envelope/IDs/markers in the
 budget, truncate at UTF-8 boundaries, and record omitted/truncated counts. Stop
 retrieval when limits are reached. Persist policy version, source IDs/revisions,
 hash, actual byte count, budget and exclusions for reproducibility.
+Also cap the rendered history input at 65,536 characters, including tag escaping,
+outer JSON string escaping and source metadata, to leave room under the runtime's
+120,000-character request limit. Select/truncate excerpts against both limits
+before freezing the snapshot.
 
 ## PR 3 — planner/worker context and redaction
 
@@ -110,6 +114,11 @@ allowed fields explicitly; the debug exporter itself is not a history schema.
 Redaction removes secrets; it does not grant access or lower classification.
 Honor existing source classifications, exclude isolated tool/delegation evidence,
 and never widen Goal/Room audience access. A thread alone grants no Room rights.
+Persist transitive Goal and memory-manifest access provenance in the immutable
+snapshot independently of excerpt selection, and authorize every requirement
+against live domain ACLs before copying derived prose. Carry all requirements
+forward even when the original ancestor is omitted. Recover missing provenance
+from legacy follow-up ancestry independently of history budgets and excerpt limits.
 
 Inject the same frozen `threadHistory` into planner, executor and reviewer inputs
 in `AgentEngine`; label excerpts as untrusted historical evidence with provenance.

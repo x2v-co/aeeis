@@ -121,5 +121,5 @@ export function debugBundle(run: AgentRun) {
     taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
     modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
     validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
-    events: run.events, graphs: projectRunGraphs(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' });
+    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' });
 }
