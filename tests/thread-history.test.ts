@@ -58,6 +58,29 @@ describe('frozen thread history', () => {
     expect(get).not.toHaveBeenCalled();
     expect(snapshot.hash).toBe(threadHistoryHash(snapshot));
   });
+  it.each([false, true])('retains and authorizes transitive access independently of excerpt selection (legacy: %s)', async legacy => {
+    const { repository, thread, runs } = await fixture(2);
+    await repository.mutate(runs[0]!.id, root => { root.goalId = 'restricted-goal'; root.context.memoryManifestId = 'restricted-manifest'; });
+    const root = await repository.get(runs[0]!.id), parent = await repository.get(runs[1]!.id);
+    parent.context.threadHistory = await buildThreadHistory(repository, thread.id, root, threadScope, 'internal', 4096);
+    if (legacy) delete parent.context.threadHistory.accessProvenance;
+    parent.goal = 'Derived Room fact. ' + 'padding '.repeat(1000);
+    const get = vi.spyOn(repository, 'get');
+    const authorize = vi.fn(async () => undefined);
+    const snapshot = await buildThreadHistory(repository, thread.id, parent, threadScope, 'internal', 1800, authorize);
+    const access = [{ goalId: root.goalId, memoryManifestId: root.context.memoryManifestId }];
+    expect(snapshot.entries.map(entry => entry.runId)).toEqual([parent.id]);
+    expect(snapshot.accessProvenance).toEqual(access);
+    expect(snapshot.hash).toBe(threadHistoryHash(snapshot));
+    expect(snapshot.actualBytes).toBe(Buffer.byteLength(JSON.stringify(snapshot)));
+    expect(snapshot.actualBytes).toBeLessThanOrEqual(1800);
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(authorize).toHaveBeenCalledWith(parent, access);
+    expect(get).toHaveBeenCalledTimes(legacy ? 1 : 0);
+    await expect(buildThreadHistory(repository, thread.id, parent, threadScope, 'internal', 1800, async (_run, requirements) => {
+      if (requirements.some(item => item.goalId === root.goalId)) throw new Error('Revoked Goal access');
+    })).rejects.toThrow('Revoked Goal access');
+  });
   it('redacts against each ancestor before excerpt truncation, hashing and byte budgeting', async () => {
     const { repository, thread, runs } = await fixture(2);
     const secrets = ['opaque-ancestor-value', 'opaque-parent-value'];

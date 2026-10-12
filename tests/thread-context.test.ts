@@ -14,7 +14,7 @@ import { projectRunGraphs } from '../src/runtime/graphs.js';
 import { ModelOutcomeUnknown, type ModelAdapter, type ModelRequest } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import { debugBundle } from '../src/runtime/run-debug.js';
-import { threadHistoryInput, threadHistorySources } from '../src/runtime/thread-context.js';
+import { MAX_RENDERED_THREAD_HISTORY_CHARS, threadHistoryInput, threadHistorySources } from '../src/runtime/thread-context.js';
 import type { ThreadHistory } from '../src/runtime/thread-history.js';
 import { principalAudience } from '../src/security/principal.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
@@ -220,6 +220,73 @@ describe('thread history model context', () => {
     expect((request.input as HistoryInput).availableEvidenceRefs).toEqual([`history:${f.parent.id}:${f.parent.id}#goal`]);
     expect((await f.repository.get(run.id)).artifacts).toEqual([]);
     expect((await f.repository.get(run.id)).steps[0]!.finishRepair?.reason).toContain('artifact_1');
+  });
+
+  it.each([32768, 65536])('bounds escaped HTML history before freezing a %i-byte snapshot', async budget => {
+    const f = await fixture();
+    await f.repository.mutate(f.parent.id, parent => {
+      parent.artifacts = Array.from({ length: budget === 32768 ? 4 : 8 }, (_, index) => ({
+        ...parent.artifacts[0]!, id: `artifact_${index + 1}`, taskId: `task_${index + 1}`, content: '<p></p>'.repeat(1100),
+      }));
+    });
+    const run = await new ThreadService(f.repository, f.engine, budget).followUp(f.thread.id, {
+      request: { goal: 'Summarize the HTML history' }, parentRunId: f.parent.id,
+    }, threadScope);
+    expect(run.context.threadHistory!.actualBytes).toBeLessThanOrEqual(budget);
+    expect(run.context.threadHistory!.actualBytes).toBe(Buffer.byteLength(JSON.stringify(run.context.threadHistory)));
+    expect(JSON.stringify(threadHistoryInput(run)).length).toBeLessThanOrEqual(MAX_RENDERED_THREAD_HISTORY_CHARS);
+    expect(run.context.threadHistory!.truncated).toBeGreaterThan(0);
+    await f.restart();
+    expect(await f.engine.advance(run.id)).toBe('needs_approval');
+    await approve(f.engine, f.repository, run);
+    for (let tick = 0; tick < 3; tick++) await f.engine.advance(run.id);
+    expect((await f.repository.get(run.id)).status).toBe('succeeded');
+    expect(f.model.requests.map(phaseOf)).toEqual(['planner', 'executor', 'reviewer']);
+    for (const request of f.model.requests) {
+      expect(JSON.stringify(request).length).toBeLessThanOrEqual(120000);
+      expect(snapshotFrom(request)).toEqual(run.context.threadHistory);
+    }
+  });
+
+  it('rejects revoked Room access through follow-ups whose budget excludes the Goal-bound ancestor', async () => {
+    const store = new InMemoryStore(), memberships = new InMemoryRoomMembershipRepository(), domain = new AeeisService(store, [], memberships);
+    const room = await domain.createRoom({ title: 'Room' }, undefined, 'carol', threadScope.tenantId);
+    await domain.addRoomMember(room.id, 'alice', 'editor', 'carol', threadScope.tenantId);
+    const goal = await domain.createGoal({ title: 'Goal', roomId: room.id }, undefined, 'alice', threadScope.tenantId);
+    await domain.addMemory(goal.id, { kind: 'fact', content: 'Room restricted fact' }, undefined, 'alice', threadScope.tenantId);
+    const repository = new InMemoryRunRepository(), model = new HistoryModel(), engine = new AgentEngine(repository, { model, domain });
+    const root = await engine.create({ goal: 'Goal run', goalId: goal.id }, threadScope.owner, threadScope.tenantId);
+    await repository.mutate(root.id, run => {
+      run.status = 'succeeded';
+      run.artifacts = [{ id: 'restricted-root', taskId: 'report', title: 'Report', content: 'Room restricted fact',
+        evidenceRefs: run.context.sources.map(source => source.id), hash: digest('Room restricted fact'), createdAt: run.createdAt }];
+    });
+    const threads = new ThreadService(repository, engine), thread = await threads.create({ initialRunId: root.id }, threadScope);
+    const child = await threads.followUp(thread.id, { request: { goal: 'Follow up' } }, threadScope);
+    expect(child.goalId).toBeUndefined();
+    expect(JSON.stringify(child.context.threadHistory)).toContain('Room restricted fact');
+    const access = [{ goalId: goal.id, memoryManifestId: root.context.memoryManifestId }];
+    expect(child.context.threadHistory!.accessProvenance).toEqual(access);
+    await repository.mutate(child.id, run => {
+      run.status = 'succeeded';
+      run.artifacts = [{ id: 'restricted', taskId: 'report', title: 'Report', content: 'Room restricted fact. ' + 'padding '.repeat(1000),
+        evidenceRefs: [`history:${root.id}:restricted-root`], hash: digest('Room restricted fact'), createdAt: run.createdAt }];
+    });
+    const grandchild = await threads.followUp(thread.id, { request: { goal: 'Continue' }, contextBudgetBytes: 1800 }, threadScope);
+    expect(grandchild.context.threadHistory!.entries.map(entry => entry.runId)).toEqual([child.id]);
+    expect(grandchild.context.threadHistory!.omitted.ancestorContinuations).toBe(1);
+    expect(JSON.stringify(grandchild.context.threadHistory)).toContain('Room restricted fact');
+    expect(grandchild.context.threadHistory!.accessProvenance).toEqual(access);
+    await repository.mutate(grandchild.id, run => { run.status = 'succeeded'; });
+    await domain.revokeRoomMember(room.id, 'alice', 'carol', threadScope.tenantId);
+    const get = vi.spyOn(repository, 'get');
+    for (const parentRunId of [root.id, child.id, grandchild.id]) {
+      get.mockClear();
+      await expect(threads.followUp(thread.id, { request: { goal: 'Continue after revocation' }, parentRunId, contextBudgetBytes: 1800 }, threadScope)).rejects.toThrow('Unknown room');
+      if (parentRunId !== root.id) expect(get.mock.calls.some(([id]) => id === root.id)).toBe(false);
+    }
+    expect(await repository.listRunsByThread(thread.id, threadScope)).toHaveLength(3);
+    expect(model.requests).toEqual([]);
   });
 
   it('checks live Goal/Room access before freezing history and grants no Room audience through a thread', async () => {

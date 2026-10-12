@@ -5,6 +5,7 @@ import type { Ownership } from '../security/principal.js';
 import { isOwnedBy, principalAudience } from '../security/principal.js';
 import { ThreadConflict } from './threads.js';
 import { capDebugField, redactRunData } from './run-debug.js';
+import { MAX_RENDERED_THREAD_HISTORY_CHARS, renderThreadHistoryInput } from './thread-context.js';
 
 export const DEFAULT_THREAD_HISTORY_BYTES = 32 * 1024;
 export const MAX_THREAD_HISTORY_BYTES = 64 * 1024;
@@ -26,6 +27,10 @@ export interface ThreadHistoryEntry {
   classification: AgentRun['privacy'];
   excerpts: ThreadHistoryExcerpt[];
 }
+export interface ThreadHistoryAccess {
+  goalId: string;
+  memoryManifestId?: string;
+}
 export interface ThreadHistory {
   policyVersion: 'aeeis-thread-history/1';
   threadId: string;
@@ -41,6 +46,9 @@ export interface ThreadHistory {
   omitted: { excerpts: number; artifacts: number; ancestorContinuations: number };
   truncated: number;
   entries: ThreadHistoryEntry[];
+  /** Transitive access requirements survive excerpt/ancestor omission. Missing
+   * only on older snapshots, whose ancestry must be recovered before reuse. */
+  accessProvenance?: ThreadHistoryAccess[];
 }
 function hash(text: string): string { return createHash('sha256').update(text, 'utf8').digest('hex'); }
 export function threadHistoryHash(snapshot: ThreadHistory): string {
@@ -56,6 +64,9 @@ function measure(snapshot: ThreadHistory): number {
     snapshot.actualBytes = bytes;
   }
 }
+function fits(snapshot: ThreadHistory, budgetBytes: number, renderedBudget = MAX_RENDERED_THREAD_HISTORY_CHARS): boolean {
+  return measure(snapshot) <= budgetBytes && JSON.stringify(renderThreadHistoryInput(snapshot)).length <= renderedBudget;
+}
 function prefix(text: string, bytes: number): string {
   const buffer = Buffer.from(text, 'utf8');
   let end = Math.min(bytes, buffer.length);
@@ -69,6 +80,34 @@ export function assertHistoryPrivacy(run: AgentRun, privacy: AgentRun['privacy']
 }
 export function assertThreadHistoryUnchanged(before: ThreadHistory | undefined, after: ThreadHistory | undefined): void {
   if (JSON.stringify(before) !== JSON.stringify(after)) throw new ThreadConflict('Thread history snapshot is immutable');
+}
+
+function mergeAccess(target: ThreadHistoryAccess[], additions: ThreadHistoryAccess[]): void {
+  for (const access of additions) {
+    if (!target.some(item => item.goalId === access.goalId && item.memoryManifestId === access.memoryManifestId)) target.push({ ...access });
+  }
+}
+
+/** New snapshots carry their complete access requirements without more reads.
+ * For legacy snapshots, recover them along ancestry independently of excerpt
+ * budgets and the excerpt ancestor limit; incomplete provenance fails closed. */
+export async function threadHistoryAccessProvenance(repository: RunRepository, run: AgentRun, scope: Ownership): Promise<ThreadHistoryAccess[]> {
+  const access: ThreadHistoryAccess[] = [], seen = new Set<string>();
+  let current = run;
+  for (;;) {
+    if (seen.has(current.id)) throw new ThreadConflict('Invalid thread ancestry');
+    seen.add(current.id);
+    if (!isOwnedBy(current, scope)) throw new ThreadConflict('Thread history must belong to the same owner and tenant');
+    if (current.goalId) mergeAccess(access, [{ goalId: current.goalId, ...(current.context.memoryManifestId ? { memoryManifestId: current.context.memoryManifestId } : {}) }]);
+    const history = current.context.threadHistory;
+    if (history?.accessProvenance !== undefined) { mergeAccess(access, history.accessProvenance); break; }
+    if (!history || !current.parentRunId) break;
+    const ancestor = await repository.get(current.parentRunId, scope);
+    if (ancestor.threadId !== current.threadId || ancestor.threadSequence === undefined || current.threadSequence === undefined || ancestor.threadSequence >= current.threadSequence)
+      throw new ThreadConflict('Invalid thread ancestry order');
+    current = ancestor;
+  }
+  return access;
 }
 
 /** Summaries may derive from any source in the run; redaction cannot downgrade
@@ -112,14 +151,14 @@ function isolatedEvidence(run: AgentRun): Set<string> {
 /** Fetch only the selected ancestry. Parent-first selection favors recent evidence;
  * persisted entries are chronological. This schema deliberately selects prose,
  * never complete model, source, tool or delegation records. */
-export async function buildThreadHistory(repository: RunRepository, threadId: string, parent: AgentRun | undefined, scope: Ownership, privacy: AgentRun['privacy'], budgetBytes: number, authorize?: (run: AgentRun) => Promise<void>): Promise<ThreadHistory> {
+export async function buildThreadHistory(repository: RunRepository, threadId: string, parent: AgentRun | undefined, scope: Ownership, privacy: AgentRun['privacy'], budgetBytes: number, authorize?: (run: AgentRun, access: ThreadHistoryAccess[]) => Promise<void>): Promise<ThreadHistory> {
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes <= 0 || budgetBytes > MAX_THREAD_HISTORY_BYTES) throw new RangeError('Invalid thread context byte budget');
   const snapshot: ThreadHistory = {
     policyVersion: 'aeeis-thread-history/1', threadId, ...(parent ? { parentRunId: parent.id } : {}),
     budgetBytes, actualBytes: 0, hash: '0'.repeat(64), exclusions: [...exclusions],
-    visitedAncestors: 0, omitted: { excerpts: 0, artifacts: 0, ancestorContinuations: 0 }, truncated: 0, entries: [],
+    visitedAncestors: 0, omitted: { excerpts: 0, artifacts: 0, ancestorContinuations: 0 }, truncated: 0, entries: [], accessProvenance: [],
   };
-  if (measure(snapshot) > budgetBytes) throw new RangeError('Thread context budget is too small for the history envelope');
+  if (!fits(snapshot, budgetBytes)) throw new RangeError('Thread context budget is too small for the history envelope');
   const seen = new Set<string>();
   let current = parent;
   let exhausted = false;
@@ -129,13 +168,16 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
     seen.add(current.id);
     if (!isOwnedBy(current, scope)) throw new ThreadConflict('Thread history must belong to the same owner and tenant');
     const classification = historyClassification(current, scope, privacy);
-    await authorize?.(current);
+    const access = await threadHistoryAccessProvenance(repository, current, scope);
+    await authorize?.(current, access);
+    mergeAccess(snapshot.accessProvenance!, access);
     snapshot.visitedAncestors++;
     const entry: ThreadHistoryEntry = { runId: current.id, revision: current.revision, threadSequence: current.threadSequence, classification, excerpts: [] };
     // Reserve small counter growth before filling the envelope to its boundary.
     const selectionBudget = budgetBytes - 64;
+    const fitsSelection = () => fits(snapshot, selectionBudget, MAX_RENDERED_THREAD_HISTORY_CHARS - 64);
     snapshot.entries.unshift(entry);
-    if (measure(snapshot) > selectionBudget) {
+    if (!fitsSelection()) {
       snapshot.entries.shift(); exhausted = true;
       snapshot.omitted.excerpts += 1 + (current.plans.length ? 1 : 0) + (current.review ? 1 : 0) + current.answers.length;
       snapshot.omitted.artifacts += current.artifacts.length;
@@ -176,17 +218,17 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
       const capped = capDebugField(text);
       const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: prefix(capped, MAX_EXCERPT_BYTES), truncated: capped !== text };
       entry.excerpts.push(excerpt);
-      if (measure(snapshot) > selectionBudget) {
+      if (!fitsSelection()) {
         excerpt.truncated = true;
         let low = 0, high = Buffer.byteLength(excerpt.text, 'utf8');
         const original = excerpt.text;
         while (low < high) {
           const mid = Math.ceil((low + high) / 2);
           excerpt.text = prefix(original, mid);
-          if (measure(snapshot) <= selectionBudget) low = mid; else high = mid - 1;
+          if (fitsSelection()) low = mid; else high = mid - 1;
         }
         excerpt.text = prefix(original, low);
-        if (!excerpt.text || measure(snapshot) > selectionBudget) entry.excerpts.pop();
+        if (!excerpt.text || !fitsSelection()) entry.excerpts.pop();
         if (!entry.excerpts.includes(excerpt)) snapshot.omitted.excerpts++;
         else snapshot.truncated++;
         snapshot.omitted.excerpts += total - index - 1;
@@ -201,14 +243,14 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
     // Do not fetch another aggregate if even its smallest provenance envelope
     // cannot fit. Its ID is already present on the current authorized ancestor.
     snapshot.entries.unshift({ runId: current.parentRunId, revision: 0, threadSequence: 1, classification: 'public', excerpts: [] });
-    const canFitAncestor = measure(snapshot) <= selectionBudget;
+    const canFitAncestor = fitsSelection();
     snapshot.entries.shift();
     if (!canFitAncestor) { snapshot.omitted.ancestorContinuations++; break; }
     const previousSequence = current.threadSequence;
     current = await repository.get(current.parentRunId, scope);
     if (current.threadSequence === undefined || current.threadSequence >= previousSequence) throw new ThreadConflict('Invalid thread ancestry order');
   }
-  if (measure(snapshot) > budgetBytes) throw new RangeError('Thread context budget is too small for the history envelope');
+  if (!fits(snapshot, budgetBytes)) throw new RangeError('Thread context budget is too small for the history envelope');
   snapshot.hash = threadHistoryHash(snapshot);
   return snapshot;
 }

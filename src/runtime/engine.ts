@@ -24,6 +24,7 @@ import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger
 import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, materialExcerpt, presentedMaterialExcerpts } from './materials.js';
 import type { ResourceRegistry, ResourceResolution } from './resources.js';
 import { threadHistoryGuidance, threadHistoryInput, threadHistorySources } from './thread-context.js';
+import { threadHistoryAccessProvenance, type ThreadHistoryAccess } from './thread-history.js';
 
 /** JSONB and other stores may reorder object keys. Hash the canonical form so
  * pins, plans, receipts and idempotency checks survive a persistence roundtrip. */
@@ -419,12 +420,15 @@ export class AgentEngine {
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   /** A thread conveys no Goal or Room rights. Check the domain's live ACLs
    * before copying Goal-bound history into an independent owner-only run. */
-  async authorizeThreadHistory(run: AgentRun, scope: Ownership): Promise<void> {
-    if (!run.goalId) return;
+  async authorizeThreadHistory(run: AgentRun, scope: Ownership, access?: ThreadHistoryAccess[]): Promise<void> {
+    const provenance = access ?? await threadHistoryAccessProvenance(this.repository, run, scope);
+    if (!provenance.length) return;
     if (!this.domain) throw new Conflict('Goal history requires the configured domain access checks');
-    const goal = await this.domain.getGoal(run.goalId, scope.owner, scope.tenantId);
-    if (goal.roomId) await this.domain.getRoomForPrincipal(goal.roomId, scope.owner, scope.tenantId);
-    if (run.context.memoryManifestId) await this.domain.getContextManifest(run.goalId, run.context.memoryManifestId, scope.owner, scope.tenantId);
+    for (const { goalId, memoryManifestId } of provenance) {
+      const goal = await this.domain.getGoal(goalId, scope.owner, scope.tenantId);
+      if (goal.roomId) await this.domain.getRoomForPrincipal(goal.roomId, scope.owner, scope.tenantId);
+      if (memoryManifestId) await this.domain.getContextManifest(goalId, memoryManifestId, scope.owner, scope.tenantId);
+    }
   }
   async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>): Promise<AgentRun> {
     const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });

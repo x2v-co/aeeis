@@ -56,7 +56,7 @@ export class ThreadService {
     assertFollowupParent(parent);
     if (!this.engine) throw new Error('Model runtime is not configured');
     const engine = this.engine;
-    const history = await buildThreadHistory(this.repository, id, parent, scope, body.request.privacy, budget, run => engine.authorizeThreadHistory(run, scope));
+    const history = await buildThreadHistory(this.repository, id, parent, scope, body.request.privacy, budget, (run, access) => engine.authorizeThreadHistory(run, scope, access));
     return this.engine.create(body.request, scope.owner, scope.tenantId, async run => {
       run.context.threadHistory = history;
       return this.repository.createRunInThread(run, id, parent?.id, scope, parent?.revision);
