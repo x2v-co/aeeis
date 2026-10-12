@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { FileRunRepository, NotFound } from '../src/runtime/repository.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
+import { threadHistoryHash } from '../src/runtime/thread-history.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -86,6 +87,54 @@ describe('authenticated thread API', () => {
     await repository.mutate(root.id, run => { run.goal = 'edited afterward'; });
     expect(JSON.stringify((await repository.get(child.id)).context.threadHistory)).toBe(frozen);
     expect((await repository.get(root.id)).status).toBe('succeeded');
+  });
+  it('redacts copied parent credentials before persisting history or exposing child shares and debug bundles', async () => {
+    const { app, repository, headers, directory } = await fixture();
+    // These opaque values are recognizable only through the parent's fields.
+    const credential = 'opaque-followup-credential', environment = 'opaque-followup-environment';
+    const root = threadRun();
+    root.modelDecision = { credentials: { custom: credential }, environment: { CUSTOM: environment } };
+    const prose = `Report repeats ${credential} and ${environment}. Safe evidence remains.`;
+    root.goal = prose;
+    root.plans = [{ version: 1, summary: prose, nodes: [], hash: 'a'.repeat(64), createdAt: root.createdAt }];
+    root.review = { verdict: 'accepted', summary: prose, issues: [] };
+    root.artifacts[0]!.content = prose;
+    root.answers = [{ taskId: 'task_1', question: `Question about ${credential}?`, answer: `Answer includes ${environment}.` }];
+    await repository.create(root);
+    const thread = (await app.inject({ method: 'POST', url: '/api/threads', headers, payload: { initialRunId: root.id } })).json();
+    const parentShare = await app.inject({ method: 'POST', url: `/api/runs/${root.id}/share`, headers });
+    expect(parentShare.statusCode).toBe(200);
+    const parentView = await app.inject({ url: `/api/share/${parentShare.json().token}` });
+    expect(parentView.statusCode).toBe(200);
+    for (const secret of [credential, environment]) expect(parentView.body).not.toContain(secret);
+    expect(parentView.json().artifacts[0].content).toBe('Report repeats [REDACTED] and [REDACTED]. Safe evidence remains.');
+
+    const response = await app.inject({ method: 'POST', url: `/api/threads/${thread.id}/runs`, headers, payload: { request: { goal: 'Follow up on the report' }, contextBudgetBytes: 4096 } });
+    expect(response.statusCode).toBe(202);
+    const child = await repository.get(response.json().id);
+    const childShare = await app.inject({ method: 'POST', url: `/api/runs/${child.id}/share`, headers });
+    expect(childShare.statusCode).toBe(200);
+    for (const url of [`/api/share/${childShare.json().token}`, `/api/share/${childShare.json().token}/debug-bundle`, `/api/runs/${child.id}/debug-bundle`]) {
+      const view = await app.inject({ url, ...(url.startsWith('/api/runs') ? { headers } : {}) });
+      expect(view.statusCode).toBe(200);
+      for (const secret of [credential, environment]) expect(view.body).not.toContain(secret);
+      const history = (view.json().run ?? view.json()).context.threadHistory;
+      expect(history.entries[0].excerpts.map((excerpt: { kind: string }) => excerpt.kind)).toEqual(['goal', 'plan', 'review', 'artifact', 'answer']);
+      expect(history.entries[0].excerpts.find((excerpt: { kind: string }) => excerpt.kind === 'artifact').text).toBe('Report repeats [REDACTED] and [REDACTED]. Safe evidence remains.');
+    }
+    const history = child.context.threadHistory!;
+    expect(history.actualBytes).toBe(Buffer.byteLength(JSON.stringify(history), 'utf8'));
+    expect(history.actualBytes).toBeLessThanOrEqual(4096);
+    expect(history.hash).toBe(threadHistoryHash(history));
+    const persisted = await readFile(join(directory, `${child.id}.json`), 'utf8');
+    for (const secret of [credential, environment]) {
+      expect(response.body).not.toContain(secret);
+      expect(persisted).not.toContain(secret);
+    }
+    expect(JSON.parse(persisted).context.threadHistory).toEqual(history);
+    expect(child.modelDecision ?? {}).not.toHaveProperty('credentials');
+    expect(child.modelDecision ?? {}).not.toHaveProperty('environment');
+    expect((await repository.get(root.id)).artifacts[0]!.content).toBe(prose);
   });
   it('creates an empty thread root and branches from an explicit terminal parent, with concurrent append sequences', async () => {
     const { app, repository, headers } = await fixture();

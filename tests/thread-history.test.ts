@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { buildThreadHistory, DEFAULT_THREAD_HISTORY_BYTES, threadHistoryHash } from '../src/runtime/thread-history.js';
@@ -54,6 +55,31 @@ describe('frozen thread history', () => {
     expect(snapshot.omitted.excerpts).toBeGreaterThan(0);
     expect(snapshot.omitted.ancestorContinuations).toBe(1);
     expect(get).not.toHaveBeenCalled();
+    expect(snapshot.hash).toBe(threadHistoryHash(snapshot));
+  });
+  it('redacts against each ancestor before excerpt truncation, hashing and byte budgeting', async () => {
+    const { repository, thread, runs } = await fixture(2);
+    const secrets = ['opaque-ancestor-value', 'opaque-parent-value'];
+    for (const [index, run] of runs.entries()) {
+      await repository.mutate(run.id, current => {
+        const secret = secrets[index]!.repeat(500);
+        current.modelDecision = { environment: { CUSTOM: secret } };
+        current.goal = `Goal repeats ${secret}. Safe ending.`;
+        current.artifacts[0]!.content = `Report repeats ${secret}. Safe ending.`;
+      });
+    }
+    const snapshot = await buildThreadHistory(repository, thread.id, await repository.get(runs[1]!.id), threadScope, 'internal', 1800);
+    expect(snapshot.entries.map(entry => entry.runId)).toEqual(runs.map(run => run.id));
+    for (const entry of snapshot.entries) {
+      expect(entry.excerpts.map(excerpt => excerpt.text)).toEqual(['Goal repeats [REDACTED]. Safe ending.', 'Report repeats [REDACTED]. Safe ending.']);
+      expect(entry.excerpts[0]!.hash).toBe(createHash('sha256').update(entry.excerpts[0]!.text).digest('hex'));
+      expect(entry.excerpts[1]!.hash).toBe('b'.repeat(64));
+    }
+    for (const secret of secrets) expect(JSON.stringify(snapshot)).not.toContain(secret);
+    expect(snapshot.truncated).toBe(0);
+    expect(snapshot.omitted).toEqual({ excerpts: 0, artifacts: 0, ancestorContinuations: 0 });
+    expect(snapshot.actualBytes).toBe(Buffer.byteLength(JSON.stringify(snapshot), 'utf8'));
+    expect(snapshot.actualBytes).toBeLessThanOrEqual(1800);
     expect(snapshot.hash).toBe(threadHistoryHash(snapshot));
   });
   it('bounds ancestors to 20, artifacts to 8 per run and individual excerpts to 8 KiB', async () => {

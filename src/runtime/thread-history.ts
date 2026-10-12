@@ -4,6 +4,7 @@ import type { RunRepository } from './repository.js';
 import type { Ownership } from '../security/principal.js';
 import { isOwnedBy } from '../security/principal.js';
 import { ThreadConflict } from './threads.js';
+import { redactRunData } from './run-debug.js';
 
 export const DEFAULT_THREAD_HISTORY_BYTES = 32 * 1024;
 export const MAX_THREAD_HISTORY_BYTES = 64 * 1024;
@@ -123,7 +124,10 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
     for (let index = 0; index < total; index++) {
       const answer = current.answers[index - candidates.length];
       const candidate = candidates[index] ?? { kind: 'answer' as const, ref: `${current.id}#answer:${index - candidates.length}`, text: `${answer!.question}\n${answer!.answer}` };
-      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(candidate.text), text: prefix(candidate.text, MAX_EXCERPT_BYTES), truncated: Buffer.byteLength(candidate.text, 'utf8') > MAX_EXCERPT_BYTES };
+      // Keep the ancestor's credential sources available while scrubbing copied
+      // prose, then apply the history's own truncation and envelope budget.
+      const text = redactRunData({ text: candidate.text, sourceValue: current }, { capFields: false }).text;
+      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: prefix(text, MAX_EXCERPT_BYTES), truncated: Buffer.byteLength(text, 'utf8') > MAX_EXCERPT_BYTES };
       entry.excerpts.push(excerpt);
       if (measure(snapshot) > selectionBudget) {
         excerpt.truncated = true;
