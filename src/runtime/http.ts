@@ -26,6 +26,7 @@ import { explainRun } from './explanation.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
 import { ThreadService } from '../application/thread-service.js';
 import { ThreadConflict } from './threads.js';
+import { isBootRecoverableRun } from './dispatcher.js';
 import type { RsiEvaluationHarness } from '../evaluation.js';
 import { ProjectionNotFound, type ProjectionOutbox, type ProjectionSink } from '../collaboration-projection.js';
 import type { SkillGovernance, ToolGateway } from '../integrations.js';
@@ -1523,8 +1524,10 @@ export function buildApp(options: Options) {
     const scope = { owner: principal.id, tenantId: principal.tenantId };
     await options.repository.getThread(request.params.id, scope);
     if (!options.engine || !options.dispatcher) return reply.code(503).send({ error: 'Configure a model and dispatcher before starting a thread run' });
-    const run = await threads.followUp(request.params.id, request.body, scope);
-    await notify(run.id);
+    const run = await threads.followUp(request.params.id, request.body, scope, request.headers['idempotency-key']);
+    // A lost-response retry must not restart a completed parent or child.
+    // Approval/input paths wake waiting children after committing their state.
+    if (isBootRecoverableRun(run.status)) await notify(run.id);
     return reply.code(202).send({ id: run.id, threadId: run.threadId, ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}), threadSequence: run.threadSequence, context: run.context });
   });
   app.post('/api/runs', async (request, reply) => {

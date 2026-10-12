@@ -139,9 +139,21 @@ hash includes requested parent/default-parent intent and budget. Atomically
 reserve a deterministic run ID, resolve/freeze the parent/history once, then
 create and attach the run with the reservation completed in the same commit.
 Retries return that run and snapshot even after the thread advances; different
-input for the same key returns 409. No second sequence, source fetch or provider
-call is permitted. Serialize same-key initialization and provide durable recovery
-for reserved requests; no external connector call inside a database transaction.
+input for the same key returns 409. No second sequence or preparation is permitted
+after a Run commits. Completed preparation checkpoints are reused, including
+Brain reads and semantic searches with their persisted audit. A preparation
+operation that throws is checkpointed as failed and may be retried with the same
+key before any Run commits; other completed results and the frozen history remain
+unchanged. An interruption between a provider result and checkpoint publication
+leaves an ambiguous started stage, which is not automatically resent. Global
+connector budget reservations retain their existing reconciliation rules.
+New reservations store an immutable parent history content hash in the context
+snapshot. Check it at initialization and under the commit lock; terminal event
+bookkeeping and Skill outcome receipts do not invalidate it. Content, access,
+classification, isolation and credential redaction inputs remain bound. Legacy
+reservations without this hash retain their revision check.
+Serialize same-key initialization and provide durable recovery for reserved
+requests; no external connector call inside a database transaction.
 File mode needs a recoverable reservation journal under its writer lock.
 
 Commit before dispatch. Use the existing `Dispatcher.notify(newRunId)` and

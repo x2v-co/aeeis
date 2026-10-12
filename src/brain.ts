@@ -204,6 +204,14 @@ export class GovernedBrain {
   }
   state(): BrainState { return structuredClone({ schemaVersion: 1 as const, claims: [...this.claims.values()].flat(), grants: [...this.grants.values()], audit: this.audit }); }
   auditLog(): BrainAudit[] { return structuredClone(this.audit); }
+  /** Restore checkpointed audit entries without replacing live claims or grants. */
+  restoreAudit(entries: BrainAudit[]): void {
+    const parsed = entries.map(entry => brainAuditSchema.parse(entry));
+    const known = new Set(this.audit.map(entry => entry.id));
+    for (const entry of parsed) if (!known.has(entry.id)) {
+      this.audit.push(entry); known.add(entry.id);
+    }
+  }
   static fromState(input: unknown): GovernedBrain {
     const state = brainStateSchema.parse(input);
     const brain = new GovernedBrain();

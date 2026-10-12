@@ -9,6 +9,7 @@ import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
 import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, threadsMigration, ThreadConflict, validateThreadSequence, type Thread, type ThreadRepository } from './threads.js';
 import { assertThreadHistoryUnchanged } from './thread-history.js';
+import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, FollowupLocks, threadFollowupsMigration, type ThreadFollowup } from './thread-followups.js';
 
 export interface RunRepository extends ThreadRepository {
   readonly shares?: RunShareStore;
@@ -104,6 +105,7 @@ export class FileRunRepository implements RunRepository {
   private summaries: Map<string, FileRunSummary> | undefined;
   private threadCommit: Promise<void> | undefined;
   private threadFailure: unknown;
+  private followupLocks = new FollowupLocks();
   private readonly changeSubscribers = new Set<(change: RunChange) => void | Promise<void>>();
   constructor(private directory: string) { this.shares = new FileRunShareStore(directory); this.lockPath = join(directory, '.writer.lock'); this.indexPath = join(directory, '.runs.index.json'); }
   async init(): Promise<void> {
@@ -122,7 +124,7 @@ export class FileRunRepository implements RunRepository {
       }
       throw new Error('Data directory already has a live writer');
     }
-    try { await this.recoverThreadCreations(); }
+    try { await this.recoverThreadCreations(); await this.recoverFollowupCommits(); }
     catch (error) { await unlink(this.lockPath); throw error; }
   }
   async health(): Promise<void> {
@@ -214,8 +216,7 @@ export class FileRunRepository implements RunRepository {
     await rename(temp, path);
     await this.syncDirectory();
   }
-  /** This journal is only for the two-file root attachment transaction. Follow-up
-   * creation commits a single, already-linked canonical Run replacement. */
+  /** Journal for the two-file root attachment transaction. */
   private async recoverThreadCreations(): Promise<void> {
     const journals = (await readdir(this.directory)).filter(name => /^\.thread-create-thread_[a-f0-9-]{36}\.json$/.test(name));
     for (const name of journals) {
@@ -306,20 +307,85 @@ export class FileRunRepository implements RunRepository {
       return latest ? this.get(latest.id, thread) : undefined;
     });
   }
-  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number): Promise<AgentRun> {
+  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     return this.serial(async () => {
       const thread = await this.getThread(threadId, scope), run = structuredClone(input);
+      if (followup) {
+        const reservation = await this.getThreadFollowup(threadId, followup.keyHash, thread);
+        if (!reservation) throw new ThreadConflict('Missing follow-up reservation');
+        assertSameFollowup(reservation, followup.requestHash);
+        assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
+      }
       assertUnthreaded(run);
       try { await this.get(run.id); throw new ThreadConflict('Run already exists'); }
       catch (error) { if (!(error instanceof NotFound)) throw error; }
       const parent = parentRunId === undefined ? undefined : await this.get(parentRunId, thread);
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       await this.ensureSummaries();
       const last = [...this.summaries!.values()].filter(item => item.threadId === threadId).reduce((max, item) => Math.max(max, item.threadSequence!), 0);
       prepareAttachment(run, thread, parent, last);
-      await this.save(run);
+      if (followup) {
+        // The linked Run is the journal's commit intent. Readers cannot observe
+        // it until the reservation and canonical membership are both published.
+        let release!: () => void;
+        this.threadCommit = new Promise<void>(resolve => { release = resolve; });
+        try {
+          const record: ThreadFollowup = { ...followup, contextSnapshot: { ...followup.contextSnapshot, run } };
+          await this.replaceJson(this.followupPath(threadId, followup.keyHash), record);
+          await this.replaceJson(this.path(run.id), run);
+          await this.replaceJson(this.followupPath(threadId, followup.keyHash), { ...record, state: 'completed' });
+          this.summaries?.set(run.id, this.summary(run));
+          try { await this.save(run); } catch { /* disposable projections */ }
+        } catch (error) {
+          // Replay the durable commit intent at init before serving or dispatching.
+          this.threadFailure = error;
+          throw error;
+        } finally { release(); this.threadCommit = undefined; }
+      } else await this.save(run);
       return run;
     });
+  }
+  private followupPath(threadId: string, keyHash: string): string {
+    validateThreadId(threadId);
+    if (!/^[a-f0-9]{64}$/.test(keyHash)) throw new RangeError('Invalid follow-up key hash');
+    return join(this.directory, `.thread-followup-${threadId}-${keyHash}.json`);
+  }
+  async withThreadFollowupLock<T>(threadId: string, keyHash: string, scope: Ownership, operation: () => Promise<T>): Promise<T> {
+    await this.getThread(threadId, scope);
+    return this.followupLocks.withLock(`${threadId}/${keyHash}`, operation);
+  }
+  async getThreadFollowup(threadId: string, keyHash: string, scope: Ownership): Promise<ThreadFollowup | undefined> {
+    await this.getThread(threadId, scope);
+    try { return JSON.parse(await readFile(this.followupPath(threadId, keyHash), 'utf8')) as ThreadFollowup; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
+  saveThreadFollowup(record: ThreadFollowup, scope: Ownership): Promise<void> {
+    return this.serial(async () => {
+      const before = await this.getThreadFollowup(record.threadId, record.keyHash, scope);
+      assertFollowupCheckpoint(before, record);
+      await this.replaceJson(this.followupPath(record.threadId, record.keyHash), record);
+    });
+  }
+  async *pendingThreadFollowups(): AsyncIterable<ThreadFollowup> {
+    const names = (await readdir(this.directory)).filter(name => /^\.thread-followup-thread_[a-f0-9-]{36}-[a-f0-9]{64}\.json$/.test(name)).sort();
+    for (const name of names) {
+      const record = JSON.parse(await readFile(join(this.directory, name), 'utf8')) as ThreadFollowup;
+      if (record.state === 'reserved') yield record;
+    }
+  }
+  private async recoverFollowupCommits(): Promise<void> {
+    for await (const record of this.pendingThreadFollowups()) {
+      const prepared = record.contextSnapshot.run;
+      if (!prepared?.threadId) continue;
+      const thread = await this.getThread(record.threadId);
+      if (prepared.id !== record.runId || prepared.threadId !== thread.id || prepared.parentRunId !== record.parentRunId || !isOwnedBy(prepared, thread)) throw new Error('Invalid follow-up commit journal');
+      const existing = await this.get(record.runId, thread).catch(error => { if (error instanceof NotFound) return undefined; throw error; });
+      if (existing && (existing.threadId !== thread.id || existing.threadSequence !== prepared.threadSequence)) throw new Error('Conflicting follow-up commit journal');
+      // Never overwrite progress committed after the journal publication.
+      if (!existing) await this.replaceJson(this.path(record.runId), prepared);
+      await this.replaceJson(this.followupPath(record.threadId, record.keyHash), { ...record, state: 'completed' });
+    }
   }
   attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> {
     return this.serial(async () => {
@@ -532,10 +598,16 @@ export class FileRunRepository implements RunRepository {
 export class PostgresRunRepository implements RunRepository {
   readonly shares: RunShareStore;
   private pool: pg.Pool;
+  private followupLockPool: pg.Pool;
   private readonly changeSubscribers = new Map<(change: RunChange) => void | Promise<void>, PostgresChangeSubscription>();
   private changeChannel = 'aeeis_run_changes';
   private closed = false;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); this.shares = new PostgresRunShareStore(this.pool); }
+  constructor(connectionString: string) {
+    this.pool = new pg.Pool({ connectionString }); this.shares = new PostgresRunShareStore(this.pool);
+    // Session locks use a separate bounded pool. Waiting same-key callers must
+    // not exhaust the pool used by the lock holder's checkpoint/read queries.
+    this.followupLockPool = new pg.Pool({ connectionString, max: 4 });
+  }
   async init(): Promise<void> {
     const schema = await this.pool.query<{ schema: string }>('SELECT current_schema() AS schema');
     const schemaName = schema.rows[0]?.schema ?? 'public';
@@ -547,6 +619,7 @@ export class PostgresRunRepository implements RunRepository {
       )`);
       await client.query(runSharesMigration);
       await client.query(threadsMigration);
+      await client.query(threadFollowupsMigration);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')), updated_at DESC, id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_shared_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (state->>'goalId'), updated_at DESC, id) WHERE COALESCE(state->>'privacy', 'internal') IN ('public', 'internal')`);
@@ -713,7 +786,7 @@ export class PostgresRunRepository implements RunRepository {
     const result = await this.pool.query<{ state: AgentRun }>("SELECT state FROM aeeis_runs WHERE thread_id=$1 AND COALESCE(state->>'owner','owner')=$2 AND COALESCE(state->>'tenantId','local')=$3 ORDER BY thread_sequence DESC LIMIT 1", [id, thread.owner, thread.tenantId]);
     return result.rows[0]?.state;
   }
-  async createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number): Promise<AgentRun> {
+  async createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     validateId(input.id); validateThreadId(threadId);
     if (parentRunId !== undefined) validateId(parentRunId);
     const run = structuredClone(input);
@@ -725,23 +798,71 @@ export class PostgresRunRepository implements RunRepository {
       const row = threads.rows[0];
       if (!row || (scope && !isOwnedBy({ owner: row.owner, tenantId: row.tenant_id }, scope))) throw new NotFound('Unknown thread');
       const thread = threadFromRow(row);
+      if (followup) {
+        const result = await client.query('SELECT * FROM aeeis_thread_followups WHERE thread_id=$1 AND key_hash=$2 FOR UPDATE', [threadId, followup.keyHash]);
+        if (!result.rows[0]) throw new ThreadConflict('Missing follow-up reservation');
+        const reservation = followupFromRow(result.rows[0]);
+        assertSameFollowup(reservation, followup.requestHash);
+        assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
+      }
       let parent: AgentRun | undefined;
       if (parentRunId !== undefined) {
         const parents = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1 FOR SHARE', [parentRunId]);
         parent = parents.rows[0]?.state;
         if (!parent || !isOwnedBy(parent, thread)) throw new NotFound('Unknown run');
       }
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       const last = await client.query<{ seq: number }>('SELECT COALESCE(MAX(thread_sequence),0) AS seq FROM aeeis_runs WHERE thread_id=$1', [threadId]);
       prepareAttachment(run, thread, parent, last.rows[0]!.seq);
       const inserted = await client.query('INSERT INTO aeeis_runs(id,revision,state,updated_at,thread_id,parent_run_id,thread_sequence) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING', [run.id, run.revision, run, run.updatedAt, threadId, parentRunId ?? null, run.threadSequence]);
       if (!inserted.rowCount) throw new ThreadConflict('Run already exists');
       await this.insertEvents(client, run, 0);
+      if (followup) await client.query("UPDATE aeeis_thread_followups SET state='completed' WHERE thread_id=$1 AND key_hash=$2", [threadId, followup.keyHash]);
       await client.query('COMMIT');
       await this.notifyChange(client, run);
       return run;
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
+  }
+  async withThreadFollowupLock<T>(threadId: string, keyHash: string, scope: Ownership, operation: () => Promise<T>): Promise<T> {
+    await this.getThread(threadId, scope);
+    const client = await this.followupLockPool.connect();
+    const key = `thread-followup/${threadId}/${keyHash}`;
+    let locked = false;
+    try {
+      await client.query('SELECT pg_advisory_lock(hashtextextended($1,0))', [key]);
+      locked = true;
+      return await operation();
+    } finally {
+      // Never return a connection with a session lock to the pool.
+      try { if (locked) await client.query('SELECT pg_advisory_unlock(hashtextextended($1,0))', [key]); }
+      finally { client.release(true); }
+    }
+  }
+  async getThreadFollowup(threadId: string, keyHash: string, scope: Ownership): Promise<ThreadFollowup | undefined> {
+    await this.getThread(threadId, scope);
+    const result = await this.pool.query('SELECT * FROM aeeis_thread_followups WHERE thread_id=$1 AND key_hash=$2', [threadId, keyHash]);
+    return result.rows[0] && followupFromRow(result.rows[0]);
+  }
+  async saveThreadFollowup(record: ThreadFollowup, scope: Ownership): Promise<void> {
+    assertFollowupCheckpoint(await this.getThreadFollowup(record.threadId, record.keyHash, scope), record);
+    const result = await this.pool.query(`INSERT INTO aeeis_thread_followups(thread_id,key_hash,request_hash,run_id,state,request,parent_run_id,parent_revision,context_snapshot,created_at)
+      VALUES($1,$2,$3,$4,'reserved',$5,$6,$7,$8,$9)
+      ON CONFLICT(thread_id,key_hash) DO UPDATE SET context_snapshot=EXCLUDED.context_snapshot
+      WHERE aeeis_thread_followups.request_hash=EXCLUDED.request_hash AND aeeis_thread_followups.state='reserved'`,
+    [record.threadId, record.keyHash, record.requestHash, record.runId, record.request, record.parentRunId ?? null, record.parentRevision ?? null, record.contextSnapshot, record.createdAt]);
+    if (!result.rowCount) throw new ThreadConflict('Idempotency-Key was already used with different input or completed');
+  }
+  async *pendingThreadFollowups(): AsyncIterable<ThreadFollowup> {
+    let after: [string, string] | undefined;
+    while (true) {
+      const result = await this.pool.query(`SELECT * FROM aeeis_thread_followups WHERE state='reserved'${after ? ' AND (thread_id,key_hash)>($1,$2)' : ''} ORDER BY thread_id,key_hash LIMIT 100`, after);
+      for (const row of result.rows) yield followupFromRow(row);
+      if (result.rows.length < 100) return;
+      const last = result.rows.at(-1)!;
+      after = [last.thread_id, last.key_hash];
+    }
   }
   async attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> {
     validateId(runId); validateThreadId(threadId);
@@ -922,7 +1043,17 @@ export class PostgresRunRepository implements RunRepository {
     } catch(e) { await client.query('ROLLBACK'); throw e; }
     finally { client.release(); }
   }
-  async close(): Promise<void> { if (this.closed) return; this.closed = true; const entries = [...this.changeSubscribers.entries()]; await Promise.all(entries.map(([handler, subscription]) => this.stopChangeSubscription(handler, subscription))); await this.pool.end(); }
+  async close(): Promise<void> { if (this.closed) return; this.closed = true; const entries = [...this.changeSubscribers.entries()]; await Promise.all(entries.map(([handler, subscription]) => this.stopChangeSubscription(handler, subscription))); await Promise.all([this.pool.end(), this.followupLockPool.end()]); }
+}
+
+function followupFromRow(row: Record<string, any>): ThreadFollowup {
+  return {
+    threadId: row.thread_id, keyHash: row.key_hash, requestHash: row.request_hash, runId: row.run_id,
+    state: row.state, request: row.request, contextSnapshot: row.context_snapshot,
+    ...(row.parent_run_id === null ? {} : { parentRunId: row.parent_run_id }),
+    ...(row.parent_revision === null ? {} : { parentRevision: row.parent_revision }),
+    createdAt: new Date(row.created_at).toISOString(),
+  };
 }
 
 type ThreadRow = { id: string; owner: string; tenant_id: string; title: string | null; created_at: Date };

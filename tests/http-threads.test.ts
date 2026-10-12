@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { AgentEngine } from '../src/runtime/engine.js';
+import { isBootRecoverableRun } from '../src/runtime/dispatcher.js';
+import { ThreadService } from '../src/application/thread-service.js';
 import { FileRunRepository, NotFound } from '../src/runtime/repository.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { threadHistoryHash } from '../src/runtime/thread-history.js';
@@ -24,7 +27,9 @@ async function fixture(contextBudgetBytes?: number) {
       expect(run.context.threadHistory?.threadId).toBe(run.threadId);
     }
   });
-  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined },
+  const cancel = vi.fn(async (_id: string) => ({ outcome: 'cancelled' as const }));
+  const describe = vi.fn(async (_id: string) => ({ status: 'TERMINATED' as const }));
+  const app = buildApp({ repository, engine, dispatcher: { notify, cancel, describe, close: async () => undefined },
     ...(contextBudgetBytes === undefined ? {} : { threadContextBudgetBytes: contextBudgetBytes }),
     principalTokens: {
       alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
@@ -34,10 +39,112 @@ async function fixture(contextBudgetBytes?: number) {
     },
   });
   cleanup.push(async () => { await app.close(); await repository.close(); await rm(directory, { recursive: true, force: true }); });
-  const headers = { authorization: 'Bearer alice' };
-  return { app, repository, engine, notify, model, headers, directory };
+  const headers = { authorization: 'Bearer alice', get 'idempotency-key'() { return randomUUID(); } };
+  return { app, repository, engine, notify, cancel, describe, model, headers, directory };
 }
 describe('authenticated thread API', () => {
+  it('requires a valid header or body key, and rejects conflicting header/body keys', async () => {
+    const { app, repository, notify } = await fixture();
+    const thread = threadRecord(); await repository.createThread(thread);
+    const url = `/api/threads/${thread.id}/runs`, headers = { authorization: 'Bearer alice' };
+    for (const idempotencyKey of [undefined, '', '   ', 12, 'bad\nkey', 'k'.repeat(257)]) {
+      const response = await app.inject({ method: 'POST', url, headers, payload: { request: { goal: 'root' }, ...(idempotencyKey === undefined ? {} : { idempotencyKey }) } });
+      expect(response.statusCode).toBe(400);
+    }
+    expect((await app.inject({ method: 'POST', url, headers: { ...headers, 'idempotency-key': 'a' }, payload: { request: { goal: 'root' }, idempotencyKey: 'b' } })).statusCode).toBe(400);
+    expect(notify).not.toHaveBeenCalled();
+    expect(await repository.list()).toEqual([]);
+    const payload = { request: { goal: 'root' }, idempotencyKey: 'body-key' };
+    const first = await app.inject({ method: 'POST', url, headers, payload });
+    const retry = await app.inject({ method: 'POST', url, headers: { ...headers, 'idempotency-key': payload.idempotencyKey }, payload: { request: payload.request } });
+    expect(first.statusCode).toBe(202); expect(retry.json()).toEqual(first.json());
+  });
+  it('serializes concurrent same-key POSTs, freezes the default parent and returns the lost response after the thread advances', async () => {
+    const { app, repository, engine, model, notify } = await fixture();
+    const root = threadRun(); await repository.create(root);
+    const thread = threadRecord(); await repository.createThread(thread, root.id);
+    const url = `/api/threads/${thread.id}/runs`, headers = { authorization: 'Bearer alice', 'idempotency-key': 'lost-response' };
+    const create = vi.spyOn(engine, 'create'), latest = vi.spyOn(repository, 'latestRunByThread');
+    const payload = { request: { goal: 'next' }, contextBudgetBytes: 4096 };
+    const replies = await Promise.all(Array.from({ length: 8 }, () => app.inject({ method: 'POST', url, headers, payload })));
+    expect(replies.map(response => response.statusCode)).toEqual(Array(8).fill(202));
+    for (const response of replies) expect(response.json()).toEqual(replies[0]!.json());
+    expect(create).toHaveBeenCalledOnce(); expect(latest).toHaveBeenCalledOnce();
+    expect(await repository.listRunsByThread(thread.id)).toHaveLength(2);
+    expect(model.complete).not.toHaveBeenCalled();
+    const original = replies[0]!.json();
+    await repository.mutate(original.id, run => { run.status = 'succeeded'; });
+    const later = threadRun(); await repository.createRunInThread(later, thread.id, original.id);
+    await repository.mutate(root.id, run => { run.goal = 'changed parent prose'; });
+    notify.mockClear(); latest.mockClear();
+    const retry = await app.inject({ method: 'POST', url, headers, payload });
+    expect(retry.json()).toEqual(original);
+    expect(notify).not.toHaveBeenCalled(); expect(latest).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledOnce();
+    for (const changed of [
+      { ...payload, request: { goal: 'different' } },
+      { ...payload, parentRunId: root.id },
+      { ...payload, contextBudgetBytes: 4000 },
+    ]) expect((await app.inject({ method: 'POST', url, headers, payload: changed })).statusCode).toBe(409);
+    expect(await repository.listRunsByThread(thread.id)).toHaveLength(3);
+  });
+  it('scopes keys to each owner/tenant/thread and hides inaccessible reservations', async () => {
+    const { app, repository } = await fixture();
+    const key = 'same-opaque-key', ids = [];
+    for (const [owner, tenantId, token] of [['alice', 'team-a', 'alice'], ['bob', 'team-a', 'bob'], ['alice', 'team-b', 'outsider'], ['alice', 'team-a', 'alice']]) {
+      const thread = { ...threadRecord(), owner, tenantId }; await repository.createThread(thread);
+      const url = `/api/threads/${thread.id}/runs`;
+      const response = await app.inject({ method: 'POST', url, headers: { authorization: `Bearer ${token}`, 'idempotency-key': key }, payload: { request: { goal: 'root' } } });
+      expect(response.statusCode).toBe(202); ids.push(response.json().id);
+      const wrongToken = token === 'alice' ? 'outsider' : 'alice';
+      expect((await app.inject({ method: 'POST', url, headers: { authorization: `Bearer ${wrongToken}`, 'idempotency-key': key }, payload: { request: { goal: 'changed' } } })).statusCode).toBe(404);
+    }
+    expect(new Set(ids).size).toBe(4);
+  });
+  it('recovers failed notify after restart and replays the same follow-up without preparing a second run', async () => {
+    const { app, repository, directory, notify } = await fixture();
+    const thread = threadRecord(); await repository.createThread(thread);
+    notify.mockRejectedValueOnce(new Error('Temporal unavailable'));
+    const headers = { authorization: 'Bearer alice', 'idempotency-key': 'durable-retry' }, payload = { request: { goal: 'root' } };
+    const response = await app.inject({ method: 'POST', url: `/api/threads/${thread.id}/runs`, headers, payload });
+    expect(response.statusCode).toBe(202);
+    expect((await repository.get(response.json().id)).events.at(-1)?.type).toBe('dispatch.failed');
+    await app.close(); await repository.close();
+    const restarted = new FileRunRepository(directory); await restarted.init();
+    try {
+      const model: ModelAdapter = { pin: { model: 'fixture', endpoint: 'http://127.0.0.1', promptVersion: 'fixture/1' }, complete: vi.fn() };
+      const engine = new AgentEngine(restarted, model), threads = new ThreadService(restarted, engine, 1000);
+      await threads.recover(); await engine.recover();
+      const recoveredNotify = vi.fn();
+      for (const run of await restarted.list()) if (isBootRecoverableRun(run.status)) await recoveredNotify(run.id);
+      expect(recoveredNotify).toHaveBeenCalledOnce(); expect(recoveredNotify).toHaveBeenCalledWith(response.json().id);
+      const create = vi.spyOn(engine, 'create');
+      const retry = await threads.followUp(thread.id, payload, threadScope, headers['idempotency-key']);
+      expect(retry.id).toBe(response.json().id); expect(retry.context).toEqual(response.json().context);
+      expect(create).not.toHaveBeenCalled(); expect(await restarted.listRunsByThread(thread.id)).toHaveLength(1);
+    } finally {
+      await restarted.close();
+      // Cleanup owns this repository instance; reopen after the restart drill.
+      await repository.init();
+    }
+  });
+  it('cancels/reconciles only the selected child workflow and preserves parents, siblings and membership', async () => {
+    const { app, repository, headers, cancel, describe, notify } = await fixture();
+    const root = threadRun(); await repository.create(root);
+    const thread = threadRecord(); await repository.createThread(thread, root.id);
+    const post = (goal: string) => app.inject({ method: 'POST', url: `/api/threads/${thread.id}/runs`, headers, payload: { request: { goal }, parentRunId: root.id } });
+    const child = (await post('cancel me')).json(), sibling = (await post('reconcile me')).json();
+    const before = await repository.get(root.id);
+    notify.mockClear();
+    expect((await app.inject({ method: 'POST', url: `/api/runs/${child.id}/cancel`, headers, payload: { reason: 'stop' } })).json().run).toMatchObject({ status: 'cancelled', threadId: thread.id, parentRunId: root.id, threadSequence: 2 });
+    expect(cancel).toHaveBeenCalledOnce(); expect(cancel).toHaveBeenCalledWith(child.id, 'stop');
+    expect((await repository.get(sibling.id)).status).toBe('queued');
+    const result = await app.inject({ method: 'POST', url: `/api/runs/${sibling.id}/reconcile`, headers, payload: { source: 'temporal', dry_run: false } });
+    expect(result.json()).toMatchObject({ runId: sibling.id, action: 'cancel', applied: true });
+    for (const [id] of describe.mock.calls) expect(id).toBe(sibling.id);
+    expect(await repository.get(root.id)).toEqual(before); expect(notify).not.toHaveBeenCalled();
+    expect((await repository.listRunsByThread(thread.id)).map(run => run.threadSequence)).toEqual([1, 2, 3]);
+  });
   it('creates empty threads and root attachments, returns compact sequence pages with owner run links', async () => {
     const { app, repository, headers } = await fixture();
     const emptyResponse = await app.inject({ method: 'POST', url: '/api/threads', headers, payload: {} });

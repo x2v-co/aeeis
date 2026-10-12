@@ -5,12 +5,15 @@ import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prep
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { scopedRecent, validateCollectionLimit } from './collection-query.js';
 import { assertThreadHistoryUnchanged } from '../runtime/thread-history.js';
+import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, FollowupLocks, type ThreadFollowup } from '../runtime/thread-followups.js';
 
 /** Ephemeral adapter with the same serial write and ownership contract as file mode. */
 export class InMemoryRunRepository implements RunRepository {
   readonly shares = new InMemoryRunShareStore();
   private runs = new Map<string, AgentRun>();
   private threads = new Map<string, Thread>();
+  private followups = new Map<string, ThreadFollowup>();
+  private followupLocks = new FollowupLocks();
   private queue: Promise<unknown> = Promise.resolve();
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.queue.then(operation);
@@ -64,18 +67,46 @@ export class InMemoryRunRepository implements RunRepository {
       return latest && structuredClone(latest);
     });
   }
-  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentRevision?: number): Promise<AgentRun> {
+  createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     return this.serial(async () => {
       const thread = await this.getThread(threadId, scope), run = structuredClone(input);
+      if (followup) {
+        const reservation = this.followups.get(`${threadId}/${followup.keyHash}`);
+        if (!reservation) throw new ThreadConflict('Missing follow-up reservation');
+        assertSameFollowup(reservation, followup.requestHash);
+        assertFollowupCommit(reservation, run, threadId, parentRunId);
+        parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
+      }
       assertUnthreaded(run);
       if (this.runs.has(run.id)) throw new ThreadConflict('Run already exists');
       const parent = parentRunId === undefined ? undefined : await this.get(parentRunId, thread);
-      assertFollowupParent(parent, parentRevision);
+      assertFollowupParent(parent, parentSnapshot);
       const last = [...this.runs.values()].filter(item => item.threadId === threadId).reduce((max, item) => Math.max(max, item.threadSequence!), 0);
       prepareAttachment(run, thread, parent, last);
       this.runs.set(run.id, structuredClone(run));
+      if (followup) this.followups.set(`${threadId}/${followup.keyHash}`, structuredClone({ ...followup, state: 'completed' }));
       return run;
     });
+  }
+  async withThreadFollowupLock<T>(threadId: string, keyHash: string, scope: Ownership, operation: () => Promise<T>): Promise<T> {
+    await this.getThread(threadId, scope);
+    return this.followupLocks.withLock(`${threadId}/${keyHash}`, operation);
+  }
+  async getThreadFollowup(threadId: string, keyHash: string, scope: Ownership): Promise<ThreadFollowup | undefined> {
+    await this.getThread(threadId, scope);
+    const record = this.followups.get(`${threadId}/${keyHash}`);
+    return record && structuredClone(record);
+  }
+  saveThreadFollowup(record: ThreadFollowup, scope: Ownership): Promise<void> {
+    return this.serial(async () => {
+      await this.getThread(record.threadId, scope);
+      const key = `${record.threadId}/${record.keyHash}`, before = this.followups.get(key);
+      assertFollowupCheckpoint(before, record);
+      this.followups.set(key, structuredClone(record));
+    });
+  }
+  async *pendingThreadFollowups(): AsyncIterable<ThreadFollowup> {
+    for (const record of [...this.followups.values()]) if (record.state === 'reserved') yield structuredClone(record);
   }
   attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> {
     return this.serial(async () => {
