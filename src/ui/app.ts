@@ -180,6 +180,11 @@ function eventLabel(type: string): string {
     'agent.requested': '已请求外部 Agent', 'agent.progress': '外部 Agent 有进展', 'agent.completed': '外部 Agent 已完成', 'agent.failed': '外部 Agent 调用失败', 'agent.unknown': '外部 Agent 结果待核查',
     'external.usage.recorded': '外部用量已记录', 'external.usage_recorded': '外部用量已记录', 'external.budget_stopped': '外部预算已停止',
     'model.usage_recorded': '模型用量已记录',
+    'input.requested': '等待补充信息', 'input.received': '已收到补充信息', 'review.requested': '开始独立审核', 'review.completed': '审核完成',
+    'plan.repair_requested': '计划格式修复中', 'plan.revision_requested': '已请求修改计划', 'run.paused': '运行已暂停', 'run.resumed': '运行已继续',
+    'run.retry_requested': '已请求重试', 'run.reconciled': '状态已对齐', 'run.interrupted': '运行中断', 'run.cancel.workflow_failed': '取消后台任务失败',
+    'run.cancelled_reconcile_requested': '已请求核查取消前的调用', 'run.cancelled_reconcile_failed': '取消前的调用核查失败', 'artifact.created': '产物已生成',
+    'model.unknown': '模型结果待核查', 'model.reconciled': '模型结果已核查', 'model.validation_failed': '模型输出校验失败', 'model.budget_stopped': '模型预算已停止',
     'task.execution.started': '任务开始执行', 'task.execution.completed': '任务执行完成', 'task.execution.failed': '任务执行失败',
   };
   const normalized = type.trim().replace(/\s+/g, '.');
@@ -260,6 +265,7 @@ function setCurrentRunOpen(enabled: boolean): void {
   const detail = $('detail');
   const empty = $('empty');
   if (detail) detail.hidden = !enabled || !current;
+  document.body.classList.toggle('run-open', enabled && Boolean(current || currentId));
   if (empty) empty.hidden = minimalMode || enabled || Boolean(current);
   syncCurrentRunToggle(current);
   if (!enabled) $('run-dock').hidden = true;
@@ -337,7 +343,7 @@ function syncConfigurationNotice(): void {
 function syncDetailsToggleLabel(): void {
   const control = $('details-toggle') as HTMLButtonElement | null;
   if (!control) return;
-  control.textContent = detailsMode ? '收起设置' : quickRunReady ? '更多设置' : '连接模型';
+  control.textContent = detailsMode ? '收起设置' : quickRunReady ? '更多设置' : authRequired ? '输入令牌' : '连接模型';
   control.title = detailsMode ? '收起运行配置' : quickRunReady ? '展开运行边界和治理设置' : '打开令牌和模型配置';
   control.dataset.state = detailsMode ? 'expanded' : quickRunReady ? 'ready' : 'attention';
   control.setAttribute('aria-expanded', String(detailsMode));
@@ -668,9 +674,24 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   if (!response.ok) throw new Error(value?.error ?? `运行服务请求失败（HTTP ${response.status}）`);
   return (value ?? {}) as T;
 }
+let authRequired = false;
+const SERVER_ERROR_LABELS: Record<string, string> = {
+  'Local access token required': '需要访问令牌：点击“输入令牌”，填写本地访问令牌后连接。',
+  'Invalid local access token': '访问令牌无效，请重新输入。',
+  'Shared runs are read-only': '只读分享页不能执行操作。',
+};
 function errorMessage(error: unknown): string {
-  return error instanceof Error && error.message ? error.message : String(error || '运行服务暂时不可用');
+  const text = error instanceof Error && error.message ? error.message : String(error || '运行服务暂时不可用');
+  if (/access token/i.test(text)) { authRequired = true; syncDetailsToggleLabel(); }
+  return SERVER_ERROR_LABELS[text] ?? text;
 }
+function formatTime(value: string | number | Date): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+}
+const REVIEW_VERDICT_LABELS: Record<string, string> = { accepted: '通过', revise: '需修改', rejected: '未通过', needs_revision: '需修改' };
+// Keep the raw verdict next to non-passing labels so operators can grep logs and debug bundles for it.
+function reviewVerdictLabel(verdict: string): string { const label = REVIEW_VERDICT_LABELS[verdict]; return !label ? verdict : verdict === 'accepted' ? label : `${label}（${verdict}）`; }
 let errorToastTimer: number | undefined;
 function message(text: string): void {
   $('error').textContent = text;
@@ -778,7 +799,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     heading.append(element('strong', label), element('small', runStatusLabel(run.status)));
     body.append(heading, element('span', run.goal.slice(0, 120), 'attention-goal'), element('small', `下一步 · ${next}`, 'attention-next'));
     const meta = run.updatedAt && Number.isFinite(Date.parse(run.updatedAt))
-      ? new Date(run.updatedAt).toLocaleString()
+      ? formatTime(run.updatedAt)
       : '刚刚更新';
     const quickLabel = run.status === 'failed' ? '重试' : run.status === 'needs_input' ? '补充' : run.status === 'needs_approval' ? '查看计划' : '核查';
     const quickAction = button(quickLabel, async () => {
@@ -969,7 +990,7 @@ function renderReminders(items: ReminderSummary[]): void {
   list.replaceChildren(); $('reminders-empty').hidden = items.length > 0;
   for (const reminder of items) {
     const item = element('div', '', `fact-row reminder-${reminder.status}`);
-    item.append(element('strong', `${runStatusLabel(reminder.status)} · ${reminder.title}`), element('small', `${new Date(reminder.dueAt).toLocaleString()} · ${reminder.delivery.channel} → ${reminder.delivery.destination} · ${privacyLabel(reminder.privacy)}`), element('small', reminder.message));
+    item.append(element('strong', `${runStatusLabel(reminder.status)} · ${reminder.title}`), element('small', `${formatTime(reminder.dueAt)} · ${reminder.delivery.channel} → ${reminder.delivery.destination} · ${privacyLabel(reminder.privacy)}`), element('small', reminder.message));
     if (reminder.recurrence) {
       const rule = reminder.recurrence.calendar;
       const schedule = rule ? `${frequencyLabel(rule.frequency)} · ${rule.timeZone} ${rule.time}${rule.daysOfWeek ? ` · 星期 ${rule.daysOfWeek.join(',')}` : ''}${rule.dayOfMonth ? ` · 每月 ${rule.dayOfMonth} 日` : ''}` : `每 ${reminder.recurrence.intervalMs! / 60_000} 分钟`;
@@ -1133,7 +1154,7 @@ function renderImprovementSignals(signals: ImprovementSignalSummary[]): void {
   list.replaceChildren(); $('improvement-signals-empty').hidden = signals.length > 0;
   for (const signal of signals) {
     const item = element('div', '', 'fact-row');
-    item.append(element('strong', `${signal.kind} · ${signal.candidateId ? '已形成候选' : signal.proposal ? '待评测' : '待补全提案'}`), element('small', `${signal.reason} · ${new Date(signal.occurredAt).toLocaleString()}`), element('small', `Run ${signal.runId} · 证据 ${signal.sourceRefs.join(', ')}`));
+    item.append(element('strong', `${signal.kind} · ${signal.candidateId ? '已形成候选' : signal.proposal ? '待评测' : '待补全提案'}`), element('small', `${signal.reason} · ${formatTime(signal.occurredAt)}`), element('small', `Run ${signal.runId} · 证据 ${signal.sourceRefs.join(', ')}`));
     if (signal.synthesis) {
       const attempt = signal.synthesis;
       const label = attempt.error ? attempt.error : attempt.state === 'completed' ? (attempt.hasProposal ? '已生成提案' : '证据不足，未提出改动') : attempt.state === 'unknown' ? '结果不明，等待核查' : attempt.state === 'started' ? '已预留调用；执行中或中断待核查' : '提案生成失败';
@@ -1174,7 +1195,7 @@ function renderAgents(agents: AgentSummary[]): void {
       details.append(element('summary', '审计记录'));
       if (events.length) {
         const list = element('ul');
-        for (const event of events) list.append(element('li', `${event.action} · ${event.actor} · ${new Date(event.at).toLocaleString()}`));
+        for (const event of events) list.append(element('li', `${event.action} · ${event.actor} · ${formatTime(event.at)}`));
         details.append(list);
       } else details.append(element('p', '没有审计事件。', 'muted'));
       item.querySelector(':scope > .inline-inspection')?.remove();
@@ -1271,7 +1292,7 @@ function renderCollaborations(competitions: CompetitionSummary[], debates: Debat
   const competitionList = $('competitions'); competitionList.replaceChildren(); $('competitions-empty').hidden = competitions.length > 0;
   for (const competition of competitions.slice(0, 12)) {
     const item = element('div', '', `fact-row collaboration-${competition.status}`);
-    item.append(element('strong', `${runStatusLabel(competition.status)} · ${competition.brief.goal.slice(0, 48)}`), element('small', `${competition.candidates.length}/${competition.brief.participantAgentIds.length} 个候选 · ${competition.scores.length} 个评分${competition.selectedAgentId ? ` · 已选 ${competition.selectedAgentId}` : ''}`), element('small', collaborationCostText(competition.usage, competition.brief.modelBudget)), element('small', competition.failureReason ?? ''), element('small', new Date(competition.updatedAt).toLocaleString()));
+    item.append(element('strong', `${runStatusLabel(competition.status)} · ${competition.brief.goal.slice(0, 48)}`), element('small', `${competition.candidates.length}/${competition.brief.participantAgentIds.length} 个候选 · ${competition.scores.length} 个评分${competition.selectedAgentId ? ` · 已选 ${competition.selectedAgentId}` : ''}`), element('small', collaborationCostText(competition.usage, competition.brief.modelBudget)), element('small', competition.failureReason ?? ''), element('small', formatTime(competition.updatedAt)));
     item.append(button('查看详情', async () => { showCollaborationDetails(item, `Competition ${competition.id}`, await api(`/collaborations/competitions/${encodeURIComponent(competition.id)}`)); }));
     if (['collecting', 'running'].includes(competition.status)) item.append(button('运行 Competition', async () => { await api(`/collaborations/competitions/${encodeURIComponent(competition.id)}/run`, {}); await refresh(); }));
     for (const attempt of competition.attempts ?? []) if (['started', 'unknown'].includes(attempt.state)) item.append(button(`核查参与者 ${attempt.participantAgentId}`, () => reconcileCompetitionAttempt(competition.id, attempt)));
@@ -1284,7 +1305,7 @@ function renderCollaborations(competitions: CompetitionSummary[], debates: Debat
     const flagged = debate.room.moderation?.filter(item => item.status === 'flagged').length ?? 0;
     const adjudication = debate.room.adjudication?.status ? ` · 裁决${runStatusLabel(debate.room.adjudication.status)}` : '';
     const unsettled = debate.attempts?.filter(item => ['started', 'unknown'].includes(item.state)).length ?? 0;
-    item.append(element('strong', `${runStatusLabel(debate.status)} · ${(debate.room.goal ?? debate.room.taskId).slice(0, 48)}`), element('small', `${debate.room.messages.length} 条消息 · ${debate.room.participantAgentIds.length} 个 Agent${flagged ? ` · ${flagged} 条被标记` : ''}${unsettled ? ` · ${unsettled} 条待处理` : ''}${adjudication}`), element('small', collaborationCostText(debate.usage, debate.modelBudget)), element('small', debate.closeReason ?? ''), element('small', new Date(debate.updatedAt).toLocaleString()));
+    item.append(element('strong', `${runStatusLabel(debate.status)} · ${(debate.room.goal ?? debate.room.taskId).slice(0, 48)}`), element('small', `${debate.room.messages.length} 条消息 · ${debate.room.participantAgentIds.length} 个 Agent${flagged ? ` · ${flagged} 条被标记` : ''}${unsettled ? ` · ${unsettled} 条待处理` : ''}${adjudication}`), element('small', collaborationCostText(debate.usage, debate.modelBudget)), element('small', debate.closeReason ?? ''), element('small', formatTime(debate.updatedAt)));
     item.append(button('查看消息与裁决', async () => { showCollaborationDetails(item, `Debate ${debate.id}`, await api(`/collaborations/debates/${encodeURIComponent(debate.id)}`)); }));
     if (debate.status === 'active') item.append(button('运行 Debate', async () => { await api(`/collaborations/debates/${encodeURIComponent(debate.id)}/run`, {}); await refresh(); }));
     for (const attempt of debate.attempts ?? []) if (['started', 'unknown'].includes(attempt.state)) item.append(button(`核查 ${attempt.slot}`, () => reconcileDebateAttempt(debate.id, attempt)));
@@ -1294,13 +1315,13 @@ function renderCollaborations(competitions: CompetitionSummary[], debates: Debat
   const projectionList = $('projections'); projectionList.replaceChildren(); $('projections-empty').hidden = projections.length > 0;
   for (const projection of projections.slice(-12).reverse()) {
     const item = element('div', '', `fact-row projection-${projection.status}`);
-    item.append(element('strong', `${runStatusLabel(projection.status)} · ${projection.aggregateType}:${projection.aggregateId}`), element('small', `${projection.channel} → ${projection.destination} · ${projection.attempts} 次尝试`), element('small', projection.lastError ?? new Date(projection.updatedAt).toLocaleString()));
+    item.append(element('strong', `${runStatusLabel(projection.status)} · ${projection.aggregateType}:${projection.aggregateId}`), element('small', `${projection.channel} → ${projection.destination} · ${projection.attempts} 次尝试`), element('small', projection.lastError ?? formatTime(projection.updatedAt)));
     projectionList.append(item);
   }
   const policyList = $('trigger-policies'); policyList.replaceChildren(); $('trigger-policies-empty').hidden = triggerPolicies.length > 0;
   for (const policy of triggerPolicies.slice(0, 12)) {
     const item = element('div', '', `fact-row trigger-policy-${policy.enabled ? 'enabled' : 'disabled'}`);
-    item.append(element('strong', `${policy.enabled ? '启用' : '停用'} · ${policy.name}`), element('small', `${policy.id} · ${policy.eventTypes.join(', ')} · ${policy.action.type}/${policy.action.dispatch}`), element('small', `participants: ${policy.action.participantAgentIds.join(', ')}`), element('small', new Date(policy.updatedAt).toLocaleString()));
+    item.append(element('strong', `${policy.enabled ? '启用' : '停用'} · ${policy.name}`), element('small', `${policy.id} · ${policy.eventTypes.join(', ')} · ${policy.action.type}/${policy.action.dispatch}`), element('small', `participants: ${policy.action.participantAgentIds.join(', ')}`), element('small', formatTime(policy.updatedAt)));
     item.append(button(policy.enabled ? '停用' : '启用', async () => { await api(`/collaborations/triggers/policies/${encodeURIComponent(policy.id)}`, { enabled: !policy.enabled }, 'PATCH'); await refresh(); }));
     item.append(button('删除', async () => { if (window.confirm(`删除 Trigger Policy ${policy.name}？`)) { await api(`/collaborations/triggers/policies/${encodeURIComponent(policy.id)}`, undefined, 'DELETE'); await refresh(); } }));
     policyList.append(item);
@@ -1308,7 +1329,7 @@ function renderCollaborations(competitions: CompetitionSummary[], debates: Debat
   const decisionList = $('trigger-decisions'); decisionList.replaceChildren(); $('trigger-decisions-empty').hidden = triggerDecisions.length > 0;
   for (const decision of triggerDecisions.slice(0, 20)) {
     const item = element('div', '', `fact-row trigger-decision-${decision.state}`);
-    item.append(element('strong', `${runStatusLabel(decision.state)} · ${decision.actionType}`), element('small', `${decision.policyId} · ${decision.eventId}`), element('small', `${runStatusLabel(decision.dispatchState)}${decision.resourceId ? ` · ${decision.resourceId}` : ''}`), element('small', decision.error ?? decision.dispatchError ?? new Date(decision.startedAt).toLocaleString()));
+    item.append(element('strong', `${runStatusLabel(decision.state)} · ${decision.actionType}`), element('small', `${decision.policyId} · ${decision.eventId}`), element('small', `${runStatusLabel(decision.dispatchState)}${decision.resourceId ? ` · ${decision.resourceId}` : ''}`), element('small', decision.error ?? decision.dispatchError ?? formatTime(decision.startedAt)));
     if (decision.state !== 'failed' && !['completed', 'failed'].includes(decision.dispatchState)) item.append(button('核查', () => reconcileTriggerDecision(decision)));
     decisionList.append(item);
   }
@@ -1324,7 +1345,7 @@ async function renderRooms(rooms: RoomSummary[]): Promise<void> {
   }));
   for (const [index, room] of rooms.entries()) {
     const item = element('div', '', 'fact-row room-' + room.status);
-    item.append(element('strong', room.title + ' · ' + runStatusLabel(room.status)), element('small', room.id + ' · ' + new Date(room.updatedAt).toLocaleString()));
+    item.append(element('strong', room.title + ' · ' + runStatusLabel(room.status)), element('small', room.id + ' · ' + formatTime(room.updatedAt)));
     if (room.description) item.append(element('small', room.description));
     if (room.status === 'active') item.append(button('归档 Room', async () => { await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH'); await refresh(); }));
     const { members, events } = roomData[index]!;
@@ -1376,7 +1397,7 @@ function appendSessionEventRow(timeline: HTMLOListElement, roomId: string, event
   const heading = element('div', '', 'session-event-heading');
   const revision = event.revision && event.revision > 1 ? ` · v${event.revision}` : '';
   const operation = event.operation && event.operation !== 'publish' ? ` · ${event.operation}` : '';
-  heading.append(element('strong', `#${event.sequence} · ${event.type}${operation}${revision}`), element('small', `${event.actorId} · ${new Date(event.createdAt).toLocaleString()}`));
+  heading.append(element('strong', `#${event.sequence} · ${event.type}${operation}${revision}`), element('small', `${event.actorId} · ${formatTime(event.createdAt)}`));
   row.append(heading, element('p', event.content));
   row.append(element('small', `${event.goalId ? `Goal ${event.goalId}` : 'Room 共享上下文'} · manifest ${event.contextManifestId} · ${privacyLabel(event.classification)} · audience ${event.audienceSnapshot.digest.slice(0, 12)}…`));
   if (event.targetEventId) row.append(element('small', `目标事件：${event.targetEventId}`));
@@ -1549,7 +1570,7 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
         inspection.append(element('summary', '任务回执'));
         if (snapshot.receipts.length) {
           const list = element('ul');
-          for (const receipt of snapshot.receipts) list.append(element('li', `${receipt.taskId} · ${receipt.transition} · ${new Date(receipt.occurredAt).toLocaleString()}${receipt.reason ? ` · ${receipt.reason}` : ''}`));
+          for (const receipt of snapshot.receipts) list.append(element('li', `${receipt.taskId} · ${receipt.transition} · ${formatTime(receipt.occurredAt)}${receipt.reason ? ` · ${receipt.reason}` : ''}`));
           inspection.append(list);
         } else inspection.append(element('p', '尚无执行回执。', 'muted'));
         details.querySelector(':scope > .inline-inspection')?.remove();
@@ -1824,7 +1845,7 @@ function updateRunActivity(run: RunView): void {
       trail.replaceChildren();
       for (const event of trailEvents) {
         const item = element('li', eventLabel(event.type));
-        item.title = `${event.type} · ${new Date(event.at).toLocaleString()}`;
+        item.title = `${event.type} · ${formatTime(event.at)}`;
         trail.append(item);
       }
       trail.dataset.signature = trailSignature;
@@ -2005,6 +2026,7 @@ function renderRunDecision(run: RunView): void {
   }
 }
 function render(run: RunView): void {
+  document.body.classList.toggle('run-open', currentRunOpen);
   const shareResult = $('run-share-result');
   if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
   if (!readOnlyShare && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
@@ -2036,7 +2058,7 @@ function render(run: RunView): void {
   for (const item of progress) {
     const value = item.progress;
     const row = element('li', '', 'agent-progress-item');
-    row.append(element('time', new Date(value.at).toLocaleString()), element('strong', `${runStatusLabel(value.status)} · ${value.agentId} · #${value.sequence}`), element('span', value.percent === undefined ? value.message : `${value.message} · ${value.percent}%`));
+    row.append(element('time', formatTime(value.at)), element('strong', `${runStatusLabel(value.status)} · ${value.agentId} · #${value.sequence}`), element('span', value.percent === undefined ? value.message : `${value.message} · ${value.percent}%`));
     if (value.evidenceRefs.length || value.artifactRefs.length) row.append(element('small', `引用：${[...value.evidenceRefs, ...value.artifactRefs].join(', ')}`));
     progressList.append(row);
   }
@@ -2173,7 +2195,10 @@ function render(run: RunView): void {
     }
   }
   if (!run.artifacts.length) artifacts.append(element('p', '实际执行后，报告和其他产物会出现在这里。', 'muted'));
-  $('review').textContent = run.review ? `${run.review.verdict}: ${run.review.summary}\n${run.review.issues.join('\n')}` : '';
+  $('review').textContent = run.review
+    ? `审核${reviewVerdictLabel(run.review.verdict)}：${run.review.summary}${run.review.issues.length ? `\n${run.review.verdict === 'accepted' ? '提示（不影响通过）' : '问题'}：\n${run.review.issues.map(issue => `· ${issue}`).join('\n')}` : ''}`
+    : '';
+  $('review').dataset.state = run.review?.verdict === 'accepted' ? (run.review.issues.length ? 'warning' : 'ok') : run.review ? 'attention' : '';
   const timeline = $('timeline'); timeline.replaceChildren();
   renderTimelineFilterState();
   const timelineEvents = run.events.filter(event => timelineMatchesFilter(event.type)).sort((a, b) => a.seq - b.seq);
@@ -2181,7 +2206,7 @@ function render(run: RunView): void {
   for (const e of timelineEvents) {
     const item = element('li', '', `timeline-item timeline-${timelineTone(e.type)}`);
     item.title = e.type;
-    item.append(element('time', new Date(e.at).toLocaleString()), element('strong', eventLabel(e.type)), element('small', `#${e.seq}`));
+    item.append(element('time', formatTime(e.at)), element('strong', eventLabel(e.type)), element('small', `#${e.seq}`));
     const details = element('details'); details.append(element('summary', '事件详情'), element('pre', JSON.stringify(e.data ?? {}, null, 2))); item.append(details);
     timeline.append(item);
   }
@@ -2229,7 +2254,7 @@ function renderExplanation(explanation: RunExplanation): void {
   governance.append(element('small', `Tool ${explanation.governance.tools.length} 个 · Agent ${explanation.governance.agents.length} 个`));
   plan.append(governance);
   panel.append(plan);
-  if (explanation.review) panel.append(element('p', `审核：${explanation.review.verdict} · ${explanation.review.summary}${explanation.review.confidence === undefined ? '' : ` · 置信度 ${(explanation.review.confidence * 100).toFixed(0)}%`}`, 'muted'));
+  if (explanation.review) panel.append(element('p', `审核：${reviewVerdictLabel(explanation.review.verdict)} · ${explanation.review.summary}${explanation.review.confidence === undefined ? '' : ` · 置信度 ${(explanation.review.confidence * 100).toFixed(0)}%`}`, 'muted'));
 }
 
 function renderGovernance(run: RunView): void {
@@ -2253,7 +2278,7 @@ function renderGovernance(run: RunView): void {
   if (run.modelDecision?.selected) {
     model.append(element('span', `${run.modelDecision.selected.provider ?? 'provider'} / ${run.modelDecision.selected.model ?? 'model'}`));
     if (run.modelDecision.catalogHash) model.append(element('small', `catalog hash：${run.modelDecision.catalogHash}`));
-    if (run.modelDecision.catalogRetrievedAt) model.append(element('small', `目录读取：${new Date(run.modelDecision.catalogRetrievedAt).toLocaleString()}`));
+    if (run.modelDecision.catalogRetrievedAt) model.append(element('small', `目录读取：${formatTime(run.modelDecision.catalogRetrievedAt)}`));
     if (run.modelDecision.reason) model.append(element('small', run.modelDecision.reason));
   } else model.append(element('span', '固定模型或旧 Run 未保存目录决策。', 'muted'));
   container.append(model);
@@ -2642,6 +2667,7 @@ async function initialize(): Promise<void> {
     evolutionConfigured = status.evolutionConfigured;
     modelConfigured = status.modelConfigured;
     taskSchedulerConfigured = status.taskSchedulerConfigured;
+    authRequired = false;
     quickRunReady = status.modelConfigured && status.modelHealth?.ready !== false;
     syncConfigurationNotice();
     syncDetailsToggleLabel();
@@ -2700,7 +2726,7 @@ async function copyRunLink(url: string): Promise<void> { await navigator.clipboa
     const result = $('run-share-result');
     result.replaceChildren();
     const link = element('a', url); link.href = url;
-    result.append(link, element('small', ` · 到期：${new Date(share.expiresAt).toLocaleString()}`));
+    result.append(link, element('small', ` · 到期：${formatTime(share.expiresAt)}`));
     await copyRunLink(url).catch(() => undefined);
   } catch (error) { message(errorMessage(error)); }
   finally { button.disabled = false; }
