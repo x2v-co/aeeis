@@ -340,7 +340,7 @@ export function buildApp(options: Options) {
     reply.header('x-request-id', requestId);
     reply.header('x-content-type-options', 'nosniff');
     reply.header('cache-control', 'no-store');
-    reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
     const host = request.headers.host ?? '';
     const route = request.routeOptions.url ?? '';
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';

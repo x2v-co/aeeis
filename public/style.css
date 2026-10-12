@@ -708,6 +708,12 @@ body.minimal-mode:not(.details-mode) .command-center {
   background: transparent;
   box-shadow: none;
 }
+/* A run is open: collapse the full-height launch hero so the run (and /runs/<id> deep links) land above the fold. */
+body.minimal-mode.run-open:not(.details-mode) .command-center { min-height: 0; padding-top: 12px; padding-bottom: 12px; }
+@media (max-width: 780px) { body.minimal-mode.run-open:not(.details-mode) .command-center { min-height: 0; padding: 8px 0 12px; } }
+#review { white-space: pre-wrap; }
+#review[data-state="warning"] { border-left: 3px solid #e3a008; padding-left: 10px; }
+#review[data-state="attention"] { border-left: 3px solid #d64545; padding-left: 10px; }
 body.minimal-mode:not(.details-mode) .command-context {
   margin-bottom: 12px;
 }
