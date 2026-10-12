@@ -109,6 +109,7 @@ for (const [schemaId, fixture] of [
   ['https://contracts.aeeis.dev/planprice/1/schemas/catalog-1.schema.json', rolling],
   ['https://contracts.aeeis.dev/planprice/1/schemas/mapping-1.schema.json', mapping],
   ['https://contracts.aeeis.dev/planprice/1/schemas/aeeis-model-pin-1.schema.json', pin],
+  ['https://contracts.aeeis.dev/planprice/1/schemas/aeeis-model-pin-1.schema.json', { ...pin, maxTokens: 16384, maxOutputTokens: 32768 }],
   ['https://contracts.aeeis.dev/planprice/1/schemas/health-1.schema.json', health],
   ['https://contracts.aeeis.dev/planprice/1/schemas/health-1.schema.json', healthExpired],
   ['https://contracts.aeeis.dev/planprice/1/schemas/error-1.schema.json', error],

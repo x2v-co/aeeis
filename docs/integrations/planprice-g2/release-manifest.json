@@ -118,7 +118,7 @@
       "path": "schemas/aeeis-model-pin-1.schema.json",
       "owner": "aeeis",
       "status": "draft",
-      "sha256": "9bcbf92b5df08a1ef5156da8822538f4d9134e8d906a5a7c7273d63f066cae9f"
+      "sha256": "9d587f5a14e376647816f18a18b91284b19066d8a442eba31ff51d5e92db4b5e"
     },
     {
       "path": "schemas/catalog-1.schema.json",

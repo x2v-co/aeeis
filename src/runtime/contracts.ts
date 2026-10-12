@@ -179,6 +179,8 @@ export interface Artifact { id: string; taskId: string; title: string; content: 
  */
 export interface ModelPin {
   model: string; endpoint: string; promptVersion: string; provider?: string;
+  /** Initial output allowance and, when known, the provider's output limit. */
+  maxTokens?: number; maxOutputTokens?: number;
   schemaVersion?: 'aeeis-model-pin/1'; routingMode?: 'catalog' | 'compatibility' | 'static';
   offeringId?: string | null; modelId?: string | null; modelVersion?: string | null;
   versionStatus?: 'pinned' | 'rolling' | 'unknown'; providerId?: string | null;
