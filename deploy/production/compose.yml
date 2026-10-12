@@ -19,6 +19,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        AEEIS_GIT_COMMIT: ${AEEIS_GIT_COMMIT:-unknown}
     restart: unless-stopped
     env_file: .env.production
     depends_on:
@@ -44,6 +46,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        AEEIS_GIT_COMMIT: ${AEEIS_GIT_COMMIT:-unknown}
     command: ["node", "dist/temporal/worker.js"]
     restart: unless-stopped
     env_file: .env.production

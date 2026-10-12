@@ -74,7 +74,7 @@ export const requestSchema = z.object({
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   title: z.string().min(1).max(200),
-  instruction: z.string().min(1).max(4000),
+  instruction: z.string().trim().min(1).max(4000),
   dependsOn: z.array(z.string()).max(20).default([]),
 }).strip();
 // Model planning metadata is not part of the executable plan. Strip it before
@@ -263,6 +263,8 @@ export interface AgentRun {
   agentProgress?: Array<{ idempotencyKey: string; progress: AgentProgressEvent }>;
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown; disposition?: 'isolated'; isolatedCost?: { tokens?: number | undefined; money?: number | undefined; currency?: string | undefined } }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
+  /** One durable schema repair per proposed plan, also used after restart. */
+  plannerRepair?: { rawOutput: string; validationError: string };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };
@@ -294,7 +296,7 @@ export function normalizeModelJson(value: unknown, wrapper?: string, discriminat
 }
 
 export function validatePlan(value: unknown): PlanDraft {
-  const plan = planSchema.parse(normalizeModelJson(value, 'plan', 'nodes'));
+  const plan = planSchema.parse(normalizePlanOutput(value));
   const byId = new Map(plan.nodes.map(n => [n.id, n]));
   if (byId.size !== plan.nodes.length) throw new Error('Duplicate task ID');
   const visiting = new Set<string>(), visited = new Set<string>();
@@ -310,4 +312,54 @@ export function validatePlan(value: unknown): PlanDraft {
   }
   for (const id of byId.keys()) visit(id);
   return plan;
+}
+
+/** Extract transport formatting only; the schema and DAG checks still apply. */
+export function normalizePlanOutput(value: unknown): unknown {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (typeof value === 'string') {
+      const text = value.trim().replace(/^\s*```(?:json)?\s*$/gim, '').trim();
+      try { value = JSON.parse(text); continue; } catch { /* prose or markdown around JSON */ }
+      const object = firstBalancedObject(text);
+      if (!object) return value;
+      try { value = JSON.parse(object); continue; } catch { return value; }
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const candidate = value as Record<string, unknown>;
+    const keys = Object.keys(candidate);
+    // Preserve the previously supported plan envelope with extra metadata.
+    if (!('nodes' in candidate) && 'plan' in candidate) { value = candidate.plan; continue; }
+    if (!('summary' in candidate) && !('nodes' in candidate) && keys.length === 1
+      && ['plan', 'result', 'output', 'data', 'response'].includes(keys[0]!)) {
+      value = candidate[keys[0]!]; continue;
+    }
+    if (!Array.isArray(candidate.nodes)) return value;
+    return { ...candidate, nodes: candidate.nodes.map(node => {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return node;
+      const item = node as Record<string, unknown>;
+      if (item.instruction !== undefined && item.instruction !== null
+        && (typeof item.instruction !== 'string' || item.instruction.trim())) return node;
+      const instruction = [item.description, item.goal, item.title, item.name]
+        .find(field => typeof field === 'string' && field.trim());
+      return instruction === undefined ? node : { ...item, instruction };
+    }) };
+  }
+  return value;
+}
+
+function firstBalancedObject(text: string): string | undefined {
+  const start = text.indexOf('{');
+  if (start < 0) return undefined;
+  let depth = 0, quoted = false, escaped = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) return text.slice(start, index + 1);
+  }
+  return undefined;
 }

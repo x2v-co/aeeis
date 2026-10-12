@@ -1,0 +1,8 @@
+# Helpers include this override only after resolving a release SHA.
+services:
+  api:
+    environment:
+      AEEIS_GIT_COMMIT: ${AEEIS_GIT_COMMIT:?Set AEEIS_GIT_COMMIT to a git SHA}
+  worker:
+    environment:
+      AEEIS_GIT_COMMIT: ${AEEIS_GIT_COMMIT:?Set AEEIS_GIT_COMMIT to a git SHA}

@@ -1532,7 +1532,15 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
-    return { status: await options.engine.advance(request.params.id) };
+    await options.engine.advance(request.params.id);
+    // Read the durable state even if another advance owned the in-flight work.
+    // Revisions, timestamps and telemetry events alone do not prove progress.
+    const run = await options.repository.get(request.params.id);
+    // Older workers validate a strict status-only envelope during rollout.
+    if (request.headers['x-aeeis-advance-progress'] !== '1') return { status: run.status };
+    return { status: run.status, progress: digest({ status: run.status, plans: run.plans, steps: run.steps,
+      calls: run.calls, artifacts: run.artifacts, answers: run.answers, plannerRepair: run.plannerRepair,
+      toolReceipts: run.toolReceipts, pendingTool: run.pendingTool, pendingDelegation: run.pendingDelegation }) };
   });
   app.post<{ Params: { id: string } }>('/internal/reminders/:id/advance', async (request, reply) => {
     if (!options.reminders || !options.reminderPump) return reply.code(503).send({ error: 'Reminder timer is not configured' });

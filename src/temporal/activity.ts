@@ -1,11 +1,11 @@
 import { ApplicationFailure } from '@temporalio/activity';
 import { z } from 'zod';
 
-export interface AdvanceRunActivityResult { status: string }
+export interface AdvanceRunActivityResult { status: string; progress?: string }
 export interface AdvanceReminderActivityResult { status: string; terminal: boolean; wakeAt?: string }
 export interface AdvanceRunActivityOptions { api: string; token: string; timeoutMs?: number }
 
-const responseSchema = z.object({ status: z.string().min(1).max(40) }).strict();
+const responseSchema = z.object({ status: z.string().min(1).max(40), progress: z.string().min(1).max(200).optional() }).strict();
 const reminderResponseSchema = z.object({ protocol: z.literal('aeeis-reminder-advance/1'), status: z.string().min(1).max(40), terminal: z.boolean(), wakeAt: z.string().datetime({ offset: true }).optional() }).strict();
 
 /**
@@ -23,7 +23,7 @@ export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (i
     let response: Response;
     try {
       response = await fetch(`${options.api}/internal/runs/${encodeURIComponent(id)}/advance`, {
-        method: 'POST', headers: { authorization: `Bearer ${options.token}`, 'content-type': 'application/json' },
+        method: 'POST', headers: { authorization: `Bearer ${options.token}`, 'content-type': 'application/json', 'x-aeeis-advance-progress': '1' },
         body: '{}', signal: AbortSignal.timeout(timeoutMs), redirect: 'error',
       });
     } catch (error) {
@@ -34,10 +34,13 @@ export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (i
       if ([408, 425, 429].includes(response.status) || response.status >= 500) throw new Error(`AEEIS activity returned retryable HTTP ${response.status}`);
       throw ApplicationFailure.nonRetryable(`AEEIS activity returned non-retryable HTTP ${response.status}`, 'AeeisPermanentError');
     }
-    let body: unknown;
-    try { body = responseSchema.parse(await response.json()); }
+    let body: AdvanceRunActivityResult;
+    try {
+      const parsed = responseSchema.parse(await response.json());
+      body = parsed.progress === undefined ? { status: parsed.status } : { status: parsed.status, progress: parsed.progress };
+    }
     catch { throw ApplicationFailure.nonRetryable('AEEIS activity returned an invalid status envelope', 'AeeisProtocolError'); }
-    return { status: (body as { status: string }).status };
+    return body;
   };
 }
 

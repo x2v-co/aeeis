@@ -51,6 +51,29 @@ with spaces. Runtime secrets support `*_FILE`, but direct and file variants
 cannot coexist, even with an empty direct value. `STACK_ENV_FILE` deliberately
 avoids the runtime's `AEEIS_*_FILE` secret convention.
 
+`AEEIS_GIT_COMMIT` identifies the release in Run debug bundles. `bin/deploy.sh`
+passes the checkout's full SHA as a Docker build argument; the image stores it
+in both `ENV AEEIS_GIT_COMMIT` and the OCI `org.opencontainers.image.revision`
+label. For `--no-build`, the helper reads that label after pulling the image,
+then falls back to a hex commit image tag (never the local checkout's SHA).
+An explicit shell/systemd value takes precedence over the selected env file;
+both override derived metadata. Use a 7–40 character git SHA. Untagged legacy
+images without metadata retain their image environment; helpers omit the
+override instead of exporting `unknown`. Systemd startup also resolves image
+labels after pulling, so an image absent at startup can supply its SHA.
+
+The resolved SHA is recorded in `.candidate.<stack>.env`, `.current.<stack>.env`
+and `.previous.<stack>.env`, so promotion, rollback and systemd restarts retain
+the release identity. Helpers include `compose.commit.yml` for both API and
+worker only when a SHA is available. For direct Compose commands, include
+`-f compose.yml -f compose.commit.yml` and supply `AEEIS_GIT_COMMIT` in the
+selected `--env-file`, recorded release file, or shell environment. Omit that
+override file to retain the image's metadata; helpers resolve older release
+files too.
+The older `deploy/production/compose.yml` passes the build argument and leaves
+runtime precedence to the image and `.env.production` (no empty environment
+override); build it with `--env-file .env.production` when the SHA is there.
+
 Configure a **real provider** through `AEEIS_MODEL_BASE_URL` (HTTPS
 OpenAI-compatible base), `AEEIS_MODEL` (actual model or ARK endpoint ID), and
 `AEEIS_MODEL_API_KEY`. SG can use an approved overseas provider; CN can use ARK
@@ -118,6 +141,15 @@ allowlist; configure it independently if switching to service URLs.
   Inspect `aeeis-model-error/1` logs for status, request ID, attempt, elapsed time,
   code and a bounded body excerpt. Exhausted network/5xx failures remain unknown;
   retrying the same idempotency key can still incur additional provider charges.
+- Run workflows complete on `succeeded`, `failed` and `cancelled`. `unknown`
+  provider outcomes park without polling until explicit reconciliation signals
+  `wake`; Temporal still reports a parked workflow as RUNNING. Unchanged active
+  advances use durable delays of 1, 2, 4, 8, 16, 30 and 30 seconds, then park
+  after eight advances without progress. The counter survives continue-as-new
+  and resets on real progress or wake. The workflow patch preserves existing
+  histories; older API responses without progress metadata receive the same
+  bounded backoff. No-progress metadata is opt-in so older workers retain their
+  strict status-only response contract during deployment.
 - State files use `AEEIS_STACK`: `.current.<stack>.env`, `.previous.<stack>.env`
   and `.candidate.<stack>.env`. Legacy `.current.env` is read only if its
   `AEEIS_STACK` or build ID identifies this exact stack. New releases use keyed files.
