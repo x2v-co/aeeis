@@ -135,6 +135,7 @@ const competitionModels = JSON.stringify(Object.fromEntries(['agent.one', 'agent
 const environment = {
   ...inherited,
   NODE_ENV: 'development', AEEIS_ENV: 'development', AEEIS_DEMO_MODE: '1',
+  AEEIS_AUTH_DISABLED: '1',
   AEEIS_HOST: '127.0.0.1', PORT: String(apiPort), AEEIS_DATA_DIR: dataDir,
   AEEIS_FIXTURE_MODEL_HOST: '127.0.0.1', AEEIS_FIXTURE_MODEL_PORT: String(modelPort),
   AEEIS_FIXTURE_EVALUATOR_HOST: '127.0.0.1', AEEIS_FIXTURE_EVALUATOR_PORT: String(evaluatorPort),

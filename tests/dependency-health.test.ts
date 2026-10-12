@@ -56,7 +56,7 @@ describe('connector dependency probes', () => {
       expect(() => validateRuntimeConfig({ [`AEEIS_${name}_URL`]: 'https://connector.example/search', [key]: endpoint })).toThrow(key);
       expect(() => new HttpDependencyProbe('https://connector.example/search', endpoint)).toThrow();
     }
-    expect(() => validateRuntimeConfig({ [`AEEIS_${name}_URL`]: 'https://connector.example/search', [key]: 'https://connector.example/health' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ AEEIS_ACCESS_TOKEN: 'health-test-token', [`AEEIS_${name}_URL`]: 'https://connector.example/search', [key]: 'https://connector.example/health' })).not.toThrow();
   });
 
   it('detects missing files and directories without searching or loading records', async () => {

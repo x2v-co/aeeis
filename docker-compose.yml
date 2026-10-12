@@ -101,6 +101,8 @@ services:
       AEEIS_ENV: development
       AEEIS_DEMO_MODE: "1"
       AEEIS_HOST: 0.0.0.0
+      # Fixed development fixture credential; non-loopback binds require auth.
+      AEEIS_ACCESS_TOKEN: compose-access-token
       # Tailscale Serve exposes this loopback API at the stable tailnet name.
       # Keep the Docker service name for internal health checks as well.
       AEEIS_TRUSTED_HOSTS: aeeis,aeeis-server.tailc7b6c3.ts.net

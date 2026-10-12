@@ -19,6 +19,7 @@ const demoEnvironment = {
   ...inheritedEnvironment,
   NODE_ENV: 'development',
   AEEIS_ENV: 'development',
+  AEEIS_AUTH_DISABLED: '1',
   AEEIS_HOST: host,
   PORT: String(apiPort),
   AEEIS_DEMO_MODE: '1',

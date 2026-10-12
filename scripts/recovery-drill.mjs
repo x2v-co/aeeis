@@ -49,12 +49,15 @@ try {
   await waitForHttp(`http://127.0.0.1:${modelPort}/health`, modelProcess, timeoutMs, 'fixture model');
   apiProcess = startProcess(process.execPath, [resolve('dist/server.js')], {
     env: {
-      ...process.env,
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => ![
+        'AEEIS_ACCESS_TOKEN', 'AEEIS_PRINCIPAL_TOKENS', 'AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL',
+        'AEEIS_ACCESS_TOKEN_FILE', 'AEEIS_PRINCIPAL_TOKENS_FILE', 'AEEIS_OIDC_ISSUER_FILE', 'AEEIS_OIDC_AUDIENCE_FILE', 'AEEIS_OIDC_JWKS_URL_FILE',
+      ].includes(key))),
       PORT: String(apiPort), AEEIS_HOST: '127.0.0.1', AEEIS_DATA_DIR: dataDirectory,
       DATABASE_URL: restoredUrl.toString(), AEEIS_RUNNER: 'local',
       AEEIS_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`, AEEIS_MODEL: 'aeeis-recovery-fixture/1',
       AEEIS_MODEL_HEALTH_URL: `http://127.0.0.1:${modelPort}/health`, AEEIS_MODEL_ALLOW_INSECURE_HTTP: '1',
-      AEEIS_ACCESS_TOKEN: '', AEEIS_WORKER_TOKEN: '',
+      AEEIS_AUTH_DISABLED: '1', AEEIS_WORKER_TOKEN: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

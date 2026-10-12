@@ -67,6 +67,10 @@ import { FileResourceRegistry, type ResourceRegistry } from './runtime/resources
 // Validate credentials before opening stores and acquiring writer locks.
 loadFileEnvironment();
 validateRuntimeConfig();
+if (process.env.AEEIS_AUTH_DISABLED === '1') {
+  console.warn('WARNING: API AUTHENTICATION IS DISABLED (AEEIS_AUTH_DISABLED=1). All API callers have owner and operator access. This is only safe on loopback.');
+}
+const accessToken = process.env.AEEIS_ACCESS_TOKEN?.trim() ? process.env.AEEIS_ACCESS_TOKEN : undefined;
 const principalTokens = process.env.AEEIS_PRINCIPAL_TOKENS === undefined ? undefined
   : principalTokensSchema.parse(JSON.parse(process.env.AEEIS_PRINCIPAL_TOKENS));
 const oidcEnvPresent = ['AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL'].some(name => process.env[name] !== undefined);
@@ -82,8 +86,8 @@ if (oidcEnvPresent) {
   };
   oidcResolver = new OidcPrincipalResolver(config).resolver();
 }
-if (principalTokens !== undefined && (process.env.AEEIS_ACCESS_TOKEN || oidcResolver)) throw new Error('Configure only one of AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC authentication');
-if (oidcResolver && process.env.AEEIS_ACCESS_TOKEN) throw new Error('OIDC authentication cannot be combined with AEEIS_ACCESS_TOKEN');
+if (principalTokens !== undefined && (accessToken || oidcResolver)) throw new Error('Configure only one of AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC authentication');
+if (oidcResolver && accessToken) throw new Error('OIDC authentication cannot be combined with AEEIS_ACCESS_TOKEN');
 const projectionTargets: ProjectionTarget[] = process.env.AEEIS_PROJECTION_TARGETS === undefined ? [] : z.array(z.object({
   channel: z.string().trim().min(1).max(100), destination: z.string().trim().min(1).max(500),
   aggregateTypes: z.array(z.enum(['room', 'goal', 'plan', 'task', 'run', 'competition', 'debate', 'evolution', 'reminder', 'session_event'])).max(10).optional(),
@@ -514,7 +518,7 @@ try {
   const knowledgeMaintenance = knowledge && 'runEmbeddingReindexBatch' in knowledge && 'enqueueEmbeddingReindex' in knowledge && 'getEmbeddingReindexStatus' in knowledge ? knowledge as unknown as KnowledgeEmbeddingMaintenance : undefined;
   const defaultAllowedTools = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, localToolkit?.config.defaultAllowedTools ?? [], toolkit);
   const app = buildApp({ localToolDefaults: defaultAllowedTools, demoMode: process.env.AEEIS_DEMO_MODE === '1', repository, domain, brain, brainStore, ...(brainSemanticIndex ? { brainSemanticIndex } : {}), rsi, ...(rsiProposalSynthesis ? { rsiProposalSynthesis } : {}), ...(rsiAutomation ? { rsiAutomation } : {}), ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(knowledgeMaintenance ? { knowledge: knowledgeMaintenance } : {}), ...(knowledge ? { knowledgeProvider: knowledge } : {}), ...(projectSources ? { projectSourcesProvider: projectSources } : {}), ...(trustedHosts.length ? { trustedHosts } : {}), ...(publicHosts.length ? { publicHosts } : {}), ...(trustedOrigins.length ? { trustedOrigins } : {}), ...(agentEndpointHosts.length ? { agentEndpointHosts } : {}), ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), ...(toolkit ? { tools: toolkit } : {}), collaboration, collaborationTriggers, projection, reminders: reminderStore, reminderPump, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(feishuDebateIngress ? { feishuDebateIngress } : {}), ...(hermesDebateIngress ? { hermesDebateIngress } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}), ...(taskScheduler ? { taskScheduler } : {}),
-    ...(process.env.AEEIS_ACCESS_TOKEN ? { token: process.env.AEEIS_ACCESS_TOKEN } : {}),
+    ...(accessToken ? { token: accessToken } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
     ...(principalTokens ? { principalTokens } : {}),
     ...(oidcResolver ? { principalResolver: oidcResolver } : {}),
