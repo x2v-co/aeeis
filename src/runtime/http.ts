@@ -50,7 +50,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; maxSseConnections?: number }
+interface Options { localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -217,12 +217,26 @@ export function buildApp(options: Options) {
     try { return await healthProbe('brainSemanticIndex', () => options.brainSemanticIndex!.health!()); }
     catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Brain semantic index health probe timed out' : 'Brain semantic index health probe failed' }; }
   };
+  const toolsBootAt = Date.now();
+  const toolsGraceMs = options.readinessToolsGraceMs ?? Number(process.env.AEEIS_READY_TOOLS_GRACE_MS ?? 60_000);
+  if (!Number.isFinite(toolsGraceMs) || toolsGraceMs < 0) throw new Error('AEEIS_READY_TOOLS_GRACE_MS must be a nonnegative finite number');
+  let toolsWarmed = false;
   const toolsReadiness = async () => {
     if (!options.tools) return { ready: true, detail: 'tool gateway not configured' };
-    if (!options.tools.health) return { ready: false, detail: 'Tool gateway health probe unavailable' };
-    try { return await healthProbe('tools', () => options.tools!.health!()); }
-    catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'Tool gateway health probe timed out' : 'Tool gateway health probe failed' }; }
+    let result: { ready: boolean; detail: string };
+    try {
+      result = options.tools.health
+        ? await healthProbe('tools', () => options.tools!.health!())
+        : { ready: false, detail: 'Tool gateway health probe unavailable' };
+    } catch (error) {
+      result = { ready: false, detail: error instanceof HealthProbeTimeout ? 'Tool gateway health probe timed out' : 'Tool gateway health probe failed' };
+    }
+    if (result.ready) { toolsWarmed = true; return result; }
+    if (!toolsWarmed && Date.now() - toolsBootAt < toolsGraceMs) return { ready: false, detail: 'warming', state: 'warming' as const };
+    return { ...result, state: 'failed' as const };
   };
+  // Start the first cached probe at boot without delaying the server's startup.
+  app.addHook('onReady', () => { if (options.tools) void toolsReadiness(); });
   const agentRegistryReadiness = async () => {
     if (!options.agentDirectory) return { ready: true, detail: 'agent registry not configured' };
     if (!options.agentDirectory.health) return { ready: false, detail: 'Agent Registry health probe unavailable' };
@@ -245,7 +259,7 @@ export function buildApp(options: Options) {
     try { return await healthProbe(name, operation); }
     catch (error) { return { ready: false, detail: error instanceof HealthProbeTimeout ? 'dependency check timed out' : 'dependency check failed', checkedAt: new Date().toISOString() }; }
   };
-  type ReadinessCheck = { name: string; ready: boolean; required: boolean; detail: string };
+  type ReadinessCheck = { name: string; ready: boolean; required: boolean; detail: string; state?: 'warming' | 'failed' };
   type ReadinessSnapshot = { ready: boolean; checks: ReadinessCheck[]; reindex?: KnowledgeEmbeddingReindexStatus; knowledgeCollected: boolean };
   let readinessInFlight: Promise<ReadinessSnapshot> | undefined;
   const readinessSnapshot = async (): Promise<ReadinessSnapshot> => {
@@ -293,7 +307,7 @@ export function buildApp(options: Options) {
         { name: 'collaboration', ready: Boolean(options.collaboration), required: false, detail: options.collaboration ? 'collaboration repository configured' : 'collaboration unavailable' },
         { name: 'reminders', ready: Boolean(options.reminders), required: false, detail: options.reminders ? 'durable reminder store configured' : 'reminders unavailable' },
       );
-      return { ready: checks.every(result => !result.required || result.ready), checks, knowledgeCollected, ...(reindex === undefined ? {} : { reindex }) };
+      return { ready: checks.every(result => result.state !== 'warming' && (!result.required || result.ready)), checks, knowledgeCollected, ...(reindex === undefined ? {} : { reindex }) };
     })();
     try { return await readinessInFlight; }
     finally { readinessInFlight = undefined; }

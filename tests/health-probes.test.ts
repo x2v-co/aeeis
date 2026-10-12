@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
+import { AgentEngine } from '../src/runtime/engine.js';
+import { AeeisService } from '../src/application/aeeis-service.js';
+import { InMemoryStore } from '../src/adapters/in-memory-store.js';
+import { InMemoryTaskDispatchRepository, TaskScheduler } from '../src/task-scheduler.js';
 import type { ToolGateway } from '../src/integrations.js';
 
 function deferred<T>() {
@@ -107,6 +111,56 @@ describe('cached read-only health probes', () => {
 });
 
 describe('HTTP readiness health caching', () => {
+  it.each(['pending', 'failure', 'exception'] as const)('warms the first %s probe at boot, stays 503 and fails honestly after startup grace', async mode => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-ready-startup-'));
+    const repository = new FileRunRepository(directory); await repository.init();
+    const held = deferred<ProbeHealth>();
+    let time = 10_000;
+    const date = vi.spyOn(Date, 'now').mockImplementation(() => time);
+    const health = vi.fn(async () => {
+      if (mode === 'pending') return held.promise;
+      if (mode === 'exception') throw new Error('private failure');
+      return { ready: false, detail: 'tool manifest unavailable' };
+    });
+    const tools: ToolGateway = { health, listTools: async () => [], invoke: async () => { throw new Error('unused'); } };
+    const domain = new AeeisService(new InMemoryStore());
+    const engine = new AgentEngine(repository, {
+      pin: { model: 'fixture', endpoint: 'http://127.0.0.1:1', promptVersion: 'test' }, complete: async () => ({ value: {} }),
+      health: async () => ({ ...good, checkedAt: new Date().toISOString() }),
+    });
+    const dispatcher = { notify: async () => {}, close: async () => {} };
+    const taskScheduler = new TaskScheduler(domain, engine, dispatcher, new InMemoryTaskDispatchRepository());
+    const app = buildApp({ repository, tools, engine, domain, dispatcher, taskScheduler, readinessCheckTimeoutMs: 100, readinessToolsGraceMs: 1000 });
+    try {
+      await app.ready(); // Boot alone initiates the probe, with no readiness request.
+      expect(health).toHaveBeenCalledTimes(1);
+      const warm = await app.inject('/readyz');
+      expect(warm.statusCode).toBe(503);
+      expect(warm.json().checks.filter((check: { required: boolean }) => check.required).every((check: { ready: boolean }) => check.ready)).toBe(true);
+      expect(warm.json().checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'tools', ready: false, state: 'warming', detail: 'warming' })]));
+      time = 11_001;
+      const failed = await app.inject('/readyz');
+      expect(failed.json().checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'tools', ready: false, state: 'failed', detail: mode === 'pending' ? 'Tool gateway health probe timed out' : mode === 'exception' ? 'Tool gateway health probe failed' : 'tool manifest unavailable' })]));
+      expect(health).toHaveBeenCalledTimes(1);
+      if (mode === 'pending') {
+        held.resolve(good);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const recovered = await app.inject('/readyz');
+        expect(recovered.statusCode).toBe(200);
+        expect(recovered.json().checks).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'tools', ready: true })]));
+      }
+    } finally { held.resolve(good); date.mockRestore(); await app.close(); await repository.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('validates the tools startup grace environment setting', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-ready-env-'));
+    const repository = new FileRunRepository(directory); await repository.init();
+    try {
+      vi.stubEnv('AEEIS_READY_TOOLS_GRACE_MS', '-1');
+      expect(() => buildApp({ repository })).toThrow('AEEIS_READY_TOOLS_GRACE_MS');
+    } finally { vi.unstubAllEnvs(); await repository.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('shares cached tools health across readyz, status and metrics while leaving manifests live', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-ready-cache-'));
     const repository = new FileRunRepository(directory); await repository.init();

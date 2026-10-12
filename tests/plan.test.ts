@@ -14,6 +14,12 @@ describe("model plan parsing", () => {
     expect(decisionSchema.safeParse({ type: "tool", tool: "shell", argument: "execute" }).success).toBe(false);
   });
 
+  it("unwraps fenced/stringified plans and defaults absent dependencies", () => {
+    const { dependsOn: _unused, ...node } = draft.nodes[0]!;
+    expect(validatePlan('```json\n' + JSON.stringify({ plan: JSON.stringify({ ...draft, nodes: [node] }) }) + '\n```')).toEqual(draft);
+    expect(() => validatePlan({ plan: { ...draft, nodes: [{ ...node, dependsOn: ['missing'] }] } })).toThrow('missing dependency');
+  });
+
   it("still rejects malformed nodes, missing/duplicate dependencies and cycles", () => {
     expect(() => validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], id: "Invalid" }] })).toThrow();
     expect(() => validatePlan({ ...draft, nodes: [{ ...draft.nodes[0], dependsOn: ["missing"] }] })).toThrow("missing dependency");

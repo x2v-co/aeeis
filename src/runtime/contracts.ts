@@ -75,25 +75,25 @@ export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   title: z.string().min(1).max(200),
   instruction: z.string().min(1).max(4000),
-  dependsOn: z.array(z.string()).max(20),
+  dependsOn: z.array(z.string()).max(20).default([]),
 }).strip();
 // Model planning metadata is not part of the executable plan. Strip it before
-// graph validation and hashing; request/decision/authorization schemas stay strict.
+// graph validation and hashing; request/authorization schemas stay strict.
 export const planSchema = z.object({
   summary: z.string().min(1).max(4000),
   nodes: z.array(nodeSchema).min(1).max(12),
 }).strip();
 export const decisionSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strict(),
-  z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strict(),
-  z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strict(),
-  z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strict(),
-  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100), artifactType: z.enum(['project-pulse/1', 'website-builder/1']).optional(), structured: z.unknown().optional() }).strict(),
+  z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strip(),
+  z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strip(),
+  z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
+  z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strip(),
+  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100).default([]), artifactType: z.enum(['project-pulse/1', 'website-builder/1']).optional(), structured: z.unknown().optional() }).strip(),
 ]);
 export const reviewSchema = z.object({
   verdict: z.enum(['accepted', 'needs_revision']),
   summary: z.string().min(1).max(4000),
-  issues: z.array(z.string().min(1).max(2000)).max(20),
+  issues: z.preprocess(value => typeof value === 'string' ? [value] : value, z.array(z.string().min(1).max(2000)).max(20).default([])),
   /** Optional calibrated confidence used by governed collaboration triggers. */
   confidence: z.number().min(0).max(1).optional(),
   /** Optional concrete, evidence-backed RSI proposal. A reviewer may surface
@@ -104,33 +104,33 @@ export const reviewSchema = z.object({
     baseVersion: z.string().trim().min(1).max(200), proposedVersion: z.string().trim().min(1).max(200),
     change: z.string().trim().min(1).max(8000), reason: z.string().trim().min(1).max(4000),
     risk: z.enum(['low', 'medium', 'high']), sourceReceiptRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
-  }).strict().optional(),
-}).strict();
+  }).strip().optional(),
+}).strip();
 const projectPulseItemSchema = z.object({
   text: z.string().trim().min(1).max(2000),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
-}).strict();
+}).strip();
 const projectPulseOwnerSchema = z.object({
   name: z.string().trim().min(1).max(200),
   responsibility: z.string().trim().min(1).max(1000),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
-}).strict();
+}).strip();
 const projectPulseDeadlineSchema = z.object({
   text: z.string().trim().min(1).max(1000),
   date: z.string().trim().min(1).max(100),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
-}).strict();
+}).strip();
 const workspacePathSchema = z.string().trim().min(1).max(1000).refine(value => !value.startsWith('/') && !value.includes('\\') && !value.split('/').some(part => part === '' || part === '.' || part === '..'), 'path must be relative to the Run workspace');
-const websiteBuilderEvidenceItemSchema = z.object({ text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict();
+const websiteBuilderEvidenceItemSchema = z.object({ text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strip();
 export const websiteBuilderArtifactSchema = z.object({
   schemaVersion: z.literal('website-builder/1'),
   changedFiles: z.array(workspacePathSchema).max(500),
-  preview: z.object({ url: z.string().url().optional(), status: z.enum(['started', 'ready', 'failed', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict().optional(),
-  validation: z.array(z.object({ name: z.string().trim().min(1).max(200), status: z.enum(['passed', 'failed', 'skipped', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict()).max(100),
-  artifacts: z.array(z.object({ path: workspacePathSchema, kind: z.string().trim().min(1).max(100).optional(), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strict()).max(100),
+  preview: z.object({ url: z.string().url().optional(), status: z.enum(['started', 'ready', 'failed', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strip().optional(),
+  validation: z.array(z.object({ name: z.string().trim().min(1).max(200), status: z.enum(['passed', 'failed', 'skipped', 'unknown']), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strip()).max(100),
+  artifacts: z.array(z.object({ path: workspacePathSchema, kind: z.string().trim().min(1).max(100).optional(), evidenceRefs: z.array(z.string().trim().min(1).max(50)).min(1) }).strip()).max(100),
   blockers: z.array(websiteBuilderEvidenceItemSchema).max(50),
   unknowns: z.array(websiteBuilderEvidenceItemSchema).max(50),
-}).strict();
+}).strip();
 /** Machine-readable Project Pulse output. Empty sections are valid; every
  * asserted entry must carry at least one source, receipt or artifact ref. */
 export const projectPulseArtifactSchema = z.object({
@@ -144,7 +144,7 @@ export const projectPulseArtifactSchema = z.object({
   deadlines: z.array(projectPulseDeadlineSchema).max(30),
   nextActions: z.array(projectPulseItemSchema).max(30),
   unknowns: z.array(projectPulseItemSchema).max(30),
-}).strict();
+}).strip();
 export type TaskRequest = z.infer<typeof requestSchema>;
 export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
@@ -277,8 +277,24 @@ export interface AgentRun {
   reconciledModelCall?: ReconciledModelCall;
 }
 
+/** Decode model transport formatting without changing executable semantics. */
+export function normalizeModelJson(value: unknown, wrapper?: string, discriminator?: string): unknown {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (typeof value === 'string') {
+      const text = value.trim().replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, '$1');
+      try { value = JSON.parse(text); continue; } catch { return value; }
+    }
+    if (wrapper && value && typeof value === 'object' && !Array.isArray(value)
+      && (!discriminator || !(discriminator in value)) && wrapper in value) {
+      value = (value as Record<string, unknown>)[wrapper]; continue;
+    }
+    return value;
+  }
+  return value;
+}
+
 export function validatePlan(value: unknown): PlanDraft {
-  const plan = planSchema.parse(value);
+  const plan = planSchema.parse(normalizeModelJson(value, 'plan', 'nodes'));
   const byId = new Map(plan.nodes.map(n => [n.id, n]));
   if (byId.size !== plan.nodes.length) throw new Error('Duplicate task ID');
   const visiting = new Set<string>(), visited = new Set<string>();
