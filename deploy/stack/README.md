@@ -137,7 +137,12 @@ allowlist; configure it independently if switching to service URLs.
   Backup and health timers run daily and every 5 minutes.
   Both services use `OnFailure=aeeis-notify@<instance>.service`; set
   `AEEIS_NOTIFY_WEBHOOK` in the protected stack env to receive JSON `text`
-  messages. Unset webhooks log to the journal; delivery failures are best effort.
+  messages. For Telegram set `AEEIS_NOTIFY_TG_BOT_TOKEN` and
+  `AEEIS_NOTIFY_TG_CHAT_ID` (text prefixed `[aeeis]`; may be combined with the
+  webhook). curl uses `AEEIS_NOTIFY_PROXY`, else the first line of
+  `AEEIS_NOTIFY_PROXY_FILE` (default `/etc/notify-failure/proxy`; `KEY=url`
+  form accepted) when present. With no target configured, alerts log to the
+  journal only; delivery failures are best effort.
   Follow the runbook's installation steps, including removing the old
   `10-notify.conf` drop-ins now that notifications are in the repo units.
 - Optional `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and
