@@ -1,0 +1,11 @@
+# /etc/systemd/system/aeeis-backup@.timer
+[Unit]
+Description=Daily AEEIS stack backup (%i)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

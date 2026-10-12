@@ -1,4 +1,5 @@
 import { parseTemporalVersioningConfig, type TemporalVersioningConfig } from './versioning.js';
+import { validateInternalEndpoint } from '../internal-endpoint.js';
 
 export interface TemporalWorkerConfig {
   token: string;
@@ -25,17 +26,6 @@ function boundedName(env: NodeJS.ProcessEnv, name: string, fallback: string): st
   return value;
 }
 
-function workerApiUrl(raw: string, allowInsecureHttp: boolean): string {
-  let url: URL;
-  try { url = new URL(raw); } catch { throw new Error('AEEIS_INTERNAL_URL must be a valid URL'); }
-  if (url.username || url.password || url.search || url.hash) throw new Error('AEEIS_INTERNAL_URL must not contain credentials, query or fragment');
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && (allowInsecureHttp || loopback))) {
-    throw new Error('AEEIS_INTERNAL_URL must use HTTPS except loopback or explicit development override');
-  }
-  return url.toString().replace(/\/+$/, '');
-}
-
 /** Parse Worker-only configuration before connecting to Temporal. The API
  * process has a separate deployment validator; keeping this boundary local
  * prevents a malformed Worker from polling or exposing a misleading readyz. */
@@ -46,7 +36,7 @@ export function parseTemporalWorkerConfig(env: NodeJS.ProcessEnv = process.env):
   if (production && !env.AEEIS_INTERNAL_URL?.trim()) throw new Error('Production Temporal Worker requires AEEIS_INTERNAL_URL');
   if (production && env.AEEIS_WORKER_ALLOW_INSECURE_HTTP === '1') throw new Error('Production Temporal Worker cannot enable insecure HTTP');
   if (env.AEEIS_WORKER_ALLOW_INSECURE_HTTP !== undefined && !['0', '1'].includes(env.AEEIS_WORKER_ALLOW_INSECURE_HTTP)) throw new Error('AEEIS_WORKER_ALLOW_INSECURE_HTTP must be 0 or 1');
-  const api = workerApiUrl(env.AEEIS_INTERNAL_URL?.trim() || 'http://127.0.0.1:4323', env.AEEIS_WORKER_ALLOW_INSECURE_HTTP === '1');
+  const api = validateInternalEndpoint(env.AEEIS_INTERNAL_URL?.trim() || 'http://127.0.0.1:4323', 'AEEIS_INTERNAL_URL', env, env.AEEIS_WORKER_ALLOW_INSECURE_HTTP === '1')!.toString().replace(/\/+$/, '');
   const taskQueue = boundedName(env, 'AEEIS_TASK_QUEUE', 'aeeis-agent');
   const namespace = boundedName(env, 'TEMPORAL_NAMESPACE', 'default');
   const healthHost = (env.AEEIS_WORKER_HEALTH_HOST ?? '127.0.0.1').trim();

@@ -1,4 +1,5 @@
 import { validateHealthEndpoint } from './dependency-health.js';
+import { validateInternalEndpoint } from './internal-endpoint.js';
 import { createPublicKey } from 'node:crypto';
 
 function parseConfigRecord(raw: string | undefined, label: string, allowEmpty = false): Record<string, string> {
@@ -284,7 +285,10 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   if (env.AEEIS_CHANNEL_IDENTITY_TOKEN && !env.AEEIS_CHANNEL_IDENTITY_URL) {
     throw new Error('AEEIS_CHANNEL_IDENTITY_TOKEN requires AEEIS_CHANNEL_IDENTITY_URL');
   }
-  validateIntegrationEndpoint(env.AEEIS_INTERNAL_URL, 'AEEIS_INTERNAL_URL');
+  validateInternalEndpoint(env.AEEIS_INTERNAL_URL, 'AEEIS_INTERNAL_URL', env);
+  if (env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP !== undefined && !['0', '1'].includes(env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP)) throw new Error('AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP must be 0 or 1');
+  validateInternalEndpoint(env.AEEIS_TEMPORAL_WORKER_HEALTH_URL, 'AEEIS_TEMPORAL_WORKER_HEALTH_URL', env, env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1');
+  if (production && env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1') throw new Error('Production Temporal Worker health cannot use insecure HTTP');
   validateAgentCards(env.AEEIS_AGENT_CARDS, env.AEEIS_AGENT_ALLOW_INSECURE_HTTP === '1');
   validateOAuthConfig(env.AEEIS_AGENT_OAUTH_CONFIG);
   validateEndpointFields(env.AEEIS_LINEAR_PROJECT_SOURCES, 'AEEIS_LINEAR_PROJECT_SOURCES');
@@ -474,9 +478,6 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
     if (!env.AEEIS_WORKER_TOKEN) throw new Error('Temporal production configuration requires AEEIS_WORKER_TOKEN');
     if (!env.AEEIS_INTERNAL_URL) throw new Error('Temporal production configuration requires AEEIS_INTERNAL_URL');
     if (production && !env.AEEIS_TEMPORAL_WORKER_HEALTH_URL) throw new Error('Temporal production configuration requires AEEIS_TEMPORAL_WORKER_HEALTH_URL');
-    if (env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP !== undefined && !['0', '1'].includes(env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP)) throw new Error('AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP must be 0 or 1');
-    validateEndpoint(env.AEEIS_TEMPORAL_WORKER_HEALTH_URL, 'AEEIS_TEMPORAL_WORKER_HEALTH_URL', env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1');
-    if (production && env.AEEIS_TEMPORAL_WORKER_HEALTH_ALLOW_INSECURE_HTTP === '1') throw new Error('Production Temporal Worker health cannot use insecure HTTP');
     if (!env.AEEIS_BUILD_ID) throw new Error('Temporal production configuration requires stable AEEIS_BUILD_ID');
     if (env.AEEIS_TEMPORAL_USE_VERSIONING !== '1') throw new Error('Temporal production configuration requires AEEIS_TEMPORAL_USE_VERSIONING=1');
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(env.AEEIS_BUILD_ID)) throw new Error('AEEIS_BUILD_ID must be 1-128 characters using letters, digits, ., _, :, / or -');

@@ -1,0 +1,42 @@
+# Smoke-test overlay: adds a Fixture Model and a Fixture Projection Sink inside
+# the shared network namespace (loopback, so production validation stays ON:
+# AEEIS_ENV=production, no insecure-HTTP switches). For isolated CI only.
+#   CI=true docker compose -f compose.yml -f compose.smoke.yml --env-file stack.env up -d
+services:
+  fixture-model:
+    image: ${AEEIS_IMAGE:-aeeis:local}
+    init: true
+    network_mode: service:netns
+    command: ["node", "scripts/fixture-model.mjs"]
+    environment:
+      CI: ${CI:?The fixture overlay is for isolated CI only; set CI=true}
+      AEEIS_FIXTURE_MODEL_HOST: 127.0.0.1
+      AEEIS_FIXTURE_MODEL_PORT: 4399
+    depends_on:
+      netns:
+        condition: service_started
+
+  fixture-sink:
+    image: ${AEEIS_IMAGE:-aeeis:local}
+    init: true
+    network_mode: service:netns
+    command: ["node", "scripts/fixture-projection-sink.mjs"]
+    environment:
+      AEEIS_FIXTURE_SINK_HOST: 127.0.0.1
+      AEEIS_FIXTURE_SINK_PORT: 4799
+    depends_on:
+      netns:
+        condition: service_started
+
+  api:
+    depends_on:
+      fixture-model:
+        condition: service_started
+      fixture-sink:
+        condition: service_started
+    environment:
+      AEEIS_MODEL_BASE_URL: http://127.0.0.1:4399/v1
+      AEEIS_MODEL: aeeis-fixture/1
+      AEEIS_MODEL_HEALTH_URL: http://127.0.0.1:4399/health
+      AEEIS_PROJECTION_SINK_URL: http://127.0.0.1:4799/events
+      AEEIS_PROJECTION_SINK_HEALTH_URL: http://127.0.0.1:4799/health
