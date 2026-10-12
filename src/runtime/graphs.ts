@@ -1,4 +1,5 @@
 import type { AgentRun } from './contracts.js';
+import { threadHistorySources } from './thread-context.js';
 
 export interface GraphNode { id: string; type: string; label: string; status?: string; metadata?: Record<string, unknown> }
 export interface GraphEdge { from: string; to: string; type: string }
@@ -79,6 +80,7 @@ export function projectRunGraphs(run: AgentRun): RunGraphs {
   const evidenceNodes: GraphNode[] = [];
   const evidenceEdges: GraphEdge[] = [];
   for (const source of run.context.sources) evidenceNodes.push({ id: source.id, type: 'source', label: source.title, metadata: { source: source.source, hash: source.hash, ...(source.origin ? { origin: source.origin } : {}) } });
+  for (const source of threadHistorySources(run)) evidenceNodes.push({ id: source.id, type: 'source', label: source.title, metadata: { source: source.source, hash: source.hash, contentHash: source.contentHash, origin: source.origin, classification: source.classification, untrusted: true, threadHistoryHash: run.context.threadHistory!.hash } });
   for (const receipt of run.toolReceipts ?? []) if (receipt.authorization?.decision !== 'isolated') evidenceNodes.push({ id: receipt.receiptId, type: 'tool_receipt', label: receipt.operation, status: receipt.status, metadata: { provider: receipt.provider, responseHash: receipt.responseHash ?? null } });
   for (const outcome of (run.delegationOutcomes ?? []).filter(item => item.disposition !== 'isolated')) evidenceNodes.push({ id: outcome.receiptRef, type: 'delegation_receipt', label: `agent:${outcome.receipt.agentId}`, status: outcome.status, metadata: { contextVersion: outcome.contextVersion } });
   for (const call of run.calls) evidenceNodes.push({ id: call.id, type: 'model_receipt', label: `model:${call.phase}`, status: call.state, metadata: { inputHash: call.inputHash, outputHash: call.outputHash ?? null } });

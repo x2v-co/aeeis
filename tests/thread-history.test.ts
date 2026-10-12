@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { buildThreadHistory, DEFAULT_THREAD_HISTORY_BYTES, threadHistoryHash } from '../src/runtime/thread-history.js';
 import { ThreadConflict } from '../src/runtime/threads.js';
+import type { AgentRun } from '../src/runtime/contracts.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 
 async function fixture(count = 3) {
@@ -97,7 +98,9 @@ describe('frozen thread history', () => {
     const outputs = await buildThreadHistory(repository, thread.id, await repository.get(runs[0]!.id), threadScope, 'internal', 65536);
     expect(outputs.entries[0]!.excerpts.filter(item => item.kind === 'artifact')).toHaveLength(8);
     expect(outputs.omitted.artifacts).toBe(2);
-    expect(Buffer.byteLength(outputs.entries[0]!.excerpts[0]!.text, 'utf8')).toBe(8192);
+    expect(Buffer.byteLength(outputs.entries[0]!.excerpts[0]!.text, 'utf8')).toBeLessThanOrEqual(8192);
+    expect(outputs.entries[0]!.excerpts[0]!.text).toMatch(/…\[truncated\]$/);
+    expect(outputs.entries[0]!.excerpts[0]!.text).not.toContain('\uFFFD');
     expect(outputs.truncated).toBe(1);
   });
   it('rejects disclosure of included parent or ancestor classifications and validates envelope budgets', async () => {
@@ -109,5 +112,38 @@ describe('frozen thread history', () => {
     for (const budget of [0, 1, 1.5, 65537]) await expect(buildThreadHistory(repository, thread.id, undefined, threadScope, 'internal', budget)).rejects.toThrow(RangeError);
     const empty = await buildThreadHistory(repository, thread.id, undefined, threadScope, 'internal', 32768);
     expect(empty.entries).toEqual([]); expect(empty.visitedAncestors).toBe(0);
+  });
+  it('retains source classifications and rejects owner audience exclusion even after redaction', async () => {
+    const { repository, thread, runs } = await fixture(1);
+    await repository.mutate(runs[0]!.id, run => { run.context.sources[0]!.classification = 'private'; });
+    const parent = await repository.get(runs[0]!.id);
+    await expect(buildThreadHistory(repository, thread.id, parent, threadScope, 'internal', 32768)).rejects.toThrow('classification');
+    const history = await buildThreadHistory(repository, thread.id, parent, threadScope, 'private', 32768);
+    expect(history.entries[0]!.classification).toBe('private');
+    parent.context.audience = ['bob'];
+    await expect(buildThreadHistory(repository, thread.id, parent, threadScope, 'private', 32768)).rejects.toThrow('audience');
+    await expect(buildThreadHistory(repository, thread.id, parent, { ...threadScope, tenantId: 'other' }, 'private', 32768)).rejects.toThrow('owner and tenant');
+  });
+  it('excludes isolated receipts, delegations and dependent artifacts including review prose', async () => {
+    const { repository, thread, runs } = await fixture(1);
+    const parent = await repository.get(runs[0]!.id);
+    parent.toolReceipts = [{ receiptId: 'isolated-tool', outputRefs: ['isolated-tool-output'], authorization: { decision: 'isolated' } }] as AgentRun['toolReceipts'];
+    parent.delegationOutcomes = [{ receiptRef: 'isolated-agent', disposition: 'isolated', result: { artifacts: [{ ref: 'isolated-agent-output' }] } }] as AgentRun['delegationOutcomes'];
+    const artifact = parent.artifacts[0]!;
+    parent.artifacts = [
+      { ...artifact, id: 'dependent', taskId: 'dependent', evidenceRefs: ['tainted'], content: 'indirect isolated text' },
+      { ...artifact, id: 'tainted', taskId: 'tainted', evidenceRefs: ['isolated-tool-output'], content: 'isolated tool text' },
+      { ...artifact, id: 'agent-result', taskId: 'agent-result', evidenceRefs: ['isolated-agent-output'], content: 'isolated agent text' },
+      { ...artifact, id: 'safe', taskId: 'safe', content: 'safe final output' },
+    ];
+    parent.review = { verdict: 'accepted', issues: [], summary: 'review repeats isolated tool text' };
+    parent.plans = [{ version: 1, hash: 'planhash', createdAt: parent.createdAt, nodes: [], summary: 'plan repeats isolated tool text' }];
+    const history = await buildThreadHistory(repository, thread.id, parent, threadScope, 'internal', 32768);
+    expect(history.entries[0]!.excerpts.map(item => item.ref)).toEqual([`${parent.id}#goal`, 'safe']);
+    expect(history.omitted.artifacts).toBe(3);
+    expect(history.omitted.excerpts).toBe(2);
+    expect(JSON.stringify(history)).not.toContain('isolated tool text');
+    expect(JSON.stringify(history)).not.toContain('isolated agent text');
+    expect(JSON.stringify(history)).not.toContain('indirect isolated text');
   });
 });

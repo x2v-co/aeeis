@@ -19,7 +19,7 @@ export const threadPageSchema = z.object({
 }).strict();
 
 export class ThreadService {
-  constructor(private repository: RunRepository, private engine?: Pick<AgentEngine, 'create'>, private contextBudgetBytes = DEFAULT_THREAD_HISTORY_BYTES) {
+  constructor(private repository: RunRepository, private engine?: Pick<AgentEngine, 'create' | 'authorizeThreadHistory'>, private contextBudgetBytes = DEFAULT_THREAD_HISTORY_BYTES) {
     if (!Number.isSafeInteger(contextBudgetBytes) || contextBudgetBytes <= 0 || contextBudgetBytes > MAX_THREAD_HISTORY_BYTES) throw new RangeError('Invalid server thread context byte budget');
   }
   private validateId(id: string): void { if (!/^thread_[a-f0-9-]{36}$/.test(id)) throw new NotFound('Unknown thread'); }
@@ -54,8 +54,9 @@ export class ThreadService {
       throw new ThreadConflict('Parent must belong to this thread');
     }
     assertFollowupParent(parent);
-    const history = await buildThreadHistory(this.repository, id, parent, scope, body.request.privacy, budget);
     if (!this.engine) throw new Error('Model runtime is not configured');
+    const engine = this.engine;
+    const history = await buildThreadHistory(this.repository, id, parent, scope, body.request.privacy, budget, run => engine.authorizeThreadHistory(run, scope));
     return this.engine.create(body.request, scope.owner, scope.tenantId, async run => {
       run.context.threadHistory = history;
       return this.repository.createRunInThread(run, id, parent?.id, scope, parent?.revision);

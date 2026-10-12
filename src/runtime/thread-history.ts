@@ -2,16 +2,16 @@ import { createHash } from 'node:crypto';
 import type { AgentRun } from './contracts.js';
 import type { RunRepository } from './repository.js';
 import type { Ownership } from '../security/principal.js';
-import { isOwnedBy } from '../security/principal.js';
+import { isOwnedBy, principalAudience } from '../security/principal.js';
 import { ThreadConflict } from './threads.js';
-import { redactRunData } from './run-debug.js';
+import { capDebugField, redactRunData } from './run-debug.js';
 
 export const DEFAULT_THREAD_HISTORY_BYTES = 32 * 1024;
 export const MAX_THREAD_HISTORY_BYTES = 64 * 1024;
 const MAX_ANCESTORS = 20;
 const MAX_ARTIFACTS = 8;
 const MAX_EXCERPT_BYTES = 8 * 1024;
-const exclusions = ['rawModelCalls', 'credentials', 'environments', 'toolPayloads', 'sourcePayloads', 'approvals', 'permissions'];
+const exclusions = ['rawModelCalls', 'credentials', 'environments', 'toolPayloads', 'sourcePayloads', 'approvals', 'permissions', 'isolatedEvidence'];
 export interface ThreadHistoryExcerpt {
   kind: 'goal' | 'plan' | 'review' | 'answer' | 'artifact';
   ref: string;
@@ -71,10 +71,48 @@ export function assertThreadHistoryUnchanged(before: ThreadHistory | undefined, 
   if (JSON.stringify(before) !== JSON.stringify(after)) throw new ThreadConflict('Thread history snapshot is immutable');
 }
 
+/** Summaries may derive from any source in the run; redaction cannot downgrade
+ * their classification. Reusing a snapshot never admits a new recipient. */
+function historyClassification(run: AgentRun, scope: Ownership, privacy: AgentRun['privacy']): AgentRun['privacy'] {
+  const audience = principalAudience({ id: scope.owner, tenantId: scope.tenantId });
+  // Older owner-only contexts used bare owner IDs. Ownership was checked first.
+  if (!run.context.audience.includes(audience) && !run.context.audience.includes(scope.owner))
+    throw new ThreadConflict('Thread history audience does not include its owner');
+  let classification = run.privacy ?? 'internal';
+  for (const candidate of [...run.context.sources.map(source => source.classification ?? classification), ...(run.context.threadHistory?.entries.map(entry => entry.classification) ?? [])]) {
+    if (classificationRank[candidate] > classificationRank[classification]) classification = candidate;
+  }
+  assertHistoryPrivacy({ ...run, privacy: classification }, privacy);
+  return classification;
+}
+
+/** Isolated external outputs remain unavailable even when an artifact cites
+ * them indirectly through another artifact. */
+function isolatedEvidence(run: AgentRun): Set<string> {
+  const refs = new Set((run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision === 'isolated').flatMap(receipt => [receipt.receiptId, ...receipt.outputRefs]));
+  for (const outcome of run.delegationOutcomes ?? []) if (outcome.disposition === 'isolated') {
+    refs.add(outcome.receiptRef);
+    const result = outcome.result as { artifacts?: unknown } | undefined;
+    if (Array.isArray(result?.artifacts)) for (const artifact of result.artifacts) {
+      if (artifact && typeof artifact === 'object') {
+        if (typeof artifact.id === 'string') refs.add(artifact.id);
+        if (typeof artifact.ref === 'string') refs.add(artifact.ref);
+      }
+    }
+  }
+  let changed: boolean;
+  do {
+    changed = false;
+    for (const source of run.context.sources) if (!refs.has(source.id) && source.origin && refs.has(source.origin.ref)) { refs.add(source.id); changed = true; }
+    for (const artifact of run.artifacts) if (!refs.has(artifact.id) && artifact.evidenceRefs.some(ref => refs.has(ref))) { refs.add(artifact.id); changed = true; }
+  } while (changed);
+  return refs;
+}
+
 /** Fetch only the selected ancestry. Parent-first selection favors recent evidence;
  * persisted entries are chronological. This schema deliberately selects prose,
  * never complete model, source, tool or delegation records. */
-export async function buildThreadHistory(repository: RunRepository, threadId: string, parent: AgentRun | undefined, scope: Ownership, privacy: AgentRun['privacy'], budgetBytes: number): Promise<ThreadHistory> {
+export async function buildThreadHistory(repository: RunRepository, threadId: string, parent: AgentRun | undefined, scope: Ownership, privacy: AgentRun['privacy'], budgetBytes: number, authorize?: (run: AgentRun) => Promise<void>): Promise<ThreadHistory> {
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes <= 0 || budgetBytes > MAX_THREAD_HISTORY_BYTES) throw new RangeError('Invalid thread context byte budget');
   const snapshot: ThreadHistory = {
     policyVersion: 'aeeis-thread-history/1', threadId, ...(parent ? { parentRunId: parent.id } : {}),
@@ -90,9 +128,10 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
       || (parent && current.threadSequence > parent.threadSequence!)) throw new ThreadConflict('Invalid thread ancestry');
     seen.add(current.id);
     if (!isOwnedBy(current, scope)) throw new ThreadConflict('Thread history must belong to the same owner and tenant');
-    assertHistoryPrivacy(current, privacy);
+    const classification = historyClassification(current, scope, privacy);
+    await authorize?.(current);
     snapshot.visitedAncestors++;
-    const entry: ThreadHistoryEntry = { runId: current.id, revision: current.revision, threadSequence: current.threadSequence, classification: current.privacy ?? 'internal', excerpts: [] };
+    const entry: ThreadHistoryEntry = { runId: current.id, revision: current.revision, threadSequence: current.threadSequence, classification, excerpts: [] };
     // Reserve small counter growth before filling the envelope to its boundary.
     const selectionBudget = budgetBytes - 64;
     snapshot.entries.unshift(entry);
@@ -106,16 +145,23 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
     const candidates: Array<{ kind: ThreadHistoryExcerpt['kind']; ref: string; text: string; hash?: string }> = [
       { kind: 'goal', ref: `${current.id}#goal`, text: current.goal },
     ];
+    const isolated = isolatedEvidence(current);
+    // Plan/review summaries can repeat withheld artifacts; do not reintroduce
+    // their prose through a summary even when the artifact itself is excluded.
+    const isolatedArtifacts = current.artifacts.some(artifact => isolated.has(artifact.id));
     const plan = current.plans.at(-1);
-    if (plan) candidates.push({ kind: 'plan', ref: `${current.id}#plan:${plan.version}`, text: plan.summary });
-    if (current.review) candidates.push({ kind: 'review', ref: `${current.id}#review`, text: current.review.summary });
+    if (plan && !isolatedArtifacts) candidates.push({ kind: 'plan', ref: `${current.id}#plan:${plan.version}`, text: plan.summary });
+    else if (plan) snapshot.omitted.excerpts++;
+    if (current.review && !isolatedArtifacts) candidates.push({ kind: 'review', ref: `${current.id}#review`, text: current.review.summary });
+    else if (current.review) snapshot.omitted.excerpts++;
     // Final output excerpts precede potentially numerous question/answer pairs.
     const taskIds = new Set<string>();
     const artifacts: AgentRun['artifacts'] = [];
     for (let index = current.artifacts.length - 1; index >= 0 && artifacts.length < MAX_ARTIFACTS; index--) {
       const artifact = current.artifacts[index]!;
       if (taskIds.has(artifact.taskId)) continue;
-      taskIds.add(artifact.taskId); artifacts.push(artifact);
+      taskIds.add(artifact.taskId);
+      if (!isolated.has(artifact.id)) artifacts.push(artifact);
     }
     snapshot.omitted.artifacts += current.artifacts.length - artifacts.length;
     for (const artifact of artifacts.reverse()) candidates.push({ kind: 'artifact', ref: artifact.id, text: artifact.content, hash: artifact.hash });
@@ -127,7 +173,8 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
       // Keep the ancestor's credential sources available while scrubbing copied
       // prose, then apply the history's own truncation and envelope budget.
       const text = redactRunData({ text: candidate.text, sourceValue: current }, { capFields: false }).text;
-      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: prefix(text, MAX_EXCERPT_BYTES), truncated: Buffer.byteLength(text, 'utf8') > MAX_EXCERPT_BYTES };
+      const capped = capDebugField(text);
+      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: prefix(capped, MAX_EXCERPT_BYTES), truncated: capped !== text };
       entry.excerpts.push(excerpt);
       if (measure(snapshot) > selectionBudget) {
         excerpt.truncated = true;
