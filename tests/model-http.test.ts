@@ -1,9 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { HttpModelAdapter, ModelOutcomeUnknown, ModelResponseRejected } from '../src/runtime/model.js';
 
 const servers: Server[] = [];
-afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
+afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
+
+function sequence(replies: Array<{ reason: string | null; content?: string; usage?: { prompt_tokens: number; completion_tokens: number } }>) {
+  const fetch = vi.fn(async () => {
+    const reply = replies.shift()!;
+    return new Response(JSON.stringify({ choices: [{ message: { content: reply.content ?? '{"ok":true}' }, finish_reason: reply.reason }], ...(reply.usage ? { usage: reply.usage } : {}) }));
+  });
+  vi.stubGlobal('fetch', fetch);
+  return fetch;
+}
 
 function fixture(body: unknown, status = 200): Promise<string> {
   return new Promise((resolve) => {
@@ -15,6 +24,108 @@ function fixture(body: unknown, status = 200): Promise<string> {
 }
 
 describe('HttpModelAdapter', () => {
+  it.each([
+    { pin: {}, call: {}, expected: 16384 },
+    { pin: { maxTokens: 8192 }, call: {}, expected: 8192 },
+    { pin: { maxTokens: 8192 }, call: { maxTokens: 24000 }, expected: 24000 },
+    { pin: {}, call: { maxTokens: 65536 }, expected: 65536 },
+    { pin: { maxOutputTokens: 4096 }, call: {}, expected: 4096 },
+    { pin: { maxOutputTokens: 20000 }, call: { maxTokens: 24000 }, expected: 20000 },
+  ])('uses the configured output allowance: %j', async ({ pin, call, expected }) => {
+    const fetch = sequence([{ reason: 'stop' }]);
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 60000, undefined, false, pin);
+    await adapter.complete({ system: 's', input: {}, ...call });
+    expect(JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).max_tokens).toBe(expected);
+  });
+
+  it('retries length once with a capped doubled allowance and sums both meters', async () => {
+    const fetch = sequence([
+      { reason: 'length', content: '{"partial":', usage: { prompt_tokens: 10, completion_tokens: 20 } },
+      { reason: 'stop', usage: { prompt_tokens: 12, completion_tokens: 30 } },
+    ]);
+    const beforeRetry = vi.fn();
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 60000, undefined, false, { maxOutputTokens: 24000 });
+    await expect(adapter.complete({ system: 's', input: { x: 1 }, idempotencyKey: 'call-1', beforeRetry })).resolves.toEqual({ value: { ok: true }, usage: { inputTokens: 22, outputTokens: 50 } });
+    expect(beforeRetry).toHaveBeenCalledTimes(1);
+    expect(beforeRetry).toHaveBeenCalledWith({ inputTokens: 10, outputTokens: 20 });
+    const attempts = fetch.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(attempts.map(([, options]) => JSON.parse(options.body as string).max_tokens)).toEqual([16384, 24000]);
+    expect(attempts.map(([, options]) => (options.headers as Record<string, string>)['idempotency-key'])).toEqual(['call-1', 'call-1:length-retry']);
+    expect(attempts.map(([, options]) => JSON.parse(options.body as string).messages)).toEqual([
+      [{ role: 'system', content: 's' }, { role: 'user', content: '{"x":1}' }],
+      [{ role: 'system', content: 's' }, { role: 'user', content: '{"x":1}' }],
+    ]);
+  });
+
+  it.each(['length', 'content_filter', 'tool_calls', null, 'invalid-json'])('rejects an unusable retry and retains summed usage: %s', async reason => {
+    const fetch = sequence([
+      { reason: 'length', usage: { prompt_tokens: 10, completion_tokens: 20 } },
+      { reason: reason === 'invalid-json' ? 'stop' : reason, content: 'not-json', usage: { prompt_tokens: 12, completion_tokens: 30 } },
+    ]);
+    const result = new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} });
+    await expect(result).rejects.toBeInstanceOf(ModelResponseRejected);
+    await expect(result).rejects.toMatchObject({ usage: { inputTokens: 22, outputTokens: 50 } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((fetch.mock.calls[1] as unknown as [string, RequestInit])[1].body as string).max_tokens).toBe(32768);
+  });
+
+  it.each(['content_filter', 'tool_calls', null])('does not retry another non-stop reason: %s', async reason => {
+    const fetch = sequence([{ reason, usage: { prompt_tokens: 10, completion_tokens: 5 } }]);
+    await expect(new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} })).rejects.toMatchObject({ usage: { inputTokens: 10, outputTokens: 5 } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the retry within the provider output cap even when it is already reached', async () => {
+    const fetch = sequence([
+      { reason: 'length', usage: { prompt_tokens: 10, completion_tokens: 5 } },
+      { reason: 'length', usage: { prompt_tokens: 10, completion_tokens: 5 } },
+    ]);
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 60000, undefined, false, { maxOutputTokens: 8000 });
+    await expect(adapter.complete({ system: 's', input: {} })).rejects.toMatchObject({ usage: { inputTokens: 20, outputTokens: 10 } });
+    const attempts = fetch.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(attempts.map(([, options]) => JSON.parse(options.body as string).max_tokens)).toEqual([8000, 8000]);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid token limits before any request: %s', async maxTokens => {
+    const fetch = sequence([]);
+    expect(() => new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 60000, undefined, false, { maxTokens })).toThrow();
+    expect(() => new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 60000, undefined, false, { maxOutputTokens: maxTokens })).toThrow();
+    await expect(new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {}, maxTokens })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1])('keeps aggregate usage missing when attempt %s omits its meter', async missing => {
+    const fetch = sequence([0, 1].map(index => ({ reason: index === 0 ? 'length' : 'stop', ...(index === missing ? {} : { usage: { prompt_tokens: 10, completion_tokens: 5 } }) })));
+    await expect(new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} })).resolves.toEqual({ value: { ok: true } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries length even when all tokens were spent before any content was produced', async () => {
+    const fetch = sequence([
+      { reason: 'length', content: '', usage: { prompt_tokens: 10, completion_tokens: 5 } },
+      { reason: 'stop', usage: { prompt_tokens: 10, completion_tokens: 8 } },
+    ]);
+    await expect(new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} })).resolves.toEqual({ value: { ok: true }, usage: { inputTokens: 20, outputTokens: 13 } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves first-attempt spend when the retry is refused with HTTP 400', async () => {
+    const fetch = sequence([{ reason: 'length', usage: { prompt_tokens: 10, completion_tokens: 5 } }]);
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })));
+    fetch.mockResolvedValueOnce(new Response('private provider error', { status: 400 }));
+    const result = new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} });
+    await expect(result).rejects.toMatchObject({ message: 'Model provider returned HTTP 400', usage: { inputTokens: 10, outputTokens: 5 } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves an interrupted retry unknown and makes no further requests', async () => {
+    const fetch = sequence([{ reason: 'length', usage: { prompt_tokens: 10, completion_tokens: 5 } }]);
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })));
+    fetch.mockRejectedValueOnce(new Error('private transport error'));
+    await expect(new HttpModelAdapter('https://example.com', 'fixture', '').complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])('identifies timeout before or after headers (headers sent: %s) without retrying', async headersSent => {
     let requests = 0;
     const port = await new Promise<string>(resolve => {
@@ -51,7 +162,7 @@ describe('HttpModelAdapter', () => {
     const port = await fixture({ choices: [{ message: { content: choice.content }, finish_reason: choice.finish_reason }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
     const request = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'fixture', '').complete({ system: 's', input: {} });
     await expect(request).rejects.toBeInstanceOf(ModelResponseRejected);
-    await expect(request).rejects.toMatchObject({ usage: { inputTokens: 10, outputTokens: 5 } });
+    await expect(request).rejects.toMatchObject({ usage: { inputTokens: choice.finish_reason === 'length' ? 20 : 10, outputTokens: choice.finish_reason === 'length' ? 10 : 5 } });
   });
   it('parses an OpenAI-compatible JSON response and reports usage', async () => {
     const port = await fixture({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 5 } });

@@ -19,7 +19,7 @@ import { projectSourceSyncReceiptSchema, synchronizeProjectSources, validateProj
 import { claimDigest, type BrainPersistence, type GovernedBrain, type BrainSemanticSearcher } from '../brain.js';
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
-import { globalBudgetReconciliationSchema, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
+import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
 import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt } from './materials.js';
 import type { ResourceRegistry, ResourceResolution } from './resources.js';
 
@@ -959,7 +959,29 @@ export class AgentEngine {
       globalReservation = await this.globalBudget.ledger.reserve(globalSelection, this.modelGlobalKey(run.id, callId));
       if (!globalReservation.reserved && globalReservation.state === 'rejected') throw new Conflict('Global model budget reservation was rejected');
     }
-    const requestWithKey = { ...request, idempotencyKey };
+    const requestWithKey: ModelRequest = { ...request, idempotencyKey, beforeRetry: async usage => {
+      const current = await this.repository.get(run.id);
+      if (!runnable.has(current.status)) throw new Conflict('Run is no longer runnable');
+      const call = current.calls.find(item => item.id === callId)!;
+      if (validModelUsage(usage)) call.usage = usage;
+      // This snapshot includes the first attempt without settling the durable
+      // receipt until the adapter returns the total for both attempts.
+      assertModelBudget(current);
+      if (this.globalBudget && call.globalBudgetAccountKey) {
+        const account = await this.globalBudget.ledger.get(call.globalBudgetAccountKey);
+        if (!account) throw new Conflict('Global model budget account is unavailable');
+        const cost = this.modelGlobalUsage(current, usage);
+        if (account.budget.tokens !== undefined) {
+          if (cost.tokens === undefined || account.unreportedTokenCalls) throw new Conflict('Global token usage is missing; reconcile before continuing');
+          if (account.usedTokens + cost.tokens >= account.budget.tokens) throw new Conflict('Global token budget exhausted');
+        }
+        if (account.budget.moneyUsd !== undefined) {
+          if (cost.moneyUsd === undefined || account.unreportedMoneyCalls) throw new Conflict('Global USD usage is missing; reconcile before continuing');
+          if (normalizeUsd(account.usedMoneyUsd + cost.moneyUsd) >= account.budget.moneyUsd) throw new Conflict('Global money budget exhausted');
+        }
+      }
+      await request.beforeRetry?.(usage);
+    } };
     let reserved = false;
     await this.repository.mutate(run.id, current => {
       if (!runnable.has(current.status)) return;
@@ -986,7 +1008,7 @@ export class AgentEngine {
       event(current, 'model.started', { callId, phase, taskId: taskId ?? null }); reserved = true;
     });
     if (!reserved) return;
-    let result: ModelResponse;
+    let result: ModelResponse | undefined;
     try {
       const reconciled = existingCallId && run.reconciledModelCall?.callId === existingCallId ? run.reconciledModelCall : undefined;
       result = reconciled ? { value: reconciled.value, ...(reconciled.usage ? { usage: reconciled.usage } : {}) } : await model.complete(requestWithKey);
@@ -996,7 +1018,8 @@ export class AgentEngine {
       const failed = await this.repository.mutate(run.id, current => {
         const call = current.calls.find(c => c.id === callId)!;
         call.state = error instanceof ModelOutcomeUnknown ? 'unknown' : 'failed'; call.endedAt = now();
-        if (error instanceof ModelResponseRejected && validModelUsage(error.usage)) call.usage = error.usage;
+        const usage = error instanceof ModelResponseRejected ? error.usage : result?.usage;
+        if (validModelUsage(usage)) call.usage = usage;
         if (error instanceof ModelOutcomeUnknown && current.status !== 'cancelled') {
           current.reconcileDisposition = current.status === 'paused' ? 'paused' : 'running';
           current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
@@ -1007,15 +1030,16 @@ export class AgentEngine {
         current.modelUsage = deriveModelUsage(current);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId });
       });
-      if (error instanceof ModelResponseRejected && validModelUsage(error.usage)) await this.settleModelGlobal(failed, callId, error.usage);
+      if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
       throw error;
     }
     // Output, validation outcome, artifacts and completion receipt commit atomically.
+    const completed = result;
     await this.repository.mutate(run.id, current => {
       const call = current.calls.find(c => c.id === callId)!;
-      call.state = 'completed'; call.endedAt = now(); call.outputHash = digest(result.value);
-      if (validModelUsage(result.usage)) call.usage = result.usage;
+      call.state = 'completed'; call.endedAt = now(); call.outputHash = digest(completed.value);
+      if (validModelUsage(completed.usage)) call.usage = completed.usage;
       event(current, 'model.completed', { callId });
       current.modelUsage = deriveModelUsage(current);
       if (call.usage) event(current, 'model.usage_recorded', { callId, usage: call.usage, total: current.modelUsage });
@@ -1033,7 +1057,7 @@ export class AgentEngine {
       }
       const paused = current.status === 'paused';
       if (paused) current.status = current.resumeStatus ?? 'running';
-      try { apply(current, result.value); }
+      try { apply(current, completed.value); }
       catch (error) {
         current.status = 'failed';
         current.error = failureReason(error, 'Invalid model output');

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { CatalogModelResolver, HttpCatalogModelFactory } from '../src/runtime/model-router.js';
+import { CatalogModelResolver, HttpCatalogModelFactory, StaticModelResolver } from '../src/runtime/model-router.js';
+import { HttpModelAdapter } from '../src/runtime/model.js';
 import type { ModelCatalog } from '../src/integrations.js';
 import type { ModelPin } from '../src/runtime/contracts.js';
 
@@ -54,6 +55,14 @@ describe('catalog model resolver health', () => {
 });
 
 describe('catalog model recovery', () => {
+  it.each(['maxTokens', 'maxOutputTokens'] as const)('preserves a static pin\'s %s across recovery', field => {
+    const adapter = new HttpModelAdapter('https://provider.example/v1', 'fixture', '', undefined, 60000, undefined, false, { maxTokens: 8192, maxOutputTokens: 16384 });
+    const pin = JSON.parse(JSON.stringify(adapter.pin)) as ModelPin;
+    const resolver = new StaticModelResolver(adapter);
+    expect(resolver.forPin(pin)).toBe(adapter);
+    expect(() => resolver.forPin({ ...pin, [field]: 4096 })).toThrow('Pinned model is unavailable');
+  });
+
   it('persists the complete Planprice catalog identity and restores it after restart', async () => {
     const catalog: ModelCatalog = {
       list: async () => [{

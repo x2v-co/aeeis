@@ -1,17 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
-import { ModelOutcomeUnknown, ModelResponseRejected, type ModelAdapter, type ModelRequest, type ModelResponse } from '../src/runtime/model.js';
+import { HttpModelAdapter, ModelOutcomeUnknown, ModelResponseRejected, type ModelAdapter, type ModelRequest, type ModelResponse } from '../src/runtime/model.js';
 import { CatalogModelResolver } from '../src/runtime/model-router.js';
 import { buildApp } from '../src/runtime/http.js';
+import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 
 const plan = { summary: 'Deliver', nodes: [{ id: 'work', title: 'Work', instruction: 'Produce a result', dependsOn: [] }] };
 const reportedUsage = { inputTokens: 10, outputTokens: 5 };
 const resources: Array<{ directory: string; repo: FileRunRepository }> = [];
-afterEach(async () => { for (const { repo, directory } of resources.splice(0)) { await repo.close(); await rm(directory, { recursive: true, force: true }); } });
+afterEach(async () => { vi.unstubAllGlobals(); for (const { repo, directory } of resources.splice(0)) { await repo.close(); await rm(directory, { recursive: true, force: true }); } });
 async function setup(complete?: ModelAdapter['complete'], prices = { inputPricePerMillion: 1, outputPricePerMillion: 2, priceCurrency: 'USD' }) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-budget-'));
   const repo = new FileRunRepository(directory); await repo.init(); resources.push({ directory, repo });
@@ -37,6 +38,54 @@ async function approve(engine: AgentEngine, repo: FileRunRepository, id: string)
 }
 
 describe('durable Run model budgets', () => {
+  it.each(['run', 'global'] as const)('checks %s budgets between length retry attempts and accounts their totals', async scope => {
+    for (const { budget, expectedAttempts, status } of [
+      { budget: { tokens: 15 }, expectedAttempts: 1, status: 'failed' },
+      { budget: { tokens: 29 }, expectedAttempts: 2, status: 'failed' },
+      { budget: { tokens: 30 }, expectedAttempts: 2, status: 'needs_approval' },
+      { budget: { moneyUsd: 0.00002 }, expectedAttempts: 1, status: 'failed' },
+      { budget: { moneyUsd: 0.00003 }, expectedAttempts: 2, status: 'failed' },
+      { budget: { moneyUsd: 0.00004 }, expectedAttempts: 2, status: 'needs_approval' },
+    ]) {
+      const fetch = vi.fn(async () => new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(plan) }, finish_reason: fetch.mock.calls.length === 1 ? 'length' : 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      })));
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new HttpModelAdapter('http://127.0.0.1:1', 'fixture', '');
+      const { engine: localEngine, repo, resolver } = await setup(request => adapter.complete(request));
+      const ledger = new InMemoryGlobalBudgetLedger(); await ledger.init();
+      const globalBudget = { ledger, select: createGlobalBudgetSelector([{ budget, window: 'none' }]) };
+      const engine = scope === 'run' ? localEngine : new AgentEngine(repo, { resolver, globalBudget });
+      try {
+        const run = await engine.create({ goal: 'Deliver', ...(scope === 'run' ? { modelBudget: budget } : {}) });
+        expect(await engine.advance(run.id)).toBe(status);
+        const settled = await repo.get(run.id);
+        expect(fetch).toHaveBeenCalledTimes(expectedAttempts);
+        expect(settled.calls).toHaveLength(1);
+        expect(settled.calls[0]?.usage).toEqual({ inputTokens: 10 * expectedAttempts, outputTokens: 5 * expectedAttempts });
+        expect(settled.modelUsage).toMatchObject({ tokens: 15 * expectedAttempts, unreportedCalls: 0 });
+        expect(settled.modelUsage?.moneyUsd).toBeCloseTo(0.00002 * expectedAttempts, 10);
+        expect(settled.plans).toHaveLength(status === 'failed' ? 0 : 1);
+        if (scope === 'global') {
+          const accountKey = globalBudget.select({ owner: run.owner, tenantId: 'local' }, run.createdAt)!.accountKey;
+          expect(await ledger.get(accountKey)).toMatchObject({ usedCalls: 1, usedTokens: 15 * expectedAttempts, usedMoneyUsd: 0.00002 * expectedAttempts });
+        }
+      } finally { await ledger.close(); }
+    }
+  });
+
+  it('blocks a length retry when the first attempt omits budget-required usage', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"partial":' }, finish_reason: 'length' }] })));
+    vi.stubGlobal('fetch', fetch);
+    const adapter = new HttpModelAdapter('http://127.0.0.1:1', 'fixture', '');
+    const { engine, repo } = await setup(request => adapter.complete(request));
+    const run = await engine.create({ goal: 'Deliver', modelBudget: { tokens: 100 } });
+    expect(await engine.advance(run.id)).toBe('failed');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await repo.get(run.id)).modelUsage).toMatchObject({ tokens: 0, unreportedCalls: 1 });
+  });
+
   it('pins input/output prices and accounts planner, executor and reviewer across restart', async () => {
     const { engine, repo, resolver, prices, requests } = await setup();
     const run = await engine.create({ goal: 'Deliver', modelBudget: { tokens: 50, moneyUsd: 0.001 } });

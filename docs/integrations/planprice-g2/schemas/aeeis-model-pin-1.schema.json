@@ -20,6 +20,18 @@
       "minLength": 1,
       "maxLength": 300
     },
+    "maxTokens": {
+      "description": "Initial output token allowance; a call may override it.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "maxOutputTokens": {
+      "description": "Provider output token limit, when known; caps initial and retry allowances.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
     "schemaVersion": {
       "const": "aeeis-model-pin/1"
     },

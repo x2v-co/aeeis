@@ -2,7 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelPin } from './contracts.js';
 
-export interface ModelRequest { system: string; input: unknown; idempotencyKey?: string }
+export interface ModelRequest {
+  system: string; input: unknown; idempotencyKey?: string;
+  /** Overrides the pin's initial output allowance. */
+  maxTokens?: number;
+  /** Check cumulative billable usage before an internal length retry. */
+  beforeRetry?: (usage: ModelResponse['usage']) => void | Promise<void>;
+}
 export interface ModelResponse { value: unknown; usage?: { inputTokens: number; outputTokens: number } }
 export interface ModelHealth {
   ready: boolean;
@@ -73,9 +79,11 @@ export class AgentpayModelAdapter implements ModelAdapter {
   }
 }
 const envelope = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string().min(1) }), finish_reason: z.string().nullable() })).min(1),
+  choices: z.array(z.object({ message: z.object({ content: z.string() }), finish_reason: z.string().nullable() })).min(1),
   usage: z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative() }).optional(),
 });
+const tokenLimit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const defaultMaxTokens = 16_384;
 
 // OpenAI-compatible chat transport; no credentials or provider response bodies enter public errors.
 export class HttpModelAdapter implements ModelAdapter {
@@ -88,6 +96,8 @@ export class HttpModelAdapter implements ModelAdapter {
       throw new Error('Model endpoint must use HTTPS (except loopback development servers)');
     }
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
+    if (this.pin.maxTokens !== undefined) tokenLimit.parse(this.pin.maxTokens);
+    if (this.pin.maxOutputTokens !== undefined) tokenLimit.parse(this.pin.maxOutputTokens);
     if (healthUrl) {
       const health = new URL(healthUrl);
       if (health.username || health.password || health.search || health.hash) throw new Error('Model health endpoint must not contain credentials, query or fragment');
@@ -105,6 +115,41 @@ export class HttpModelAdapter implements ModelAdapter {
     } catch { return { ready: false, detail: 'provider health probe failed or timed out', checkedAt }; }
   }
   async complete(request: ModelRequest): Promise<ModelResponse> {
+    const cap = this.pin.maxOutputTokens ?? Number.MAX_SAFE_INTEGER;
+    let maxTokens = Math.min(tokenLimit.parse(request.maxTokens ?? this.pin.maxTokens ?? defaultMaxTokens), cap);
+    let usage: ModelResponse['usage'];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let raw: z.infer<typeof envelope>;
+      try { raw = await this.requestCompletion(request, maxTokens, attempt); }
+      catch (error) {
+        if (error instanceof ModelResponseRejected && attempt > 0) {
+          const total = usage && error.usage ? { inputTokens: usage.inputTokens + error.usage.inputTokens, outputTokens: usage.outputTokens + error.usage.outputTokens } : undefined;
+          throw new ModelResponseRejected(error.message, total);
+        }
+        throw error;
+      }
+      const reported = raw.usage ? { inputTokens: raw.usage.prompt_tokens, outputTokens: raw.usage.completion_tokens } : undefined;
+      // A partial total must not look like fully reported usage to budget checks.
+      usage = attempt === 0 ? reported : usage && reported ? {
+        inputTokens: usage.inputTokens + reported.inputTokens,
+        outputTokens: usage.outputTokens + reported.outputTokens,
+      } : undefined;
+      const choice = raw.choices[0]!;
+      if (choice.finish_reason === 'length' && attempt === 0) {
+        try { await request.beforeRetry?.(usage); }
+        catch (error) { throw new ModelResponseRejected(error instanceof Error ? error.message : 'Model retry budget check failed', usage); }
+        maxTokens = Math.min(maxTokens * 2, cap);
+        continue;
+      }
+      if (choice.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage);
+      let value: unknown;
+      try { value = JSON.parse(choice.message.content); }
+      catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage); }
+      return { value, ...(usage ? { usage } : {}) };
+    }
+    throw new ModelResponseRejected('Model response is incomplete', usage);
+  }
+  private async requestCompletion(request: ModelRequest, maxTokens: number, attempt: number): Promise<z.infer<typeof envelope>> {
     let response: Response;
     const signal = AbortSignal.timeout(this.requestTimeoutMs);
     const transportFailure = (stage: 'request' | 'response'): ModelOutcomeUnknown => new ModelOutcomeUnknown(
@@ -115,15 +160,15 @@ export class HttpModelAdapter implements ModelAdapter {
     try {
       response = await fetch(this.pin.endpoint, {
         method: 'POST', redirect: 'error', signal,
-        headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}) },
-        body: JSON.stringify({ model: this.pin.model, max_tokens: 4096, response_format: { type: 'json_object' },
+        headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(request.idempotencyKey ? { 'idempotency-key': attempt === 0 ? request.idempotencyKey : `${request.idempotencyKey}:length-retry` } : {}) },
+        body: JSON.stringify({ model: this.pin.model, max_tokens: maxTokens, response_format: { type: 'json_object' },
           messages: [{ role: 'system', content: request.system }, { role: 'user', content: JSON.stringify(request.input) }] }),
       });
     } catch { throw transportFailure('request'); }
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status >= 500 || response.status === 408) throw new ModelOutcomeUnknown(`Model provider returned HTTP ${response.status}; execution outcome requires reconciliation`);
-      throw new Error(`Model provider returned HTTP ${response.status}`);
+      throw new ModelResponseRejected(`Model provider returned HTTP ${response.status}`, { inputTokens: 0, outputTokens: 0 });
     }
     const reader = response.body?.getReader();
     if (!reader) throw new Error('Empty model response');
@@ -137,12 +182,6 @@ export class HttpModelAdapter implements ModelAdapter {
       if (size > 1_000_000) { await reader.cancel(); throw new Error('Model response exceeds size limit'); }
       chunks.push(value);
     }
-    const raw = envelope.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    const usage = raw.usage ? { inputTokens: raw.usage.prompt_tokens, outputTokens: raw.usage.completion_tokens } : undefined;
-    if (raw.choices[0]!.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage);
-    let value: unknown;
-    try { value = JSON.parse(raw.choices[0]!.message.content); }
-    catch { throw new ModelResponseRejected('Model response did not contain valid JSON', usage); }
-    return { value, ...(usage ? { usage } : {}) };
+    return envelope.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
   }
 }

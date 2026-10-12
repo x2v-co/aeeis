@@ -17,7 +17,7 @@ export class StaticModelResolver implements ModelResolver {
   constructor(private readonly adapter: ModelAdapter) {}
   async resolve(_request: ModelSelectionRequest): Promise<ModelResolution> { return { adapter: this.adapter }; }
   forPin(pin: ModelPin): ModelAdapter {
-    if (pin.model !== this.adapter.pin.model || pin.endpoint !== this.adapter.pin.endpoint || pin.promptVersion !== this.adapter.pin.promptVersion || pin.provider !== this.adapter.pin.provider) throw new Error('Pinned model is unavailable in the configured resolver');
+    if (pin.model !== this.adapter.pin.model || pin.endpoint !== this.adapter.pin.endpoint || pin.promptVersion !== this.adapter.pin.promptVersion || pin.provider !== this.adapter.pin.provider || pin.maxTokens !== this.adapter.pin.maxTokens || pin.maxOutputTokens !== this.adapter.pin.maxOutputTokens) throw new Error('Pinned model is unavailable in the configured resolver');
     return this.adapter;
   }
   async health(): Promise<ModelHealth> {
