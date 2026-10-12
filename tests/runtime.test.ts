@@ -11,6 +11,7 @@ import type { AgentRun, ModelPin } from '../src/runtime/contracts.js';
 import type { SkillGovernance, ToolGateway, ToolInvocation, ToolResult } from '../src/integrations.js';
 import type { RunRepository } from '../src/runtime/repository.js';
 import type { Ownership } from '../src/security/principal.js';
+import type { Thread } from '../src/runtime/threads.js';
 import { AgentDirectory, AgentGateway } from '../src/agent-gateway.js';
 import type { AgentCard } from '../src/protocol.js';
 import { InMemoryKnowledgeProvider, makeKnowledgeRecord } from '../src/knowledge.js';
@@ -241,6 +242,10 @@ class StaleReadRunRepository implements RunRepository {
   hideNextReconcileLock = false;
   constructor(private readonly inner: RunRepository) {}
   create(run: AgentRun): Promise<void> { return this.inner.create(run); }
+  createThread(thread: Thread): Promise<void> { return this.inner.createThread(thread); }
+  getThread(id: string, scope?: Ownership): Promise<Thread> { return this.inner.getThread(id, scope); }
+  listRunsByThread(id: string, scope?: Ownership, limit?: number): Promise<AgentRun[]> { return this.inner.listRunsByThread(id, scope, limit); }
+  attachRunToThread(runId: string, threadId: string, parentRunId?: string, scope?: Ownership): Promise<AgentRun> { return this.inner.attachRunToThread(runId, threadId, parentRunId, scope); }
   async get(id: string, scope?: Ownership): Promise<AgentRun> {
     const run = await this.inner.get(id, scope);
     if (this.hideNextReconcileLock && run.pendingTool?.reconcileInFlight) {
