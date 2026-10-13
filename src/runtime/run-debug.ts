@@ -17,6 +17,38 @@ const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|model
 // honor escapes so a credential copied into another field can be scrubbed.
 const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
 const assignmentKey = (key: string): string => key.replace(/^["']|["']$/g, '');
+/** Visit complete JSON objects/arrays inside prose or code fences before field capping. */
+function redactJsonFragments(text: string, redact: (value: unknown) => unknown): string {
+  let out = '', last = 0;
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== '{' && text[start] !== '[') continue;
+    const stack: string[] = [];
+    let quoted = false, escaped = false;
+    for (let end = start; end < text.length; end++) {
+      const char = text[end]!;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === '{' || char === '[') stack.push(char);
+      else if (char === '}' || char === ']') {
+        if (stack.pop() !== (char === '}' ? '{' : '[')) break;
+        if (stack.length) continue;
+        try {
+          const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+          out += text.slice(last, start) + JSON.stringify(redact(parsed));
+          last = end + 1;
+        } catch { /* Keep non-JSON prose intact. */ }
+        start = end;
+        break;
+      }
+      // An incomplete fragment cannot be parsed; avoid rescanning its suffix.
+      if (end === text.length - 1) start = end;
+    }
+  }
+  return out + text.slice(last);
+}
 /** Redact `env: { ... }` objects with brace matching so nested objects cannot leak past the first `}`. */
 function redactEnvBlocks(text: string): string {
   const opener = /(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{/gi;
@@ -101,7 +133,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
       if (/^\s*[\[{]/.test(item)) {
         try { const parsed: unknown = JSON.parse(item); collect(parsed); return capField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
       }
-      return scrub(item);
+      return scrub(options.omitRawProviderText ? redactJsonFragments(item, parsed => { collect(parsed); return visit(parsed, depth + 1); }) : item);
     }
     if (Array.isArray(item)) return capArray(item).map(child => visit(child, depth + 1));
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key) && !(options.omitRawProviderText && rawProviderKey.test(key.replace(/[ _-]/g, '')))).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
@@ -120,7 +152,7 @@ export function sharedRunView(run: AgentRun) {
 export function debugRunView(run: AgentRun) {
   return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
 }
-export function debugBundle(run: AgentRun) {
+export function debugBundle(run: AgentRun, options: { omitRawProviderText?: boolean } = {}) {
   // Events, plans and steps (taskAttempts) are emitted once at the top level. Embedding them
   // again under `run` made every lifecycle event appear twice in the bundle.
   const { events: _events, plans: _plans, steps: _steps, ...runSummary } = run;
@@ -128,5 +160,5 @@ export function debugBundle(run: AgentRun) {
     taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
     modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
     validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
-    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' });
+    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' }, options);
 }

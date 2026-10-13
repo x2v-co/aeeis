@@ -33,6 +33,28 @@ async function setup(adapter = model) {
 }
 
 describe('run sharing HTTP boundary', () => {
+  it.each(['encoded', 'fenced', 'embedded'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
+    const { app, repo, run, auth } = await setup();
+    const encoded = JSON.stringify({ rawOutput: 'PRIVATE_LARGE_PROVIDER', safe: 'RETAINED_LARGE_RESULT', nested: [{ providerResponse: 'PRIVATE_NESTED_PROVIDER', safe: true }], padding: '😀'.repeat(MAX_DEBUG_FIELD_BYTES) });
+    const text = format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.` : encoded;
+    await repo.mutate(run.id, current => {
+      current.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: text }] });
+    });
+    const original = await repo.get(run.id);
+    const share = (await app.inject({ method: 'POST', url: `/api/runs/${run.id}/share`, headers: auth })).json();
+    for (const suffix of ['', '/debug-bundle']) {
+      const response = await app.inject({ url: `/api/share/${share.token}${suffix}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain('PRIVATE_');
+      expect(response.body).not.toContain('rawOutput');
+      expect(response.body).not.toContain('providerResponse');
+      expect(response.body).toContain('RETAINED_LARGE_RESULT');
+      const steps = suffix ? response.json().taskAttempts : response.json().steps;
+      expect(Buffer.byteLength(steps[0].observations[0].result)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
+    }
+    expect((await app.inject({ url: `/api/runs/${run.id}/debug-bundle`, headers: auth })).body).toContain('PRIVATE_LARGE_PROVIDER');
+    expect(await repo.get(run.id)).toEqual(original);
+  });
   it('omits raw provider text recursively from public run views and bundles, retaining owner diagnostics', async () => {
     const { app, repo, run, auth } = await setup();
     await repo.mutate(run.id, current => {
@@ -236,6 +258,17 @@ describe('share storage and redaction helpers', () => {
 });
 
 describe('debug redaction hardening', () => {
+  it('strips nested encoded JSON and multiple prose JSON fragments with escaped delimiters', () => {
+    const first = JSON.stringify({ safe: 'Quoted "} [" value', nested: JSON.stringify([{ raw_text: 'PRIVATE_ENCODED', safe: 'retained nested' }]) });
+    const second = JSON.stringify([{ provider_output: { content: 'PRIVATE_OBJECT' }, safe: 'retained array' }]);
+    const result = redactRunData({ text: `Before ${first} between ${second} after` }, { omitRawProviderText: true });
+    expect(result.text).not.toContain('PRIVATE_');
+    expect(result.text).toContain('Quoted');
+    expect(result.text).toContain('retained nested');
+    expect(result.text).toContain('retained array');
+    expect(result.text).toContain('between');
+    expect(result.text).toContain('after');
+  });
   it('scrubs session credentials and copied values inside prose-wrapped and incomplete JSON', () => {
     const text = 'Here is the response: {"summary":"copied-session copied-api-key", "session_id":"copied-session", "api_key":"copied-api-key"}\n'
       + 'session_id=plain-session\n{"session-id":"partial-session", "summary":';

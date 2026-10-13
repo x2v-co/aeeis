@@ -40,7 +40,8 @@ describe('thread shares', () => {
     for (const id of [root.id, child.id]) await repo.mutate(id, run => {
       run.calls.push({ id: `model_${id}`, phase: 'executor', taskId: 'task', state: 'completed', inputHash: 'hash', startedAt: run.createdAt, rawOutput: 'PRIVATE_CALL' });
       run.plannerRepair = { rawOutput: 'PRIVATE_PLANNER', validationError: 'Schema mismatch' };
-      run.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: [{ raw_output: 'PRIVATE_NESTED', providerResponse: 'PRIVATE_RESPONSE', safe: 'RETAINED_RESULT' }] }], finishRepair: { reason: 'Incomplete finish', candidate: 'PRIVATE_CANDIDATE' } });
+      run.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: [{ raw_output: 'PRIVATE_NESTED', providerResponse: 'PRIVATE_RESPONSE', safe: 'RETAINED_RESULT' },
+        `Observation: \`\`\`json\n${JSON.stringify({ rawOutput: 'PRIVATE_FENCED', safe: 'RETAINED_FENCED', padding: 'x'.repeat(10000) })}\n\`\`\``] }], finishRepair: { reason: 'Incomplete finish', candidate: 'PRIVATE_CANDIDATE' } });
       run.events.push({ id: `evt_${id}`, seq: run.events.length + 1, type: 'model.validation_failed', at: run.createdAt, data: { validation: { rawOutput: 'PRIVATE_VALIDATION', issues: [{ rawText: 'PRIVATE_TEXT', message: 'Schema mismatch' }] } } });
     });
     const token = (await share()).json();
@@ -51,6 +52,7 @@ describe('thread shares', () => {
       expect(response.body).not.toContain('PRIVATE_');
       for (const key of ['rawOutput', 'raw_output', 'providerResponse', 'rawText', 'plannerRepair', 'finishRepair']) expect(response.body).not.toContain(key);
       expect(response.body).toContain('RETAINED_RESULT');
+      expect(response.body).toContain('RETAINED_FENCED');
       expect(response.body).toContain('Schema mismatch');
     }
     const owner = await app.inject({ url: `/api/threads/${thread.id}/debug-bundle`, headers: auth });

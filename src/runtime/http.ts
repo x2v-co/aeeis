@@ -1483,7 +1483,7 @@ export function buildApp(options: Options) {
   app.get<{ Params: { token: string } }>('/api/share/:token/debug-bundle', async (request, reply) => {
     reply.header('referrer-policy', 'no-referrer');
     const resolved = await resolveShare(request.params.token);
-    if (resolved.kind === 'run') return redactRunData(debugBundle(await options.repository.get(resolved.share.runId)), { omitRawProviderText: true });
+    if (resolved.kind === 'run') return debugBundle(await options.repository.get(resolved.share.runId), { omitRawProviderText: true });
     const thread = await options.repository.getThread(resolved.share.threadId);
     const runs = await readThreadBundleRuns(options.repository, thread, resolved.share.throughSequence);
     return threadDebugBundle(thread, resolved.share.throughSequence, runs, 'share');
