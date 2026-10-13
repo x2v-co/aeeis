@@ -60,13 +60,13 @@ describe('model request compatibility across upgrades', () => {
     const engine = new AgentEngine(repository, model), run = await engine.create({ goal: 'Preserve exact inputs' });
     expect(await engine.advance(run.id)).toBe('unknown');
     const unknown = await repository.get(run.id), call = unknown.calls[0]!;
-    expect(call.request).toEqual({ system: original[0]!.system, input: original[0]!.input });
-    expect(digest(call.request)).toBe(call.inputHash);
+    expect(call.modelRequest).toEqual({ system: original[0]!.system, input: original[0]!.input });
+    expect(digest(call.modelRequest)).toBe(call.inputHash);
     await repository.mutate(run.id, current => { current.goal = 'Changed reconstruction input'; });
     const upgraded = new AgentEngine(repository, model);
     await upgraded.command(run.id, 'reconcile', { reason: 'Provider checked; exact replay authorized' });
     expect(await upgraded.advance(run.id)).toBe('needs_approval');
-    expect({ system: original[1]!.system, input: original[1]!.input }).toEqual(call.request);
+    expect({ system: original[1]!.system, input: original[1]!.input }).toEqual(call.modelRequest);
     expect(original[1]!.idempotencyKey).toBe(call.idempotencyKey);
     expect((await repository.get(run.id)).calls).toHaveLength(1);
   });
@@ -75,7 +75,7 @@ describe('model request compatibility across upgrades', () => {
     const fixture = fixtures.cases.executor, repository = new InMemoryRunRepository();
     const run = structuredClone(fixture.run);
     if (format === 'legacy hash') run.calls.at(-1)!.inputHash = 'a'.repeat(64);
-    else run.calls.at(-1)!.request = { system: 'Changed request', input: {} };
+    else run.calls.at(-1)!.modelRequest = { system: 'Changed request', input: {} };
     await repository.create(run);
     const complete = vi.fn(async () => ({ value: fixture.output }));
     const engine = new AgentEngine(repository, { pin: run.model, complete });

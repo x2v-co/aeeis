@@ -171,20 +171,20 @@ describe('durable execution allowances', () => {
     fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('Unknown after replanning'));
     expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
     const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
-    const original = structuredClone(call.request)!;
+    const original = structuredClone(call.modelRequest)!;
     // The pre-offset builder included the old revision's failed executor call.
     (original.input as any).executionBudget.remainingModelCalls = 3;
     const originalHash = digest(original);
     await fixture.repository.mutate(unknown.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;
       current.calls.at(-1)!.inputHash = originalHash;
-      delete current.calls.at(-1)!.request;
+      delete current.calls.at(-1)!.modelRequest;
     });
     const providerCalls = fixture.complete.mock.calls.length;
     await fixture.engine.reconcileModelCall(unknown.id, { callId: call.id, inputHash: originalHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed the pre-offset request', output: { type: 'finish', title: 'Report', content: 'The source summary reports blocked records.', evidenceRefs: [unknown.context.sources[0]!.id] } });
     expect(await fixture.engine.advance(unknown.id)).toBe('running');
     const recovered = await fixture.repository.get(unknown.id);
-    expect(recovered.calls.at(-1)).toMatchObject({ id: call.id, inputHash: originalHash, state: 'completed', request: original });
+    expect(recovered.calls.at(-1)).toMatchObject({ id: call.id, inputHash: originalHash, state: 'completed', modelRequest: original });
     expect(fixture.complete).toHaveBeenCalledTimes(providerCalls);
   });
 
@@ -202,7 +202,7 @@ describe('durable execution allowances', () => {
     fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('idle timeout'));
     expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
     const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
-    if (format === 'hash only') await fixture.repository.mutate(unknown.id, current => { delete current.calls.at(-1)!.request; });
+    if (format === 'hash only') await fixture.repository.mutate(unknown.id, current => { delete current.calls.at(-1)!.modelRequest; });
     expect(unknown.steps[0]!.finalCallId).toBe(call.id);
     expect(await fixture.engine.advance(unknown.id)).toBe('unknown');
     expect(fixture.complete).toHaveBeenCalledTimes(3);

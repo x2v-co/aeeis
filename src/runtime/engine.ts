@@ -1066,7 +1066,7 @@ export class AgentEngine {
     if (!call || call.phase !== phase || call.taskId !== taskId) throw new Conflict('Reconciled model call does not match the current phase/task');
     // Pre-snapshot calls can use the legacy format only when its exact canonical
     // hash matches. Never change a provider request under an existing call key.
-    const original = call.request ?? [request, ...legacyRequests].find(candidate => digest(candidate) === call.inputHash);
+    const original = call.modelRequest ?? [request, ...legacyRequests].find(candidate => digest(candidate) === call.inputHash);
     if (!original || digest(original) !== call.inputHash) throw new Conflict('Reconciled model request no longer matches the unknown call');
     return structuredClone(original);
   }
@@ -1125,16 +1125,16 @@ export class AgentEngine {
       if (existing) {
         if (existing.state !== 'unknown' || existing.inputHash !== digest(request)) throw new Conflict('Reconciled model request no longer matches the unknown call');
         existing.state = 'started'; existing.startedAt = now(); delete existing.endedAt; existing.idempotencyKey = idempotencyKey;
-        existing.request = JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['request']>;
+        existing.modelRequest = JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['modelRequest']>;
       } else {
         if (current.calls.length >= current.maxModelCalls) throw new Error('Model call budget exhausted');
         if (globalReservation && !globalReservation.reserved) {
-          current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, ...(globalSelection ? { globalBudgetAccountKey: globalSelection.accountKey } : {}), request: JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['request']>, state: 'unknown', inputHash: digest(request), startedAt, endedAt: startedAt });
+          current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, ...(globalSelection ? { globalBudgetAccountKey: globalSelection.accountKey } : {}), modelRequest: JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['modelRequest']>, state: 'unknown', inputHash: digest(request), startedAt, endedAt: startedAt });
           current.status = 'unknown'; current.resumeStatus = 'running'; current.error = 'Global model reservation already exists; reconcile the provider before retrying.';
           event(current, 'model.unknown', { callId, reason: 'global_reservation_exists' });
           return;
         }
-        current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, ...(globalSelection ? { globalBudgetAccountKey: globalSelection.accountKey } : {}), request: JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['request']>, state: 'started', inputHash: digest(request), startedAt });
+        current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, ...(globalSelection ? { globalBudgetAccountKey: globalSelection.accountKey } : {}), modelRequest: JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['modelRequest']>, state: 'started', inputHash: digest(request), startedAt });
       }
       current.modelUsage = deriveModelUsage(current);
       delete current.resumeModelCallId;
@@ -1352,7 +1352,7 @@ export class AgentEngine {
       executionBudget: budgetForLimit(proposedLimitReason, nodeCalls.length),
     });
     const legacyRequests: ModelRequest[] = [];
-    if (run.resumeModelCallId && !run.calls.find(call => call.id === run.resumeModelCallId)?.request) {
+    if (run.resumeModelCallId && !run.calls.find(call => call.id === run.resumeModelCallId)?.modelRequest) {
       // The first allowance implementation counted all revisions. Preserve an
       // outstanding pre-offset call's original budget/prompt as well as abde784.
       const oldCalls = run.calls.filter(call => call.phase === 'executor' && call.taskId === node.id && call.id !== run.resumeModelCallId);

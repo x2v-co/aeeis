@@ -12,7 +12,7 @@ const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|ma
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
 // Public views must not expose provider completions or schema-repair payloads,
 // even when nested in observations, validation diagnostics or JSON strings.
-const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
+const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|modelrequest|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
 // Also recognize assignments inside prose and incomplete JSON. Quoted values
 // honor escapes so a credential copied into another field can be scrubbed.
 const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
