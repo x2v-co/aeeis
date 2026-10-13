@@ -85,7 +85,7 @@ export const planSchema = z.object({
   nodes: z.array(nodeSchema).min(1).max(12),
 }).strip();
 export const decisionSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000) }).strip(),
+  z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000), offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(1).max(100).optional(), characterOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strip(),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strip(),
   z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strip(),

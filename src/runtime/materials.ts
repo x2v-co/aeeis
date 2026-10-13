@@ -54,8 +54,97 @@ export interface MaterialExcerpt {
   /** CSV counts include the header row. */
   totalRows?: number;
   presentedRows?: number;
+  representation?: 'csv-summary';
 }
 export const PRESENTED_SOURCE_TEXT_BUDGET = 48_000;
+export const LARGE_CSV_BYTES = 2048;
+export const CSV_SUMMARY_CHARS = 3000;
+export const SOURCE_PAGE_CHARS = 4000;
+
+export interface CsvColumnStats {
+  name: string; type: string; distinct: number; nullCount: number; min?: string | number; max?: string | number;
+}
+export interface CsvSummary {
+  schemaVersion: 'csv-summary/1'; rowCount: number; malformedRows: number;
+  columns: CsvColumnStats[]; sampleRows: string[][];
+}
+
+function csvCells(record: string): string[] {
+  const cells: string[] = []; let cell = '', quoted = false;
+  for (let index = 0; index < record.length; index++) {
+    const character = record[index]!;
+    if (character === '"') {
+      if (quoted && record[index + 1] === '"') { cell += '"'; index++; }
+      else quoted = !quoted;
+    } else if (character === ',' && !quoted) { cells.push(cell); cell = ''; }
+    else cell += character;
+  }
+  cells.push(cell); return cells;
+}
+function csvRecords(content: string): string[] { return materialRows(content.replace(/^\uFEFF/, ''), true).filter(row => row !== ''); }
+
+/** Statistics use every data row; sampleRows are the first five rows, not a ranking. */
+export function csvSummary(content: string): CsvSummary {
+  const records = csvRecords(content), header = csvCells(records.shift() ?? '');
+  const rows = records.map(csvCells);
+  const columns = header.map((name, index): CsvColumnStats => {
+    const values = rows.map(row => row[index]?.trim() ?? '').filter(value => value !== '');
+    const types = new Set(values.map(value => /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(value) && Number.isFinite(Number(value)) ? 'number'
+      : /^(?:true|false)$/i.test(value) ? 'boolean' : /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value) && Number.isFinite(Date.parse(value)) ? 'date' : 'text'));
+    const type = types.size === 0 ? 'null' : types.size === 1 ? [...types][0]! : 'mixed';
+    let min: string | number | undefined, max: string | number | undefined;
+    for (const value of values) {
+      const comparable = type === 'number' ? Number(value) : value;
+      if (min === undefined || comparable < min) min = comparable;
+      if (max === undefined || comparable > max) max = comparable;
+    }
+    return { name, type, distinct: new Set(values).size, nullCount: rows.length - values.length,
+      ...(min === undefined ? {} : { min, max: max! }) };
+  });
+  return { schemaVersion: 'csv-summary/1', rowCount: rows.length, malformedRows: rows.filter(row => row.length !== header.length).length, columns, sampleRows: rows.slice(0, 5) };
+}
+
+function csvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: number): MaterialExcerpt {
+  const summary = csvSummary(source.content);
+  const clip = (value: string) => value.length <= 100 ? value : `${value.slice(0, 99)}…`;
+  const rendered = { ...summary, columns: summary.columns.map(column => ({ ...column, name: clip(column.name),
+    ...(typeof column.min === 'string' ? { min: clip(column.min) } : {}), ...(typeof column.max === 'string' ? { max: clip(column.max) } : {}) })),
+    sampleRows: summary.sampleRows.map(row => row.map(clip)), omittedColumns: 0,
+    instructions: 'Statistics cover all rows. Samples are first rows only; text values may be shortened. Read bounded pages with sources.read (offset/limit). Do not infer unseen row details.' };
+  while (JSON.stringify(rendered).length > maxLength && rendered.sampleRows.length) rendered.sampleRows.pop();
+  while (JSON.stringify(rendered).length > maxLength && rendered.columns.length) { rendered.columns.pop(); rendered.omittedColumns++; }
+  const content = JSON.stringify(rendered).length <= maxLength ? JSON.stringify(rendered) : `CSV: ${summary.rowCount} data rows; call sources.read`.slice(0, maxLength);
+  return { content, format: 'csv', truncated: true, totalChars: source.content.length, totalRows: summary.rowCount + 1,
+    presentedRows: rendered.sampleRows.length, representation: 'csv-summary' };
+}
+
+/** Full source bytes stay in the repository. Large CSV reads expose bounded pages. */
+export function readMaterialPage(source: Source, options: { offset?: number | undefined; limit?: number | undefined; characterOffset?: number | undefined } = {}) {
+  if (materialFormat(source) !== 'csv' || Buffer.byteLength(source.content, 'utf8') <= LARGE_CSV_BYTES) return materialForModel(source);
+  const records = csvRecords(source.content), header = records[0] ?? '', rows = records.slice(1);
+  const offset = options.offset ?? 0, limit = Math.min(options.limit ?? 20, 100);
+  const sourceContentHash = source.contentHash ?? materialContentHash(source.content);
+  // Pathological headers/records remain accessible in explicitly marked character fragments.
+  if (records.some(row => header.length + row.length + 1 > SOURCE_PAGE_CHARS) || options.characterOffset !== undefined) {
+    const characterOffset = options.characterOffset ?? 0;
+    let content = source.content.slice(characterOffset, characterOffset + SOURCE_PAGE_CHARS);
+    // Continuations never split a UTF-16 surrogate pair in model-visible text.
+    if (/[\uD800-\uDBFF]$/.test(content) && /[\uDC00-\uDFFF]/.test(source.content[characterOffset + content.length] ?? '')) content = content.slice(0, -1);
+    const next = characterOffset + content.length;
+    return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash,
+      page: { mode: 'characters', characterOffset, totalChars: source.content.length, fragment: true,
+        nextRead: next < source.content.length ? { argument: source.id, characterOffset: next } : null } };
+  }
+  const selected: string[] = []; let size = header.length;
+  for (const row of rows.slice(offset, offset + limit)) {
+    if (size + row.length + 1 > SOURCE_PAGE_CHARS) break;
+    selected.push(row); size += row.length + 1;
+  }
+  const content = [header, ...selected].join('\n'), nextOffset = offset + selected.length;
+  return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash,
+    page: { mode: 'rows', offset, limit, returnedRows: selected.length, totalRows: rows.length,
+      nextRead: nextOffset < rows.length ? { argument: source.id, offset: nextOffset, limit } : null } };
+}
 
 export function materialFormat(source: Pick<Source, 'title' | 'source' | 'content'>): MaterialFormat {
   const name = `${source.title} ${source.source}`;
@@ -124,13 +213,22 @@ export function materialExcerpt(source: Pick<Source, 'title' | 'source' | 'conte
 export function presentedMaterialExcerpts(sources: Source[], terms: string[], budget = PRESENTED_SOURCE_TEXT_BUDGET): MaterialExcerpt[] {
   const allocations = new Array<number>(sources.length).fill(0);
   let remaining = budget;
-  const pending = sources.map((source, index) => ({ index, length: source.content.length })).sort((a, b) => a.length - b.length);
+  const pending = sources.map((source, index) => ({ index, length: materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES ? Math.min(source.content.length, CSV_SUMMARY_CHARS) : source.content.length })).sort((a, b) => a.length - b.length);
   for (let index = 0; index < pending.length; index++) {
     const source = pending[index]!;
     const share = Math.min(source.length, Math.floor(remaining / (pending.length - index)));
     allocations[source.index] = share; remaining -= share;
   }
-  return sources.map((source, index) => materialExcerpt(source, terms, allocations[index]));
+  return sources.map((source, index) => materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES
+    ? csvSummaryExcerpt(source, allocations[index]!) : materialExcerpt(source, terms, allocations[index]));
+}
+
+export function presentedMaterials(sources: Source[], terms: string[] = [], budget = PRESENTED_SOURCE_TEXT_BUDGET) {
+  const excerpts = presentedMaterialExcerpts(sources, terms, budget);
+  return sources.map((source, index) => {
+    const { content, ...metadata } = excerpts[index]!;
+    return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash: source.contentHash ?? materialContentHash(source.content), ...metadata };
+  });
 }
 
 export function relevantMaterialExcerpt(content: string, terms: string[], maxLength = 1200): string {

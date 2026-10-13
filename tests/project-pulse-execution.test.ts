@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { buildApp } from '../src/runtime/http.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ProjectPulseArtifact } from '../src/runtime/contracts.js';
+import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { materialContentHash } from '../src/runtime/materials.js';
+import { EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -22,6 +24,7 @@ async function setup(output: (ref: string, input: Record<string, unknown>) => un
   const complete = vi.fn(async (request: ModelRequest) => {
     if (request.system.includes('Plan a real deliverable')) return { value: plan, usage: { inputTokens: 10, outputTokens: 5 } };
     if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Verified', issues: [] }, usage: { inputTokens: 10, outputTokens: 5 } };
+    expect(request.system.length + JSON.stringify(request.input).length).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
     const input = request.input as Record<string, unknown> & { sourceCatalog: Array<{ id: string }>; observations: unknown[] };
     const ref = input.sourceCatalog[0]!.id;
     if (!uploads && !input.observations.length) return { value: { type: 'tool', tool: 'sources.read', argument: ref }, usage: { inputTokens: 10, outputTokens: 5 } };
@@ -56,22 +59,70 @@ async function completeRun(engine: AgentEngine, repository: FileRunRepository, i
 }
 
 describe('Project Pulse finish output', () => {
-  it('delivers the whole uploaded CSV to the executor and accepts without a source read', async () => {
+  it('presents a compact CSV summary and accepts evidence from its statistics', async () => {
     const rows = ['id,task,status,owner', ...Array.from({ length: 160 }, (_, i) => `${i},Migration task ${i},blocked,Owner ${i}`)];
     const csv = rows.join('\n');
     expect(csv.length).toBeGreaterThan(1200);
     const { engine, repository, run } = await setup((ref, input) => {
       const presented = (input.presentedSources as Array<Record<string, unknown>>)[0]!;
-      expect(presented).toMatchObject({ id: ref, format: 'csv', truncated: false, totalChars: csv.length, totalRows: rows.length, presentedRows: rows.length });
-      expect(presented.content).toContain(rows[0]);
-      expect(presented.content).toContain(rows.at(-1));
-      expect(presented.content).toContain(csv);
+      expect(presented).toMatchObject({ id: ref, format: 'csv', truncated: true, totalChars: csv.length, totalRows: rows.length, representation: 'csv-summary' });
+      expect(presented.content).toContain('csv-summary/1');
+      expect(presented.content).toContain('Owner 0');
+      expect(presented.content).toContain('\"rowCount\":160');
+      expect((presented.content as string).length).toBeLessThan(3500);
       return finish(ref);
     }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: csv }]);
     const completed = await completeRun(engine, repository, run.id);
     expect(completed.status, completed.error).toBe('succeeded');
     expect(completed.review?.verdict).toBe('accepted');
     expect(completed.steps[0]?.observations).toHaveLength(0);
+  });
+
+  it('reads a requested CSV page and exposes a continuation through the real engine', async () => {
+    const csv = (await readFile(new URL('./fixtures/project-pulse-large.csv', import.meta.url), 'utf8')).trimEnd();
+    const { engine, repository, run } = await setup((ref, input) => {
+      const observations = input.observations as Array<{ result: any }>;
+      if (!observations.length) return { type: 'tool', tool: 'sources.read', argument: ref, offset: 180, limit: 7 };
+      const page = observations.at(-1)!.result;
+      expect(page.page).toMatchObject({ mode: 'rows', offset: 180, returnedRows: 7, totalRows: 200, nextRead: { argument: ref, offset: 187, limit: 7 } });
+      expect(page.content).toContain('Migration task 180');
+      expect(page.content).not.toContain('Migration task 199');
+      expect(page.sourceContentHash).toBe(materialContentHash(csv));
+      return finish(ref);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: csv }]);
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.context.sources[0]!.content).toBe(csv);
+  });
+
+  it('bounds old observations in actual executor prompts and retains durable results', async () => {
+    const csv = (await readFile(new URL('./fixtures/project-pulse-large.csv', import.meta.url), 'utf8')).trimEnd();
+    let inspected = false;
+    const { engine, repository, run } = await setup((ref, input) => {
+      if (!inspected) return { type: 'tool', tool: 'sources.read', argument: ref };
+      const observations = input.observations as Array<{ result: any }>;
+      expect(JSON.stringify(observations).length).toBeLessThanOrEqual(10_000);
+      expect(observations[0]!.result).toMatchObject({ schemaVersion: 'context-reference/1', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      return finish(ref);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: csv }]);
+    await repository.mutate(run.id, current => {
+      for (let i = 0; i < 20; i++) current.steps[0]!.observations.push({ tool: 'sources.read', argument: current.context.sources[0]!.id, result: { id: current.context.sources[0]!.id, content: csv } });
+    });
+    inspected = true;
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.steps[0]!.observations.at(-1)!.result).toMatchObject({ content: csv });
+  });
+
+  it('leaves executor timeouts unknown without retrying a changed context', async () => {
+    const { engine, repository, complete, run } = await setup(ref => finish(ref));
+    const before = complete.mock.calls.length;
+    complete.mockRejectedValueOnce(new ModelOutcomeUnknown('Model timed out; reconcile before retrying'));
+    expect(await engine.advance(run.id)).toBe('unknown');
+    expect(await engine.advance(run.id)).toBe('unknown');
+    const unknown = await repository.get(run.id);
+    expect(complete.mock.calls.length).toBe(before + 1);
+    expect(unknown.calls.at(-1)!.state).toBe('unknown');
   });
 
   it('uses CSV-aware source search with a hash of the exact excerpt', async () => {

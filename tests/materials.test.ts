@@ -1,7 +1,84 @@
 import { describe, expect, it } from 'vitest';
-import { escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt, materialExcerpt, presentedMaterialExcerpts } from '../src/runtime/materials.js';
+import { readFileSync } from 'node:fs';
+import { csvSummary, readMaterialPage, SOURCE_PAGE_CHARS, escapeMaterialRef, materialContentHash, materialForModel, materialQueryTerms, relevantMaterialExcerpt, materialExcerpt, presentedMaterialExcerpts } from '../src/runtime/materials.js';
+
+const csv = readFileSync(new URL('./fixtures/project-pulse-large.csv', import.meta.url), 'utf8');
+const csvSource = { id: 'source.csv', title: 'tasks.csv', source: 'upload', content: csv, hash: materialContentHash(csv) };
 
 describe('runtime material boundaries', () => {
+  it('summarizes every CSV row, with schema, nulls, distinct values, ranges and quoted samples', () => {
+    expect(Buffer.byteLength(csv)).toBeGreaterThan(2048);
+    const summary = csvSummary(csv);
+    expect(summary).toMatchObject({ schemaVersion: 'csv-summary/1', rowCount: 200, malformedRows: 0 });
+    expect(summary.columns[0]).toEqual({ name: 'id', type: 'number', distinct: 200, nullCount: 0, min: 0, max: 199 });
+    expect(summary.columns.find(column => column.name === 'owner')).toMatchObject({ type: 'text', nullCount: 20, distinct: 8 });
+    expect(summary.columns.find(column => column.name === 'deadline')).toMatchObject({ type: 'date', min: '2026-10-14', max: '2026-10-27' });
+    expect(summary.sampleRows[0]!.at(-1)).toBe('Quoted, comma and "escaped quote"\nsecond line');
+    expect(summary.sampleRows).toHaveLength(5);
+    const excerpt = presentedMaterialExcerpts([csvSource], [])[0]!;
+    expect(excerpt).toMatchObject({ representation: 'csv-summary', totalRows: 201, truncated: true });
+    expect(excerpt.content.length).toBeLessThanOrEqual(3000);
+    expect(JSON.parse(excerpt.content).sampleRows.flat().join(' ')).not.toContain('Late blocker');
+  });
+
+  it('paginates all raw CSV rows without loss, repeating the header and hashing each exact page', () => {
+    const records: string[] = []; let offset = 0;
+    for (;;) {
+      const result = readMaterialPage(csvSource, { offset, limit: 7 });
+      expect(result.content.length).toBeLessThan(SOURCE_PAGE_CHARS + 200);
+      expect(result.sourceContentHash).toBe(materialContentHash(csv));
+      const content = result.content.split('\n').slice(1, -1).join('\n');
+      expect(result.contentHash).toBe(materialContentHash(content));
+      const pageRows = content.slice(content.indexOf('\n') + 1);
+      records.push(pageRows);
+      if (!result.page!.nextRead) break;
+      offset = (result.page!.nextRead as { offset: number }).offset;
+    }
+    expect(records.join('\n')).toBe(csv.trimEnd().slice(csv.indexOf('\n') + 1));
+    expect(readMaterialPage(csvSource, { offset: 200 }).page!.nextRead).toBeNull();
+  });
+
+  it('handles mixed/empty columns, BOM and malformed records', () => {
+    expect(csvSummary('\uFEFFnumber,flag,empty\r\n1,true,\r\n2,false,\r\nword,true,extra,unexpected\r\n')).toMatchObject({
+      rowCount: 3, malformedRows: 1, columns: [{ name: 'number', type: 'mixed' }, { name: 'flag', type: 'boolean', distinct: 2 }, { name: 'empty', nullCount: 2 }],
+    });
+  });
+
+  it('keeps pathological CSV columns and samples inside even a tiny summary budget', () => {
+    const wide = { ...csvSource, content: `${Array.from({ length: 300 }, (_, i) => `column${i}`).join(',')}\n${'long value,'.repeat(300)}` };
+    for (const budget of [0, 30, 500, 3000]) expect(presentedMaterialExcerpts([wide], [], budget)[0]!.content.length).toBeLessThanOrEqual(budget);
+  });
+
+  it('exposes oversized records through bounded, explicitly marked character fragments', () => {
+    const source = { ...csvSource, content: 'id,notes\n1,"' + 'long text\n'.repeat(1500) + '"' };
+    let content = '', characterOffset = 0;
+    for (;;) {
+      const result = readMaterialPage(source, { characterOffset });
+      expect(result.page).toMatchObject({ mode: 'characters', fragment: true });
+      const text = result.content.split('\n').slice(1, -1).join('\n');
+      expect(text.length).toBeLessThanOrEqual(SOURCE_PAGE_CHARS);
+      content += text;
+      if (!result.page!.nextRead) break;
+      characterOffset = (result.page!.nextRead as { characterOffset: number }).characterOffset;
+    }
+    expect(content).toBe(source.content);
+  });
+
+  it('preserves legacy full reads for small CSV and non-CSV', () => {
+    for (const source of [{ ...csvSource, content: 'id,status\n1,open' }, { ...csvSource, title: 'brief.txt', content: 'notes\n'.repeat(2000) }]) {
+      expect(readMaterialPage(source)).toEqual(materialForModel(source));
+    }
+  });
+
+  it('preserves Unicode when a character-page boundary would split a surrogate pair', () => {
+    const source = { ...csvSource, content: 'id,notes\n1,"' + 'x'.repeat(3999 - 12) + '🙂' + 'tail'.repeat(2000) + '"' };
+    const first = readMaterialPage(source, { characterOffset: 0 });
+    const text = first.content.split('\n').slice(1, -1).join('\n');
+    expect(text.length).toBe(3999);
+    const next = (first.page!.nextRead as { characterOffset: number }).characterOffset;
+    const second = readMaterialPage(source, { characterOffset: next });
+    expect(second.content.split('\n')[1]).toMatch(/^🙂/);
+  });
   it('keeps the CSV header and complete records around a late match, including quoted newlines', () => {
     const rows = ['id,status,description', ...Array.from({ length: 80 }, (_, i) => `${i},open,"${i === 75 ? 'needle\nsecond line' : 'work item ' + i}"`)];
     const source = { title: 'tasks.csv', source: 'browser-file:tasks.csv', content: rows.join('\r\n') };

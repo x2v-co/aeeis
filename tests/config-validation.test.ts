@@ -13,6 +13,14 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it('validates streaming configuration and bounded idle/overall deadlines', () => {
+    for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).not.toThrow();
+    for (const value of ['', 'true', '2']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).toThrow('AEEIS_MODEL_STREAM');
+    for (const name of ['AEEIS_MODEL_IDLE_TIMEOUT_MS', 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS']) {
+      for (const value of ['1000', '180000', '600000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
+      for (const value of ['0', '999', '-1', 'NaN', '1.5', '600001', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+    }
+  });
   it.each([
     {},
     { AEEIS_ENV: 'development' },
