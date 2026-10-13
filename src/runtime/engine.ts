@@ -199,11 +199,28 @@ const legacyCatalogExecutorPrompt = legacyExecutorPrompt.replace('listed in the 
 
 /** Normalize finish encodings only. Artifact schemas, evidence validation and
  * capability authorization still validate the normalized candidate. */
-function normalizeFinishOutput(value: unknown): unknown {
+export function normalizeFinishOutput(value: unknown): unknown {
   value = normalizeModelJson(value, 'decision', 'type');
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const candidate = { ...value } as Record<string, unknown>;
   if (candidate.type !== undefined && candidate.type !== 'finish') return value;
+  // Weaker models nest finish fields under a wrapper (e.g. {type:'finish', artifact:{structured,...}}).
+  for (const wrapper of ['artifact', 'result', 'output', 'finish']) {
+    const nested = normalizeModelJson(candidate[wrapper], 'artifact', 'schemaVersion');
+    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue;
+    const inner = nested as Record<string, unknown>;
+    if (!['structured', 'structuredData', 'structured_data', 'artifactType', 'schemaVersion', 'content', 'evidenceRefs'].some(key => key in inner)) continue;
+    const moved: string[] = [];
+    for (const key of ['title', 'content', 'evidenceRefs', 'artifactType', 'structured', 'structuredData', 'structured_data'])
+      if (candidate[key] === undefined && inner[key] !== undefined) { candidate[key] = inner[key]; moved.push(key); }
+    // The wrapper itself may be the structured artifact.
+    if (candidate.structured === undefined && 'schemaVersion' in inner && ['project-pulse/1', 'website-builder/1'].includes(String(inner.schemaVersion))) { candidate.structured = inner; moved.push('$'); }
+    if (moved.length) {
+      delete candidate[wrapper];
+      console.warn(JSON.stringify({ protocol: 'aeeis-finish-normalized/1', wrapper, moved }));
+      break;
+    }
+  }
   if (candidate.structured === undefined) {
     for (const key of ['structuredData', 'structured_data', 'data']) {
       const structured = normalizeModelJson(candidate[key], 'artifact', 'schemaVersion');
