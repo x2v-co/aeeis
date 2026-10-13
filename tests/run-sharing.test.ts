@@ -33,10 +33,12 @@ async function setup(adapter = model) {
 }
 
 describe('run sharing HTTP boundary', () => {
-  it.each(['encoded', 'fenced', 'embedded'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
+  it.each(['encoded', 'double encoded', 'fenced', 'embedded', 'unclosed prose', 'bracketed prose'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
     const { app, repo, run, auth } = await setup();
     const encoded = JSON.stringify({ rawOutput: 'PRIVATE_LARGE_PROVIDER', safe: 'RETAINED_LARGE_RESULT', nested: [{ providerResponse: 'PRIVATE_NESTED_PROVIDER', safe: true }], padding: '😀'.repeat(MAX_DEBUG_FIELD_BYTES) });
-    const text = format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.` : encoded;
+    const text = format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.`
+      : format === 'double encoded' ? JSON.stringify(encoded) : format === 'unclosed prose' ? `Note [context: ${encoded}`
+      : format === 'bracketed prose' ? `Note [context: ${encoded}]` : encoded;
     await repo.mutate(run.id, current => {
       current.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: text }] });
     });

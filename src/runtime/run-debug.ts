@@ -18,7 +18,8 @@ const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|model
 const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
 const assignmentKey = (key: string): string => key.replace(/^["']|["']$/g, '');
 /** Visit complete JSON objects/arrays inside prose or code fences before field capping. */
-function redactJsonFragments(text: string, redact: (value: unknown) => unknown): string {
+function redactJsonFragments(text: string, redact: (value: unknown) => unknown, depth = 0): string {
+  if (depth > 40) return '[truncated]';
   let out = '', last = 0;
   for (let start = 0; start < text.length; start++) {
     if (text[start] !== '{' && text[start] !== '[') continue;
@@ -33,18 +34,28 @@ function redactJsonFragments(text: string, redact: (value: unknown) => unknown):
       } else if (char === '"') quoted = true;
       else if (char === '{' || char === '[') stack.push(char);
       else if (char === '}' || char === ']') {
-        if (stack.pop() !== (char === '}' ? '{' : '[')) break;
+        if (stack.pop() !== (char === '}' ? '{' : '[')) {
+          out += text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1, end), redact, depth + 1) + char;
+          last = end + 1; start = end;
+          break;
+        }
         if (stack.length) continue;
         try {
           const parsed: unknown = JSON.parse(text.slice(start, end + 1));
           out += text.slice(last, start) + JSON.stringify(redact(parsed));
           last = end + 1;
-        } catch { /* Keep non-JSON prose intact. */ }
+        } catch {
+          // Prose brackets may wrap a valid JSON fragment without themselves
+          // being JSON. Inspect their interior rather than skipping the payload.
+          out += text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1, end), redact, depth + 1) + char;
+          last = end + 1;
+        }
         start = end;
         break;
       }
-      // An incomplete fragment cannot be parsed; avoid rescanning its suffix.
-      if (end === text.length - 1) start = end;
+      if (end === text.length - 1) {
+        return out + text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1), redact, depth + 1);
+      }
     }
   }
   return out + text.slice(last);
@@ -130,7 +141,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
     if (depth > 40 || ++visited > MAX_DEBUG_NODES) return '[truncated]';
     if (typeof item === 'string') {
       // JSON embedded in model raw output/materials still receives key-based redaction.
-      if (/^\s*[\[{]/.test(item)) {
+      if (/^\s*[\[{]/.test(item) || (options.omitRawProviderText && /^\s*"/.test(item))) {
         try { const parsed: unknown = JSON.parse(item); collect(parsed); return capField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
       }
       return scrub(options.omitRawProviderText ? redactJsonFragments(item, parsed => { collect(parsed); return visit(parsed, depth + 1); }) : item);
