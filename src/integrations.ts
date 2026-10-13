@@ -3,6 +3,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { validateHealthEndpoint, type DependencyHealth } from './dependency-health.js';
+import { toolFailureDetails } from './tool-failures.js';
 const execFile = promisify(execFileCallback);
 
 export const receiptSchema = z.object({
@@ -454,8 +455,19 @@ export class ToolkitRegistryGateway implements ToolGateway {
       // Prefer the schema-bound structured content (title, truncation and
       // other evidence fields) over the convenience text output; the MCP
       // gateway resolves structured content first for the same reason.
-      const result = completed ? (body.structuredContent ?? body.output ?? null) : { error: typeof body.error === 'string' ? body.error : 'Toolkit execution failed' };
-      const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
+      const failure = completed ? undefined : toolFailureDetails(body);
+      // Separate toolkit auth/server responses from an executed tool reporting
+      // a target-site failure (including toolkit routes that forward that status).
+      if (failure && !response.ok) {
+        const targetFailure = /target|upstream|web[ -]?fetch|fetch|website|https?:\/\/|网页|抓取|目标站/i.test(failure.message);
+        failure.httpStatus ??= response.status;
+        if (!targetFailure && (response.status === 401 || response.status === 403 || response.status >= 500)) {
+          failure.errorCode = `toolkit_http_${response.status}`;
+        } else if (failure.errorCode === 'tool_failed') failure.errorCode = `http_${failure.httpStatus}`;
+      }
+      const result = completed ? (body.structuredContent ?? body.output ?? null)
+        : { error: failure!.message, errorCode: failure!.errorCode, ...(failure!.httpStatus === undefined ? {} : { httpStatus: failure!.httpStatus }) };
+      const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(failure ? { errorCode: failure.errorCode } : {}), ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
       return { status, output: result, ...(providerReceiptId ? { outputRefs: [`toolkit-receipt:${providerReceiptId}`] } : {}), receipt };
     } catch (error) {
       return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
