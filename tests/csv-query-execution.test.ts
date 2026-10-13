@@ -84,11 +84,25 @@ describe('executor CSV query tool', () => {
     expect(completed.pendingTool).toBeUndefined();
   });
 
-  it('rejects a non-CSV stored source', async () => {
+  it('rejects a non-CSV stored source as a recoverable executor error', async () => {
     const fixture = await setup(undefined, { materials: [{ title: 'notes.txt', source: 'upload', content: 'Plain notes' }] });
     const completed = await fixture.drain();
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('requires a CSV source');
+    expect(completed.status).toBe('succeeded');
+    expect(JSON.stringify(completed.steps[0]!.observations)).toContain('requires a CSV source');
+    // Invalid query arguments are first returned to the executor as recoverable errors.
+    expect(completed.events.filter(item => item.type === 'tool.failed_recoverable').length).toBeGreaterThan(0);
+  });
+
+  it('returns invalid comparison operands to the executor and lets it correct the query', async () => {
+    const fixture = await setup(input => {
+      const errors = input.observations.filter((item: { result?: { error?: unknown } }) => item.result?.error);
+      if (input.observations.length > errors.length) return finish(input);
+      if (errors.length) return { ...query(input), filters: [{ column: 'amount', op: 'lt', value: 1000 }] };
+      return { ...query(input), filters: [{ column: 'team', op: 'lt', value: 'not-a-number' }] };
+    });
+    const completed = await fixture.drain();
+    expect(completed.status).toBe('succeeded');
+    expect(completed.events.filter(item => item.type === 'tool.failed_recoverable')).toHaveLength(1);
   });
 
   it.each([{ limit: 201 }, { unexpected: 'field' }, { filters: [{ column: 'team', op: 'regex', value: '.*' }] }, { type: 'invalid' }])('rejects malformed query decisions without external capability fallback: %j', async fields => {
@@ -97,7 +111,9 @@ describe('executor CSV query tool', () => {
     expect(completed.status).toBe('failed');
     expect(completed.error).toContain('schema validation');
     expect(completed.calls.at(-1)!.validationErrors).toBeDefined();
-    expect(completed.steps[0]!.observations).toEqual([]);
+    // One corrective schema retry is offered before the Run fails.
+    expect(completed.steps[0]!.observations.map(item => item.tool)).toEqual(['output.schema']);
+    expect(completed.events.filter(item => item.type === 'model.schema_retry')).toHaveLength(1);
     expect(completed.pendingTool).toBeUndefined();
     expect(completed.toolReceipts).toEqual([]);
   });
