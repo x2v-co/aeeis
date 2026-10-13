@@ -295,6 +295,19 @@ export function runClock(run: Pick<AgentRun, 'createdAt'>, timeZone = process.en
     note: 'Use currentDate as "today". Dates inside sources (createdAt, exported_at, etc.) describe the data, not the current date.' };
 }
 
+export const evidenceWritingGuidance = '\nEvidence writing rules: cite concrete evidence IDs copied exactly from availableEvidenceRefs, e.g. [source_…]. Never write placeholders such as [证据], [evidence], [来源], [source], [citation] or [ID]; a finish containing a placeholder or an ID that is not in availableEvidenceRefs is rejected. Facts must be evidence-backed. Put every inference, recommendation or assumption without direct evidence under a separate heading titled exactly "推断" (or "Inference" for English output); never mix them into factual sections. Dates from clock (e.g. "as of today") come from the system clock and are not source facts.';
+const placeholderPattern = /\[(?:证据|依据|来源|出处|引用|evidence|source|sources|citation|cite|ref|ID|id)(?:\s*(?:ID|id|\d+|…|\.\.\.))?\]|【(?:证据|来源|引用)】/;
+const inlineIdPattern = /\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
+/** Deterministic finish-content checks: placeholders and inline IDs that were never received. */
+export function finishContentProblems(content: string, observed: Set<string>): string[] {
+  const problems: string[] = [];
+  const placeholder = placeholderPattern.exec(content);
+  if (placeholder) problems.push(`content contains the evidence placeholder ${JSON.stringify(placeholder[0])}; replace it with concrete IDs from availableEvidenceRefs`);
+  const unknownIds = [...new Set(content.match(inlineIdPattern) ?? [])].filter(ref => !observed.has(ref) && ![...observed].some(known => known.endsWith(ref)));
+  if (unknownIds.length) problems.push(`content cites IDs that were not received: ${JSON.stringify(unknownIds.slice(0, 10))}`);
+  return problems;
+}
+
 function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
   value = normalizeFinishOutput(value);
   try { return decisionSchema.parse(value); }
@@ -1514,7 +1527,7 @@ export class AgentEngine {
     const systemForLimit = (reason: string | undefined, legacy = false, csv = false) => (legacy ? legacyExecutorSystem : csv ? csvExecutorSystem : executorBaseSystem)
         + (run.events.some(event => event.type === 'tool.failed_recoverable' && event.data.taskId === node.id) ? '\nTool observations with error.recoverable=true report a failed attempt, not successful evidence. Use the error message and HTTP status to choose another source or approach, or finish with a useful partial answer and explicit limitations. Avoid repeating the same failing call.' : '')
         + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns for missing evidence. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
-    const executorSystem = systemForLimit(proposedLimitReason);
+    const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance;
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), task: node, sourceCatalog: [...run.context.sources, ...historySources].map(({ id, title }) => ({ id, title })),
         dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(step.observations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
         ...(expectedArtifactType ? { expectedArtifactType } : {}), ...(step.finishRepair ? { finishRepair: step.finishRepair } : {}) };
@@ -1679,6 +1692,13 @@ export class AgentEngine {
             : failureReason(error, 'Invalid finish output contract');
           if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${reason}`);
           requestFinishRepair(current, live, value, reason);
+          return;
+        }
+        const contentProblems = finishContentProblems(decision.content, observed);
+        if (contentProblems.length) {
+          console.warn(JSON.stringify({ protocol: 'aeeis-finish-content-check/1', runId: current.id, taskId: node.id, problems: contentProblems.map(problem => problem.split(':')[0]) }));
+          if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${contentProblems.join('; ')}`);
+          requestFinishRepair(current, live, value, contentProblems.join('; '));
           return;
         }
         const invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
@@ -2159,8 +2179,9 @@ export class AgentEngine {
     const currentSystem = legacyRequest.system + (run.partial ? '\nThis run exhausted its execution/evidence allowance. Review it as an explicitly partial answer: assess received evidence and honest limitations, and do not require exhaustive source scans.' : '');
     legacyRequests.push({ system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input } });
     const reviewRepair = run.reviewRepair ? redactRunData(run.reviewRepair) : undefined;
-    const reviewSystem = currentSystem + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
-    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { partial: run.partial ?? false, ...legacyRequest.input, sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
+    const reviewContext = '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Only the final synthesis artifact of a skill Run carries artifactType/structured (already schema-validated); intermediate task artifacts are plain text. Judge content, evidence support and the separation of facts from a section titled "推断"/"Inference".';
+    const reviewSystem = currentSystem + reviewContext + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
+    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
       try { current.review = parseReviewDecision(value); }
       catch (error) {
         const issues = validationDetails(error)?.issues;

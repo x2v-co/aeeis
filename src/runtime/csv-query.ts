@@ -17,12 +17,14 @@ const aggregateSchema = z.discriminatedUnion('op', [
   z.object({ op: z.enum(['sum', 'avg', 'min', 'max', 'countDistinct']), column, as: column }).strict(),
 ]);
 
+/** Models often send [] for "none"; treat an empty optional array as omitted. */
+const omitEmpty = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => Array.isArray(value) && value.length === 0 ? undefined : value, schema);
 export const csvQueryOptionsSchema = z.object({
-  select: z.array(column).min(1).max(100).optional(),
-  filters: z.array(filterSchema).max(50).default([]),
-  groupBy: z.array(column).min(1).max(20).optional(),
-  aggregates: z.array(aggregateSchema).min(1).max(50).optional(),
-  orderBy: z.array(z.object({ column, direction: z.enum(['asc', 'desc']).default('asc') }).strict()).min(1).max(20).optional(),
+  select: omitEmpty(z.array(column).min(1).max(100).optional()),
+  filters: z.preprocess(value => value === null ? undefined : value, z.array(filterSchema).max(50).default([])),
+  groupBy: omitEmpty(z.array(column).min(1).max(20).optional()),
+  aggregates: omitEmpty(z.array(aggregateSchema).min(1).max(50).optional()),
+  orderBy: omitEmpty(z.array(z.object({ column, direction: z.enum(['asc', 'desc']).default('asc') }).strict()).min(1).max(20).optional()),
   limit: z.number().int().min(1).max(200).default(50),
 }).strict();
 export const csvQueryDecisionSchema = csvQueryOptionsSchema.extend({

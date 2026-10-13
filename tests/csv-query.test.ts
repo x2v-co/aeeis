@@ -150,7 +150,7 @@ describe('strict CSV query validation', () => {
   it.each([
     [null, 'Invalid CSV query arguments'], [[], 'Invalid CSV query arguments'], [{ extra: true }, 'Unrecognized key'],
     [{ limit: 0 }, 'limit'], [{ limit: 201 }, 'limit'], [{ limit: 1.5 }, 'limit'], [{ limit: '50' }, 'limit'],
-    [{ select: [] }, 'select'], [{ groupBy: [] }, 'groupBy'], [{ aggregates: [] }, 'aggregates'],
+    
     [{ select: ['id', 'id'] }, 'duplicate'], [{ select: ['missing'] }, 'select: unknown column'],
     [{ groupBy: ['missing'] }, 'groupBy: unknown column'], [{ groupBy: ['team', 'team'] }, 'duplicate'],
     [{ filters: [{ column: 'missing', op: 'eq', value: 1 }] }, 'filters: unknown column'],
