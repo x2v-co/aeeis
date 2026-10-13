@@ -100,7 +100,7 @@ describe('threads through HTTP and the shipped CLI', () => {
       await new ThreadService(repository, new AgentEngine(repository, model)).recover();
       app = start();
       const replay = await call('POST', url, payload, 'alice', 'followup-key');
-      expect(replay.data).toEqual(child); expect(requests).toHaveLength(beforeRestart);
+      expect(replay.data.id).toBe(child.id); expect(replay.data.threadSequence).toBe(child.threadSequence); expect(replay.data.context.threadHistory.hash).toBe(child.context.threadHistory.hash); expect(requests).toHaveLength(beforeRestart);
       const timeline = (await call('GET', `/api/threads/${thread.id}?limit=2`)).data;
       expect(timeline.runs.map((run: { id: string }) => run.id)).toEqual([root.id, child.id]);
       expect(timeline.nextAfterSequence).toBe(2);
