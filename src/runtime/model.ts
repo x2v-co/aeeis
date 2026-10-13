@@ -103,17 +103,31 @@ const streamFrameSizeLimit = 1_000_000;
 const streamBufferSizeLimit = 1_000_000;
 
 const streamChunk = z.object({
-  choices: z.array(z.object({ index: z.number().int(), delta: z.object({ content: z.string().nullish(), reasoning_content: z.string().nullish(), reasoning: z.string().nullish() }), finish_reason: z.string().nullish() })),
+  choices: z.array(z.object({ index: z.number().int(), delta: z.object({ content: z.string().nullish(), reasoning_content: z.string().nullish(), reasoning: z.string().nullish(), tool_calls: z.array(z.object({ function: z.object({ name: z.string().nullish(), arguments: z.string().nullish() }).partial().nullish() }).passthrough()).nullish() }), finish_reason: z.string().nullish() })),
   usage: envelope.shape.usage.unwrap().nullish(),
 });
 
 interface StreamDiagnostics {
   sseFrames: number; contentBytes: number; reasoningBytes: number;
+  /** tool_calls name+arguments deltas (not counted in content). */
+  toolCallBytes?: number;
+  /** Inter-frame gap stats in ms, measured at frame decode time. */
+  frameGapAvgMs?: number; frameGapMaxMs?: number;
+  lastFrameAt?: number; frameGapTotalMs?: number;
   finishReason?: string;
   usage?: z.infer<typeof envelope>['usage'];
 }
 interface TransportHistory {
   midstreamRetries: number; usageUnknown: boolean; thinkingUnsupported: boolean;
+}
+
+/** otherBytes = SSE framing + per-frame JSON envelope (id/model/created/choices/usage). */
+function logDiagnostics(d: StreamDiagnostics, responseBytes: number) {
+  const { lastFrameAt: _l, frameGapTotalMs: _t, ...rest } = d;
+  const toolCallBytes = d.toolCallBytes ?? 0;
+  const otherBytes = responseBytes - d.contentBytes - d.reasoningBytes - toolCallBytes;
+  return { ...rest, toolCallBytes, otherBytes, envelopeBytesPerFrame: d.sseFrames ? Math.round(otherBytes / d.sseFrames) : undefined,
+    contentBytesPerFrame: d.sseFrames ? Math.round(d.contentBytes / d.sseFrames * 10) / 10 : undefined };
 }
 
 /** Decode SSE frames across arbitrary UTF-8/chunk boundaries, retaining the final usage-only chunk. */
@@ -137,7 +151,17 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
         const boundary = buffer.indexOf('\n\n', searchFrom);
         if (boundary < 0) { searchFrom = Math.max(0, buffer.length - 1); break; }
         const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); searchFrom = 0;
-        if (frame) diagnostics.sseFrames++;
+        if (frame) {
+          const now = Date.now();
+          if (diagnostics.lastFrameAt !== undefined) {
+            const gap = now - diagnostics.lastFrameAt;
+            diagnostics.frameGapTotalMs = (diagnostics.frameGapTotalMs ?? 0) + gap;
+            diagnostics.frameGapMaxMs = Math.max(diagnostics.frameGapMaxMs ?? 0, gap);
+          }
+          diagnostics.lastFrameAt = now;
+          diagnostics.sseFrames++;
+          if (diagnostics.sseFrames > 1) diagnostics.frameGapAvgMs = Math.round((diagnostics.frameGapTotalMs ?? 0) / (diagnostics.sseFrames - 1));
+        }
         if (Buffer.byteLength(frame, 'utf8') > streamFrameSizeLimit) throw new ModelOutcomeUnknown('Model stream frame exceeds size limit; the provider outcome requires reconciliation');
         const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
         if (!data) continue; // comments/keepalives/event metadata
@@ -153,6 +177,7 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
         for (const choice of chunk.choices) {
           diagnostics.contentBytes += Buffer.byteLength(choice.delta.content ?? '', 'utf8');
           diagnostics.reasoningBytes += Buffer.byteLength(choice.delta.reasoning_content ?? '', 'utf8') + Buffer.byteLength(choice.delta.reasoning ?? '', 'utf8');
+          for (const call of choice.delta.tool_calls ?? []) diagnostics.toolCallBytes = (diagnostics.toolCallBytes ?? 0) + Buffer.byteLength((call.function?.name ?? '') + (call.function?.arguments ?? ''), 'utf8');
           if (choice.index !== 0) continue;
           seenChoice = true;
           if (choice.finish_reason != null) diagnostics.finishReason = finishReason = choice.finish_reason;
@@ -393,7 +418,7 @@ export class HttpModelAdapter implements ModelAdapter {
           console.info(JSON.stringify({ protocol: 'aeeis-model-completion/1', provider: this.pin.provider ?? new URL(this.pin.endpoint).hostname,
             model: this.pin.model, requestId: response?.headers.get('x-request-id') ?? response?.headers.get('x-tt-logid') ?? null,
             attempt, lengthAttempt, headersMs, firstByteMs, elapsedMs: Date.now() - attemptStarted, responseBytes,
-            ...diagnostics, otherBytes: responseBytes - diagnostics.contentBytes - diagnostics.reasoningBytes,
+            ...logDiagnostics(diagnostics, responseBytes),
             idempotencyKey, requestBodyHash, transportAttempt, midstreamRetries: history.midstreamRetries,
             thinkingUnsupported: history.thinkingUnsupported || undefined,
             ...(history.usageUnknown ? { usageUnknown: true, billingRisk: 'duplicate-possible' } : {}),
@@ -472,7 +497,7 @@ export class HttpModelAdapter implements ModelAdapter {
           attempt, maxAttempts: this.transport.maxAttempts, lengthAttempt, elapsedMs: Date.now() - started,
           errorCode: redact(errorCode ?? (signal.aborted ? 'TIMEOUT' : String((error as NodeJS.ErrnoException)?.code ?? ((error as Error)?.cause as NodeJS.ErrnoException | undefined)?.code ?? (network ? 'NETWORK_ERROR' : (error as Error)?.name ?? 'ERROR')))),
           bodyExcerpt: redact(bodyExcerpt), responseBytes, headersMs, firstByteMs, promptChars: request.system.length + JSON.stringify(request.input).length,
-          ...diagnostics, otherBytes: responseBytes - diagnostics.contentBytes - diagnostics.reasoningBytes,
+          ...logDiagnostics(diagnostics, responseBytes),
           idempotencyKey, requestBodyHash, transportAttempt, midstreamRetries: history.midstreamRetries, maxMidstreamRetries: this.transport.midstreamRetries,
           thinkingUnsupported: thinkingDowngrade || history.thinkingUnsupported || undefined,
           ...(streamReceived && responseBytes > 0 || history.usageUnknown ? { usageUnknown: true } : {}),
