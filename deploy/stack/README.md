@@ -111,6 +111,15 @@ allowlist; configure it independently if switching to service URLs.
 
 ## Release and operations
 
+Thread releases apply additive run-repository migrations `002-threads.sql`,
+`003-thread-followups.sql` and `004-thread-shares.sql` after 001 under the existing
+migration lock. Rehearse DDL lock duration, preserve the tables on rollback, and
+keep old writers away from threaded runs. Defaults are
+`AEEIS_THREAD_CONTEXT_BUDGET_BYTES=32768`, `AEEIS_SHARE_TTL_SECONDS=604800` and
+`AEEIS_SHARE_MAX_TTL_SECONDS=2592000`; the TTL settings are shared with run links.
+See the [thread operator note](../../docs/operations/runbook.md#11-threads-部署与恢复)
+for exact limits, backups and reservation/dispatch recovery.
+
 - `bin/deploy.sh` builds the checked-out release (or uses `--no-build`), replays
   all Running AEEIS histories plus a closed sample on the candidate image, starts the stack,
   waits for that build's RUNNING worker, promotes the Worker Deployment Current

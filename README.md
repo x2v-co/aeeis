@@ -144,6 +144,42 @@ npm run dev
 
 `npm run dev` 自动读取当前目录的 `.env`，忽略模板中的空配置项，显式进程环境变量优先；修改后需重启。`npm start`、Worker 与 demo 仍使用各自显式的环境配置，不会自动读取该文件。用 `/api/status` 核对实际的 `model.model`、`model.endpoint` 与 `executionProfile`；`modelConfigured` 仅代表配置存在，真实调用结果应查看 Run 的 `calls` 和 `usage`。
 
+### Try threads
+
+本地工作台支持跨 Run 对话；完整语义见 [Threads](#threads)，部署与恢复见[运维说明](docs/operations/runbook.md#11-threads-部署与恢复)。先按上方本地运行步骤启动服务，使用当前安装的访问 token：
+
+```sh
+export AEEIS_BASE_URL=http://127.0.0.1:4323
+export AEEIS_TOKEN='<access-token>'
+curl -sS "$AEEIS_BASE_URL/api/threads" \
+  -H "Authorization: Bearer $AEEIS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"报告迭代"}'
+# 将响应中的 thread_<uuid> 填入 THREAD_ID。
+export THREAD_ID='thread_<uuid>'
+curl -sS "$AEEIS_BASE_URL/api/threads/$THREAD_ID/runs" \
+  -H "Authorization: Bearer $AEEIS_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: report-root-1' -d '{"request":{"goal":"整理一份简短报告"}}'
+```
+
+打开 `/threads/<thread-id>`，查看计划并批准本次 Run；如出现 `needs_input`，通过工作台回答，或向 `POST /api/runs/<run-id>/answer` 提交 `{"answer":"..."}`。等到 Run 为 `succeeded`、`failed` 或 `cancelled` 后，在对话页面填写下一条目标；也可用 API：
+
+```sh
+curl -sS "$AEEIS_BASE_URL/api/threads/$THREAD_ID/runs" \
+  -H "Authorization: Bearer $AEEIS_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: report-followup-1' \
+  -d '{"request":{"goal":"基于前一份报告补充建议"},"contextBudgetBytes":4096}'
+curl -sS "$AEEIS_BASE_URL/api/threads/$THREAD_ID?limit=50&afterSequence=0" \
+  -H "Authorization: Bearer $AEEIS_TOKEN"
+node scripts/fetch-run.mjs "$THREAD_ID"
+curl -sS "$AEEIS_BASE_URL/api/threads/$THREAD_ID/share" \
+  -H "Authorization: Bearer $AEEIS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"ttlSeconds":3600}'
+# 使用分享响应的 url 或 token，无需安装访问 token。
+node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
+```
+
+每个新 Run 都需要自己的计划审批。重试同一请求时保留 `Idempotency-Key`，即使服务重启或对话已有后续 Run，仍返回原 Run；同 key 改目标、parent 或预算会返回 409。新的 follow-up 使用新的 key。默认 parent 是最新 Run；传 `parentRunId` 可从较早的终态 Run 分支。读取 timeline 时使用响应的 `nextAfterSequence` 翻页。分享后再创建一个 follow-up，可以确认原分享不会显示它；使用 `DELETE /api/threads/<thread-id>/share/<share-id>` 撤销后，分享页面和 CLI 都返回 404。
+
 ### 持久化本地工具
 
 本地工具可随 AEEIS 主进程启动，不需要另起 4398 服务。复制 `local-tools.example.json`，在 `.env` 中设置 `AEEIS_LOCAL_TOOLS_CONFIG=local-tools.example.json`，启动 Colima（macOS）或本机 Linux Docker Engine，运行 `npm run sandbox:up` 检查引擎，再运行 `npm run sandbox:build` 构建 Linux 工作镜像，最后运行 `npm run dev`。构建上下文仅为 `sandbox/`，不会发送项目或 `.env`。也可以指向自己保存的 JSON 配置。配置路径相对启动目录，JSON 内的 `workspaceRoot`、`stateDirectory` 相对该 JSON 文件；修改后重启生效。`npm start` 的环境变量仍由部署者显式提供。
@@ -283,6 +319,8 @@ RSI 与协作 Trigger Pump 现在使用独立的持久化 Run 扫描位置，每
 
 ## 当前 API
 
+- `POST /api/threads`、`GET /api/threads/:id`、`POST /api/threads/:id/runs`（follow-up 必须提供 `Idempotency-Key`）
+- `GET /api/threads/:id/debug-bundle`、`POST /api/threads/:id/share`、`GET /api/threads/:id/shares`、`DELETE /api/threads/:id/share/:shareId`
 - `GET|POST /api/rooms`、`GET|PATCH /api/rooms/:id`、`GET /api/rooms/:id/goals`、`GET|POST /api/rooms/:id/members`、`DELETE /api/rooms/:id/members/:principalId`
 - `GET /health`
 - `GET /readyz`（依赖未就绪时返回 503，供部署和长时任务监控使用）
@@ -422,9 +460,32 @@ Shares expire after seven days by default. Configure `AEEIS_SHARE_TTL_SECONDS` a
 To investigate a run, download `GET /api/runs/<id>/debug-bundle` with normal authentication, or `GET /api/share/<token>/debug-bundle` with a share URL. Bundles include the run, plans, task attempts, bounded model output, validation errors, events, version and commit. Set `AEEIS_GIT_COMMIT` to identify the build (otherwise `unknown`). New model failures preserve raw output and validation details; historical runs cannot recover output already discarded.
 
 ```sh
-node scripts/fetch-run.mjs https://aeeis.example/share/<token>
-AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN=<access-token> node scripts/fetch-run.mjs <run-id>
-AEEIS_TOKEN=<access-token> node scripts/fetch-run.mjs https://aeeis.example/runs/<run-id>
+node scripts/fetch-run.mjs 'https://aeeis.example/share/<token>'
+AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN='<access-token>' node scripts/fetch-run.mjs '<run-id>'
+AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN='<access-token>' node scripts/fetch-run.mjs 'https://aeeis.example/runs/<run-id>'
 ```
 
 The script writes `run-<run-id>.debug.json`. `AEEIS_BASE_URL` is required for bare IDs and relative URLs; `AEEIS_TOKEN` is required for authenticated run URLs/IDs. Share URLs need no access token.
+
+## Threads
+
+Threads group independent runs into an owner/tenant scoped conversation at `/threads/<id>`. A follow-up creates a new Run, with a new plan, approval, execution and budgets. A `needs_input` answer uses `/api/runs/:id/answer` and continues the existing Run. Threads are separate from Goals, Room membership and Project Pulse follow-up plans. Existing unthreaded Runs remain supported; `POST /api/threads` can attach one as the root with `initialRunId`.
+
+Follow-ups require an `Idempotency-Key` and a terminal parent (`succeeded`, `failed`, `cancelled`). Identical retries return the same Run and context, including after restart; changed input for the same key returns 409. The default parent is the latest member; an explicit `parentRunId` creates a branch. Frozen history follows only that parent's ancestry, excluding siblings and later runs. It carries source IDs/revisions, excerpt hashes, classification and access provenance into planner, executor and reviewer inputs as untrusted evidence; the current goal remains authoritative. It grants no tools, agents, approvals or Room rights. Ownership, live Goal/Room access and privacy are checked before copying history; a lower-privacy request cannot disclose more restricted parent evidence.
+
+History defaults to **32 KiB UTF-8**, with a server ceiling of **64 KiB** and a smaller per-request `contextBudgetBytes` allowed. These are byte limits, separate from model token and money budgets. Selection prefers the immediate parent then recent ancestors, visits at most 20 ancestors, includes at most eight final artifacts per run and caps excerpts at 8 KiB. Included entries are stored chronologically; `actualBytes`, `truncated` and `omitted` explain budget loss. `omitted.ancestorContinuations` counts unvisited ancestry continuations, not all unseen runs. Raw model calls, credentials, environment data, full tool/source payloads and isolated evidence are excluded. The escaped model history input is additionally capped at 65,536 characters. The immutable snapshot and its hash are reused on retries.
+
+Thread shares capture `throughSequence` when created and expose redacted `public`/`internal` runs through that cutoff. Later follow-ups need a new share. Status/output updates and current privacy changes to captured runs still apply; the share freezes membership, not run content. Private/confidential runs, historical context, restricted source observations and hidden parent links are omitted. A token grants read-only access to the shared view/export, with no underlying authenticated run/artifact routes or follow-up authority. Owner/tenant checks apply to thread management; expiry and revocation return 404.
+
+`scripts/fetch-run.mjs` accepts a bare thread ID, `/threads/<id>`, an absolute thread URL, or a share URL/token:
+
+```sh
+AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN='<access-token>' node scripts/fetch-run.mjs '<thread-id>'
+AEEIS_BASE_URL=https://aeeis.example AEEIS_TOKEN='<access-token>' node scripts/fetch-run.mjs 'https://aeeis.example/threads/<thread-id>'
+node scripts/fetch-run.mjs 'https://aeeis.example/share/<share-token>'
+AEEIS_BASE_URL=https://aeeis.example node scripts/fetch-run.mjs '<share-token>'
+```
+
+Thread exports use `/api/threads/:id/debug-bundle` for owners and `/api/share/:token/debug-bundle` for shares, returning `aeeis-thread-debug-bundle/1` with `kind: "thread"`, `access`, thread metadata, `throughSequence`, `exportedAt` and ascending redacted `runs`. Owner exports retain frozen history/provenance; share exports apply the same exclusions as the share page. Storage reads use pages of 100; exports exceeding the 32 MiB retained-data or JSON limit return 413 rather than a partial thread. Individual run bundles retain `aeeis-debug-bundle/2`.
+
+The CLI writes `thread-<thread-id>.debug.json` with mode 0600 (including overwritten files). It limits downloads to 32 MiB, rejects redirects, accepts HTTPS or loopback HTTP, and sends `AEEIS_TOKEN` only to the origin configured by `AEEIS_BASE_URL`. Share requests never include that credential. Follow the [local try guide](#try-threads) and [migration/recovery note](docs/operations/runbook.md#11-threads-部署与恢复).

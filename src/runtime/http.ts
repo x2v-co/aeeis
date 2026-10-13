@@ -1,5 +1,6 @@
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
+import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
 import { debugBundle, sharedRunView } from './run-debug.js';
 import { artifactFilename } from './artifact-download.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
@@ -1436,11 +1437,6 @@ export function buildApp(options: Options) {
     if (activeShare(threadShare)) return { kind: 'thread' as const, share: threadShare };
     throw new NotFound('Unknown share');
   }
-  async function readSharedRun(token: string): Promise<AgentRun> {
-    const resolved = await resolveShare(token);
-    if (resolved.kind !== 'run') throw new NotFound('Unknown run share');
-    return options.repository.get(resolved.share.runId);
-  }
   app.get<{ Params: { id: string } }>('/runs/:id', async (_request, reply) => reply.type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8')));
   app.get<{ Params: { id: string } }>('/threads/:id', async (_request, reply) => reply.type('text/html; charset=utf-8').send(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8')));
   app.get<{ Params: { token: string } }>('/share/:token', async (request, reply) => {
@@ -1486,7 +1482,19 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { token: string } }>('/api/share/:token/debug-bundle', async (request, reply) => {
     reply.header('referrer-policy', 'no-referrer');
-    return debugBundle(await readSharedRun(request.params.token));
+    const resolved = await resolveShare(request.params.token);
+    if (resolved.kind === 'run') return debugBundle(await options.repository.get(resolved.share.runId));
+    const thread = await options.repository.getThread(resolved.share.threadId);
+    const runs = await readThreadBundleRuns(options.repository, thread, resolved.share.throughSequence);
+    return threadDebugBundle(thread, resolved.share.throughSequence, runs, 'share');
+  });
+  app.get<{ Params: { id: string } }>('/api/threads/:id/debug-bundle', async request => {
+    const principal = principalOf(request), scope = { owner: principal.id, tenantId: principal.tenantId };
+    const thread = await options.repository.getThread(request.params.id, scope);
+    const latest = await options.repository.latestRunByThread(thread.id, scope);
+    const throughSequence = latest?.threadSequence ?? 0;
+    const runs = await readThreadBundleRuns(options.repository, thread, throughSequence);
+    return threadDebugBundle(thread, throughSequence, runs, 'owner');
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id/debug-bundle', async request => debugBundle(await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request))));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => { const principal = principalOf(request); return getReadableRun(options.repository, options.domain, request.params.id, principal); });

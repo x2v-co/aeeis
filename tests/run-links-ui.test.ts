@@ -46,6 +46,7 @@ describe('run link workbench', () => {
     start(`/share/${token}`, fetch);
     await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
     const doc = dom.window.document;
+    expect(doc.getElementById('copy-run-link')?.textContent).toBe('复制链接');
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]![0]).toBe(`/api/share/${token}`);
     expect(fetch.mock.calls[0]![1].headers).not.toHaveProperty('authorization');

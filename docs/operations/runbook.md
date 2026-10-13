@@ -132,3 +132,29 @@ readiness 的 repository/model/dispatcher/knowledge 检查并发执行，等待�
 出现处理错误时先查看对应 Run/event 和 Pump 日志。单条错误不会挡住其他 Run，会在下一轮重访；cursor 保存失败会保留旧位置并重放，重复调用由 durable attempt、signal ID 和 Trigger Decision 幂等拦截。不要把 cursor 前移来掩盖处理错误。未知供应商调用仍必须按原有 reconcile 流程核查，清理 checkpoint 不能授予再次调用供应商的权限。
 
 恢复备份时保留 cursor 可继续扫描；丢失 cursor 会从头重放，领域事实和幂等回执必须完整恢复。此实现限制每批读取量，不保证固定发现延迟；持续检查单个 Run 的大小、全轮巡检时长和 Pump 错误，并对实际数据容量验收。
+
+## 11. Threads 部署与恢复
+
+PostgreSQL 的 `PostgresRunRepository.init` 在现有 `runs` migration advisory lock 事务内，按 001 之后的顺序应用以下可重复执行的 additive migrations：
+
+| Migration | 内容 |
+| --- | --- |
+| `002-threads.sql` | `aeeis_threads`、Run membership/parent/sequence 列、约束及唯一序号索引 |
+| `003-thread-followups.sql` | `aeeis_thread_followups`，持久化 key/request hash、冻结 history 和 preparation checkpoints |
+| `004-thread-shares.sql` | `aeeis_thread_shares`，独立 token hash、过期/撤销时间与 `through_sequence` |
+
+文件位于 `src/adapters/migrations/`，bootstrap 使用对应的源码 SQL 常量。旧 Run 的 nullable membership 列无需回填，JSON schemaVersion 仍为 1。002 的 membership CHECK 为 `NOT VALID`，约束新写入并避免启动时扫描历史记录；索引构建仍取得普通 DDL 锁。按[生产迁移手册](../runbooks/aeeis-production-migration.md)先备份，并在生产规模副本上确认 bootstrap 的锁持续时间，再安排维护窗口。API 与 Worker 使用兼容的同一版本；有 threaded Run 后，不允许旧 writer 修改它们。回滚应用时保留 additive 表、列和数据。
+
+下面是 `src` 实际读取的完整 thread/history/share 环境变量清单（核对 `src/server.ts` 和 `src/runtime/run-shares.ts`，后者用 `process.env[name]` 读取）：
+
+| 环境变量 | 默认值 | 限制与作用 |
+| --- | --- | --- |
+| `AEEIS_THREAD_CONTEXT_BUDGET_BYTES` | `32768` bytes（32 KiB） | 正整数，最大 `65536`；服务端 follow-up history 预算及请求上限；每个请求只能调低 |
+| `AEEIS_SHARE_TTL_SECONDS` | `604800` seconds（7 天） | 正整数，最多 `31536000`；有效默认值取本值与 maximum 的较小者，Run 与 Thread share 共用 |
+| `AEEIS_SHARE_MAX_TTL_SECONDS` | `2592000` seconds（30 天） | 正整数，最多 `31536000`；share 请求 `ttlSeconds` 的上限 |
+
+其余 history 限制是源码常量：20 个祖先、每 Run 最多 8 个 final artifacts、每 excerpt 8192 bytes、转义后输入 65536 characters；export 以 100 条存储分页、32 MiB 总限额读取。没有独立的 thread enable、ancestor limit 或 thread TTL 环境开关。配置修改后重启 API；既有 Run 的冻结 history 与已签发 share 的截止时间不会被重写。通用 `_FILE` 敏感配置注入机制仍可用。CLI 的 `AEEIS_BASE_URL` / `AEEIS_TOKEN` 是客户端输入，默认未设置；现有单 Run debug metadata 的 `AEEIS_GIT_COMMIT` 默认 `unknown`。
+
+文件模式的 metadata、Run、reservation journal 和 `.thread-shares.json` 与 Run 仓库一起备份，保持 single-writer lock；可重建的索引不能替代 canonical 文件。重启时先恢复 pending follow-up reservations，再执行 boot/reconcile dispatch；已完成的 history、connector 和 Brain checkpoints 会复用，commit 前的失败不会把部分链接的 Run 交给 dispatcher。进程在 provider result 与 checkpoint publication 之间中断产生的 `started` 歧义不能自动重发，需要核查供应商证据。恢复完成后用原 `Idempotency-Key` 重试并确认 Run ID、sequence 和 history hash 相同；同 key 改请求应返回 409。
+
+Local 与 Temporal 都在原子提交 membership 后通知 dispatcher；每个 Run 对应自己的 workflow ID，parent 已完成后保持完成。若 commit 后 notify 失败，检查 `dispatch.failed`，恢复执行服务并使用该 Run 的 resume dispatch（`POST /api/runs/:id/dispatch`）或既有 boot/reconcile 恢复，不要另建 follow-up。审批与回答唤醒 child 的 workflow。用 owner 读取 timeline/export、用 share token 检查 cutoff 和 redaction，再验证撤销后的页面、API 与 export 均为 404。使用步骤见 [README Try threads](../../README.md#try-threads)。
