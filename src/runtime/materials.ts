@@ -84,10 +84,12 @@ function csvCells(record: string): string[] {
 }
 function csvRecords(content: string): string[] { return materialRows(content.replace(/^\uFEFF/, ''), true).filter(row => row !== ''); }
 
+/** Shared CSV parser: BOM, CRLF, quoted newlines, commas and escaped quotes. */
+export function parseCsv(content: string): string[][] { return csvRecords(content).map(csvCells); }
+
 /** Statistics use every data row; sampleRows are the first five rows, not a ranking. */
 export function csvSummary(content: string): CsvSummary {
-  const records = csvRecords(content), header = csvCells(records.shift() ?? '');
-  const rows = records.map(csvCells);
+  const rows = parseCsv(content), header = rows.shift() ?? [''];
   const columns = header.map((name, index): CsvColumnStats => {
     const values = rows.map(row => row[index]?.trim() ?? '').filter(value => value !== '');
     const types = new Set(values.map(value => /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(value) && Number.isFinite(Number(value)) ? 'number'
@@ -113,7 +115,7 @@ function csvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: number): 
   const rendered = { ...summary, columns: summary.columns.map(column => ({ ...column, name: clip(column.name),
     ...(typeof column.min === 'string' ? { min: clip(column.min) } : {}), ...(typeof column.max === 'string' ? { max: clip(column.max) } : {}) })),
     sampleRows: summary.sampleRows.map(row => row.map(clip)), omittedColumns: 0,
-    instructions: 'Statistics cover all rows. Samples are first rows only; text values may be shortened. Read bounded pages with sources.read (offset/limit). Do not infer unseen row details.' };
+    instructions: 'Statistics cover all rows. Samples are first rows only; text values may be shortened. Query all rows with sources.csvQuery for filtering/aggregation, or read bounded pages with sources.read (offset/limit). Do not infer unseen row details.' };
   while (JSON.stringify(rendered).length > maxLength && rendered.sampleRows.length) rendered.sampleRows.pop();
   while (JSON.stringify(rendered).length > maxLength && rendered.columns.length) { rendered.columns.pop(); rendered.omittedColumns++; }
   const content = JSON.stringify(rendered).length <= maxLength ? JSON.stringify(rendered) : `CSV: ${summary.rowCount} data rows; call sources.read`.slice(0, maxLength);
