@@ -171,9 +171,3 @@ history cap. The subsequent broader run passes 1,351 tests across 94 files
 Temporal-server test files blocked by the sandbox. No test configuration was
 changed to conceal the full-suite limitation. Re-run the entire suite with
 localhost/child-process permissions before deployment.
-
-Staging/commit is blocked by the managed workspace: Git's worktree metadata at
-`/workspace/aeeis/.git/worktrees/aeeis-ark` is mounted read-only, so `git add`
-cannot create `index.lock`. All edits are confined to `/workspace/aeeis-ark`;
-verification logs live in `/tmp/aeeis-ark-*`. No push, deployment or production
-provider call was performed.
