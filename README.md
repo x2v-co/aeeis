@@ -134,7 +134,11 @@ npm run dev
 
 复制 `.env.example` 后配置一个 OpenAI-compatible endpoint：
 
-固定模型的请求超时由 `AEEIS_MODEL_TIMEOUT_MS` 控制，默认 180000（3 分钟），范围 1000–600000 毫秒，覆盖等待响应和读取正文。超时后 Run 保留 `unknown`，不自动重发；收到服务商回执后再核查恢复。超时不等于服务商没有执行或没有计费。
+非流式模型的请求超时由 `AEEIS_MODEL_TIMEOUT_MS` 控制，默认 180000（3 分钟），范围 1000–600000 毫秒，覆盖等待响应和读取正文。ARK/volcengine 自动启用 SSE，其他 OpenAI-compatible provider 默认保持非流式；`AEEIS_MODEL_STREAM=1|0` 可显式覆盖，固定模型和 catalog 路由均适用。流式调用使用 `AEEIS_MODEL_IDLE_TIMEOUT_MS`（默认继承 `AEEIS_MODEL_TIMEOUT_MS`）约束等待响应头及无字节间隔，reasoning/heartbeat 字节也重置 idle；另有 `AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS`（默认 600000）限制每次 transport attempt 的总时长，两个值范围均为 1000–600000 毫秒。请求携带 `stream_options.include_usage`，保留最终 usage 与 finish_reason；provider 返回普通 JSON 时仍可解析。
+
+Transport 重试仍受 `AEEIS_MODEL_MAX_ATTEMPTS`（默认 3）及 `AEEIS_MODEL_RETRY_BASE_MS` / `AEEIS_MODEL_RETRY_MAX_MS` 控制；SSE 响应头已到达后的中断不自动重发。耗尽 transport 重试后，超时 Run 保留 `unknown`；executor 不用缩小上下文另开一次模型调用，必须收到服务商回执并核查计费后再恢复。超时不等于服务商没有执行或没有计费。
+
+大于 2048 UTF-8 字节的 CSV 在 planner/executor/reviewer 中使用列名、类型、distinct/null 数、min/max、总行数及前五行样本的摘要，每份最多 3000 字符。`sources.read` 使用从 0 开始的数据行 `offset` 和 `limit`（默认 20，最多 100），每页原文最多 4000 字符，返回 `page.nextRead`；超长单行用带 `characterOffset` 的明确字符片段继续读取。原始资料和完整观察结果保存在 Run 中。模型中的观察结果最多 10000 序列化字符，旧的大结果压缩为引用及 SHA-256；executor 的 system + JSON input 总预算为 96000 字符，重复的依赖和证据过大时压缩，固定授权字段过大时在模型调用前拒绝。测量与历史分析见 [CSV timeout investigation](docs/bigcsv-timeout.md)。
 
 ```bash
 cp .env.example .env

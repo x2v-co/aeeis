@@ -88,13 +88,75 @@ const envelope = z.object({
 });
 const tokenLimit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const defaultMaxTokens = 16_384;
+const responseSizeLimit = 1_000_000;
+const streamFrameSizeLimit = 1_000_000;
+const streamBufferSizeLimit = 1_000_000;
 
-export interface ModelTransportOptions { maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number }
+const streamChunk = z.object({
+  choices: z.array(z.object({ index: z.number().int(), delta: z.object({ content: z.string().nullish() }), finish_reason: z.string().nullish() })),
+  usage: envelope.shape.usage.unwrap().nullish(),
+});
+
+/** Decode SSE frames across arbitrary UTF-8/chunk boundaries, retaining the final usage-only chunk. */
+async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult<Uint8Array>>, activity: () => void): Promise<z.infer<typeof envelope>> {
+  const decoder = new TextDecoder();
+  let buffer = '', content = '', finishReason: string | null = null, contentBytes = 0, seenChoice = false;
+  let skipLF = false, searchFrom = 0;
+  let usage: z.infer<typeof envelope>['usage'];
+  for (;;) {
+    const { done, value } = await read();
+    if (done) throw new ModelOutcomeUnknown('Model stream ended before [DONE]; the provider outcome requires reconciliation');
+    activity();
+    // Drain large network chunks incrementally so many valid frames never fill the pending buffer.
+    for (let offset = 0; offset < value.byteLength; offset += 65_536) {
+      let text = decoder.decode(value.subarray(offset, offset + 65_536), { stream: true });
+      if (!text) continue;
+      // CR ends a line immediately; suppress its paired LF even across network/decoder chunks.
+      if (skipLF && text.startsWith('\n')) text = text.slice(1);
+      skipLF = text.endsWith('\r');
+      buffer += text.replace(/\r\n|\r/g, '\n');
+      for (;;) {
+        const boundary = buffer.indexOf('\n\n', searchFrom);
+        if (boundary < 0) { searchFrom = Math.max(0, buffer.length - 1); break; }
+        const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); searchFrom = 0;
+        if (Buffer.byteLength(frame, 'utf8') > streamFrameSizeLimit) throw new ModelOutcomeUnknown('Model stream frame exceeds size limit; the provider outcome requires reconciliation');
+        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
+        if (!data) continue; // comments/keepalives/event metadata
+        if (data.trim() === '[DONE]') {
+          if (!seenChoice) throw new ModelOutcomeUnknown('Model stream contained no completion; the provider outcome requires reconciliation');
+          return { choices: [{ message: { content }, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
+        }
+        let chunk: z.infer<typeof streamChunk>;
+        try { chunk = streamChunk.parse(JSON.parse(data)); }
+        catch { throw new ModelOutcomeUnknown('Model stream contained an invalid event; the provider outcome requires reconciliation'); }
+        if (chunk.usage) usage = chunk.usage;
+        // Repeated metadata, reasoning and keepalives do not consume the retained content allowance.
+        for (const choice of chunk.choices) if (choice.index === 0) {
+          seenChoice = true;
+          const delta = choice.delta.content ?? '';
+          contentBytes += Buffer.byteLength(delta, 'utf8');
+          if (contentBytes > responseSizeLimit) throw new ModelOutcomeUnknown('Model stream content exceeds size limit; the provider outcome requires reconciliation');
+          content += delta;
+          if (choice.finish_reason != null) finishReason = choice.finish_reason;
+        }
+      }
+      if (Buffer.byteLength(buffer, 'utf8') > streamBufferSizeLimit) throw new ModelOutcomeUnknown('Model stream buffer exceeds size limit; the provider outcome requires reconciliation');
+    }
+  }
+}
+
+export interface ModelTransportOptions {
+  maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number;
+  stream?: boolean; idleTimeoutMs?: number; streamOverallTimeoutMs?: number;
+}
 export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOptions {
   return {
     maxAttempts: Number(env.AEEIS_MODEL_MAX_ATTEMPTS ?? 3),
     retryBaseMs: Number(env.AEEIS_MODEL_RETRY_BASE_MS ?? 500),
     retryMaxMs: Number(env.AEEIS_MODEL_RETRY_MAX_MS ?? 10_000),
+    ...(env.AEEIS_MODEL_STREAM === undefined ? {} : { stream: env.AEEIS_MODEL_STREAM === '1' }),
+    idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000),
+    streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 600_000),
   };
 }
 
@@ -109,12 +171,16 @@ export class HttpModelAdapter implements ModelAdapter {
     if (url.protocol !== 'https:' && !(allowInsecureHttp || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) {
       throw new Error('Model endpoint must use HTTPS (except loopback development servers)');
     }
-    const ark = /(^|\.)volces\.com$/.test(url.hostname) || /ark|volcengine/i.test(provider ?? '');
-    this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000 };
+    const ark = /(^|\.)(?:volces\.com|bytepluses\.com)$/.test(url.hostname) || /ark|volcengine|byteplus/i.test(provider ?? '');
+    this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
+      stream: transport.stream ?? ark, idleTimeoutMs: transport.idleTimeoutMs ?? requestTimeoutMs, streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 600_000 };
     z.number().int().min(1).max(10).parse(this.transport.maxAttempts);
     z.number().int().min(0).max(60_000).parse(this.transport.retryBaseMs);
     z.number().int().min(this.transport.retryBaseMs).max(60_000).parse(this.transport.retryMaxMs);
     z.number().int().min(1).max(600_000).parse(this.requestTimeoutMs);
+    z.boolean().parse(this.transport.stream);
+    z.number().int().min(1).max(600_000).parse(this.transport.idleTimeoutMs);
+    z.number().int().min(1).max(600_000).parse(this.transport.streamOverallTimeoutMs);
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
     if (this.pin.maxTokens !== undefined) tokenLimit.parse(this.pin.maxTokens);
     if (this.pin.maxOutputTokens !== undefined) tokenLimit.parse(this.pin.maxOutputTokens);
@@ -176,8 +242,21 @@ export class HttpModelAdapter implements ModelAdapter {
     const started = Date.now();
     for (let attempt = 1; attempt <= this.transport.maxAttempts; attempt++) {
       // A fresh deadline bounds fetch AND response-body consumption on each try.
-      const signal = AbortSignal.timeout(this.requestTimeoutMs);
+      const controller = new AbortController(), signal = controller.signal;
+      const streaming = this.transport.stream;
+      const overallMs = streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs;
+      let timeoutMs = overallMs, timeoutKind = 'overall';
+      const overallTimer = setTimeout(() => controller.abort(), overallMs);
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const activity = () => {
+        if (!streaming) return;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => { timeoutMs = this.transport.idleTimeoutMs; timeoutKind = 'idle'; controller.abort(); }, this.transport.idleTimeoutMs);
+      };
+      activity();
+      let streamReceived = false;
       let response: Response | undefined;
+      let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let stage: 'request' | 'response' = 'request';
       let bodyExcerpt = '';
       let errorCode: string | undefined;
@@ -187,21 +266,34 @@ export class HttpModelAdapter implements ModelAdapter {
           method: 'POST', redirect: 'error', signal,
           headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(request.idempotencyKey ? { 'idempotency-key': lengthAttempt === 0 ? request.idempotencyKey : `${request.idempotencyKey}:length-retry` } : {}) },
           body: JSON.stringify({ model: this.pin.requestModel ?? this.pin.model, max_tokens: maxTokens, response_format: { type: 'json_object' },
+            ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}),
             messages: [{ role: 'system', content: request.system }, { role: 'user', content: JSON.stringify(request.input) }] }),
         });
         stage = 'response';
+        activity();
         // HTTP classification must survive an error body that itself times out.
         if (!response.ok) httpError = response.status >= 500 || response.status === 408
           ? new ModelOutcomeUnknown(`Model provider returned HTTP ${response.status}; execution outcome requires reconciliation`)
           : new ModelResponseRejected(`Model provider returned HTTP ${response.status}`, { inputTokens: 0, outputTokens: 0 });
         // Read only a bounded error excerpt. Never put it in public Run errors.
+        streamReceived = response.ok && (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') ?? false);
         const reader = response.body?.getReader();
-        if (!reader) throw new Error('Empty model response');
+        if (!reader) throw streamReceived ? new ModelOutcomeUnknown('Empty model stream; the provider outcome requires reconciliation') : new Error('Empty model response');
+        bodyReader = reader;
+        const read = async () => {
+          signal.throwIfAborted();
+          let abort: () => void = () => {};
+          const aborted = new Promise<never>((_resolve, reject) => { abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true }); });
+          try { return await Promise.race([reader.read(), aborted]); }
+          finally { signal.removeEventListener('abort', abort); }
+        };
+        if (streamReceived) return await readStreamCompletion(read, activity);
         const chunks: Uint8Array[] = []; let size = 0;
-        const limit = response.ok ? 1_000_000 : 2048;
+        const limit = response.ok ? responseSizeLimit : 2048;
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await read();
           if (done) break;
+          activity();
           size += value.length;
           if (size > limit) {
             if (!response.ok) chunks.push(value.slice(0, Math.max(0, limit - (size - value.length))));
@@ -225,7 +317,7 @@ export class HttpModelAdapter implements ModelAdapter {
         const retryable = httpError !== undefined
           ? response!.status === 429 || response!.status >= 500
           : network;
-        const willRetry = retryable && attempt < this.transport.maxAttempts;
+        const willRetry = retryable && !streamReceived && attempt < this.transport.maxAttempts;
         const delayMs = willRetry ? Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (attempt - 1)) * (0.5 + Math.random() * 0.5)) : 0;
         const redact = (text: string): string => {
           if (this.apiKey) text = text.split(this.apiKey).join('[REDACTED]');
@@ -242,10 +334,10 @@ export class HttpModelAdapter implements ModelAdapter {
         if (willRetry) { await new Promise(resolve => setTimeout(resolve, delayMs)); continue; }
         if (httpError) throw httpError;
         if (network) throw new ModelOutcomeUnknown(signal.aborted
-          ? `Model ${stage} timed out after ${this.requestTimeoutMs}ms. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`
+          ? `Model ${stage} timed out after ${timeoutMs}ms${streaming ? ` (${timeoutKind} timeout)` : ''}. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`
           : `Model ${stage} connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`);
         throw error;
-      }
+      } finally { clearTimeout(overallTimer); clearTimeout(idleTimer); void bodyReader?.cancel().catch(() => undefined); }
     }
     throw new Error('Model retry attempts exhausted');
   }
