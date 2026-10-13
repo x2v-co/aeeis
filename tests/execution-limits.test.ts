@@ -104,12 +104,13 @@ describe('durable execution allowances', () => {
     expect(finished.artifacts[0]!.partial).toBe(true);
   });
 
-  it('reconciles an unknown final call using its original input without another provider request', async () => {
+  it.each(['snapshot', 'hash only'])('reconciles an unknown final call with %s using its original input without another provider request', async format => {
     const fixture = await setup({ maxNodeIterations: 2 });
     await fixture.engine.advance(fixture.run.id); // first read
     fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('idle timeout'));
     expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
     const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
+    if (format === 'hash only') await fixture.repository.mutate(unknown.id, current => { delete current.calls.at(-1)!.request; });
     expect(unknown.steps[0]!.finalCallId).toBe(call.id);
     expect(await fixture.engine.advance(unknown.id)).toBe('unknown');
     expect(fixture.complete).toHaveBeenCalledTimes(3);
