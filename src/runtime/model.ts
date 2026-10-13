@@ -270,7 +270,7 @@ export class HttpModelAdapter implements ModelAdapter {
       const streaming = this.transport.stream;
       const overallMs = streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs;
       let timeoutMs = overallMs, timeoutKind = 'overall';
-      const overallTimer = setTimeout(() => controller.abort(), overallMs);
+      let overallTimer = setTimeout(() => controller.abort(), overallMs);
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
       const firstByteTimer = setTimeout(() => { timeoutMs = this.transport.firstByteTimeoutMs; timeoutKind = 'first-byte'; controller.abort(); }, this.transport.firstByteTimeoutMs);
       let responseBytes = 0;
@@ -309,6 +309,14 @@ export class HttpModelAdapter implements ModelAdapter {
           : new ModelResponseRejected(`Model provider returned HTTP ${response.status}`, { inputTokens: 0, outputTokens: 0 });
         // Read only a bounded error excerpt. Never put it in public Run errors.
         streamReceived = response.ok && (response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') ?? false);
+        if (streaming && !streamReceived && !signal.aborted) {
+          // JSON and HTTP error bodies keep the request deadline even when SSE was requested.
+          timeoutMs = Math.min(overallMs, this.requestTimeoutMs);
+          clearTimeout(overallTimer);
+          const remainingMs = timeoutMs - (Date.now() - attemptStarted);
+          if (remainingMs <= 0) controller.abort();
+          else overallTimer = setTimeout(() => controller.abort(), remainingMs);
+        }
         const reader = response.body?.getReader();
         if (!reader) throw streamReceived ? new ModelOutcomeUnknown('Empty model stream; the provider outcome requires reconciliation') : new Error('Empty model response');
         bodyReader = reader;
