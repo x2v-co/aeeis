@@ -289,6 +289,8 @@ export interface AgentRun {
   }>;
   /** One durable schema repair per proposed plan, also used after restart. */
   plannerRepair?: { rawOutput: string; validationError: string };
+  /** One corrective reviewer retry: redacted zod issues from the rejected review. */
+  reviewRepair?: { issues: Array<{ path: string; code: string; message: string }> };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };

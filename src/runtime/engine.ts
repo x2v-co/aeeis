@@ -388,6 +388,43 @@ function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
  * verdict but an oversized optional proposal, keep the verdict and discard
  * only that malformed proposal so a successful Run is not lost to auxiliary
  * RSI text. Any invalid required review field remains a hard failure. */
+const reviewText = (value: unknown): string | undefined => typeof value === 'string' ? value
+  : Array.isArray(value) ? value.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+  : value && typeof value === 'object' ? JSON.stringify(value) : typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
+/** Lenient handling of reviewer fields that weaker models often mistype:
+ * text fields are coerced, optional fields with an unusable type are dropped (logged). */
+export function normalizeReviewOptionals(input: Record<string, unknown>): Record<string, unknown> {
+  const candidate = { ...input };
+  const dropped: Array<{ path: string; type: string }> = [];
+  const typeOf = (value: unknown) => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  if ('summary' in candidate && typeof candidate.summary !== 'string') {
+    const text = reviewText(candidate.summary); if (text !== undefined) candidate.summary = text;
+  }
+  if (candidate.issues === null) delete candidate.issues;
+  else if (Array.isArray(candidate.issues)) candidate.issues = candidate.issues.filter(item => item !== null && item !== undefined).map(item => typeof item === 'string' ? item : reviewText(item)!);
+  if ('confidence' in candidate) {
+    const raw = candidate.confidence;
+    const number = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() ? Number(raw.trim().replace(/%$/, '')) / (raw.trim().endsWith('%') ? 100 : 1) : NaN;
+    if (Number.isFinite(number) && number >= 0 && number <= 1) candidate.confidence = number;
+    else { dropped.push({ path: 'confidence', type: typeOf(raw) }); delete candidate.confidence; }
+  }
+  if ('improvement' in candidate) {
+    const raw = candidate.improvement;
+    if (raw === null || raw === undefined) delete candidate.improvement;
+    else if (typeof raw !== 'object' || Array.isArray(raw)) { dropped.push({ path: 'improvement', type: typeOf(raw) }); delete candidate.improvement; }
+    else {
+      // Optional proposal text fields: arrays are joined, objects stringified.
+      const improvement = { ...raw as Record<string, unknown> };
+      for (const key of ['change', 'reason', 'baseVersion', 'proposedVersion'])
+        if (key in improvement && typeof improvement[key] !== 'string') { const text = reviewText(improvement[key]); if (text === undefined) delete improvement[key]; else improvement[key] = text; }
+      if (typeof improvement.sourceReceiptRefs === 'string') improvement.sourceReceiptRefs = [improvement.sourceReceiptRefs];
+      candidate.improvement = improvement;
+    }
+  }
+  if (dropped.length) console.warn(JSON.stringify({ protocol: 'aeeis-review-field-dropped/1', fields: dropped }));
+  return candidate;
+}
+
 function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
   value = normalizeModelJson(normalizeModelJson(value, 'decision', 'verdict'), 'review', 'verdict');
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -399,14 +436,18 @@ function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
     }
     value = candidate;
   }
+  if (value && typeof value === 'object' && !Array.isArray(value)) value = normalizeReviewOptionals(value as Record<string, unknown>);
   try { return reviewSchema.parse(value); }
   catch (error) {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       const candidate = value as Record<string, unknown>;
-      if (candidate.improvement && typeof candidate.improvement === 'object' && !Array.isArray(candidate.improvement)) {
+      if ('improvement' in candidate) {
         const { improvement: _ignored, ...withoutImprovement } = candidate;
         const fallback = reviewSchema.safeParse(withoutImprovement);
-        if (fallback.success) return fallback.data;
+        if (fallback.success) {
+          console.warn(JSON.stringify({ protocol: 'aeeis-review-field-dropped/1', fields: [{ path: 'improvement', type: 'invalid-shape' }] }));
+          return fallback.data;
+        }
       }
     }
     throw error;
@@ -2062,8 +2103,22 @@ export class AgentEngine {
     }
     const currentSystem = legacyRequest.system + (run.partial ? '\nThis run exhausted its execution/evidence allowance. Review it as an explicitly partial answer: assess received evidence and honest limitations, and do not require exhaustive source scans.' : '');
     legacyRequests.push({ system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input } });
-    await this.call(run, model, 'reviewer', { system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input, sources: presentedMaterials(run.context.sources, [], sourcePromptChars) } }, (current, value) => {
-      current.review = parseReviewDecision(value);
+    const reviewRepair = run.reviewRepair ? redactRunData(run.reviewRepair) : undefined;
+    const reviewSystem = currentSystem + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
+    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { partial: run.partial ?? false, ...legacyRequest.input, sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
+      try { current.review = parseReviewDecision(value); }
+      catch (error) {
+        const issues = validationDetails(error)?.issues;
+        if (!issues || current.reviewRepair) throw error;
+        const call = current.calls.at(-1)!;
+        current.reviewRepair = redactRunData({ issues: issues.map(({ path, code, message }) => ({ path, code, message: message.slice(0, 200) })) });
+        call.validationErrors = current.reviewRepair.issues;
+        event(current, 'model.validation_failed', { callId: call.id, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
+        event(current, 'review.repair_requested', { callId: call.id });
+        console.warn(JSON.stringify({ protocol: 'aeeis-model-schema-retry/1', runId: current.id, phase: 'reviewer', issues: issues.map(issue => ({ path: issue.path, code: issue.code })) }));
+        return;
+      }
+      delete current.reviewRepair;
       // The verdict is the reviewer's decision. Issues on an accepted review are
       // non-blocking findings and are surfaced as warnings, not as a failure.
       const accepted = current.review.verdict === 'accepted';
