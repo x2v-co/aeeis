@@ -195,6 +195,13 @@ export function queryCsvSource(source: Source, input: unknown = {}) {
   while (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS && result.rows.length) {
     result.rows.pop(); result.returnedRows = result.rows.length; result.truncated = true;
   }
+  if (result.truncated) Object.assign(result, { omittedRows: result.totalResultRows - result.returnedRows,
+    truncationNote: `TRUNCATED: ${result.returnedRows} of ${result.totalResultRows} result rows returned (${matchedRowCount} matched source rows). Cite only returned rows; use aggregates for whole-data statistics.` });
+  while (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS && result.rows.length) {
+    result.rows.pop(); result.returnedRows = result.rows.length;
+    Object.assign(result, { omittedRows: result.totalResultRows - result.returnedRows,
+      truncationNote: `TRUNCATED: ${result.returnedRows} of ${result.totalResultRows} result rows returned (${matchedRowCount} matched source rows). Cite only returned rows; use aggregates for whole-data statistics.` });
+  }
   if (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS) throw new CsvQueryInputError('CSV query metadata exceeds the 6000 character result budget; select fewer or shorter columns/aliases');
   return result;
 }
