@@ -11,31 +11,53 @@ import { decideRunAdvance, maxStalledAdvances } from '../src/temporal/run-advanc
 import type { AdvanceRunActivityResult } from '../src/temporal/activity.js';
 import { InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 
-it('does not duplicate a stale tick when another API finishes while its budget reservation is delayed', async () => {
+it.each(['completed', 'in flight'])('refunds a stale tick when another API call is %s after its budget reservation is delayed', async outcome => {
   const repository = new InMemoryRunRepository(), ledger = new InMemoryGlobalBudgetLedger();
-  const select = () => ({ accountKey: 'shared', owner: 'owner', tenantId: 'local', windowKey: 'unbounded', budget: { calls: 10, tokens: 1000 } });
+  const select = () => ({ accountKey: 'shared', owner: 'owner', tenantId: 'local', windowKey: 'unbounded', budget: { calls: 2, tokens: 1000 } });
   let release!: () => void, started!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   const began = new Promise<void>(resolve => { started = resolve; });
   const reserve = ledger.reserve.bind(ledger);
   vi.spyOn(ledger, 'reserve').mockImplementationOnce(async (selection, key) => { started(); await pending; return reserve(selection, key); });
-  const complete = vi.fn(async () => ({ value: { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Report', dependsOn: [] }] }, usage: { inputTokens: 10, outputTokens: 5 } }));
+  let finish!: () => void, called!: () => void;
+  const providerPending = new Promise<void>(resolve => { finish = resolve; });
+  const providerBegan = new Promise<void>(resolve => { called = resolve; });
+  const complete = vi.fn(async () => {
+    called();
+    if (outcome === 'in flight') await providerPending;
+    return { value: { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Report', dependsOn: [] }] }, usage: { inputTokens: 10, outputTokens: 5 } };
+  });
   const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
   const services = { model, globalBudget: { ledger, select } };
   const first = new AgentEngine(repository, services), second = new AgentEngine(repository, services);
   const run = await first.create({ goal: 'Report' });
   const advancing = first.advance(run.id);
+  let winning: ReturnType<AgentEngine['advance']> | undefined;
   try {
     await began;
-    expect(await second.advance(run.id)).toBe('needs_approval');
+    winning = second.advance(run.id);
+    await providerBegan;
+    if (outcome === 'completed') expect(await winning).toBe('needs_approval');
     release();
-    expect(await advancing).toBe('needs_approval');
+    expect(await advancing).toBe(outcome === 'completed' ? 'needs_approval' : 'planning');
     expect(complete).toHaveBeenCalledTimes(1);
     expect((await repository.get(run.id)).calls).toHaveLength(1);
-    const account = (await ledger.get('shared'))!;
-    expect(Object.values(account.entries).every(entry => entry.state === 'settled')).toBe(true);
+    let account = (await ledger.get('shared'))!;
+    expect(account.usedCalls).toBe(1);
+    expect(Object.values(account.entries).filter(entry => entry.state === 'released')).toHaveLength(1);
+    finish();
+    expect(await winning).toBe('needs_approval');
+    account = (await ledger.get('shared'))!;
+    expect(Object.values(account.entries).map(entry => entry.state).sort()).toEqual(['released', 'settled']);
     expect(account.usedTokens).toBe(15);
-  } finally { release(); await advancing; }
+    expect(account.unreportedTokenCalls).toBe(0);
+    // Only the executed call lacks pricing; the released entry adds no hold.
+    expect(account.unreportedMoneyCalls).toBe(1);
+    const next = await second.create({ goal: 'Another report' });
+    expect(await second.advance(next.id)).toBe('needs_approval');
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect((await ledger.get('shared'))?.usedCalls).toBe(2);
+  } finally { release(); finish(); await Promise.all([advancing, winning]); await ledger.close(); }
 });
 
 it('returns 202 during a blocked tick, polls after completion, and never duplicates across activity retries or API instances', async () => {

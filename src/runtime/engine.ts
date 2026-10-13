@@ -20,7 +20,7 @@ import { projectSourceSyncReceiptSchema, synchronizeProjectSources, validateProj
 import { claimDigest, type BrainAudit, type BrainClaim, type BrainPersistence, type GovernedBrain, type BrainSemanticSearcher } from '../brain.js';
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
-import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
+import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetReservation, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
 import { escapeMaterialRef, materialContentHash, materialQueryTerms, materialExcerpt, presentedMaterials, readMaterialPage } from './materials.js';
 import { boundedExecutorInput, boundedObservations } from './prompt-context.js';
 import { executionLimitReason, executionLimitsSchema, nodeModelCalls, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from './execution-limits.js';
@@ -1082,10 +1082,11 @@ export class AgentEngine {
       assertModelBudget(run); assertExternalSettlement(run);
     }
     const globalSelection = existingCallId ? undefined : this.modelGlobalSelection(run, startedAt);
-    let globalReservation: { reserved: boolean; state: 'reserved' | 'unknown' | 'settled' | 'rejected' } | undefined;
+    let globalReservation: GlobalBudgetReservation | undefined;
     if (globalSelection && this.globalBudget) {
       globalReservation = await this.globalBudget.ledger.reserve(globalSelection, this.modelGlobalKey(run.id, callId));
       if (!globalReservation.reserved && globalReservation.state === 'rejected') throw new Conflict('Global model budget reservation was rejected');
+      if (!globalReservation.reserved && globalReservation.state === 'released') throw new Conflict('Global model budget reservation was released');
     }
     // Transport options stay outside the durable request hash so historical
     // unknown planner calls can still be reconciled against their original input.
@@ -1151,8 +1152,8 @@ export class AgentEngine {
     });
     if (!reserved) {
       // A competing tick won the durable fence after budget admission. No
-      // provider request occurred for this key, so do not leave it unknown.
-      if (globalSelection && globalReservation?.reserved && this.globalBudget) await this.globalBudget.ledger.settle(globalSelection.accountKey, this.modelGlobalKey(run.id, callId), { tokens: 0, moneyUsd: 0 });
+      // provider request occurred for this key, so refund its call allowance.
+      if (globalSelection && globalReservation?.reserved && this.globalBudget) await this.globalBudget.ledger.release(globalSelection.accountKey, this.modelGlobalKey(run.id, callId));
       return;
     }
     let result: ModelResponse | undefined;
