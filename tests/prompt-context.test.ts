@@ -3,8 +3,28 @@ import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS } from
 import { digest } from '../src/runtime/engine.js';
 import { decisionSchema } from '../src/runtime/contracts.js';
 import { queryCsvSource } from '../src/runtime/csv-query.js';
+import { jsonRead, markdownSection, sampleSource } from '../src/runtime/source-readers.js';
 
 describe('executor context budget', () => {
+  it('preserves structured reader selectors, counts, continuation and hashes through both projections', () => {
+    const source = { id: 'source-fixture', source: 'upload', hash: 'stored-hash' };
+    const reads = [
+      { tool: 'sources.jsonRead', result: jsonRead({ ...source, title: 'data.json', content: JSON.stringify({ text: 'x'.repeat(12000) }) }, { path: '$.text' }), fields: ['path', 'shape', 'page', 'truncated'] },
+      { tool: 'sources.markdownSection', result: markdownSection({ ...source, title: 'notes.md', content: '# Root\n' + 'x'.repeat(12000) }, { heading: 'Root' }), fields: ['section', 'page', 'truncated'] },
+      { tool: 'sources.sample', result: sampleSource({ ...source, title: 'notes.txt', content: ('x'.repeat(1000) + '\n').repeat(100) }), fields: ['rowCount', 'sampled', 'truncated'] },
+    ];
+    for (const { tool, result, fields } of reads) {
+      const observations = [0, 1].map(() => ({ tool, argument: source.id, result }));
+      const expected = { schemaVersion: 'context-reference/1', id: result.id, sourceContentHash: result.sourceContentHash, contentHash: digest(result),
+        ...Object.fromEntries(fields.map(field => [field, (result as any)[field]])) };
+      const projected = boundedObservations(observations, () => [source.id]);
+      expect(projected[0]!.result).toMatchObject(expected);
+      expect(projected[1]).toEqual(observations[1]);
+      const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(87000), observations }).observations as typeof observations;
+      expect(overall[0]!.result).toMatchObject(expected);
+      expect(overall[1]).toEqual(observations[1]);
+    }
+  });
   it('preserves query counts and source hash on compacted observations and retains the latest query', () => {
     const result = queryCsvSource({ id: 'source.csv', title: 'data.csv', source: 'upload', hash: 'source-hash', content: 'id,note\n' + Array.from({ length: 50 }, (_, i) => `${i},${'x'.repeat(120)}`).join('\n') });
     const observations = [0, 1].map(() => ({ tool: 'sources.csvQuery', argument: 'source.csv', result }));

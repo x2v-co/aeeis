@@ -12,6 +12,8 @@ import { buildThreadHistory } from '../src/runtime/thread-history.js';
 import { threadHistorySources } from '../src/runtime/thread-context.js';
 import { materialForModel } from '../src/runtime/materials.js';
 import { queryCsvSource } from '../src/runtime/csv-query.js';
+import { readStructuredSource } from '../src/runtime/source-readers.js';
+import { structuredSourceTools } from '../src/runtime/source-tools.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 import { isolatedPostgres } from './support/postgres.js';
 
@@ -122,11 +124,19 @@ describe('thread shares', () => {
     const csvQuery = (source: typeof visibleSource) => ({ tool: 'sources.csvQuery', argument: source.id,
       result: queryCsvSource({ ...source, title: 'notes.csv', content: `note\n${source.content}` }) });
     const visibleQuery = csvQuery(visibleSource);
+    const structuredReads = (source: typeof visibleSource) => structuredSourceTools.map(tool => {
+      const title = tool.includes('markdown') ? 'notes.md' : tool.includes('json') ? 'notes.json' : tool.includes('pdf') ? 'notes.pdf' : 'notes.txt';
+      const content = title.endsWith('.md') ? `# Notes\n${source.content}` : title.endsWith('.json') ? JSON.stringify({ text: source.content }) : source.content;
+      const options = tool === 'sources.markdownSection' ? { heading: 'Notes' } : {};
+      return { tool, argument: source.id, result: readStructuredSource(tool, { ...source, title, content }, options) };
+    });
+    const visibleStructuredReads = structuredReads(visibleSource);
     const otherObservation = { tool: 'example.lookup', argument: 'current', result: { content: 'CURRENT TOOL RESULT' } };
     child.steps = [{ taskId: 'task_1', status: 'succeeded', attempts: 1, observations: [
       visibleRead,
       ...hiddenSources.map(source => ({ tool: 'sources.read', argument: source.id, result: materialForModel(source) })),
       visibleQuery, ...hiddenSources.map(csvQuery),
+      ...visibleStructuredReads, ...hiddenSources.flatMap(structuredReads),
       { tool: 'sources.search', argument: 'brief', result: searchResults },
       otherObservation,
     ] }, { taskId: 'task_2', status: 'succeeded', attempts: 1, observations: [
@@ -144,7 +154,7 @@ describe('thread shares', () => {
     const shared = view.json().runs[0];
     expect(shared.context.sources).toEqual([visibleSource]);
     expect(shared.steps[0].observations).toEqual([
-      visibleRead, visibleQuery, { tool: 'sources.search', argument: 'brief', result: [searchResults[0]] }, otherObservation,
+      visibleRead, visibleQuery, ...visibleStructuredReads, { tool: 'sources.search', argument: 'brief', result: [searchResults[0]] }, otherObservation,
     ]);
     expect(shared.steps[1].observations).toEqual([]);
 
