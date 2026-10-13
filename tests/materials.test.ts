@@ -14,11 +14,12 @@ describe('runtime material boundaries', () => {
     expect(summary.columns.find(column => column.name === 'owner')).toMatchObject({ type: 'text', nullCount: 20, distinct: 8 });
     expect(summary.columns.find(column => column.name === 'deadline')).toMatchObject({ type: 'date', min: '2026-10-14', max: '2026-10-27' });
     expect(summary.sampleRows[0]!.at(-1)).toBe('Quoted, comma and "escaped quote"\nsecond line');
-    expect(summary.sampleRows).toHaveLength(5);
+    expect(summary.sampleRows).toHaveLength(7);
+    expect(summary.sampleRowIndices).toEqual([0, 1, 51, 100, 149, 198, 199]);
     const excerpt = presentedMaterialExcerpts([csvSource], [])[0]!;
     expect(excerpt).toMatchObject({ representation: 'csv-summary', totalRows: 201, truncated: true });
     expect(excerpt.content.length).toBeLessThanOrEqual(3000);
-    expect(JSON.parse(excerpt.content).sampleRows.flat().join(' ')).not.toContain('Late blocker');
+    expect(JSON.parse(excerpt.content)).toMatchObject({ sampled: true, sampleRowIndices: [0, 1, 51, 100, 149, 198, 199] });
   });
 
   it('paginates all raw CSV rows without loss, repeating the header and hashing each exact page', () => {
@@ -59,6 +60,14 @@ describe('runtime material boundaries', () => {
   it('keeps pathological CSV columns and samples inside even a tiny summary budget', () => {
     const wide = { ...csvSource, content: `${Array.from({ length: 300 }, (_, i) => `column${i}`).join(',')}\n${'long value,'.repeat(300)}` };
     for (const budget of [0, 30, 500, 3000]) expect(presentedMaterialExcerpts([wide], [], budget)[0]!.content.length).toBeLessThanOrEqual(budget);
+  });
+
+  it('preserves Unicode when shortening hybrid CSV summary cells', () => {
+    const value = 'x'.repeat(98) + '🙂' + 'tail'.repeat(10);
+    const source = { ...csvSource, content: ['note', ...Array.from({ length: 30 }, () => value)].join('\n') };
+    const summary = JSON.parse(presentedMaterialExcerpts([source], [])[0]!.content);
+    expect(summary).toMatchObject({ sampled: true, sampleCellsTruncated: true });
+    expect(summary.sampleRows.every((row: string[]) => row[0] === 'x'.repeat(98) + '…')).toBe(true);
   });
 
   it('exposes oversized records through bounded, explicitly marked character fragments', () => {

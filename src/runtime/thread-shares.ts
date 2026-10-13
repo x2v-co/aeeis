@@ -3,6 +3,7 @@ import type { AgentRun } from './contracts.js';
 import type { Thread } from './threads.js';
 import { FileShareStore, InMemoryShareStore, newRunShare, type Share } from './run-shares.js';
 import { redactRunData, sharedRunView } from './run-debug.js';
+import { isSourceReadTool } from './source-tools.js';
 
 export interface ThreadShare extends Share { threadId: string; throughSequence: number }
 export interface ThreadShareStore {
@@ -60,7 +61,7 @@ export function sharedThreadView(thread: Thread, throughSequence: number, runs: 
     // Source tools copy history and restricted content into durable observations.
     // Search results lack origin metadata, so also require a retained catalog ID.
     for (const step of copy.steps) step.observations = step.observations.flatMap(observation => {
-      if (observation.tool === 'sources.read' || observation.tool === 'sources.csvQuery') return visibleResult(observation.result) ? [observation] : [];
+      if (isSourceReadTool(observation.tool)) return visibleResult(observation.result) ? [observation] : [];
       if (observation.tool === 'sources.search') {
         if (!Array.isArray(observation.result)) return [];
         const result = observation.result.filter(visibleResult);

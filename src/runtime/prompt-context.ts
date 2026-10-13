@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Step } from './contracts.js';
+import { isSourceReadTool, isStructuredSourceTool } from './source-tools.js';
 
 /** Includes system and serialized input, measured before sending or reserving billing. */
 export const EXECUTOR_PROMPT_CHARS = 96_000;
@@ -25,6 +26,10 @@ function sourceObservationMetadata(observation: Step['observations'][number]) {
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated };
+  }
+  if (isStructuredSourceTool(observation.tool) && result && typeof result === 'object') {
+    return { id: result.id, sourceContentHash: result.sourceContentHash,
+      ...Object.fromEntries(['page', 'path', 'section', 'shape', 'rowCount', 'sampled', 'truncated', 'totalHeadings', 'totalEntries', 'supported'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };
   }
   // Continuations are structured protocol data, independent of the evidence preview.
   return observation.tool === 'sources.read' && result && typeof result === 'object' && result.page
@@ -74,7 +79,7 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
       if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
       const item = items[index] as Record<string, unknown>;
       const reference = typeof item.id === 'string' ? item.id : `${key}/${index}`;
-      if (key === 'observations' && (item.tool === 'sources.read' || item.tool === 'sources.csvQuery')) {
+      if (key === 'observations' && isSourceReadTool(item.tool)) {
         // Preserve the newest bounded page through the overall executor projection too.
         if (index === items.length - 1 && size(item.result) <= LATEST_OBSERVATION_RESULT_CHARS) continue;
         projected[index] = { ...item, result: { ...compact(item.result, reference),
