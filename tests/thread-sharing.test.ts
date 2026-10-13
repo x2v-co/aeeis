@@ -115,7 +115,9 @@ describe('thread shares', () => {
     expect(shared.steps[1].observations).toEqual([]);
 
     const debug = await app.inject({ url: `/api/share/${token.token}/debug-bundle` });
-    expect(debug.statusCode).toBe(404);
+    expect(debug.statusCode).toBe(200);
+    expect(debug.json()).toMatchObject({ schemaVersion: 'aeeis-thread-debug-bundle/1', kind: 'thread', access: 'share', runs: [{ id: child.id }] });
+    for (const value of ['LEGACY HISTORY TEXT', 'PRIVATE SOURCE TEXT', 'CONFIDENTIAL SOURCE TEXT', 'threadHistory', 'origin-source']) expect(debug.body).not.toContain(value);
     expect(debug.body).not.toContain(parentText);
     expect(debug.body).not.toContain(root.id);
     expect((await app.inject({ url: `/api/runs/${child.id}/debug-bundle` })).statusCode).toBe(401);
@@ -153,7 +155,7 @@ describe('thread shares', () => {
     }
     for (const url of [`/api/threads/${thread.id}`, `/api/runs/${root.id}`, `/api/runs/${root.id}/artifacts/${root.artifacts[0]!.id}/download`]) expect((await app.inject({ url, headers: { authorization: `Bearer ${token.token}` } })).statusCode).toBe(401);
     expect((await app.inject({ method: 'POST', url: `/api/threads/${thread.id}/runs`, headers: { authorization: `Bearer ${token.token}` }, payload: { request: { goal: 'unauthorized' } } })).statusCode).toBe(401);
-    expect((await app.inject({ url: `/api/share/${token.token}/debug-bundle` })).statusCode).toBe(404);
+    expect((await app.inject({ url: `/api/share/${token.token}/debug-bundle` })).statusCode).toBe(200);
     const otherThread = threadRecord(); await repo.createThread(otherThread);
     expect((await app.inject({ method: 'DELETE', url: `/api/threads/${otherThread.id}/share/${token.id}`, headers: auth })).statusCode).toBe(404);
     expect((await app.inject({ url: `/api/share/${token.token}` })).statusCode).toBe(200);
