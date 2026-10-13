@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Source } from './contracts.js';
+import { LATEST_OBSERVATION_RESULT_CHARS } from './prompt-context.js';
 
 /** Hash the bytes that will actually be shown to a model. */
 export function materialContentHash(content: string): string {
@@ -93,10 +94,12 @@ export function csvSummary(content: string): CsvSummary {
       : /^(?:true|false)$/i.test(value) ? 'boolean' : /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value) && Number.isFinite(Date.parse(value)) ? 'date' : 'text'));
     const type = types.size === 0 ? 'null' : types.size === 1 ? [...types][0]! : 'mixed';
     let min: string | number | undefined, max: string | number | undefined;
+    let minComparable: string | number | undefined, maxComparable: string | number | undefined;
     for (const value of values) {
-      const comparable = type === 'number' ? Number(value) : value;
-      if (min === undefined || comparable < min) min = comparable;
-      if (max === undefined || comparable > max) max = comparable;
+      const comparable = type === 'number' ? Number(value) : type === 'date' ? Date.parse(value) : value;
+      const reported = type === 'number' ? comparable : value;
+      if (minComparable === undefined || comparable < minComparable) { minComparable = comparable; min = reported; }
+      if (maxComparable === undefined || comparable > maxComparable) { maxComparable = comparable; max = reported; }
     }
     return { name, type, distinct: new Set(values).size, nullCount: rows.length - values.length,
       ...(min === undefined ? {} : { min, max: max! }) };
@@ -118,32 +121,52 @@ function csvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: number): 
     presentedRows: rendered.sampleRows.length, representation: 'csv-summary' };
 }
 
-/** Full source bytes stay in the repository. Large CSV reads expose bounded pages. */
+/** Full source bytes stay in the repository. Pages fit the latest observation after JSON escaping. */
 export function readMaterialPage(source: Source, options: { offset?: number | undefined; limit?: number | undefined; characterOffset?: number | undefined } = {}) {
-  if (materialFormat(source) !== 'csv' || Buffer.byteLength(source.content, 'utf8') <= LARGE_CSV_BYTES) return materialForModel(source);
+  const full = materialForModel(source), csv = materialFormat(source) === 'csv';
+  const fits = (result: unknown) => JSON.stringify(result).length <= LATEST_OBSERVATION_RESULT_CHARS;
+  if (options.characterOffset === undefined && fits(full) && (!csv || Buffer.byteLength(source.content, 'utf8') <= LARGE_CSV_BYTES)) return full;
+  const sourceContentHash = source.contentHash ?? materialContentHash(source.content);
+  const characterPage = () => {
+    const characterOffset = options.characterOffset ?? 0;
+    const resultFor = (length: number) => {
+      const content = source.content.slice(characterOffset, characterOffset + length), next = characterOffset + content.length;
+      return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash,
+        page: { mode: 'characters' as const, characterOffset, totalChars: source.content.length, fragment: true,
+          nextRead: next < source.content.length ? { argument: source.id, characterOffset: next } : null } };
+    };
+    if (!fits(resultFor(0))) throw new Error('Source metadata exceeds the source page budget');
+    let low = 0, high = Math.min(SOURCE_PAGE_CHARS, Math.max(0, source.content.length - characterOffset));
+    // Include the material boundary and pagination fields in the serialized allowance.
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (fits(resultFor(middle))) low = middle;
+      else high = middle - 1;
+    }
+    const content = source.content.slice(characterOffset, characterOffset + low);
+    // Continuations never split a UTF-16 surrogate pair in model-visible text.
+    if (/[\uD800-\uDBFF]$/.test(content) && /[\uDC00-\uDFFF]/.test(source.content[characterOffset + content.length] ?? '')) low--;
+    if (low === 0 && characterOffset < source.content.length) throw new Error('Source metadata leaves no room for source content');
+    return resultFor(low);
+  };
+  if (!csv || options.characterOffset !== undefined) return characterPage();
   const records = csvRecords(source.content), header = records[0] ?? '', rows = records.slice(1);
   const offset = options.offset ?? 0, limit = Math.min(options.limit ?? 20, 100);
-  const sourceContentHash = source.contentHash ?? materialContentHash(source.content);
-  // Pathological headers/records remain accessible in explicitly marked character fragments.
-  if (records.some(row => header.length + row.length + 1 > SOURCE_PAGE_CHARS) || options.characterOffset !== undefined) {
-    const characterOffset = options.characterOffset ?? 0;
-    let content = source.content.slice(characterOffset, characterOffset + SOURCE_PAGE_CHARS);
-    // Continuations never split a UTF-16 surrogate pair in model-visible text.
-    if (/[\uD800-\uDBFF]$/.test(content) && /[\uDC00-\uDFFF]/.test(source.content[characterOffset + content.length] ?? '')) content = content.slice(0, -1);
-    const next = characterOffset + content.length;
+  const rowPage = (selected: string[], pageOffset = offset) => {
+    const content = [header, ...selected].join('\n'), nextOffset = pageOffset + selected.length;
     return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash,
-      page: { mode: 'characters', characterOffset, totalChars: source.content.length, fragment: true,
-        nextRead: next < source.content.length ? { argument: source.id, characterOffset: next } : null } };
-  }
+      page: { mode: 'rows' as const, offset: pageOffset, limit, returnedRows: selected.length, totalRows: rows.length,
+        nextRead: nextOffset < rows.length ? { argument: source.id, offset: nextOffset, limit } : null } };
+  };
+  // Pathological headers/records, including escape-heavy rows, remain accessible as fragments.
+  if (header.length > SOURCE_PAGE_CHARS || !fits(rowPage([]))
+    || rows.some((row, index) => header.length + row.length + 1 > SOURCE_PAGE_CHARS || !fits(rowPage([row], index)))) return characterPage();
   const selected: string[] = []; let size = header.length;
   for (const row of rows.slice(offset, offset + limit)) {
-    if (size + row.length + 1 > SOURCE_PAGE_CHARS) break;
+    if (size + row.length + 1 > SOURCE_PAGE_CHARS || !fits(rowPage([...selected, row]))) break;
     selected.push(row); size += row.length + 1;
   }
-  const content = [header, ...selected].join('\n'), nextOffset = offset + selected.length;
-  return { ...materialForModel({ ...source, content, contentHash: materialContentHash(content) }), sourceContentHash,
-    page: { mode: 'rows', offset, limit, returnedRows: selected.length, totalRows: rows.length,
-      nextRead: nextOffset < rows.length ? { argument: source.id, offset: nextOffset, limit } : null } };
+  return rowPage(selected);
 }
 
 export function materialFormat(source: Pick<Source, 'title' | 'source' | 'content'>): MaterialFormat {

@@ -29,6 +29,34 @@ describe('executor context budget', () => {
     expect(boundedObservations(original, () => ['source.csv'])).toEqual(boundedObservations(reordered, () => ['source.csv']));
   });
 
+  it('retains page metadata explicitly when compacting escaped source results', () => {
+    const result = { id: 'source.csv', content: '"'.repeat(8000), sourceContentHash: 'a'.repeat(64),
+      page: { mode: 'rows', offset: 0, returnedRows: 1, totalRows: 2, nextRead: { argument: 'source.csv', offset: 1, limit: 20 } } };
+    const observations = Array.from({ length: 3 }, () => ({ tool: 'sources.read', argument: 'source.csv', result }));
+    const projected = boundedObservations(observations, () => ['source.csv']);
+    expect(projected.at(-1)!.result).toMatchObject({ schemaVersion: 'context-reference/1', previewTruncated: true, page: result.page, sourceContentHash: result.sourceContentHash });
+    expect(JSON.stringify(projected.at(-1)!.result).length).toBeLessThanOrEqual(6000);
+    expect(projected[0]!.result).toMatchObject({ page: result.page, contentHash: digest(result) });
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+  });
+
+  it.each([
+    { mode: 'rows', offset: 0, nextRead: { argument: 'source.csv', offset: 1, limit: 20 } },
+    { mode: 'characters', characterOffset: 0, nextRead: { argument: 'source.txt', characterOffset: 4000 } },
+  ])('preserves source continuations and the latest page during overall input compaction: $mode', page => {
+    const observations = [
+      { tool: 'sources.read', argument: page.nextRead.argument, result: { content: 'old'.repeat(1100), page, sourceContentHash: 'a'.repeat(64) } },
+      { tool: 'sources.read', argument: page.nextRead.argument, result: { content: 'new'.repeat(1800), page, sourceContentHash: 'a'.repeat(64) } },
+    ];
+    const input = { fixed: 'x'.repeat(89_000), observations };
+    const projected = boundedExecutorInput('system', input);
+    expect(JSON.stringify(projected).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+    expect((projected.observations as typeof observations)[0]).toMatchObject({ tool: 'sources.read', argument: page.nextRead.argument,
+      result: { schemaVersion: 'context-reference/1', page, sourceContentHash: 'a'.repeat(64), contentHash: digest(observations[0]!.result) } });
+    expect((projected.observations as typeof observations).at(-1)).toEqual(observations.at(-1));
+    expect(input.observations[0]!.result.content).toHaveLength(3300);
+  });
+
   it('enforces a total budget across dependencies, observations, sources and receipts without changing authorization', () => {
     const input = { task: { id: 'pulse' }, allowedTools: [{ id: 'approved' }], availableEvidenceRefs: ['artifact_1', 'source.csv'],
       dependencies: [{ id: 'artifact_1', taskId: 'inspect', title: 'Analysis', content: 'x'.repeat(80_000), evidenceRefs: ['source.csv'] }],

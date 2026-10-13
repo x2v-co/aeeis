@@ -5,10 +5,11 @@ afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(
 const chunk = (content: string, reason: string | null = null) => ({ choices: [{ index: 0, delta: { content }, finish_reason: reason }], usage: null });
 const usage = { prompt_tokens: 12, completion_tokens: 30 };
 const event = (value: unknown, separator = '\n') => `data: ${JSON.stringify(value)}${separator}${separator}`;
-function response(text: string, byteChunks = false) {
+function response(text: string, byteChunks: boolean | number = false) {
   const bytes = new TextEncoder().encode(text);
   return new Response(new ReadableStream({ start(controller) {
-    if (byteChunks) for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+    if (byteChunks === true) for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+    else if (typeof byteChunks === 'number') for (let offset = 0; offset < bytes.length; offset += byteChunks) controller.enqueue(bytes.slice(offset, offset + byteChunks));
     else controller.enqueue(bytes);
     controller.close();
   } }), { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
@@ -32,6 +33,29 @@ describe('OpenAI-compatible SSE transport', () => {
     expect((options.headers as Record<string, string>)['idempotency-key']).toBe('stream-key');
   });
 
+  it.each([
+    ['LF', '\n', false], ['LF', '\n', true],
+    ['CRLF', '\r\n', false], ['CRLF', '\r\n', true],
+    ['CR', '\r', false], ['CR', '\r', true],
+  ] as const)('parses %s multiline events and usage (separator: %j, one-byte chunks: %s)', async (_name, separator, byteChunks) => {
+    const multiline = `data: {"choices":${separator}data: [{"index":0,"delta":{"content":"{\\"text\\":\\""},"finish_reason":null}]}${separator}${separator}`;
+    const stream = `: heartbeat${separator}event: completion${separator}${separator}` + multiline
+      + event(chunk('中文🙂"}', 'stop'), separator) + event({ choices: [], usage }, separator) + `data: [DONE]${separator}${separator}`;
+    const fetch = vi.fn(async () => response(stream, byteChunks)); vi.stubGlobal('fetch', fetch);
+    await expect(adapter().complete({ system: 's', input: {}, includeRawOutput: true })).resolves.toEqual({
+      value: { text: '中文🙂' }, rawOutput: '{"text":"中文🙂"}', usage: { inputTokens: 12, outputTokens: 30 },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles mixed line endings without dispatching a split CRLF as a blank line', async () => {
+    const stream = ': heartbeat\r\n\r' + 'event: completion\n'
+      + 'data: {"choices":\r\ndata: [{"index":0,"delta":{"content":"{}"},"finish_reason":"stop"}]}\r\n\r\n'
+      + event({ choices: [], usage }, '\r') + 'data: [DONE]\n\r';
+    vi.stubGlobal('fetch', vi.fn(async () => response(stream, true)));
+    await expect(adapter().complete({ system: 's', input: {} })).resolves.toEqual({ value: {}, usage: { inputTokens: 12, outputTokens: 30 } });
+  });
+
   it('keeps length retries, metering, finish_reason and idempotency keys consistent with JSON transport', async () => {
     const replies = [response(event(chunk('{"partial":', 'length')) + event({ choices: [], usage }) + 'data: [DONE]\n\n'),
       response(event(chunk('{"ok":true}', 'stop')) + event({ choices: [], usage }) + 'data: [DONE]\n\n')];
@@ -53,6 +77,38 @@ describe('OpenAI-compatible SSE transport', () => {
   it('keeps absent streaming usage absent', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')));
     await expect(adapter().complete({ system: 's', input: {} })).resolves.toEqual({ value: {} });
+  });
+
+  it.each([false, 997])('accepts long streams with repeated metadata and reasoning (byte chunks: %s)', async byteChunks => {
+    const text = 'x'.repeat(8000);
+    const metadata = { id: 'chatcmpl-long-completion', object: 'chat.completion.chunk', created: 1780000000, model: 'ark-model', system_fingerprint: 'fp_fixture' };
+    const stream = event({ ...metadata, choices: [{ index: 0, delta: { reasoning_content: 'thinking '.repeat(1000) }, finish_reason: null }] }).repeat(150)
+      + Array.from(JSON.stringify(text), character => event({ ...metadata, ...chunk(character) })).join('')
+      + event(chunk('', 'stop')) + event({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 9000 } }) + 'data: [DONE]\n\n';
+    expect(Buffer.byteLength(stream)).toBeGreaterThan(1_400_000);
+    const fetch = vi.fn(async () => response(stream, byteChunks)); vi.stubGlobal('fetch', fetch);
+    await expect(adapter().complete({ system: 's', input: {}, includeRawOutput: true })).resolves.toEqual({ value: text, rawOutput: JSON.stringify(text), usage: { inputTokens: 12, outputTokens: 9000 } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('excludes 6000 short reasoning frames and heartbeats from retained output limits', async () => {
+    const metadata = { id: 'chatcmpl-reasoning', object: 'chat.completion.chunk', created: 1780000000, model: 'ark-model' };
+    const reasoning = event({ ...metadata, choices: [{ index: 0, delta: { reasoning_content: 'plan' }, finish_reason: null }] });
+    const stream = (': heartbeat\n\n' + reasoning).repeat(6000)
+      + event(chunk('{"ok":true}', 'stop')) + event({ choices: [], usage }) + 'data: [DONE]\n\n';
+    expect(Buffer.byteLength(stream)).toBeGreaterThan(1_000_000);
+    const fetch = vi.fn(async () => response(stream, 997)); vi.stubGlobal('fetch', fetch);
+    await expect(adapter().complete({ system: 's', input: {} })).resolves.toEqual({ value: { ok: true }, usage: { inputTokens: 12, outputTokens: 30 } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['complete frame', 'unfinished frame', 'accumulated content'])('bounds %s independently of total wire bytes', async kind => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stream = kind === 'accumulated content' ? event(chunk('🙂'.repeat(75_000))).repeat(4)
+      : 'data: ' + 'x'.repeat(1_000_001) + (kind === 'complete frame' ? '\n\n' : '');
+    const fetch = vi.fn(async () => response(stream, kind === 'complete frame' ? false : 16384)); vi.stubGlobal('fetch', fetch);
+    await expect(adapter().complete({ system: 's', input: {} })).rejects.toThrow(/size limit/);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it.each([event(chunk('{"ok":true}', 'stop')), 'data: {bad JSON}\n\n', 'data: {"error":{"message":"Bearer secret"}}\n\n', 'data: [DONE]\n\n'])('leaves incomplete/malformed streams unknown without a transport retry', async stream => {

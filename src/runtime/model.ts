@@ -88,6 +88,9 @@ const envelope = z.object({
 });
 const tokenLimit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const defaultMaxTokens = 16_384;
+const responseSizeLimit = 1_000_000;
+const streamFrameSizeLimit = 1_000_000;
+const streamBufferSizeLimit = 1_000_000;
 
 const streamChunk = z.object({
   choices: z.array(z.object({ index: z.number().int(), delta: z.object({ content: z.string().nullish() }), finish_reason: z.string().nullish() })),
@@ -97,33 +100,47 @@ const streamChunk = z.object({
 /** Decode SSE frames across arbitrary UTF-8/chunk boundaries, retaining the final usage-only chunk. */
 async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult<Uint8Array>>, activity: () => void): Promise<z.infer<typeof envelope>> {
   const decoder = new TextDecoder();
-  let buffer = '', content = '', finishReason: string | null = null, size = 0, seenChoice = false;
+  let buffer = '', content = '', finishReason: string | null = null, contentBytes = 0, seenChoice = false;
+  let skipLF = false, searchFrom = 0;
   let usage: z.infer<typeof envelope>['usage'];
   for (;;) {
     const { done, value } = await read();
     if (done) throw new ModelOutcomeUnknown('Model stream ended before [DONE]; the provider outcome requires reconciliation');
-    activity(); size += value.byteLength;
-    if (size > 1_000_000) throw new ModelOutcomeUnknown('Model stream exceeds size limit; the provider outcome requires reconciliation');
-    buffer += decoder.decode(value, { stream: true });
-    for (;;) {
-      const boundary = /\r?\n\r?\n/.exec(buffer);
-      if (!boundary) break;
-      const frame = buffer.slice(0, boundary.index); buffer = buffer.slice(boundary.index + boundary[0].length);
-      const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
-      if (!data) continue; // comments/keepalives/event metadata
-      if (data.trim() === '[DONE]') {
-        if (!seenChoice) throw new ModelOutcomeUnknown('Model stream contained no completion; the provider outcome requires reconciliation');
-        return { choices: [{ message: { content }, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
+    activity();
+    // Drain large network chunks incrementally so many valid frames never fill the pending buffer.
+    for (let offset = 0; offset < value.byteLength; offset += 65_536) {
+      let text = decoder.decode(value.subarray(offset, offset + 65_536), { stream: true });
+      if (!text) continue;
+      // CR ends a line immediately; suppress its paired LF even across network/decoder chunks.
+      if (skipLF && text.startsWith('\n')) text = text.slice(1);
+      skipLF = text.endsWith('\r');
+      buffer += text.replace(/\r\n|\r/g, '\n');
+      for (;;) {
+        const boundary = buffer.indexOf('\n\n', searchFrom);
+        if (boundary < 0) { searchFrom = Math.max(0, buffer.length - 1); break; }
+        const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); searchFrom = 0;
+        if (Buffer.byteLength(frame, 'utf8') > streamFrameSizeLimit) throw new ModelOutcomeUnknown('Model stream frame exceeds size limit; the provider outcome requires reconciliation');
+        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
+        if (!data) continue; // comments/keepalives/event metadata
+        if (data.trim() === '[DONE]') {
+          if (!seenChoice) throw new ModelOutcomeUnknown('Model stream contained no completion; the provider outcome requires reconciliation');
+          return { choices: [{ message: { content }, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
+        }
+        let chunk: z.infer<typeof streamChunk>;
+        try { chunk = streamChunk.parse(JSON.parse(data)); }
+        catch { throw new ModelOutcomeUnknown('Model stream contained an invalid event; the provider outcome requires reconciliation'); }
+        if (chunk.usage) usage = chunk.usage;
+        // Repeated metadata, reasoning and keepalives do not consume the retained content allowance.
+        for (const choice of chunk.choices) if (choice.index === 0) {
+          seenChoice = true;
+          const delta = choice.delta.content ?? '';
+          contentBytes += Buffer.byteLength(delta, 'utf8');
+          if (contentBytes > responseSizeLimit) throw new ModelOutcomeUnknown('Model stream content exceeds size limit; the provider outcome requires reconciliation');
+          content += delta;
+          if (choice.finish_reason != null) finishReason = choice.finish_reason;
+        }
       }
-      let chunk: z.infer<typeof streamChunk>;
-      try { chunk = streamChunk.parse(JSON.parse(data)); }
-      catch { throw new ModelOutcomeUnknown('Model stream contained an invalid event; the provider outcome requires reconciliation'); }
-      if (chunk.usage) usage = chunk.usage;
-      for (const choice of chunk.choices) if (choice.index === 0) {
-        seenChoice = true;
-        content += choice.delta.content ?? '';
-        if (choice.finish_reason != null) finishReason = choice.finish_reason;
-      }
+      if (Buffer.byteLength(buffer, 'utf8') > streamBufferSizeLimit) throw new ModelOutcomeUnknown('Model stream buffer exceeds size limit; the provider outcome requires reconciliation');
     }
   }
 }
@@ -272,7 +289,7 @@ export class HttpModelAdapter implements ModelAdapter {
         };
         if (streamReceived) return await readStreamCompletion(read, activity);
         const chunks: Uint8Array[] = []; let size = 0;
-        const limit = response.ok ? 1_000_000 : 2048;
+        const limit = response.ok ? responseSizeLimit : 2048;
         for (;;) {
           const { done, value } = await read();
           if (done) break;

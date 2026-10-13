@@ -4,6 +4,7 @@ import type { Step } from './contracts.js';
 /** Includes system and serialized input, measured before sending or reserving billing. */
 export const EXECUTOR_PROMPT_CHARS = 96_000;
 export const OBSERVATION_PROMPT_CHARS = 10_000;
+export const LATEST_OBSERVATION_RESULT_CHARS = 6000;
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
@@ -19,6 +20,13 @@ function compact(value: unknown, reference: string, evidenceRefs: string[] = [])
     instructions: 'Payload omitted from this prompt; the full result is retained in the Run. A reference or hash alone does not support claims about omitted details.' };
 }
 
+function sourcePagination(observation: Step['observations'][number]) {
+  const result = observation.result as Record<string, unknown> | null;
+  // Continuations are structured protocol data, independent of the evidence preview.
+  return observation.tool === 'sources.read' && result && typeof result === 'object' && result.page
+    ? { page: result.page, ...(typeof result.sourceContentHash === 'string' ? { sourceContentHash: result.sourceContentHash } : {}) } : {};
+}
+
 /** Keep the newest bounded result and compact older large results without changing durable observations. */
 export function boundedObservations(observations: Step['observations'], refs: (value: unknown) => string[], budget = OBSERVATION_PROMPT_CHARS): Step['observations'] {
   const omittedReference = (omitted: Step['observations']) => ({ tool: 'context.compacted', argument: 'observations',
@@ -29,9 +37,15 @@ export function boundedObservations(observations: Step['observations'], refs: (v
   for (let index = observations.length - 1; index >= 0; index--) {
     const observation = observations[index]!;
     let projected = observation;
-    if (size(observation.result) > (index === observations.length - 1 ? 6000 : 1000) || size(observation) + 1 > remaining) {
-      projected = { ...observation, result: { ...compact(observation.result, `observations/${index}`, refs(observation.result)),
-        ...(index === observations.length - 1 && size(observation.result) > 6000 ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) } };
+    if (size(observation.result) > (index === observations.length - 1 ? LATEST_OBSERVATION_RESULT_CHARS : 1000) || size(observation) + 1 > remaining) {
+      const projection = { ...compact(observation.result, `observations/${index}`, refs(observation.result)),
+        ...sourcePagination(observation),
+        ...(index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
+      // The preview is itself JSON-escaped when the observation enters the prompt.
+      while (projection.preview?.length && (size(projection) > LATEST_OBSERVATION_RESULT_CHARS || size({ ...observation, result: projection }) + 1 > remaining)) {
+        projection.preview = projection.preview.slice(0, Math.floor(projection.preview.length / 2));
+      }
+      projected = { ...observation, result: projection };
     }
     if (size(projected) + 1 > remaining) {
       const omitted = omittedReference(observations.slice(0, index + 1));
@@ -56,6 +70,13 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
       if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
       const item = items[index] as Record<string, unknown>;
       const reference = typeof item.id === 'string' ? item.id : `${key}/${index}`;
+      if (key === 'observations' && item.tool === 'sources.read') {
+        // Preserve the newest bounded page through the overall executor projection too.
+        if (index === items.length - 1 && size(item.result) <= LATEST_OBSERVATION_RESULT_CHARS) continue;
+        projected[index] = { ...item, result: { ...compact(item.result, reference),
+          ...sourcePagination(item as Step['observations'][number]) } };
+        continue;
+      }
       projected[index] = { ...compact(item, reference), ...(typeof item.id === 'string' ? { id: item.id } : {}),
         ...(key === 'dependencies' ? { preview: serialized(item).slice(0, 2000), previewTruncated: true } : {}),
         ...(typeof item.taskId === 'string' ? { taskId: item.taskId } : {}), ...(typeof item.title === 'string' ? { title: item.title } : {}),

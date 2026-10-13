@@ -44,6 +44,18 @@ describe('runtime material boundaries', () => {
     });
   });
 
+  it.each([
+    ['2026-01-01T00:30:00+02:00', '2025-12-31T23:30:00Z'],
+    ['2025-12-31T23:30:00Z', '2026-01-01T00:30:00+02:00'],
+  ])('orders date extrema chronologically across time zones: %j', (...dates) => {
+    const summary = csvSummary(['timestamp', ...dates, ''].join('\n'));
+    expect(summary.columns[0]).toEqual({ name: 'timestamp', type: 'date', distinct: 2, nullCount: 0,
+      min: '2026-01-01T00:30:00+02:00', max: '2025-12-31T23:30:00Z' });
+    const source = { ...csvSource, content: ['timestamp', ...Array.from({ length: 100 }, (_, i) => dates[i % 2])].join('\n') };
+    const presented = JSON.parse(presentedMaterialExcerpts([source], [])[0]!.content);
+    expect(presented.columns[0]).toEqual(summary.columns[0]);
+  });
+
   it('keeps pathological CSV columns and samples inside even a tiny summary budget', () => {
     const wide = { ...csvSource, content: `${Array.from({ length: 300 }, (_, i) => `column${i}`).join(',')}\n${'long value,'.repeat(300)}` };
     for (const budget of [0, 30, 500, 3000]) expect(presentedMaterialExcerpts([wide], [], budget)[0]!.content.length).toBeLessThanOrEqual(budget);
@@ -65,9 +77,50 @@ describe('runtime material boundaries', () => {
   });
 
   it('preserves legacy full reads for small CSV and non-CSV', () => {
-    for (const source of [{ ...csvSource, content: 'id,status\n1,open' }, { ...csvSource, title: 'brief.txt', content: 'notes\n'.repeat(2000) }]) {
+    for (const source of [{ ...csvSource, content: 'id,status\n1,open' }, { ...csvSource, title: 'brief.txt', content: 'notes\n'.repeat(200) }]) {
       expect(readMaterialPage(source)).toEqual(materialForModel(source));
     }
+  });
+
+  it.each(['txt', 'json', 'md'])('continues large single-line %s sources without losing content', extension => {
+    const content = JSON.stringify({ text: 'x'.repeat(15_000) + 'late detail 🙂' });
+    const source = { ...csvSource, title: `brief.${extension}`, content };
+    let received = '', options = {};
+    for (;;) {
+      const result = readMaterialPage(source, options);
+      expect(result.page).toMatchObject({ mode: 'characters', characterOffset: received.length, totalChars: content.length });
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(6000);
+      const fragment = result.content.split('\n').slice(1, -1).join('\n');
+      expect(result.contentHash).toBe(materialContentHash(fragment));
+      expect(result.sourceContentHash).toBe(materialContentHash(content));
+      received += fragment;
+      if (!result.page!.nextRead) break;
+      options = result.page!.nextRead;
+    }
+    expect(received).toBe(content);
+    expect(readMaterialPage(source, { characterOffset: content.length }).page!.nextRead).toBeNull();
+  });
+
+  it('honors explicit character continuations even for small non-CSV sources', () => {
+    const source = { ...csvSource, title: 'brief.txt', content: 'beginning and end' };
+    const result = readMaterialPage(source, { characterOffset: 10 });
+    expect(result.page).toMatchObject({ mode: 'characters', characterOffset: 10, nextRead: null });
+    expect(result.content.split('\n')[1]).toBe('and end');
+  });
+
+  it.each(['""', '\\'])('sizes CSV row pages after JSON escaping of %s', escaped => {
+    const rows = Array.from({ length: 8 }, (_, i) => `${i},"${escaped.repeat(500)}"`);
+    const source = { ...csvSource, content: ['id,notes', ...rows].join('\n') };
+    let offset = 0; const received: string[] = [];
+    for (;;) {
+      const result = readMaterialPage(source, { offset, limit: 8 });
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(6000);
+      expect(result.page).toMatchObject({ mode: 'rows', offset });
+      received.push(...result.content.split('\n').slice(2, -1));
+      if (!result.page!.nextRead) break;
+      offset = (result.page!.nextRead as { offset: number }).offset;
+    }
+    expect(received).toEqual(rows);
   });
 
   it('preserves Unicode when a character-page boundary would split a surrogate pair', () => {

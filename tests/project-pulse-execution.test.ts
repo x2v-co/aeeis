@@ -114,6 +114,53 @@ describe('Project Pulse finish output', () => {
     expect(completed.steps[0]!.observations.at(-1)!.result).toMatchObject({ content: csv });
   });
 
+  it.each(['txt', 'json', 'md', 'csv'])('receives intact character pages and follows continuations for %s through the real engine', async extension => {
+    const content = extension === 'csv' ? 'id,notes\n0,"' + '""'.repeat(1600) + '"\n1,late detail'
+      : JSON.stringify({ text: 'x'.repeat(15_000) + 'late detail 🙂' });
+    let received = '';
+    const { engine, repository, run } = await setup((ref, input) => {
+      const observations = input.observations as Array<{ result: any }>;
+      if (!observations.length) return { type: 'tool', tool: 'sources.read', argument: ref };
+      const result = observations.at(-1)!.result;
+      expect(result.schemaVersion).toBe('source-content/1');
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(6000);
+      expect(result.page).toMatchObject({ mode: 'characters', characterOffset: received.length });
+      const fragment = result.content.split('\n').slice(1, -1).join('\n');
+      expect(fragment).toBe(content.slice(received.length, received.length + fragment.length));
+      expect(result.contentHash).toBe(materialContentHash(fragment));
+      expect(result.sourceContentHash).toBe(materialContentHash(content));
+      received += fragment;
+      return result.page.nextRead ? { type: 'tool', tool: 'sources.read', ...result.page.nextRead } : finish(ref);
+    }, {}, [{ title: `brief.${extension}`, source: `browser-file:brief.${extension}`, content }]);
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(received).toBe(content);
+    expect(completed.context.sources[0]!.content).toBe(content);
+  });
+
+  it.each(['""', '\\', '\u0000'])('receives complete CSV row pages after escaping %j through the real engine', async escaped => {
+    const rows = [...Array.from({ length: 5 }, (_, i) => `${i},"${escaped.repeat(500)}"`), '5,late detail'];
+    const content = ['id,notes', ...rows].join('\n'), received: string[] = [];
+    const { engine, repository, run } = await setup((ref, input) => {
+      const observations = input.observations as Array<{ result: any }>;
+      if (!observations.length) return { type: 'tool', tool: 'sources.read', argument: ref, limit: 20 };
+      const result = observations.at(-1)!.result;
+      expect(result.schemaVersion).toBe('source-content/1');
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(6000);
+      expect(result.page).toMatchObject({ mode: 'rows', offset: received.length, totalRows: rows.length });
+      const pageContent = result.content.split('\n').slice(1, -1).join('\n');
+      expect(pageContent.split('\n')[0]).toBe('id,notes');
+      expect(result.contentHash).toBe(materialContentHash(pageContent));
+      expect(result.sourceContentHash).toBe(materialContentHash(content));
+      received.push(...pageContent.split('\n').slice(1));
+      return result.page.nextRead ? { type: 'tool', tool: 'sources.read', ...result.page.nextRead } : finish(ref);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content }]);
+    const completed = await completeRun(engine, repository, run.id);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(received).toEqual(rows);
+    expect(completed.context.sources[0]!.content).toBe(content);
+  });
+
   it('leaves executor timeouts unknown without retrying a changed context', async () => {
     const { engine, repository, complete, run } = await setup(ref => finish(ref));
     const before = complete.mock.calls.length;
