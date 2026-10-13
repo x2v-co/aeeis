@@ -197,6 +197,6 @@ describe('OpenAI-compatible SSE transport', () => {
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 60000, streamOverallTimeoutMs: 600000, retryEmptyIdle: false });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 180000, streamOverallTimeoutMs: 600000, retryEmptyIdle: false });
   });
 });

@@ -156,7 +156,7 @@ export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOpti
     retryBaseMs: Number(env.AEEIS_MODEL_RETRY_BASE_MS ?? 500),
     retryMaxMs: Number(env.AEEIS_MODEL_RETRY_MAX_MS ?? 10_000),
     ...(env.AEEIS_MODEL_STREAM === undefined ? {} : { stream: env.AEEIS_MODEL_STREAM === '1' }),
-    idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? 60_000),
+    idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? 180_000),
     streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 600_000),
     retryEmptyIdle: env.AEEIS_MODEL_RETRY_EMPTY_IDLE === '1',
   };
@@ -175,7 +175,7 @@ export class HttpModelAdapter implements ModelAdapter {
     }
     const ark = /(^|\.)(?:volces\.com|bytepluses\.com)$/.test(url.hostname) || /ark|volcengine|byteplus/i.test(provider ?? '');
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
-      stream: transport.stream ?? ark, idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 60_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 600_000, retryEmptyIdle: transport.retryEmptyIdle ?? false };
+      stream: transport.stream ?? ark, idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 180_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 600_000, retryEmptyIdle: transport.retryEmptyIdle ?? false };
     z.number().int().min(1).max(10).parse(this.transport.maxAttempts);
     z.number().int().min(0).max(60_000).parse(this.transport.retryBaseMs);
     z.number().int().min(this.transport.retryBaseMs).max(60_000).parse(this.transport.retryMaxMs);

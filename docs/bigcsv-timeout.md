@@ -50,7 +50,7 @@ Observations are projected into at most 10,000 serialized characters. Old result
 | Environment variable | Default | Accepted values / behavior |
 | --- | --- | --- |
 | `AEEIS_MODEL_STREAM` (new) | Auto | `1` enables SSE; `0` disables it. Omit for ARK/volcengine/BytePlus auto-on and other providers off. |
-| `AEEIS_MODEL_IDLE_TIMEOUT_MS` | `60000` | Integer 1000–600000 ms; starts before response headers and resets on received bytes, including reasoning and keepalives. Independent of the non-streaming timeout. |
+| `AEEIS_MODEL_IDLE_TIMEOUT_MS` | `180000` | Integer 1000–600000 ms; starts before response headers and resets on received bytes, including reasoning and keepalives. Independent of the non-streaming timeout. |
 | `AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS` (new) | `600000` | Integer 1000–600000 ms; per-attempt cap, even if bytes keep arriving. |
 | `AEEIS_MODEL_TIMEOUT_MS` | `180000` | Integer 1000–600000 ms; total deadline for non-streaming attempts. |
 | `AEEIS_MODEL_MAX_ATTEMPTS` | `3` in server config | Integer 1–10; transport retry cap. Streaming timeouts are unknown except for the explicit zero-byte idle retry below; no network replay after any successful response body bytes. Explicit HTTP 429/5xx responses retain the existing status retry policy. |
@@ -94,6 +94,10 @@ Each newly reserved model call now durably records its exact logical `modelReque
 Plan proposals now freeze `modelCallOffset`, the number of model calls already reserved when that revision was proposed. Node iteration checks and the executor's remaining-call budget count only executor calls after that boundary, excluding the outstanding call being resumed. Replanning therefore restores the node allowance even when IDs and the entire draft/hash are reused; retrying the same revision retains its exhausted final-call reservation. Older plan revisions recover the boundary from durable proposal/planner event order, which also works when timestamps are equal. Run-wide model/token/money budgets continue to count every revision. Before replacing steps, the runtime persists cumulative source consumption, including older Runs whose consumption was only represented in observations, so replanning does not restore exhausted run-wide page/character allowances.
 
 Public redaction also decodes JSON string literals embedded in prose, including double encoding, and scrubs raw-provider assignments in malformed/truncated fragments before field capping. When a concurrent advance loses the durable model-call fence, the ledger releases its unused global reservation, refunds `usedCalls` exactly once, and retains a `released` key to prevent readmission. Unknown, settled and rejected reservations retain their accounting.
+
+## Production follow-up: SG at `8b79931` idle-timeout regression
+
+`8b79931` (#34) lowered the default `AEEIS_MODEL_IDLE_TIMEOUT_MS` to 60000. On SG (build `aeeis-sg-prod-8b79931302a5`) ARK frequently sent no bytes for more than one minute, so runs went `unknown` on idle timeouts: large CSV `run_3c14b68a` (planning), thread follow-up `run_9070320e` (planning) and JSON `run_2ef5d7fa` (6th executor model call). The default is restored to 180000 (equal to the non-streaming `AEEIS_MODEL_TIMEOUT_MS` default); the constructor fallback is `min(requestTimeoutMs, 180000)`. **Deploy note for #34:** deployments of `8b79931` without this fix should set `AEEIS_MODEL_IDLE_TIMEOUT_MS=180000` explicitly; the `unknown` runs above need reconciliation, not blind retries. kk-cn should take this fix together with #34.
 
 ## Validation
 
