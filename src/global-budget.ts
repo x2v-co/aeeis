@@ -76,7 +76,7 @@ export const globalBudgetBillingImportSchema = z.object({
 export type GlobalBudgetBillingImport = z.infer<typeof globalBudgetBillingImportSchema>;
 
 const entrySchema = z.object({
-  state: z.enum(['reserved', 'unknown', 'settled', 'rejected']),
+  state: z.enum(['reserved', 'unknown', 'settled', 'rejected', 'released']),
   updatedAt: z.string().datetime({ offset: true }),
   usage: globalBudgetUsageSchema.optional(),
   reconciliation: globalBudgetReconciliationSchema.optional(),
@@ -130,6 +130,9 @@ export interface GlobalBudgetLedger {
   ensureUnknown(account: Pick<GlobalBudgetAccount, 'accountKey' | 'owner' | 'tenantId' | 'windowKey' | 'budget'>, idempotencyKey: string): Promise<void>;
   markUnknown(accountKey: string, idempotencyKey: string): Promise<void>;
   settle(accountKey: string, idempotencyKey: string, usage?: GlobalBudgetUsage): Promise<void>;
+  /** Refund an unused reservation only when the caller can prove no provider
+   * execution occurred. Retain the key and refund its call allowance once. */
+  release(accountKey: string, idempotencyKey: string): Promise<void>;
   /** Replace an explicitly unknown provider result; in-flight reservations
    * cannot be settled through the operator reconciliation boundary. */
   reconcile(accountKey: string, idempotencyKey: string, usage?: GlobalBudgetUsage, reconciliation?: GlobalBudgetReconciliation): Promise<void>;
@@ -170,6 +173,7 @@ function reserveInAccount(account: GlobalBudgetAccount, idempotencyKey: string):
 function markUnknownInAccount(account: GlobalBudgetAccount, idempotencyKey: string): void {
   const entry = account.entries[idempotencyKey];
   if (!entry) throw new Error('Global budget reservation is missing');
+  if (entry.state === 'released') throw new Error('Global budget reservation was already released');
   if (entry.state !== 'settled' && entry.state !== 'rejected' && entry.state !== 'unknown') {
     entry.state = 'unknown';
     if (account.budget.tokens !== undefined) account.unreportedTokenCalls += 1;
@@ -182,6 +186,7 @@ function settleInAccount(account: GlobalBudgetAccount, idempotencyKey: string, u
   const entry = account.entries[idempotencyKey];
   if (!entry) throw new Error('Global budget reservation is missing; refuse an untracked call');
   if (entry.state === 'settled') return;
+  if (entry.state === 'released') throw new Error('Global budget reservation was already released');
   if (entry.state === 'rejected') throw new Error('Global call was already rejected for exceeding its budget');
   const parsed = normalizeUsage(globalBudgetUsageSchema.parse(usage));
   if (entry.state === 'unknown') {
@@ -201,6 +206,16 @@ function settleInAccount(account: GlobalBudgetAccount, idempotencyKey: string, u
   else entry.state = 'settled';
   account.updatedAt = entry.updatedAt;
   if (entry.state === 'rejected') throw new Error('Global budget exceeded or usage was not reported');
+}
+
+function releaseInAccount(account: GlobalBudgetAccount, idempotencyKey: string): void {
+  const entry = account.entries[idempotencyKey];
+  if (!entry) throw new Error('Global budget reservation is missing');
+  if (entry.state === 'released') return;
+  if (entry.state !== 'reserved') throw new Error('Only reserved global budget entries can be released');
+  account.usedCalls -= 1;
+  entry.state = 'released';
+  entry.updatedAt = new Date().toISOString(); account.updatedAt = entry.updatedAt;
 }
 
 function reconcileInAccount(account: GlobalBudgetAccount, idempotencyKey: string, usage: GlobalBudgetUsage, reconciliation?: GlobalBudgetReconciliation): void {
@@ -246,6 +261,7 @@ export class FileGlobalBudgetLedger implements GlobalBudgetLedger {
   }
   async markUnknown(accountKey: string, key: string): Promise<void> { await this.exclusive(() => markUnknownInAccount(requireAccount(this.state.accounts, accountKey), key)); }
   async settle(accountKey: string, key: string, usage: GlobalBudgetUsage = {}): Promise<void> { await this.exclusive(() => settleInAccount(requireAccount(this.state.accounts, accountKey), key, usage)); }
+  async release(accountKey: string, key: string): Promise<void> { await this.exclusive(() => releaseInAccount(requireAccount(this.state.accounts, accountKey), key)); }
   async reconcile(accountKey: string, key: string, usage: GlobalBudgetUsage = {}, reconciliation?: GlobalBudgetReconciliation): Promise<void> { await this.exclusive(() => reconcileInAccount(requireAccount(this.state.accounts, accountKey), key, usage, reconciliation)); }
   async get(accountKey: string): Promise<GlobalBudgetAccount | undefined> { await this.init(); const value = this.state.accounts[accountKey]; return value ? structuredClone(value) : undefined; }
   async close(): Promise<void> { await this.tail; }
@@ -272,6 +288,7 @@ export class PostgresGlobalBudgetLedger implements GlobalBudgetLedger {
   async ensureUnknown(input: Pick<GlobalBudgetAccount, 'accountKey' | 'owner' | 'tenantId' | 'windowKey' | 'budget'>, key: string): Promise<void> { await this.withAccount(input, account => { if (!account.entries[key]) { reserveInAccount(account, key); markUnknownInAccount(account, key); } return { account }; }); }
   async markUnknown(accountKey: string, key: string): Promise<void> { await this.withExisting(accountKey, account => { markUnknownInAccount(account, key); return { account }; }); }
   async settle(accountKey: string, key: string, usage: GlobalBudgetUsage = {}): Promise<void> { let error: Error | undefined; await this.withExisting(accountKey, account => { try { settleInAccount(account, key, usage); } catch (e) { error = e as Error; } return { account }; }); if (error) throw error; }
+  async release(accountKey: string, key: string): Promise<void> { await this.withExisting(accountKey, account => { releaseInAccount(account, key); return { account }; }); }
   async reconcile(accountKey: string, key: string, usage: GlobalBudgetUsage = {}, reconciliation?: GlobalBudgetReconciliation): Promise<void> { let error: Error | undefined; await this.withExisting(accountKey, account => { try { reconcileInAccount(account, key, usage, reconciliation); } catch (e) { error = e as Error; } return { account }; }); if (error) throw error; }
   async get(accountKey: string): Promise<GlobalBudgetAccount | undefined> { const result = await this.pool.query('SELECT * FROM aeeis_global_budget_accounts WHERE account_key=$1', [accountKey]); return result.rows[0] ? rowToAccount(result.rows[0]) : undefined; }
   async close(): Promise<void> { await this.pool.end(); }

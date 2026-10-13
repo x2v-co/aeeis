@@ -24,7 +24,7 @@ import type { Ownership } from './security/principal.js';
 import pg from 'pg';
 import { ModelOutcomeUnknown } from './runtime/model.js';
 import { assertCollaborationBudget, collaborationBudgetSchema, collaborationCallUsageSchema, collaborationModelPinSchema, collaborationUsage, collaborationUsageSchema, type CollaborationCallUsage, type CollaborationModelPin } from './collaboration-budget.js';
-import type { GlobalBudgetLedger, GlobalBudgetSelector, GlobalBudgetSelection } from './global-budget.js';
+import type { GlobalBudgetLedger, GlobalBudgetReservation, GlobalBudgetSelector, GlobalBudgetSelection } from './global-budget.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, scopedRecent, validateCollectionLimit, type CollectionCursor } from './adapters/collection-query.js';
 
@@ -519,7 +519,7 @@ export class CollaborationService {
     return `aeeis:${kind}:${aggregateId}:${slot}`;
   }
 
-  private async reserveGlobal(kind: 'competition' | 'debate', aggregateId: string, slot: string, scope: Ownership | undefined, startedAt: string): Promise<{ selection: GlobalBudgetSelection; key: string; reserved: boolean; state: 'reserved' | 'unknown' | 'settled' | 'rejected' } | undefined> {
+  private async reserveGlobal(kind: 'competition' | 'debate', aggregateId: string, slot: string, scope: Ownership | undefined, startedAt: string): Promise<(GlobalBudgetReservation & { selection: GlobalBudgetSelection; key: string }) | undefined> {
     if (!this.globalBudget) return undefined;
     const selection = this.globalBudget.select(scope, startedAt);
     if (!selection) return undefined;

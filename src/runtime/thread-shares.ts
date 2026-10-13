@@ -76,6 +76,6 @@ export function sharedThreadView(thread: Thread, throughSequence: number, runs: 
   // from every run, including omitted fields, before redacting copied prose.
   const redacted = redactRunData({
     kind: 'thread' as const, thread: { id: thread.id, ...(thread.title ? { title: thread.title } : {}), createdAt: thread.createdAt }, throughSequence, runs: views,
-  }, { credentialSource: Object.fromEntries(runs.map(run => [run.id, run])) });
+  }, { credentialSource: Object.fromEntries(runs.map(run => [run.id, run])), omitRawProviderText: true });
   return { ...redacted, runs: Object.values(redacted.runs) };
 }

@@ -10,10 +10,109 @@ const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|acces
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+// Public views must not expose provider completions or schema-repair payloads,
+// even when nested in observations, validation diagnostics or JSON strings.
+const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|modelrequest|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
+const isRawProviderKey = (key: string): boolean => rawProviderKey.test(key.replace(/[ _-]/g, ''));
 // Also recognize assignments inside prose and incomplete JSON. Quoted values
 // honor escapes so a credential copied into another field can be scrubbed.
 const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
 const assignmentKey = (key: string): string => key.replace(/^["']|["']$/g, '');
+function quotedEnd(text: string, start: number): number | undefined {
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === text[start]) return i + 1;
+  }
+  return undefined;
+}
+/** Scrub assignments that cannot be parsed as complete JSON. Unclosed values
+ * consume the remaining fragment so provider text cannot survive truncation. */
+function redactRawProviderAssignments(text: string): string {
+  const opener = /(?<![\w.-])("(?:\\.|[^"\\])*"|'[^']*'|[\w.-]{1,160})\s*[:=]\s*/g;
+  let out = '', last = 0, match: RegExpExecArray | null;
+  while ((match = opener.exec(text))) {
+    let key = assignmentKey(match[1]!);
+    if (match[1]!.startsWith('"')) {
+      try { key = JSON.parse(match[1]!) as string; } catch { /* malformed key */ }
+    }
+    if (!isRawProviderKey(key)) continue;
+    const start = opener.lastIndex;
+    let end = start;
+    if (text[start] === '"' || text[start] === "'") end = quotedEnd(text, start) ?? text.length;
+    else if (text[start] === '{' || text[start] === '[') {
+      const stack: string[] = [];
+      end = text.length;
+      for (let i = start; i < text.length; i++) {
+        const char = text[i]!;
+        if (char === '"' || char === "'") i = (quotedEnd(text, i) ?? text.length) - 1;
+        else if (char === '{' || char === '[') stack.push(char);
+        else if (char === '}' || char === ']') {
+          if (stack.pop() !== (char === '}' ? '{' : '[')) break;
+          if (!stack.length) { end = i + 1; break; }
+        }
+      }
+    } else {
+      while (end < text.length && !/[&,;{}\[\]\r\n]/.test(text[end]!)) end++;
+    }
+    out += text.slice(last, match.index) + '[REDACTED]';
+    last = end; opener.lastIndex = end;
+  }
+  return out + text.slice(last);
+}
+/** Visit complete JSON objects/arrays and string literals inside prose or code fences before field capping. */
+function redactJsonFragments(text: string, redact: (value: unknown) => unknown, depth = 0): string {
+  if (depth > 40) return '[truncated]';
+  let out = '', last = 0;
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] === '"') {
+      const end = quotedEnd(text, start);
+      if (end === undefined) break;
+      try {
+        const parsed: unknown = JSON.parse(text.slice(start, end));
+        out += text.slice(last, start) + JSON.stringify(redact(parsed));
+        last = end;
+      } catch { /* malformed string literal */ }
+      start = end - 1;
+      continue;
+    }
+    if (text[start] !== '{' && text[start] !== '[') continue;
+    const stack: string[] = [];
+    let quoted = false, escaped = false;
+    for (let end = start; end < text.length; end++) {
+      const char = text[end]!;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === '{' || char === '[') stack.push(char);
+      else if (char === '}' || char === ']') {
+        if (stack.pop() !== (char === '}' ? '{' : '[')) {
+          out += text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1, end), redact, depth + 1) + char;
+          last = end + 1; start = end;
+          break;
+        }
+        if (stack.length) continue;
+        try {
+          const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+          out += text.slice(last, start) + JSON.stringify(redact(parsed));
+          last = end + 1;
+        } catch {
+          // Prose brackets may wrap a valid JSON fragment without themselves
+          // being JSON. Inspect their interior rather than skipping the payload.
+          out += text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1, end), redact, depth + 1) + char;
+          last = end + 1;
+        }
+        start = end;
+        break;
+      }
+      if (end === text.length - 1) {
+        return out + text.slice(last, start + 1) + redactJsonFragments(text.slice(start + 1), redact, depth + 1);
+      }
+    }
+  }
+  return out + text.slice(last);
+}
 /** Redact `env: { ... }` objects with brace matching so nested objects cannot leak past the first `}`. */
 function redactEnvBlocks(text: string): string {
   const opener = /(["']?(?:env|environment)[\w.-]*["']?\s*[:=]\s*)\{/gi;
@@ -40,7 +139,7 @@ export function capDebugField(value: string): string {
 /** Remove credential fields and scrub recognizable credentials even inside free text.
  * Values found under credential/environment keys are also scrubbed wherever copied.
  * Callers with their own byte budget can defer field capping. */
-export function redactRunData<T>(value: T, options: { capFields?: boolean; credentialSource?: unknown } = {}): T {
+export function redactRunData<T>(value: T, options: { capFields?: boolean; credentialSource?: unknown; omitRawProviderText?: boolean } = {}): T {
   const capField = (text: string): string => options.capFields === false ? text : capDebugField(text);
   const secrets = new Set<string>();
   let collected = 0, visited = 0;
@@ -95,13 +194,13 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
     if (depth > 40 || ++visited > MAX_DEBUG_NODES) return '[truncated]';
     if (typeof item === 'string') {
       // JSON embedded in model raw output/materials still receives key-based redaction.
-      if (/^\s*[\[{]/.test(item)) {
+      if (/^\s*[\[{]/.test(item) || (options.omitRawProviderText && /^\s*"/.test(item))) {
         try { const parsed: unknown = JSON.parse(item); collect(parsed); return capField(JSON.stringify(visit(parsed, depth + 1))); } catch { /* free text */ }
       }
-      return scrub(item);
+      return scrub(options.omitRawProviderText ? redactRawProviderAssignments(redactJsonFragments(item, parsed => { collect(parsed); return visit(parsed, depth + 1); })) : item);
     }
     if (Array.isArray(item)) return capArray(item).map(child => visit(child, depth + 1));
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key)).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key) && !(options.omitRawProviderText && isRawProviderKey(key))).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
     return item;
   };
   return visit(value) as T;
@@ -112,9 +211,12 @@ export function modelRawOutput(value: unknown, credentialSource?: unknown): stri
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 export function sharedRunView(run: AgentRun) {
+  return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true });
+}
+export function debugRunView(run: AgentRun) {
   return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
 }
-export function debugBundle(run: AgentRun) {
+export function debugBundle(run: AgentRun, options: { omitRawProviderText?: boolean } = {}) {
   // Events, plans and steps (taskAttempts) are emitted once at the top level. Embedding them
   // again under `run` made every lifecycle event appear twice in the bundle.
   const { events: _events, plans: _plans, steps: _steps, ...runSummary } = run;
@@ -122,5 +224,5 @@ export function debugBundle(run: AgentRun) {
     taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
     modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
     validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
-    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' });
+    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' }, options);
 }

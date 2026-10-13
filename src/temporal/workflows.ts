@@ -15,6 +15,9 @@ const { advanceRun } = proxyActivities<{
 const { advanceReminder } = proxyActivities<{
   advanceReminder(id: string): Promise<AdvanceReminderActivityResult>;
 }>({ startToCloseTimeout: '2 minutes', scheduleToCloseTimeout: '3 minutes', retry });
+const { advanceRun: advanceRunPolling } = proxyActivities<{ advanceRun(id: string): Promise<AdvanceRunActivityResult> }>({
+  startToCloseTimeout: '25 minutes', scheduleToCloseTimeout: '2 hours', heartbeatTimeout: '45 seconds', retry,
+});
 export async function agentRunWorkflow(runId: string, pollState?: { previousProgress?: string; stalled: number }): Promise<void> {
   let wake = false;
   let previousProgress = pollState?.previousProgress;
@@ -23,7 +26,7 @@ export async function agentRunWorkflow(runId: string, pollState?: { previousProg
   for (let ticks = 0; ticks < 100; ticks++) {
     wake = false;
     let result: AdvanceRunActivityResult;
-    try { result = await advanceRun(runId); }
+    try { result = await (patched('run-advance-async-heartbeat-v1') ? advanceRunPolling : advanceRun)(runId); }
     catch (error) {
       // Permanent auth/config/protocol failures wait for an explicit wake after
       // operator correction. Transport failures get a durable timer retry.
@@ -35,7 +38,7 @@ export async function agentRunWorkflow(runId: string, pollState?: { previousProg
     // Preserve old histories that already emitted a wait command for failed.
     if (status === 'failed' && patched('terminal-failed-run-v1')) return;
     if (patched('run-advance-progress-backoff-v1')) {
-      const decision = decideRunAdvance(result, previousProgress, stalled);
+      const decision = decideRunAdvance(result, previousProgress, stalled, patched('run-advance-active-poll-v2'));
       previousProgress = result.progress;
       stalled = decision.stalled;
       if (decision.kind === 'terminal') return;

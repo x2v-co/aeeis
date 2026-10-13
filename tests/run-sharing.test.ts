@@ -33,6 +33,59 @@ async function setup(adapter = model) {
 }
 
 describe('run sharing HTTP boundary', () => {
+  it.each(['encoded', 'double encoded', 'fenced', 'embedded', 'unclosed prose', 'bracketed prose', 'incomplete JSON', 'prose double encoded', 'prose encoded incomplete JSON'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
+    const { app, repo, run, auth } = await setup();
+    const encoded = JSON.stringify({ rawOutput: 'PRIVATE_LARGE_PROVIDER', safe: 'RETAINED_LARGE_RESULT', nested: [{ providerResponse: 'PRIVATE_NESTED_PROVIDER', safe: true }], padding: '😀'.repeat(MAX_DEBUG_FIELD_BYTES) });
+    const incomplete = encoded.slice(0, -3);
+    const text = format === 'incomplete JSON' ? `Observation: ${incomplete}` : format === 'prose double encoded' ? `Observation: ${JSON.stringify(encoded)}\nEnd observation.`
+      : format === 'prose encoded incomplete JSON' ? `Observation: ${JSON.stringify(incomplete)}\nEnd observation.`
+      : format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.`
+      : format === 'double encoded' ? JSON.stringify(encoded) : format === 'unclosed prose' ? `Note [context: ${encoded}`
+      : format === 'bracketed prose' ? `Note [context: ${encoded}]` : encoded;
+    await repo.mutate(run.id, current => {
+      current.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: text }] });
+    });
+    const original = await repo.get(run.id);
+    const share = (await app.inject({ method: 'POST', url: `/api/runs/${run.id}/share`, headers: auth })).json();
+    for (const suffix of ['', '/debug-bundle']) {
+      const response = await app.inject({ url: `/api/share/${share.token}${suffix}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain('PRIVATE_');
+      expect(response.body).not.toContain('rawOutput');
+      expect(response.body).not.toContain('providerResponse');
+      expect(response.body).toContain('RETAINED_LARGE_RESULT');
+      const steps = suffix ? response.json().taskAttempts : response.json().steps;
+      expect(Buffer.byteLength(steps[0].observations[0].result)).toBeLessThanOrEqual(MAX_DEBUG_FIELD_BYTES);
+    }
+    expect((await app.inject({ url: `/api/runs/${run.id}/debug-bundle`, headers: auth })).body).toContain('PRIVATE_LARGE_PROVIDER');
+    expect(await repo.get(run.id)).toEqual(original);
+  });
+  it('omits raw provider text recursively from public run views and bundles, retaining owner diagnostics', async () => {
+    const { app, repo, run, auth } = await setup();
+    await repo.mutate(run.id, current => {
+      current.calls.push({ id: 'model_1', phase: 'planner', state: 'completed', inputHash: 'hash', startedAt: current.createdAt, rawOutput: 'PRIVATE_PROVIDER_CALL', modelRequest: { system: 'Saved provider prompt', input: { threadHistory: 'PRIVATE_SNAPSHOT_HISTORY', sources: [{ content: 'PRIVATE_SNAPSHOT_SOURCE' }] } } });
+      current.plannerRepair = { rawOutput: 'PRIVATE_PLANNER_REPAIR', validationError: 'Invalid plan' };
+      current.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: { items: [{ raw_response: 'PRIVATE_PROVIDER_RESPONSE', providerText: 'PRIVATE_PROVIDER_TEXT', reasoning_content: 'PRIVATE_REASONING', safe: 'RETAINED_TOOL_RESULT' }], encoded: '{"rawOutput":"PRIVATE_ENCODED","safe":"retained"}' } }], finishRepair: { reason: 'Invalid output', candidate: 'PRIVATE_FINISH_CANDIDATE' } });
+      current.events.push({ id: 'event_1', seq: 1, type: 'model.validation_failed', at: current.createdAt, data: { rawOutput: 'PRIVATE_EVENT', validation: { issues: [{ rawText: 'PRIVATE_VALIDATION', message: 'Schema mismatch' }] } } });
+    });
+    const original = await repo.get(run.id);
+    const share = (await app.inject({ method: 'POST', url: `/api/runs/${run.id}/share`, headers: auth })).json();
+    for (const suffix of ['', '/debug-bundle']) {
+      const response = await app.inject({ url: `/api/share/${share.token}${suffix}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain('PRIVATE_');
+      for (const field of ['rawOutput', 'raw_response', 'rawText', 'reasoning_content', 'providerText', 'plannerRepair', 'finishRepair', 'modelRawOutput', 'modelRequest']) expect(response.body).not.toContain(field);
+      expect(response.body).toContain('RETAINED_TOOL_RESULT');
+      expect(response.body).toContain('Schema mismatch');
+    }
+    const owner = await app.inject({ url: `/api/runs/${run.id}/debug-bundle`, headers: auth });
+    expect(owner.body).toContain('PRIVATE_PROVIDER_CALL');
+    expect(owner.body).toContain('PRIVATE_EVENT');
+    expect(owner.body).toContain('PRIVATE_FINISH_CANDIDATE');
+    expect(owner.body).toContain('PRIVATE_SNAPSHOT_HISTORY');
+    expect(owner.body).toContain('PRIVATE_SNAPSHOT_SOURCE');
+    expect(await repo.get(run.id)).toEqual(original);
+  });
   it('serves deep links, requires owner auth to manage shares, and stores only hashes durably', async () => {
     const { app, run, other, auth, directory, repo } = await setup();
     expect((await app.inject({ url: `/runs/${run.id}` })).statusCode).toBe(200);
@@ -212,6 +265,34 @@ describe('share storage and redaction helpers', () => {
 });
 
 describe('debug redaction hardening', () => {
+  it.each([
+    'Observation: {"rawOutput":"PRIVATE_PROVIDER", "safe":',
+    'Observation: {"raw_output":"PRIVATE_PROVIDER with \\"quotes\\" and }", "safe":',
+    'Observation: {"providerText":"PRIVATE_PROVIDER without a closing quote',
+    'Observation: {"reasoning_content":{"text":"PRIVATE_PROVIDER","nested":[1,2]}, "safe":',
+    'Observation: {"\\u0072awOutput":"PRIVATE_PROVIDER", "safe":',
+    'Observation: rawResponse=PRIVATE_PROVIDER; safe=retained',
+    'Observation: rawText=PRIVATE_PROVIDER prose PRIVATE_PROVIDER_TAIL; safe=retained',
+    `Observation: ${JSON.stringify(JSON.stringify({ rawOutput: 'PRIVATE_PROVIDER', safe: 'retained' }))}`,
+    `Observation: ${JSON.stringify('{"provider_output":"PRIVATE_PROVIDER", "safe":')}`,
+  ])('scrubs raw-provider assignments and embedded JSON string literals from %s', text => {
+    const result = redactRunData({ text }, { omitRawProviderText: true });
+    expect(result.text).not.toContain('PRIVATE_PROVIDER');
+    expect(result.text).toContain('Observation:');
+    if (text.includes('safe')) expect(result.text).toContain('safe');
+    expect(redactRunData({ text }).text).toContain('PRIVATE_PROVIDER');
+  });
+  it('strips nested encoded JSON and multiple prose JSON fragments with escaped delimiters', () => {
+    const first = JSON.stringify({ safe: 'Quoted "} [" value', nested: JSON.stringify([{ raw_text: 'PRIVATE_ENCODED', safe: 'retained nested' }]) });
+    const second = JSON.stringify([{ provider_output: { content: 'PRIVATE_OBJECT' }, safe: 'retained array' }]);
+    const result = redactRunData({ text: `Before ${first} between ${second} after` }, { omitRawProviderText: true });
+    expect(result.text).not.toContain('PRIVATE_');
+    expect(result.text).toContain('Quoted');
+    expect(result.text).toContain('retained nested');
+    expect(result.text).toContain('retained array');
+    expect(result.text).toContain('between');
+    expect(result.text).toContain('after');
+  });
   it('scrubs session credentials and copied values inside prose-wrapped and incomplete JSON', () => {
     const text = 'Here is the response: {"summary":"copied-session copied-api-key", "session_id":"copied-session", "api_key":"copied-api-key"}\n'
       + 'session_id=plain-session\n{"session-id":"partial-session", "summary":';

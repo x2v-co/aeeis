@@ -70,7 +70,7 @@ describe('HttpModelAdapter', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it.each([false, true])('retries ARK timeouts including stalled bodies (headers=%s)', async headersSent => {
+  it.each([false, true])('leaves ARK idle timeouts unknown without opt-in (headers=%s)', async headersSent => {
     let requests = 0;
     const port = await new Promise<string>(resolve => {
       const server = createServer((_request, response) => {
@@ -82,7 +82,7 @@ describe('HttpModelAdapter', () => {
     });
     const adapter = new HttpModelAdapter(`http://127.0.0.1:${port}`, 'model', '', 'ark', 40, undefined, false, undefined, { retryBaseMs: 0 });
     await expect(adapter.complete({ system: 's', input: {} })).rejects.toThrow('timed out after 40ms');
-    expect(requests).toBe(3);
+    expect(requests).toBe(1);
   });
 
   it('uses capped exponential backoff with jitter between retries', async () => {

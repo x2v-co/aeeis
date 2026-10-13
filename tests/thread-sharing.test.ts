@@ -34,6 +34,35 @@ async function setup() {
 }
 
 describe('thread shares', () => {
+  it('omits raw provider text from all public thread runs and bundles, preserving authenticated debug bundles', async () => {
+    const { repo, app, thread, root, share } = await setup();
+    const child = threadRun(); await repo.createRunInThread(child, thread.id, root.id, threadScope);
+    for (const id of [root.id, child.id]) await repo.mutate(id, run => {
+      run.calls.push({ id: `model_${id}`, phase: 'executor', taskId: 'task', state: 'completed', inputHash: 'hash', startedAt: run.createdAt, rawOutput: 'PRIVATE_CALL', modelRequest: { system: 'Saved provider prompt', input: { threadHistory: 'PRIVATE_SNAPSHOT_HISTORY', sources: [{ content: 'PRIVATE_SNAPSHOT_SOURCE' }] } } });
+      run.plannerRepair = { rawOutput: 'PRIVATE_PLANNER', validationError: 'Schema mismatch' };
+      run.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: [{ raw_output: 'PRIVATE_NESTED', providerResponse: 'PRIVATE_RESPONSE', safe: 'RETAINED_RESULT' },
+        `Observation: \`\`\`json\n${JSON.stringify({ rawOutput: 'PRIVATE_FENCED', safe: 'RETAINED_FENCED', padding: 'x'.repeat(10000) })}\n\`\`\``] }], finishRepair: { reason: 'Incomplete finish', candidate: 'PRIVATE_CANDIDATE' } });
+      run.events.push({ id: `evt_${id}`, seq: run.events.length + 1, type: 'model.validation_failed', at: run.createdAt, data: { validation: { rawOutput: 'PRIVATE_VALIDATION', issues: [{ rawText: 'PRIVATE_TEXT', message: 'Schema mismatch' }] } } });
+    });
+    const token = (await share()).json();
+    for (const suffix of ['', '/debug-bundle']) {
+      const response = await app.inject({ url: `/api/share/${token.token}${suffix}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().runs).toHaveLength(2);
+      expect(response.body).not.toContain('PRIVATE_');
+      for (const key of ['rawOutput', 'raw_output', 'providerResponse', 'rawText', 'plannerRepair', 'finishRepair', 'modelRequest']) expect(response.body).not.toContain(key);
+      expect(response.body).toContain('RETAINED_RESULT');
+      expect(response.body).toContain('RETAINED_FENCED');
+      expect(response.body).toContain('Schema mismatch');
+    }
+    const owner = await app.inject({ url: `/api/threads/${thread.id}/debug-bundle`, headers: auth });
+    expect(owner.statusCode).toBe(200);
+    expect(owner.body).toContain('PRIVATE_CALL');
+    expect(owner.body).toContain('PRIVATE_CANDIDATE');
+    expect(owner.body).toContain('PRIVATE_SNAPSHOT_HISTORY');
+    expect(owner.body).toContain('PRIVATE_SNAPSHOT_SOURCE');
+    expect((await app.inject({ url: `/api/runs/${child.id}/debug-bundle`, headers: auth })).body).toContain('PRIVATE_CALL');
+  });
   it('redacts every run and cross-run copied credentials, omits history/private runs, and freezes the sequence cutoff', async () => {
     const { repo, app, thread, root, share } = await setup();
     await repo.mutate(root.id, run => { run.modelDecision = { credentials: { key: 'opaque-root-secret' } }; run.artifacts[0]!.content = 'Root output Bearer root-token'; });

@@ -1,7 +1,7 @@
 import type { AgentRun } from './contracts.js';
 import type { RunRepository } from './repository.js';
 import type { Thread } from './threads.js';
-import { redactRunData, sharedRunView } from './run-debug.js';
+import { redactRunData, debugRunView } from './run-debug.js';
 import { sharedThreadView } from './thread-shares.js';
 
 export const MAX_THREAD_BUNDLE_BYTES = 32 * 1024 * 1024;
@@ -32,7 +32,7 @@ export function threadDebugBundle(thread: Thread, throughSequence: number, runs:
   const view = access === 'share' ? sharedThreadView(thread, throughSequence, runs) : (() => {
     // Object keys preserve the complete sequence beyond the redactor's array cap.
     const redacted = redactRunData({ kind: 'thread' as const, thread, throughSequence,
-      runs: Object.fromEntries(runs.map(run => [run.id, sharedRunView(run)])),
+      runs: Object.fromEntries(runs.map(run => [run.id, debugRunView(run)])),
     }, { credentialSource: Object.fromEntries(runs.map(run => [run.id, run])) });
     return { ...redacted, runs: Object.values(redacted.runs) };
   })();

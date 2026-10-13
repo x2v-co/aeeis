@@ -13,6 +13,15 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it('validates durable execution allowances and explicit idle retry opt-in', () => {
+    for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: value })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: 'true' })).toThrow('AEEIS_MODEL_RETRY_EMPTY_IDLE');
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MAX_NODE_ITERATIONS: '1' })).toThrow();
+    for (const key of ['AEEIS_MAX_NODE_SOURCE_PAGES', 'AEEIS_MAX_RUN_SOURCE_PAGES', 'AEEIS_MAX_NODE_SOURCE_CHARS', 'AEEIS_MAX_RUN_SOURCE_CHARS']) {
+      expect(() => validateRuntimeConfig({ ...development, [key]: '0' })).toThrow();
+      expect(() => validateRuntimeConfig({ ...development, [key]: 'NaN' })).toThrow();
+    }
+  });
   it('validates streaming configuration and bounded idle/overall deadlines', () => {
     for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).not.toThrow();
     for (const value of ['', 'true', '2']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).toThrow('AEEIS_MODEL_STREAM');

@@ -134,11 +134,15 @@ npm run dev
 
 复制 `.env.example` 后配置一个 OpenAI-compatible endpoint：
 
-非流式模型的请求超时由 `AEEIS_MODEL_TIMEOUT_MS` 控制，默认 180000（3 分钟），范围 1000–600000 毫秒，覆盖等待响应和读取正文。ARK/volcengine 自动启用 SSE，其他 OpenAI-compatible provider 默认保持非流式；`AEEIS_MODEL_STREAM=1|0` 可显式覆盖，固定模型和 catalog 路由均适用。流式调用使用 `AEEIS_MODEL_IDLE_TIMEOUT_MS`（默认继承 `AEEIS_MODEL_TIMEOUT_MS`）约束等待响应头及无字节间隔，reasoning/heartbeat 字节也重置 idle；另有 `AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS`（默认 600000）限制每次 transport attempt 的总时长，两个值范围均为 1000–600000 毫秒。请求携带 `stream_options.include_usage`，保留最终 usage 与 finish_reason；provider 返回普通 JSON 时仍可解析。
+非流式模型的请求超时由 `AEEIS_MODEL_TIMEOUT_MS` 控制，默认 180000（3 分钟），范围 1000–600000 毫秒，覆盖等待响应和读取正文。ARK/volcengine 自动启用 SSE，其他 OpenAI-compatible provider 默认保持非流式；`AEEIS_MODEL_STREAM=1|0` 可显式覆盖，固定模型和 catalog 路由均适用。流式调用使用 `AEEIS_MODEL_IDLE_TIMEOUT_MS`（默认 60000，独立于非流式超时）约束等待响应头及无字节间隔，reasoning/heartbeat 字节也重置 idle；另有 `AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS`（默认 600000）限制每次 transport attempt 的总时长，两个值范围均为 1000–600000 毫秒。请求携带 `stream_options.include_usage`，保留最终 usage 与 finish_reason；provider 返回普通 JSON 时仍可解析。
 
-Transport 重试仍受 `AEEIS_MODEL_MAX_ATTEMPTS`（默认 3）及 `AEEIS_MODEL_RETRY_BASE_MS` / `AEEIS_MODEL_RETRY_MAX_MS` 控制；SSE 响应头已到达后的中断不自动重发。耗尽 transport 重试后，超时 Run 保留 `unknown`；executor 不用缩小上下文另开一次模型调用，必须收到服务商回执并核查计费后再恢复。超时不等于服务商没有执行或没有计费。
+Transport 重试仍受 `AEEIS_MODEL_MAX_ATTEMPTS`（默认 3）及 `AEEIS_MODEL_RETRY_BASE_MS` / `AEEIS_MODEL_RETRY_MAX_MS` 控制；SSE idle/overall 超时默认不重发。只有确认服务商对 idempotency key 去重并核查计费规则后，才可启用 `AEEIS_MODEL_RETRY_EMPTY_IDLE=1`（默认 0）：仅在未收到任何正文字节时，以原始 key 和正文重试一次；收到 reasoning、heartbeat 或部分 frame 后禁止重发。未收到字节本身不能证明没有计费。耗尽 transport 重试后，超时 Run 保留 `unknown`；executor 不用缩小上下文另开一次模型调用，必须收到服务商回执并核查计费后再恢复。超时不等于服务商没有执行或没有计费。
 
 大于 2048 UTF-8 字节的 CSV 在 planner/executor/reviewer 中使用列名、类型、distinct/null 数、min/max、总行数及前五行样本的摘要，每份最多 3000 字符。`sources.read` 使用从 0 开始的数据行 `offset` 和 `limit`（默认 20，最多 100），每页原文最多 4000 字符，返回 `page.nextRead`；超长单行用带 `characterOffset` 的明确字符片段继续读取。原始资料和完整观察结果保存在 Run 中。模型中的观察结果最多 10000 序列化字符，旧的大结果压缩为引用及 SHA-256；executor 的 system + JSON input 总预算为 96000 字符，重复的依赖和证据过大时压缩，固定授权字段过大时在模型调用前拒绝。测量与历史分析见 [CSV timeout investigation](docs/bigcsv-timeout.md)。
+
+每个 node 的 executor 模型迭代受 `AEEIS_MAX_NODE_ITERATIONS`（默认 8，包括最后一次 finish 和修复）限制；累计 `sources.read` 受 `AEEIS_MAX_NODE_SOURCE_PAGES` / `AEEIS_MAX_RUN_SOURCE_PAGES`（默认 4 / 12）及 `AEEIS_MAX_NODE_SOURCE_CHARS` / `AEEIS_MAX_RUN_SOURCE_CHARS`（默认 24000 / 72000 序列化字符）限制。耗尽后最后一次调用只能生成 finish，输出带 `partial`、证据限制及未验证项，后续综合继承这些限制；不再追读所有 `page.nextRead`。Run 冻结配置，读取用量在重启和 replan 后保留。
+
+Temporal worker 使用异步 advance（POST 返回 202，GET 短轮询并发送 heartbeat），每次 HTTP 请求最多 15 秒，避免单次请求跨越模型完整执行时长。activity 的 20 分钟期限对应 workflow 的 25 分钟 start-to-close 和 45 秒 heartbeat timeout；传输失败保留重试定时器，active Run 的稳定进度退避至每 60 秒轮询，不再无限等待 wake。旧 worker 的同步请求合同保留；升级顺序、proxy timeout 和已停驻历史的人工唤醒见上述调查文档。公共 Run/Thread 分享及公共 debug 下载递归移除 raw provider text 和修复候选，认证 debug bundle 保留脱敏诊断。
 
 ```bash
 cp .env.example .env
