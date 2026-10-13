@@ -212,6 +212,9 @@ export interface ModelCall {
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
   /** Provider idempotency key. Unknown calls reuse this key after reconcile. */
   idempotencyKey?: string;
+  /** Recorded transport variants; the original logical request/hash stays intact. */
+  thinkingUnsupported?: boolean;
+  midstreamRetries?: number;
   /** Shared tenant budget account pinned when this call was reserved. */
   globalBudgetAccountKey?: string;
   state: 'started' | 'completed' | 'failed' | 'unknown' | 'discarded';

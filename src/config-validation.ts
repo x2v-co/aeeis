@@ -219,12 +219,14 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   executionLimitsConfig(env);
   validateIntegerConfig(env, 'AEEIS_THREAD_CONTEXT_BUDGET_BYTES', { defaultValue: DEFAULT_THREAD_HISTORY_BYTES, min: 1, max: MAX_THREAD_HISTORY_BYTES });
   if (env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== undefined && !['0', '1'].includes(env.AEEIS_MODEL_RETRY_EMPTY_IDLE)) throw new Error('AEEIS_MODEL_RETRY_EMPTY_IDLE must be 0 or 1');
+  if (env.AEEIS_MODEL_MIDSTREAM_RETRIES?.trim() === '') throw new Error('AEEIS_MODEL_MIDSTREAM_RETRIES must be a safe integer between 0 and 3');
+  validateIntegerConfig(env, 'AEEIS_MODEL_MIDSTREAM_RETRIES', { defaultValue: 1, min: 0, max: 3 });
   if (env.AEEIS_MODEL_STREAM !== undefined && !['0', '1'].includes(env.AEEIS_MODEL_STREAM)) throw new Error('AEEIS_MODEL_STREAM must be 0 or 1');
   validateIntegerConfig(env, 'AEEIS_MODEL_IDLE_TIMEOUT_MS', { defaultValue: 180_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS', { defaultValue: 120_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS', { defaultValue: 900_000, min: 1_000, max: 1_800_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_MAX_TOKENS', { defaultValue: 16_384, min: 1, max: 1_000_000 });
-  if (env.AEEIS_MODEL_THINKING !== undefined && !['enabled', 'disabled', 'auto'].includes(env.AEEIS_MODEL_THINKING)) throw new Error('AEEIS_MODEL_THINKING must be enabled, disabled or auto');
+  if (env.AEEIS_MODEL_THINKING !== undefined && !['enabled', 'disabled', 'auto', 'provider-default'].includes(env.AEEIS_MODEL_THINKING)) throw new Error('AEEIS_MODEL_THINKING must be enabled, disabled, auto or provider-default');
   if (env.AEEIS_MODEL_REASONING_EFFORT !== undefined && !['minimal', 'low', 'medium', 'high'].includes(env.AEEIS_MODEL_REASONING_EFFORT)) throw new Error('AEEIS_MODEL_REASONING_EFFORT must be minimal, low, medium or high');
   validateIntegerConfig(env, 'AEEIS_MODEL_MAX_ATTEMPTS', { defaultValue: 3, min: 1, max: 10 });
   validateIntegerConfig(env, 'AEEIS_MODEL_RETRY_BASE_MS', { defaultValue: 500, min: 0, max: 60_000 });

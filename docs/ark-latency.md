@@ -171,3 +171,22 @@ history cap. The subsequent broader run passes 1,351 tests across 94 files
 Temporal-server test files blocked by the sandbox. No test configuration was
 changed to conceal the full-suite limitation. Re-run the entire suite with
 localhost/child-process permissions before deployment.
+
+## Mid-stream stalls (28d6581 on SG)
+
+28d6581 fixed first-byte waits: headers now arrive at p50 5.8s, max 12s. Calls still failed because ARK stopped mid-stream after sending 110KB or 38KB, and the 180s idle timeout fired.
+
+**Where the 110KB came from (inferred from code):** `responseBytes` counted raw SSE bytes. It never separated reasoning, SSE framing and answer text. `delta.reasoning_content` was not even part of the stream schema, so it was silently dropped. Each ARK frame carries id/model/created metadata and costs roughly 150–250 bytes per token. 110KB is therefore only about 450–700 tokens. Planner JSON output is usually only 1–4KB of content, so most of those tokens are almost certainly reasoning (`thinking` was not sent and the model's default is enabled), plus framing overhead. The new fields below confirm the exact split.
+
+- Both logs now include `sseFrames`, `contentBytes`, `reasoningBytes`, `otherBytes`, `finishReason` and `usage` (with `reasoning_tokens`). Partial streams log them too.
+- `retryDecision` records the decision the code actually took. Previously, `retryable` only meant the error was transient. Any body byte forced `willRetry:false`, which is why the old logs showed `retryable:true, willRetry:false` with no explanation.
+- `AEEIS_MODEL_MIDSTREAM_RETRIES` (default 1, range 0–3) controls replay after an idle timeout that follows received bytes.
+  - The replay uses the same body, with the idempotency key suffixed `:midstream-N`. An idempotency key is required.
+  - Model calls have no side effects except billing.
+  - The partial attempt may still be billed. The log marks `usageUnknown` and `billingRisk: duplicate-possible`, and the retry count is persisted.
+  - An overall timeout is never replayed.
+- ARK (volces.com / volcengineapi.com, or provider `ark`): when `AEEIS_MODEL_THINKING` is unset, the default is now `thinking: {type: disabled}`.
+  - `AEEIS_MODEL_THINKING=provider-default` sends nothing.
+  - If ARK returns HTTP 400 for these params, the call is retried once without them and logged with `thinkingUnsupported: true`. That adapter instance then stops sending them.
+
+Why not only shrink max_tokens: a stall after 38KB is not an output-length problem. A smaller cap would also trigger length retries that duplicate cost.
