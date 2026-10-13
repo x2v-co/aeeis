@@ -11,6 +11,7 @@ import { FileThreadShareStore, newThreadShare, sharedThreadView, threadSharesMig
 import { buildThreadHistory } from '../src/runtime/thread-history.js';
 import { threadHistorySources } from '../src/runtime/thread-context.js';
 import { materialForModel } from '../src/runtime/materials.js';
+import { queryCsvSource } from '../src/runtime/csv-query.js';
 import { threadRecord, threadRun, threadScope } from './support/thread-contract.js';
 import { isolatedPostgres } from './support/postgres.js';
 
@@ -118,10 +119,14 @@ describe('thread shares', () => {
       excerpt: materialForModel(source).content, ...(source.classification ? { classification: source.classification } : {}),
     }));
     const visibleRead = { tool: 'sources.read', argument: visibleSource.id, result: materialForModel(visibleSource) };
+    const csvQuery = (source: typeof visibleSource) => ({ tool: 'sources.csvQuery', argument: source.id,
+      result: queryCsvSource({ ...source, title: 'notes.csv', content: `note\n${source.content}` }) });
+    const visibleQuery = csvQuery(visibleSource);
     const otherObservation = { tool: 'example.lookup', argument: 'current', result: { content: 'CURRENT TOOL RESULT' } };
     child.steps = [{ taskId: 'task_1', status: 'succeeded', attempts: 1, observations: [
       visibleRead,
       ...hiddenSources.map(source => ({ tool: 'sources.read', argument: source.id, result: materialForModel(source) })),
+      visibleQuery, ...hiddenSources.map(csvQuery),
       { tool: 'sources.search', argument: 'brief', result: searchResults },
       otherObservation,
     ] }, { taskId: 'task_2', status: 'succeeded', attempts: 1, observations: [
@@ -139,7 +144,7 @@ describe('thread shares', () => {
     const shared = view.json().runs[0];
     expect(shared.context.sources).toEqual([visibleSource]);
     expect(shared.steps[0].observations).toEqual([
-      visibleRead, { tool: 'sources.search', argument: 'brief', result: [searchResults[0]] }, otherObservation,
+      visibleRead, visibleQuery, { tool: 'sources.search', argument: 'brief', result: [searchResults[0]] }, otherObservation,
     ]);
     expect(shared.steps[1].observations).toEqual([]);
 

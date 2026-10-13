@@ -115,7 +115,7 @@ function csvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: number): 
   const rendered = { ...summary, columns: summary.columns.map(column => ({ ...column, name: clip(column.name),
     ...(typeof column.min === 'string' ? { min: clip(column.min) } : {}), ...(typeof column.max === 'string' ? { max: clip(column.max) } : {}) })),
     sampleRows: summary.sampleRows.map(row => row.map(clip)), omittedColumns: 0,
-    instructions: 'Statistics cover all rows. Samples are first rows only; text values may be shortened. Query all rows with sources.csvQuery for filtering/aggregation, or read bounded pages with sources.read (offset/limit). Do not infer unseen row details.' };
+    instructions: 'Statistics cover all rows. Samples are first rows only; text values may be shortened. Read bounded pages with sources.read (offset/limit). Do not infer unseen row details.' };
   while (JSON.stringify(rendered).length > maxLength && rendered.sampleRows.length) rendered.sampleRows.pop();
   while (JSON.stringify(rendered).length > maxLength && rendered.columns.length) { rendered.columns.pop(); rendered.omittedColumns++; }
   const content = JSON.stringify(rendered).length <= maxLength ? JSON.stringify(rendered) : `CSV: ${summary.rowCount} data rows; call sources.read`.slice(0, maxLength);

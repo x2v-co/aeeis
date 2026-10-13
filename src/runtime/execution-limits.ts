@@ -23,7 +23,7 @@ export function executionLimitsConfig(env: NodeJS.ProcessEnv): ExecutionLimits {
 // Count durable observations, including repeated/fragment reads. Serialization
 // includes escaping and metadata so the allowance also bounds retained context.
 export function sourceReadUsage(steps: Step[]): { pages: number; chars: number } {
-  const reads = steps.flatMap(step => step.observations.filter(observation => observation.tool === 'sources.read'));
+  const reads = steps.flatMap(step => step.observations.filter(observation => observation.tool === 'sources.read' || observation.tool === 'sources.csvQuery'));
   return { pages: reads.length, chars: reads.reduce((sum, read) => sum + JSON.stringify(read.result).length, 0) };
 }
 export function runSourceReadUsage(run: AgentRun): { pages: number; chars: number } {
