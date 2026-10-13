@@ -33,10 +33,13 @@ async function setup(adapter = model) {
 }
 
 describe('run sharing HTTP boundary', () => {
-  it.each(['encoded', 'double encoded', 'fenced', 'embedded', 'unclosed prose', 'bracketed prose'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
+  it.each(['encoded', 'double encoded', 'fenced', 'embedded', 'unclosed prose', 'bracketed prose', 'incomplete JSON', 'prose double encoded', 'prose encoded incomplete JSON'])('strips provider fields from oversized %s JSON before public bundle truncation', async format => {
     const { app, repo, run, auth } = await setup();
     const encoded = JSON.stringify({ rawOutput: 'PRIVATE_LARGE_PROVIDER', safe: 'RETAINED_LARGE_RESULT', nested: [{ providerResponse: 'PRIVATE_NESTED_PROVIDER', safe: true }], padding: '😀'.repeat(MAX_DEBUG_FIELD_BYTES) });
-    const text = format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.`
+    const incomplete = encoded.slice(0, -3);
+    const text = format === 'incomplete JSON' ? `Observation: ${incomplete}` : format === 'prose double encoded' ? `Observation: ${JSON.stringify(encoded)}\nEnd observation.`
+      : format === 'prose encoded incomplete JSON' ? `Observation: ${JSON.stringify(incomplete)}\nEnd observation.`
+      : format === 'fenced' ? `\`\`\`json\n${encoded}\n\`\`\`` : format === 'embedded' ? `Observation: ${encoded}\nEnd observation.`
       : format === 'double encoded' ? JSON.stringify(encoded) : format === 'unclosed prose' ? `Note [context: ${encoded}`
       : format === 'bracketed prose' ? `Note [context: ${encoded}]` : encoded;
     await repo.mutate(run.id, current => {
@@ -262,6 +265,23 @@ describe('share storage and redaction helpers', () => {
 });
 
 describe('debug redaction hardening', () => {
+  it.each([
+    'Observation: {"rawOutput":"PRIVATE_PROVIDER", "safe":',
+    'Observation: {"raw_output":"PRIVATE_PROVIDER with \\"quotes\\" and }", "safe":',
+    'Observation: {"providerText":"PRIVATE_PROVIDER without a closing quote',
+    'Observation: {"reasoning_content":{"text":"PRIVATE_PROVIDER","nested":[1,2]}, "safe":',
+    'Observation: {"\\u0072awOutput":"PRIVATE_PROVIDER", "safe":',
+    'Observation: rawResponse=PRIVATE_PROVIDER; safe=retained',
+    'Observation: rawText=PRIVATE_PROVIDER prose PRIVATE_PROVIDER_TAIL; safe=retained',
+    `Observation: ${JSON.stringify(JSON.stringify({ rawOutput: 'PRIVATE_PROVIDER', safe: 'retained' }))}`,
+    `Observation: ${JSON.stringify('{"provider_output":"PRIVATE_PROVIDER", "safe":')}`,
+  ])('scrubs raw-provider assignments and embedded JSON string literals from %s', text => {
+    const result = redactRunData({ text }, { omitRawProviderText: true });
+    expect(result.text).not.toContain('PRIVATE_PROVIDER');
+    expect(result.text).toContain('Observation:');
+    if (text.includes('safe')) expect(result.text).toContain('safe');
+    expect(redactRunData({ text }).text).toContain('PRIVATE_PROVIDER');
+  });
   it('strips nested encoded JSON and multiple prose JSON fragments with escaped delimiters', () => {
     const first = JSON.stringify({ safe: 'Quoted "} [" value', nested: JSON.stringify([{ raw_text: 'PRIVATE_ENCODED', safe: 'retained nested' }]) });
     const second = JSON.stringify([{ provider_output: { content: 'PRIVATE_OBJECT' }, safe: 'retained array' }]);
