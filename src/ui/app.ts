@@ -3,7 +3,10 @@ import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown 
 
 window.addEventListener('pagehide', releaseArtifactDownloads);
 
-interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string }
+interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string; threadId?: string; parentRunId?: string; threadSequence?: number }
+interface ThreadRun extends RunSummary { threadSequence: number; privacy?: string; outputExcerpt?: string }
+interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
+interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
 interface RoomSummary { id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
 interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string }
 interface SessionEventSummary {
@@ -105,15 +108,22 @@ interface RunExplanation {
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const shareToken = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43})\/?$/)?.[1];
 const linkedRunId = window.location.pathname.match(/^\/runs\/(run_[a-f0-9-]{36})\/?$/)?.[1];
+const linkedThreadId = window.location.pathname.match(/^\/threads\/(thread_[a-f0-9-]{36})\/?$/)?.[1];
 const readOnlyShare = Boolean(shareToken);
 document.body.classList.toggle('shared-run', readOnlyShare);
-let currentId = linkedRunId ?? (readOnlyShare ? '' : localStorage.getItem('aeeis.run') ?? '');
+let currentId = linkedRunId ?? (readOnlyShare || linkedThreadId ? '' : localStorage.getItem('aeeis.run') ?? '');
+document.body.classList.toggle('thread-page', Boolean(linkedThreadId));
+let threadPagesAfter = [0];
+let threadNextAfter: number | undefined;
+let threadRuns: ThreadRun[] = [];
+let pendingFollowup: { key: string; body: unknown; signature: string } | undefined;
+let followupSubmitting = false;
 let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 type InputPanelMode = 'answer' | 'reconcile' | 'reconcile-cancelled';
 let inputPanelMode: InputPanelMode = 'answer';
 let cancelArmedRunId = '';
-const minimalMode = !readOnlyShare && localStorage.getItem('aeeis.minimal-mode') !== '0';
+const minimalMode = !readOnlyShare && !linkedThreadId && localStorage.getItem('aeeis.minimal-mode') !== '0';
 document.body.classList.toggle('minimal-mode', minimalMode);
 let quickRunReady = false;
 let intentPresetsOpen = false;
@@ -652,12 +662,12 @@ window.addEventListener('keydown', event => {
     }
   }
 });
-async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'): Promise<T> {
+async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
   const response = await fetch(`/api${path}`, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const raw = await response.text();
@@ -927,23 +937,92 @@ function setSystemSignal(state: 'loading' | 'connected' | 'attention' | 'offline
   const label = signal.querySelector('span');
   if (label) label.textContent = labels[state];
 }
+function renderThreadTimeline(page: ThreadPage, throughSequence?: number): void {
+  $('thread-panel').hidden = false;
+  $('thread-title').textContent = page.title ?? '对话 Thread';
+  $('thread-meta').textContent = throughSequence === undefined ? page.id : `只读分享 · 截至运行 #${throughSequence}`;
+  const list = $('thread-timeline'); list.replaceChildren();
+  for (const run of page.runs) {
+    const item = element('li', '', 'fact-row');
+    item.append(element('strong', `#${run.threadSequence} · ${runStatusLabel(run.status)} · ${run.goal}`));
+    if (run.outputExcerpt) item.append(element('pre', run.outputExcerpt.slice(0, 1000)));
+    if (run.parentRunId) {
+      if (readOnlyShare) item.append(element('small', `父运行 #${page.runs.find(parent => parent.id === run.parentRunId)?.threadSequence ?? ''}`));
+      else { const link = element('a', '父运行'); link.href = `/runs/${run.parentRunId}`; item.append(link); }
+    }
+    if (!readOnlyShare) { const link = element('a', '打开运行'); link.href = `/runs/${run.id}`; item.append(link); }
+    item.append(button(run.status === 'needs_input' && !readOnlyShare ? '回答当前问题' : '查看运行', async () => {
+      currentId = run.id; await refresh();
+      if (run.status === 'needs_input' && !readOnlyShare) openInputPanel('answer');
+      else $('run-title').focus();
+    }));
+    list.append(item);
+  }
+  if (!page.runs.length) list.append(element('li', '还没有可显示的运行。', 'muted'));
+  $('thread-followup').hidden = readOnlyShare;
+  $('thread-share-controls').hidden = readOnlyShare;
+  $('thread-more').hidden = readOnlyShare || page.nextAfterSequence === undefined;
+  if (readOnlyShare) return;
+  // Preserve the parent's selection while an ambiguous POST can be retried,
+  // including a root POST whose run has appeared since its response was lost.
+  if (pendingFollowup) { $<HTMLButtonElement>('thread-submit').disabled = followupSubmitting; return; }
+  const select = $<HTMLSelectElement>('thread-parent'), previous = select.value;
+  const parents = page.runs.filter(run => ['succeeded', 'failed', 'cancelled'].includes(run.status));
+  select.replaceChildren(...parents.map(run => { const option = element('option', `#${run.threadSequence} · ${run.goal}`); option.value = run.id; return option; }));
+  if (parents.some(run => run.id === previous)) select.value = previous;
+  else if (parents.length) {
+    select.value = parents.at(-1)!.id;
+    $<HTMLSelectElement>('thread-privacy').value = parents.at(-1)!.privacy ?? 'internal';
+  }
+  select.disabled = !parents.length;
+  $<HTMLButtonElement>('thread-submit').disabled = Boolean(page.runs.length && !parents.length);
+  $('thread-followup-note').textContent = !page.runs.length ? '提交后创建第一个运行。' : parents.length ? '后续消息会创建新运行。' : '运行结束后可以继续；当前问题请使用「回答当前问题」。';
+}
+async function refreshThread(): Promise<void> {
+  try {
+    const pages = await Promise.all(threadPagesAfter.map(after => api<ThreadPage>(`/threads/${linkedThreadId}?limit=50&afterSequence=${after}`)));
+    threadRuns = pages.flatMap(page => page.runs);
+    threadNextAfter = pages.at(-1)!.nextAfterSequence;
+    renderThreadTimeline({ ...pages[0]!, runs: threadRuns, ...(threadNextAfter === undefined ? {} : { nextAfterSequence: threadNextAfter }) });
+    currentId ||= threadRuns.at(-1)?.id ?? '';
+    if (!currentId) { stopRunEventStream(); $('detail').hidden = true; return; }
+    const run = await api<RunView>(`/runs/${currentId}`);
+    if (['succeeded', 'failed', 'cancelled'].includes(run.status)) stopRunEventStream(); else ensureRunEventStream(run.id);
+    const [graphs, explanation] = await Promise.all([api<RunGraphsView>(`/runs/${run.id}/graphs`), api<RunExplanation>(`/runs/${run.id}/explanation`)]);
+    current = { ...run, graphs }; setCurrentRunOpen(true); render(current); renderExplanation(explanation);
+  } catch (error) {
+    stopRunEventStream(); current = undefined; $('detail').hidden = true; $('thread-panel').hidden = true;
+    throw error;
+  }
+}
 async function refresh(): Promise<void> {
   if (readOnlyShare) {
     try {
-      const run = await api<RunView & { explanation: RunExplanation }>(`/share/${shareToken}`);
-      currentId = run.id; current = run;
-      setCurrentRunOpen(true); setRunDetailsMode(true);
-      render(run); renderExplanation(run.explanation);
+      const view = await api<(RunView & { explanation: RunExplanation }) | ThreadShareView>(`/share/${shareToken}`);
+      if ('kind' in view && view.kind === 'thread') {
+        document.body.classList.add('thread-page');
+        renderThreadTimeline({ ...view.thread, runs: view.runs.map(run => ({ ...run, threadSequence: run.threadSequence!, outputExcerpt: run.artifacts.at(-1)?.content ?? '' })) }, view.throughSequence);
+        const run = view.runs.find(run => run.id === currentId) ?? view.runs.at(-1);
+        if (!run) { current = undefined; currentId = ''; $('detail').hidden = true; return; }
+        currentId = run.id; current = run;
+        setCurrentRunOpen(true); setRunDetailsMode(true); render(run); renderExplanation(run.explanation);
+      } else {
+        const run = view as RunView & { explanation: RunExplanation };
+        currentId = run.id; current = run;
+        setCurrentRunOpen(true); setRunDetailsMode(true);
+        render(run); renderExplanation(run.explanation);
+      }
       $('controls').replaceChildren();
       $('decision-review-actions').replaceChildren();
       $('decision-next-button').hidden = true;
       $('input-panel').hidden = true;
     } catch (error) {
-      current = undefined; $('detail').hidden = true;
+      current = undefined; $('detail').hidden = true; $('thread-panel').hidden = true;
       throw error;
     }
     return;
   }
+  if (linkedThreadId) { await refreshThread(); return; }
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
   const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
@@ -2029,7 +2108,10 @@ function render(run: RunView): void {
   document.body.classList.toggle('run-open', currentRunOpen);
   const shareResult = $('run-share-result');
   if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
-  if (!readOnlyShare && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
+  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
+  const threadLink = $<HTMLAnchorElement>('run-thread-link');
+  threadLink.hidden = readOnlyShare || !run.threadId;
+  if (run.threadId && !readOnlyShare) threadLink.href = `/threads/${run.threadId}`;
   $('run-title').textContent = run.goal;
   $('run-status').textContent = runStatusLabel(run.status);
   $('run-status').className = `status ${run.status}`;
@@ -2620,6 +2702,7 @@ $('connect').onclick = () => {
   void initialize().finally(() => { connect.disabled = false; connect.classList.remove('is-busy'); });
 };
 async function initialize(): Promise<void> {
+  if (linkedThreadId) { await refresh().catch(error => message(errorMessage(error))); return; }
   if (readOnlyShare) {
     $('instance-mode').textContent = '只读分享 · Read-only';
     await refresh().catch(error => message(errorMessage(error)));
@@ -2705,7 +2788,44 @@ async function initialize(): Promise<void> {
     message(errorMessage(e));
   }
 }
-if (linkedRunId || readOnlyShare) { setCurrentRunOpen(true); setRunDetailsMode(true); }
+if (linkedRunId || linkedThreadId || readOnlyShare) { setCurrentRunOpen(true); setRunDetailsMode(true); }
+($('thread-more') as HTMLButtonElement).addEventListener('click', event => {
+  if (threadNextAfter === undefined) return;
+  const control = event.currentTarget as HTMLButtonElement; control.disabled = true;
+  threadPagesAfter.push(threadNextAfter);
+  void refresh().catch(error => { threadPagesAfter.pop(); message(errorMessage(error)); }).finally(() => { control.disabled = false; });
+});
+$('thread-parent').addEventListener('change', () => {
+  $<HTMLSelectElement>('thread-privacy').value = threadRuns.find(run => run.id === $<HTMLSelectElement>('thread-parent').value)?.privacy ?? 'internal';
+});
+($('thread-followup') as HTMLFormElement).addEventListener('input', () => { if (!followupSubmitting) pendingFollowup = undefined; });
+($('thread-followup') as HTMLFormElement).addEventListener('submit', event => {
+  event.preventDefault();
+  if (!linkedThreadId || readOnlyShare || followupSubmitting) return;
+  const goal = $<HTMLTextAreaElement>('thread-message').value.trim();
+  if (!goal) return;
+  const parentRunId = $<HTMLSelectElement>('thread-parent').value;
+  const body = { request: { goal, privacy: $<HTMLSelectElement>('thread-privacy').value }, ...(parentRunId ? { parentRunId } : {}) };
+  const signature = JSON.stringify(body);
+  if (pendingFollowup?.signature !== signature) pendingFollowup = { key: crypto.randomUUID(), body, signature };
+  const attempt = pendingFollowup;
+  const submit = $<HTMLButtonElement>('thread-submit'); submit.disabled = true; followupSubmitting = true;
+  void api<RunView>(`/threads/${linkedThreadId}/runs`, attempt.body, 'POST', attempt.key).then(async run => {
+    pendingFollowup = undefined; currentId = run.id; $<HTMLTextAreaElement>('thread-message').value = ''; await refresh();
+  }).catch(error => message(errorMessage(error))).finally(() => { followupSubmitting = false; submit.disabled = !pendingFollowup && Boolean(threadRuns.length && !threadRuns.some(run => ['succeeded', 'failed', 'cancelled'].includes(run.status))); });
+});
+($('create-thread-share') as HTMLButtonElement).addEventListener('click', async event => {
+  if (!linkedThreadId || readOnlyShare) return;
+  const control = event.currentTarget as HTMLButtonElement; control.disabled = true;
+  try {
+    const share = await api<{ url: string; id: string; expiresAt: string; throughSequence: number }>(`/threads/${linkedThreadId}/share`, {});
+    const url = new URL(share.url, window.location.origin).href, link = element('a', url); link.href = url;
+    const revoke = button('撤销分享', async () => { await api(`/threads/${linkedThreadId}/share/${share.id}`, undefined, 'DELETE'); $('thread-share-result').replaceChildren(element('span', '分享已撤销')); });
+    $('thread-share-result').replaceChildren(link, element('small', `截至 #${share.throughSequence} · 到期：${new Date(share.expiresAt).toLocaleString()}`), revoke);
+    await copyRunLink(url).catch(() => undefined);
+  } catch (error) { message(errorMessage(error)); }
+  finally { control.disabled = false; }
+});
 ($('copy-run-link') as HTMLButtonElement | null)?.addEventListener('click', () => {
   const url = readOnlyShare ? window.location.href : new URL(`/runs/${currentId}`, window.location.origin).href;
   void copyRunLink(url).then(() => message('链接已复制')).catch(() => {

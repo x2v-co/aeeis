@@ -1,6 +1,7 @@
 import type { AgentRun } from '../runtime/contracts.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { InMemoryRunShareStore } from '../runtime/run-shares.js';
+import { InMemoryThreadShareStore } from '../runtime/thread-shares.js';
 import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, ThreadConflict, validateThreadSequence, type Thread } from '../runtime/threads.js';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { scopedRecent, validateCollectionLimit } from './collection-query.js';
@@ -10,6 +11,7 @@ import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, Fol
 /** Ephemeral adapter with the same serial write and ownership contract as file mode. */
 export class InMemoryRunRepository implements RunRepository {
   readonly shares = new InMemoryRunShareStore();
+  readonly threadShares = new InMemoryThreadShareStore();
   private runs = new Map<string, AgentRun>();
   private threads = new Map<string, Thread>();
   private followups = new Map<string, ThreadFollowup>();

@@ -812,3 +812,11 @@ body.shared-run #configuration, body.shared-run #config-action, body.shared-run 
 body.shared-run #run-queue, body.shared-run #create-run-share, body.shared-run #controls,
 body.shared-run #input-panel, body.shared-run #decision-review-actions, body.shared-run #decision-next-button { display: none !important; }
 body.shared-run .layout { display: block; }
+body.thread-page .orientation, body.thread-page .workbench-nav, body.thread-page #command-center,
+body.thread-page .control-rail, body.thread-page .system-status, body.thread-page #configuration,
+body.thread-page #attention-inbox, body.thread-page #run-queue, body.thread-page #empty { display: none !important; }
+body.thread-page .layout { display: block; }
+#thread-timeline pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#thread-timeline .fact-row { margin-bottom: 12px; }
+#thread-timeline .fact-row a, #thread-timeline .fact-row button { margin-right: 8px; }
+#thread-share-result { display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
