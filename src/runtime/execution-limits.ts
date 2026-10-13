@@ -7,8 +7,8 @@ export const executionLimitsSchema = z.object({
   maxNodeIterations: z.number().int().min(2).max(100).default(8),
   maxNodeSourcePages: z.number().int().min(1).max(1000).default(4),
   maxRunSourcePages: z.number().int().min(1).max(10000).default(12),
-  maxNodeSourceChars: z.number().int().min(1).max(1000000).default(24000),
-  maxRunSourceChars: z.number().int().min(1).max(10000000).default(72000),
+  maxNodeSourceChars: z.number().int().min(1).max(1000000).default(12000),
+  maxRunSourceChars: z.number().int().min(1).max(10000000).default(36000),
 });
 export type ExecutionLimits = z.infer<typeof executionLimitsSchema>;
 export function executionLimitsConfig(env: NodeJS.ProcessEnv): ExecutionLimits {

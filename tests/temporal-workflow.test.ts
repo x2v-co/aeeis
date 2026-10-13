@@ -308,7 +308,7 @@ describe('AEEIS Temporal workflow', () => {
       expect(timers?.some(event => Number(event.timerStartedEventAttributes!.startToFireTimeout!.seconds) === 30)).toBe(true);
       const activity = history.events?.find(event => event.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes;
       expect(Number(activity?.heartbeatTimeout?.seconds)).toBe(45);
-      expect(Number(activity?.startToCloseTimeout?.seconds)).toBe(25 * 60);
+      expect(Number(activity?.startToCloseTimeout?.seconds)).toBe(65 * 60);
     });
   }, 120_000);
 

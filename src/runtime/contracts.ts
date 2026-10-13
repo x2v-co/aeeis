@@ -206,7 +206,7 @@ export interface ExternalBudget { calls?: number; tokens?: number; moneyUsd?: nu
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
   /** Exact logical request reserved for this call, before transport callbacks/options. */
-  modelRequest?: { system: string; input: unknown; maxTokens?: number };
+  modelRequest?: { system: string; input: unknown; maxTokens?: number; thinking?: 'enabled' | 'disabled' | 'auto' | null; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null };
   rawOutput?: string;
   validationErrors?: Array<{ path: string; code: string; message: string }>;
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;

@@ -7,11 +7,11 @@ import { ThreadConflict } from './threads.js';
 import { capDebugField, redactRunData } from './run-debug.js';
 import { MAX_RENDERED_THREAD_HISTORY_CHARS, renderThreadHistoryInput } from './thread-context.js';
 
-export const DEFAULT_THREAD_HISTORY_BYTES = 32 * 1024;
+export const DEFAULT_THREAD_HISTORY_BYTES = 12 * 1024;
 export const MAX_THREAD_HISTORY_BYTES = 64 * 1024;
 const MAX_ANCESTORS = 20;
 const MAX_ARTIFACTS = 8;
-const MAX_EXCERPT_BYTES = 8 * 1024;
+const MAX_EXCERPT_BYTES = 2 * 1024;
 const exclusions = ['rawModelCalls', 'credentials', 'environments', 'toolPayloads', 'sourcePayloads', 'approvals', 'permissions', 'isolatedEvidence'];
 export interface ThreadHistoryExcerpt {
   kind: 'goal' | 'plan' | 'review' | 'answer' | 'artifact';
@@ -216,7 +216,10 @@ export async function buildThreadHistory(repository: RunRepository, threadId: st
       // prose, then apply the history's own truncation and envelope budget.
       const text = redactRunData({ text: candidate.text, sourceValue: current }, { capFields: false }).text;
       const capped = capDebugField(text);
-      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: prefix(capped, MAX_EXCERPT_BYTES), truncated: capped !== text };
+      const marker = '\n…[truncated]';
+      const excerptText = Buffer.byteLength(capped, 'utf8') > MAX_EXCERPT_BYTES
+        ? prefix(capped, MAX_EXCERPT_BYTES - Buffer.byteLength(marker, 'utf8')) + marker : capped;
+      const excerpt: ThreadHistoryExcerpt = { kind: candidate.kind, ref: candidate.ref, hash: candidate.hash ?? hash(text), text: excerptText, truncated: excerptText !== text };
       entry.excerpts.push(excerpt);
       if (!fitsSelection()) {
         excerpt.truncated = true;

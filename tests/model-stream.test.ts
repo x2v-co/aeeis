@@ -17,12 +17,89 @@ function response(text: string, byteChunks: boolean | number = false) {
 const adapter = (options = {}) => new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0, ...options });
 
 describe('OpenAI-compatible SSE transport', () => {
-  it.each([false, true])('allows one opt-in zero-byte idle replay with the identical key (enabled: %s)', async enabled => {
+  it.each([false, true])('retries a first-byte timeout by default before/after headers (headers: %s)', async headers => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockImplementationOnce((_url, options) => headers
+      ? Promise.resolve(new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }))
+      : new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })))
+      .mockResolvedValue(response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ firstByteTimeoutMs: 100, idleTimeoutMs: 20 }).complete({ system: 's', input: {}, idempotencyKey: 'same-key' })).resolves.toEqual({ value: {} });
+    await vi.advanceTimersByTimeAsync(105); await result;
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1]![1].body).toBe(fetch.mock.calls[0]![1].body);
+    expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['same-key', 'same-key']);
+  });
+
+  it('does not reset the first-byte deadline at headers or zero-length chunks', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(() => new Promise<Response>(resolve => setTimeout(() => resolve(new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array()); } }), { headers: { 'content-type': 'text/event-stream' } })), 80)));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ firstByteTimeoutMs: 100, idleTimeoutMs: 20, maxAttempts: 1 }).complete({ system: 's', input: {}, idempotencyKey: 'same' })).rejects.toThrow('100ms (first-byte timeout)');
+    await vi.advanceTimersByTimeAsync(101); await result;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts idle timing only at the first body byte and records timing without content', async () => {
+    vi.useFakeTimers();
+    const logs = vi.spyOn(console, 'info').mockImplementation(() => {});
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => setTimeout(() => resolve(new Response(new ReadableStream({ start(c) { body = c; } }), { headers: { 'content-type': 'text/event-stream' } })), 40))));
+    const result = adapter({ firstByteTimeoutMs: 100, idleTimeoutMs: 20 }).complete({ system: 'private-system', input: { secret: 'private-input' } });
+    await vi.advanceTimersByTimeAsync(80);
+    body.enqueue(new TextEncoder().encode(': keepalive\n\n'));
+    await vi.advanceTimersByTimeAsync(15);
+    body.enqueue(new TextEncoder().encode(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); body.close();
+    await expect(result).resolves.toEqual({ value: {} });
+    expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ protocol: 'aeeis-model-completion/1', headersMs: 40, firstByteMs: 80, elapsedMs: 95 });
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private-');
+  });
+
+  it('does not count zero-length chunks as activity after the first byte', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = vi.fn(async () => new Response(new ReadableStream({ start(c) { body = c; c.enqueue(new TextEncoder().encode(':')); } }), { headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ idleTimeoutMs: 100, firstByteTimeoutMs: 10 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toThrow('100ms (idle timeout)');
+    for (let i = 0; i < 3; i++) { await vi.advanceTimersByTimeAsync(30); body.enqueue(new Uint8Array()); }
+    await vi.advanceTimersByTimeAsync(11); await result; expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['enabled', 'disabled', 'auto'] as const)('sends thinking=%s only when configured', async thinking => {
+    const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    await adapter(modelTransportConfig({ AEEIS_MODEL_THINKING: thinking })).complete({ system: 's', input: {} });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body as string)).toMatchObject({ thinking: { type: thinking } });
+  });
+
+  it.each(['minimal', 'low', 'medium', 'high'] as const)('sends reasoning_effort=%s only when configured', async effort => {
+    const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    await adapter(modelTransportConfig({ AEEIS_MODEL_REASONING_EFFORT: effort })).complete({ system: 's', input: {} });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body as string)).toHaveProperty('reasoning_effort', effort);
+  });
+
+  it('omits unset wire controls and respects frozen explicit omissions', async () => {
+    const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    await adapter(modelTransportConfig({})).complete({ system: 's', input: {} });
+    await adapter({ thinking: 'enabled', reasoningEffort: 'high' }).complete({ system: 's', input: {}, thinking: null, reasoningEffort: null });
+    for (const [, options] of fetch.mock.calls) {
+      const body = JSON.parse(options.body as string);
+      expect(body).not.toHaveProperty('thinking'); expect(body).not.toHaveProperty('reasoning_effort');
+    }
+  });
+
+  it('uses the env output allowance and doubles it on a completed length retry', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(event(chunk('', 'length')) + 'data: [DONE]\n\n'))
+      .mockResolvedValueOnce(response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    await adapter(modelTransportConfig({ AEEIS_MODEL_MAX_TOKENS: '4096' })).complete({ system: 's', input: {}, idempotencyKey: 'stable' });
+    expect(fetch.mock.calls.map(([, options]) => JSON.parse(options.body).max_tokens)).toEqual([4096, 8192]);
+  });
+
+  it.each([false, true])('allows zero-byte first-byte replay with the identical key (enabled: %s)', async enabled => {
     vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn().mockImplementationOnce(async () => new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }))
       .mockResolvedValue(response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n'));
     vi.stubGlobal('fetch', fetch);
-    const completion = adapter({ retryEmptyIdle: enabled, idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'durable-call-key' });
+    const completion = adapter({ retryEmptyIdle: enabled, firstByteTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'durable-call-key' });
     const assertion = enabled ? expect(completion).resolves.toEqual({ value: {} }) : expect(completion).rejects.toBeInstanceOf(ModelOutcomeUnknown);
     await vi.advanceTimersByTimeAsync(105);
     await assertion;
@@ -34,15 +111,17 @@ describe('OpenAI-compatible SSE transport', () => {
     }
   });
 
-  it('does not replay a second empty idle timeout or one without an idempotency key', async () => {
+  it('exhausts the configured first-byte attempts and never retries without a key', async () => {
     vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn(async () => new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetch);
-    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100, maxAttempts: 10 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
-    await vi.advanceTimersByTimeAsync(205); await result;
-    expect(fetch).toHaveBeenCalledTimes(2);
+    const result = expect(adapter({ firstByteTimeoutMs: 100, maxAttempts: 10 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toThrow('first-byte timeout');
+    await vi.advanceTimersByTimeAsync(1010); await result;
+    expect(fetch).toHaveBeenCalledTimes(10);
+    expect(new Set(fetch.mock.calls.map(([, options]: any) => options.headers['idempotency-key']))).toEqual(new Set(['stable']));
+    expect(new Set(fetch.mock.calls.map(([, options]: any) => options.body)).size).toBe(1);
     fetch.mockClear();
-    const noKey = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100 }).complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    const noKey = expect(adapter({ firstByteTimeoutMs: 100 }).complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
     await vi.advanceTimersByTimeAsync(105); await noKey;
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -197,6 +276,6 @@ describe('OpenAI-compatible SSE transport', () => {
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 180000, streamOverallTimeoutMs: 600000, retryEmptyIdle: false });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, retryEmptyIdle: true, maxTokens: 16384 });
   });
 });

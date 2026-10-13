@@ -9,7 +9,7 @@ const retry = {
 const { advanceRun } = proxyActivities<{
   advanceRun(id: string): Promise<AdvanceRunActivityResult>;
 }>({
-  // Outlive the HTTP activity's 20 minute deadline, including model retries.
+  // Legacy command options retained for histories before the long-model patch.
   startToCloseTimeout: '25 minutes', scheduleToCloseTimeout: '2 hours', retry,
 });
 const { advanceReminder } = proxyActivities<{
@@ -17,6 +17,10 @@ const { advanceReminder } = proxyActivities<{
 }>({ startToCloseTimeout: '2 minutes', scheduleToCloseTimeout: '3 minutes', retry });
 const { advanceRun: advanceRunPolling } = proxyActivities<{ advanceRun(id: string): Promise<AdvanceRunActivityResult> }>({
   startToCloseTimeout: '25 minutes', scheduleToCloseTimeout: '2 hours', heartbeatTimeout: '45 seconds', retry,
+});
+const { advanceRun: advanceRunLong } = proxyActivities<{ advanceRun(id: string): Promise<AdvanceRunActivityResult> }>({
+  // One tick can include first-byte retries and a completed length retry.
+  startToCloseTimeout: '65 minutes', scheduleToCloseTimeout: '2 hours', heartbeatTimeout: '45 seconds', retry,
 });
 export async function agentRunWorkflow(runId: string, pollState?: { previousProgress?: string; stalled: number }): Promise<void> {
   let wake = false;
@@ -26,7 +30,9 @@ export async function agentRunWorkflow(runId: string, pollState?: { previousProg
   for (let ticks = 0; ticks < 100; ticks++) {
     wake = false;
     let result: AdvanceRunActivityResult;
-    try { result = await (patched('run-advance-async-heartbeat-v1') ? advanceRunPolling : advanceRun)(runId); }
+    try { result = await (patched('run-advance-async-heartbeat-v1')
+      ? patched('run-advance-long-model-v1') ? advanceRunLong : advanceRunPolling
+      : advanceRun)(runId); }
     catch (error) {
       // Permanent auth/config/protocol failures wait for an explicit wake after
       // operator correction. Transport failures get a durable timer retry.
