@@ -21,8 +21,11 @@ function compact(value: unknown, reference: string, evidenceRefs: string[] = [])
     instructions: 'Payload omitted from this prompt; the full result is retained in the Run. A reference or hash alone does not support claims about omitted details.' };
 }
 
-function sourceObservationMetadata(observation: Step['observations'][number]) {
+function observationMetadata(observation: Step['observations'][number]) {
   const result = observation.result as Record<string, unknown> | null;
+  if (result && typeof result === 'object' && result.error && typeof result.error === 'object' && (result.error as Record<string, unknown>).recoverable === true) {
+    return { error: result.error, receiptId: result.receiptId };
+  }
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated };
@@ -48,7 +51,7 @@ export function boundedObservations(observations: Step['observations'], refs: (v
     let projected = observation;
     if (size(observation.result) > (index === observations.length - 1 ? LATEST_OBSERVATION_RESULT_CHARS : 1000) || size(observation) + 1 > remaining) {
       const projection = { ...compact(observation.result, `observations/${index}`, refs(observation.result)),
-        ...sourceObservationMetadata(observation),
+        ...observationMetadata(observation),
         ...(index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
       // The preview is itself JSON-escaped when the observation enters the prompt.
       while (projection.preview?.length && (size(projection) > LATEST_OBSERVATION_RESULT_CHARS || size({ ...observation, result: projection }) + 1 > remaining)) {
@@ -79,11 +82,11 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
       if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
       const item = items[index] as Record<string, unknown>;
       const reference = typeof item.id === 'string' ? item.id : `${key}/${index}`;
-      if (key === 'observations' && isSourceReadTool(item.tool)) {
+      if (key === 'observations' && (isSourceReadTool(item.tool) || 'error' in observationMetadata(item as Step['observations'][number]))) {
         // Preserve the newest bounded page through the overall executor projection too.
         if (index === items.length - 1 && size(item.result) <= LATEST_OBSERVATION_RESULT_CHARS) continue;
         projected[index] = { ...item, result: { ...compact(item.result, reference),
-          ...sourceObservationMetadata(item as Step['observations'][number]) } };
+          ...observationMetadata(item as Step['observations'][number]) } };
         continue;
       }
       projected[index] = { ...compact(item, reference), ...(typeof item.id === 'string' ? { id: item.id } : {}),

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { ToolkitRegistryGateway } from '../src/integrations.js';
+import { isRecoverableToolFailure, toolFailureDetails } from '../src/tool-failures.js';
 
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
@@ -52,6 +53,47 @@ function startFixture(escapeEndpoint = false, signed = false): Promise<{ url: st
 }
 
 describe('ToolkitRegistryGateway', () => {
+  it.each([
+    { status: 200, error: '网页抓取失败（HTTP 403）', errorCode: 'http_403', httpStatus: 403, recoverable: true },
+    { status: 403, error: '网页抓取失败（HTTP 403）', errorCode: 'http_403', httpStatus: 403, recoverable: true },
+    { status: 502, error: 'Target site returned HTTP 503', errorCode: 'http_503', httpStatus: 503, recoverable: true },
+    { status: 200, error: { message: 'Missing page', statusCode: 404 }, errorCode: 'http_404', httpStatus: 404, recoverable: true },
+    { status: 400, error: 'Invalid URL', errorCode: 'http_400', httpStatus: 400, recoverable: true },
+    { status: 401, error: 'Unauthorized HTTP 401', errorCode: 'toolkit_http_401', httpStatus: 401, recoverable: false },
+    { status: 403, error: 'Forbidden', errorCode: 'toolkit_http_403', httpStatus: 403, recoverable: false },
+    { status: 503, error: 'Gateway returned HTTP 503', errorCode: 'toolkit_http_503', httpStatus: 503, recoverable: false },
+    { status: 200, error: 'HTTP 407: proxy authentication required', errorCode: 'http_407', httpStatus: 407, recoverable: false },
+  ])('preserves error details and distinguishes target failures from toolkit failures: $status $error', async example => {
+    const server = createServer((_request, response) => {
+      response.statusCode = example.status;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ error: example.error, receipt: { id: 'failed-receipt' } }));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch` }] });
+    const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'idem-error', timeoutMs: 5000 });
+    expect(result.status).toBe('failed');
+    expect(result.receipt.errorCode).toBe(example.errorCode);
+    expect(result.output).toMatchObject({ error: typeof example.error === 'string' ? example.error : example.error.message, httpStatus: example.httpStatus });
+    expect(isRecoverableToolFailure(toolFailureDetails(result.output, result.receipt.errorCode))).toBe(example.recoverable);
+  });
+
+  it('keeps non-2xx responses without a provider receipt unknown', async () => {
+    const server = createServer((_request, response) => {
+      response.statusCode = 403;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ error: 'Forbidden' }));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch` }] });
+    const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'idem-unknown', timeoutMs: 5000 });
+    expect(result).toMatchObject({ status: 'unknown', receipt: { status: 'unknown', errorCode: 'transport_or_protocol' } });
+  });
+
   it('reuses only manifests bound to the fresh signed index and still rejects changed or revoked evidence', async () => {
     const root = generateKeyPairSync('ed25519');
     const signer = generateKeyPairSync('ed25519');
