@@ -10,6 +10,7 @@ import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { materialContentHash } from '../src/runtime/materials.js';
 import { EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
+import type { ExecutionLimits } from '../src/runtime/execution-limits.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -17,7 +18,7 @@ const plan = { summary: 'Pulse', nodes: [{ id: 'pulse', title: 'Project Pulse', 
 const pulse = (ref: string): ProjectPulseArtifact => ({ schemaVersion: 'project-pulse/1', progress: [{ text: 'Migration is blocked.', evidenceRefs: [ref] }], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [] });
 const finish = (ref: string) => ({ type: 'finish', title: 'Project Pulse', content: 'Migration is blocked.', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse(ref) });
 
-async function setup(output: (ref: string, input: Record<string, unknown>) => unknown, options: { maxModelCalls?: number } = {}, uploads?: Array<{ title: string; source: string; content: string }>) {
+async function setup(output: (ref: string, input: Record<string, unknown>) => unknown, options: { maxModelCalls?: number } = {}, uploads?: Array<{ title: string; source: string; content: string }>, executionLimits?: Partial<ExecutionLimits>) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-pulse-execution-'));
   const repository = new FileRunRepository(directory); await repository.init();
   cleanup.push(async () => { await repository.close(); await rm(directory, { recursive: true, force: true }); });
@@ -31,7 +32,7 @@ async function setup(output: (ref: string, input: Record<string, unknown>) => un
     return { value: output(ref, input), usage: { inputTokens: 10, outputTokens: 5 } };
   });
   const model: ModelAdapter = { pin: { model: 'ark-shape-fixture', endpoint: 'http://127.0.0.1:1', promptVersion: 'test' }, complete };
-  const engine = new AgentEngine(repository, model);
+  const engine = new AgentEngine(repository, { model, executionLimits });
   const app = buildApp({ repository, engine, dispatcher: { notify: async () => {}, close: async () => {} } }); cleanup.push(async () => { await app.close(); });
   // This is the payload produced by the workbench's runOptions(), including
   // each supported upload format. All are source text, never model instructions.
@@ -154,7 +155,7 @@ describe('Project Pulse finish output', () => {
       expect(result.sourceContentHash).toBe(materialContentHash(content));
       received.push(...pageContent.split('\n').slice(1));
       return result.page.nextRead ? { type: 'tool', tool: 'sources.read', ...result.page.nextRead } : finish(ref);
-    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content }]);
+    }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content }], { maxNodeSourcePages: 8, maxNodeSourceChars: 48000 });
     const completed = await completeRun(engine, repository, run.id);
     expect(completed.status, completed.error).toBe('succeeded');
     expect(received).toEqual(rows);

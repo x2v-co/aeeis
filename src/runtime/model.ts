@@ -332,8 +332,8 @@ export class HttpModelAdapter implements ModelAdapter {
         // Any byte (including reasoning/keepalive) makes replay unsafe.
         const emptyIdleRetry = idleTimeout && responseBytes === 0 && Boolean(request.idempotencyKey)
           && this.transport.retryEmptyIdle && !retryState.emptyIdleRetried;
-        const willRetry = retryable && responseBytes === 0 && attempt < this.transport.maxAttempts
-          && (idleTimeout ? emptyIdleRetry : !streamReceived);
+        const willRetry = retryable && (httpError !== undefined || responseBytes === 0) && attempt < this.transport.maxAttempts
+          && (streaming && signal.aborted ? idleTimeout && emptyIdleRetry : !streamReceived);
         if (willRetry && idleTimeout) retryState.emptyIdleRetried = true;
         const delayMs = willRetry ? Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (attempt - 1)) * (0.5 + Math.random() * 0.5)) : 0;
         const redact = (text: string): string => {

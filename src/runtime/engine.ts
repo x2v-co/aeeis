@@ -1128,10 +1128,21 @@ export class AgentEngine {
       delete current.resumeModelCallId;
       const step = current.steps.find(step => step.taskId === taskId);
       if (step) { delete step.error; delete step.failureReason; }
+      const executionBudget = (request.input as { executionBudget?: { finalOnly?: boolean; reason?: string } } | null)?.executionBudget;
+      if (step && phase === 'executor' && executionBudget?.finalOnly) {
+        step.limitReason = executionBudget.reason ?? 'Execution allowance exhausted';
+        step.finalCallId = callId;
+        if (!existingCallId) event(current, 'execution.limited', { taskId, reason: step.limitReason, callId });
+      }
       if (phase === 'planner') current.status = 'planning';
       event(current, 'model.started', { callId, phase, taskId: taskId ?? null }); reserved = true;
     });
-    if (!reserved) return;
+    if (!reserved) {
+      // A competing tick won the durable fence after budget admission. No
+      // provider request occurred for this key, so do not leave it unknown.
+      if (globalSelection && globalReservation?.reserved && this.globalBudget) await this.globalBudget.ledger.settle(globalSelection.accountKey, this.modelGlobalKey(run.id, callId), { tokens: 0, moneyUsd: 0 });
+      return;
+    }
     let result: ModelResponse | undefined;
     try {
       const reconciled = existingCallId && run.reconciledModelCall?.callId === existingCallId ? run.reconciledModelCall : undefined;
@@ -1323,10 +1334,6 @@ export class AgentEngine {
         ...(expectedArtifactType ? { expectedArtifactType } : {}), ...(step.finishRepair ? { finishRepair: step.finishRepair } : {}) });
     await this.call(run, model, 'executor', { system: executorSystem, input: executorInput }, (current, value) => {
       const live = current.steps.find(s => s.taskId === node.id)!;
-      if (limitReason) {
-        live.limitReason = limitReason; live.finalCallId = current.calls.at(-1)!.id;
-        event(current, 'execution.limited', { taskId: node.id, reason: limitReason, callId: live.finalCallId });
-      }
       const decision = parseExecutorDecision(value);
       if (limitReason && decision.type !== 'finish') throw new Error('Final limited-evidence call must return a finish decision; tools are disallowed');
       if (live.finishRepair && decision.type !== 'finish') throw new Error('Model artifact repair must return a finish decision; retry or replan the Run with a model that follows the output contract');

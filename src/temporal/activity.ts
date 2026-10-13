@@ -12,8 +12,8 @@ const reminderResponseSchema = z.object({ protocol: z.literal('aeeis-reminder-ad
  * The activity is the only Temporal boundary that talks to the AEEIS API.
  * Transport and overload errors remain retryable; configuration, auth and
  * protocol errors are durable non-retryable failures. AEEIS run state is the
- * business source of truth, so the workflow may still wait for a wake signal
- * after an activity failure.
+ * business source of truth. Transient failures retain a workflow timer; only
+ * permanent configuration errors and business waits require an explicit wake.
  */
 export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (id: string) => Promise<AdvanceRunActivityResult> {
   // No HTTP exchange waits on the model. Undici/proxy 300s limits therefore
@@ -29,42 +29,42 @@ export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (i
     const url = `${options.api}/internal/runs/${encodeURIComponent(id)}/advance`;
     let method: 'POST' | 'GET' = 'POST';
     for (;;) {
-    signal.throwIfAborted();
-    heartbeat({ runId: id, polling: method === 'GET' });
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method, headers: { authorization: `Bearer ${options.token}`, 'content-type': 'application/json', 'x-aeeis-advance-progress': '1', 'x-aeeis-advance-async': '1' },
-        ...(method === 'POST' ? { body: '{}' } : {}), signal: AbortSignal.any([signal, AbortSignal.timeout(options.requestTimeoutMs ?? 15_000)]), redirect: 'error',
+      signal.throwIfAborted();
+      heartbeat({ runId: id, polling: method === 'GET' });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method, headers: { authorization: `Bearer ${options.token}`, 'content-type': 'application/json', 'x-aeeis-advance-progress': '1', 'x-aeeis-advance-async': '1' },
+          ...(method === 'POST' ? { body: '{}' } : {}), signal: AbortSignal.any([signal, AbortSignal.timeout(options.requestTimeoutMs ?? 15_000)]), redirect: 'error',
+        });
+      } catch (error) {
+        throw new Error(`AEEIS activity transport failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        if ([408, 425, 429].includes(response.status) || response.status >= 500) throw new Error(`AEEIS activity returned retryable HTTP ${response.status}`);
+        throw ApplicationFailure.nonRetryable(`AEEIS activity returned non-retryable HTTP ${response.status}`, 'AeeisPermanentError');
+      }
+      let body: AdvanceRunActivityResult;
+      try {
+        const parsed = responseSchema.parse(await response.json());
+        body = parsed.progress === undefined ? { status: parsed.status } : { status: parsed.status, progress: parsed.progress };
+      }
+      catch (error) {
+        // A disconnected/timed-out body is transport failure, not a permanent
+        // schema failure; Temporal must retry it too.
+        if (!(error instanceof z.ZodError)) throw new Error('AEEIS activity response transport failed');
+        throw ApplicationFailure.nonRetryable('AEEIS activity returned an invalid status envelope', 'AeeisProtocolError');
+      }
+      heartbeat({ runId: id, ...body });
+      if (response.status !== 202) return body; // status-only older API rollout
+      method = 'GET';
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, options.pollIntervalMs ?? 1_000);
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
       });
-    } catch (error) {
-      throw new Error(`AEEIS activity transport failed: ${error instanceof Error ? error.message : 'unknown error'}`);
-    }
-    if (!response.ok) {
-      await response.body?.cancel();
-      if ([408, 425, 429].includes(response.status) || response.status >= 500) throw new Error(`AEEIS activity returned retryable HTTP ${response.status}`);
-      throw ApplicationFailure.nonRetryable(`AEEIS activity returned non-retryable HTTP ${response.status}`, 'AeeisPermanentError');
-    }
-    let body: AdvanceRunActivityResult;
-    try {
-      const parsed = responseSchema.parse(await response.json());
-      body = parsed.progress === undefined ? { status: parsed.status } : { status: parsed.status, progress: parsed.progress };
-    }
-    catch (error) {
-      // A disconnected/timed-out body is transport failure, not a permanent
-      // schema failure; Temporal must retry it too.
-      if (!(error instanceof z.ZodError || error instanceof SyntaxError)) throw new Error('AEEIS activity response transport failed');
-      throw ApplicationFailure.nonRetryable('AEEIS activity returned an invalid status envelope', 'AeeisProtocolError');
-    }
-    heartbeat({ runId: id, ...body });
-    if (response.status !== 202) return body; // status-only older API rollout
-    method = 'GET';
-    await new Promise<void>((resolve, reject) => {
-      const abort = () => { clearTimeout(timer); reject(signal.reason); };
-      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, options.pollIntervalMs ?? 1_000);
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
-    });
     }
   };
 }

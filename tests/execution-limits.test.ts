@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine, digest } from '../src/runtime/engine.js';
 import { executionLimitsConfig, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from '../src/runtime/execution-limits.js';
-import type { ModelRequest } from '../src/runtime/model.js';
+import { ModelOutcomeUnknown, type ModelRequest } from '../src/runtime/model.js';
 
 const csv = ['id,status', ...Array.from({ length: 800 }, (_, i) => `${i},blocked`)].join('\n');
 async function setup(limits: Partial<ExecutionLimits> = {}, decide?: (input: any) => unknown, nodes = 1, pulse = false) {
@@ -102,6 +102,49 @@ describe('durable execution allowances', () => {
     expect(finished.status).toBe('succeeded');
     expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(2);
     expect(finished.artifacts[0]!.partial).toBe(true);
+  });
+
+  it('reconciles an unknown final call using its original input without another provider request', async () => {
+    const fixture = await setup({ maxNodeIterations: 2 });
+    await fixture.engine.advance(fixture.run.id); // first read
+    fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('idle timeout'));
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
+    const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
+    expect(unknown.steps[0]!.finalCallId).toBe(call.id);
+    expect(await fixture.engine.advance(unknown.id)).toBe('unknown');
+    expect(fixture.complete).toHaveBeenCalledTimes(3);
+    await fixture.engine.reconcileModelCall(unknown.id, { callId: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed the exact original request', output: { type: 'finish', title: 'Partial', content: 'Observed source summary.', evidenceRefs: [unknown.context.sources[0]!.id] } });
+    expect(await fixture.engine.advance(unknown.id)).toBe('running');
+    const resumed = await fixture.repository.get(unknown.id);
+    expect(resumed.calls.at(-1)).toMatchObject({ id: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, state: 'completed' });
+    expect(resumed.artifacts[0]!.partial).toBe(true);
+    expect(fixture.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it('withholds the next page once cumulative characters exceed the remaining allowance', async () => {
+    const fixture = await setup();
+    await fixture.engine.advance(fixture.run.id);
+    const first = await fixture.repository.get(fixture.run.id), used = sourceReadUsage(first.steps);
+    await fixture.repository.mutate(first.id, current => { current.executionLimits!.maxRunSourceChars = used.chars + 100; });
+    const finished = await fixture.drain();
+    expect(finished.status).toBe('succeeded');
+    expect(sourceReadUsage(finished.steps)).toEqual(used);
+    expect(finished.sourceReadUsage).toEqual(used);
+    expect(finished.steps[0]!.observations.at(-1)!.tool).toBe('sources.read.limit');
+    expect(finished.artifacts[0]!.partial).toBe(true);
+  });
+
+  it('reserves a final call durably before a rejected provider response and never repeats it on retry', async () => {
+    const fixture = await setup({ maxNodeSourcePages: 1 });
+    await fixture.engine.advance(fixture.run.id);
+    fixture.complete.mockRejectedValueOnce(new Error('Provider rejected the finish'));
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('failed');
+    const failed = await fixture.repository.get(fixture.run.id);
+    expect(failed.steps[0]!.finalCallId).toBe(failed.calls.at(-1)!.id);
+    await fixture.engine.command(failed.id, 'retry');
+    expect(await fixture.engine.advance(failed.id)).toBe('failed');
+    expect((await fixture.repository.get(failed.id)).error).toContain('final finish call exhausted');
+    expect(fixture.complete).toHaveBeenCalledTimes(3);
   });
 
   it('validates configuration and defaults', () => {

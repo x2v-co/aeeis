@@ -252,7 +252,7 @@ describe('AEEIS Temporal workflow', () => {
     }
   }, 120_000);
 
-  it('uses bounded durable backoff for unchanged active results, parks, and resets on wake', async () => {
+  it('uses bounded durable backoff for unchanged active results and keeps a timer until completion', async () => {
     let calls = 0;
     let finish = false;
     const queue = `${taskQueue}-stalled`;
@@ -276,17 +276,39 @@ describe('AEEIS Temporal workflow', () => {
           const timeout = event.timerStartedEventAttributes?.startToFireTimeout;
           return timeout ? [Number(timeout.seconds)] : [];
         });
-        expect(timers).toEqual([1, 2, 4, 8, 16, 30, 30]);
-        await environment.sleep(300_000);
-        expect(calls).toBe(9);
+        expect(timers).toEqual([1, 2, 4, 8, 16, 30, 30, 60]);
         expect((await handle.describe()).status.name).toBe('RUNNING');
         finish = true;
-        await handle.signal('wake');
+        await environment.sleep(60_000);
         await expect(handle.result()).resolves.toBeUndefined();
         expect(calls).toBe(10);
       } finally {
         if ((await handle.describe()).status.name === 'RUNNING') await handle.terminate('test cleanup');
       }
+    });
+  }, 120_000);
+
+  it('schedules a wake timer after exhausting activity transport retries without an external signal', async () => {
+    let calls = 0;
+    const queue = `${taskQueue}-retry-exhausted`;
+    const localWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
+      activities: { advanceRun: async () => {
+        calls++;
+        if (calls <= 5) throw new Error('AEEIS activity transport failed: fetch failed');
+        return { status: 'succeeded' };
+      } },
+    });
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: 'temporal-retry-exhausted', taskQueue: queue, args: ['run-retry-exhausted'] });
+      await expect(handle.result()).resolves.toBeUndefined();
+      expect(calls).toBe(6);
+      const history = await handle.fetchHistory();
+      const timers = history.events?.filter(event => event.timerStartedEventAttributes);
+      expect(timers?.some(event => Number(event.timerStartedEventAttributes!.startToFireTimeout!.seconds) === 30)).toBe(true);
+      const activity = history.events?.find(event => event.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes;
+      expect(Number(activity?.heartbeatTimeout?.seconds)).toBe(45);
+      expect(Number(activity?.startToCloseTimeout?.seconds)).toBe(25 * 60);
     });
   }, 120_000);
 

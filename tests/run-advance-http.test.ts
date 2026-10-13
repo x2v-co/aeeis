@@ -9,6 +9,34 @@ import { FileRunRepository } from '../src/runtime/repository.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { decideRunAdvance, maxStalledAdvances } from '../src/temporal/run-advance.js';
 import type { AdvanceRunActivityResult } from '../src/temporal/activity.js';
+import { InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
+
+it('does not duplicate a stale tick when another API finishes while its budget reservation is delayed', async () => {
+  const repository = new InMemoryRunRepository(), ledger = new InMemoryGlobalBudgetLedger();
+  const select = () => ({ accountKey: 'shared', owner: 'owner', tenantId: 'local', windowKey: 'unbounded', budget: { calls: 10, tokens: 1000 } });
+  let release!: () => void, started!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const began = new Promise<void>(resolve => { started = resolve; });
+  const reserve = ledger.reserve.bind(ledger);
+  vi.spyOn(ledger, 'reserve').mockImplementationOnce(async (selection, key) => { started(); await pending; return reserve(selection, key); });
+  const complete = vi.fn(async () => ({ value: { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Report', dependsOn: [] }] }, usage: { inputTokens: 10, outputTokens: 5 } }));
+  const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
+  const services = { model, globalBudget: { ledger, select } };
+  const first = new AgentEngine(repository, services), second = new AgentEngine(repository, services);
+  const run = await first.create({ goal: 'Report' });
+  const advancing = first.advance(run.id);
+  try {
+    await began;
+    expect(await second.advance(run.id)).toBe('needs_approval');
+    release();
+    expect(await advancing).toBe('needs_approval');
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect((await repository.get(run.id)).calls).toHaveLength(1);
+    const account = (await ledger.get('shared'))!;
+    expect(Object.values(account.entries).every(entry => entry.state === 'settled')).toBe(true);
+    expect(account.usedTokens).toBe(15);
+  } finally { release(); await advancing; }
+});
 
 it('returns 202 during a blocked tick, polls after completion, and never duplicates across activity retries or API instances', async () => {
   const repository = new InMemoryRunRepository();
