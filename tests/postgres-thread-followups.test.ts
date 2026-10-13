@@ -22,13 +22,17 @@ describe.skipIf(!databaseUrl)('cross-process follow-up reservations', () => {
     try {
       await Promise.all([first.init(), second.init()]);
       const thread = threadRecord(), parent = threadRun(); await first.create(parent); await first.createThread(thread, parent.id);
+      const lockKey = `thread-followup/${thread.id}/${followupHash('parallel-api')}`;
       const search = vi.fn(async () => {
-        const locks = await pool.query(`SELECT a.state,a.xact_start FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
-          WHERE l.locktype='advisory' AND l.granted AND a.datname=current_database()`);
-        expect(locks.rows.length).toBeGreaterThan(0);
-        // A holder may briefly run another statement (state 'active'); the invariant is that no
-        // transaction stays open across the connector call.
-        for (const row of locks.rows) expect(row.state).not.toMatch(/^idle in transaction/);
+        // Test schemas share one database, so other concurrently running test files can hold their
+        // own (transaction-scoped) advisory locks. Sample only this follow-up's session lock holder.
+        const locks = await pool.query(`SELECT a.pid,a.state,a.xact_start FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
+          WHERE l.locktype='advisory' AND l.granted AND l.objsubid=1 AND a.datname=current_database()
+            AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended($1,0)`, [lockKey]);
+        // Exactly one connection holds the lock while the connector call runs, and it has no open
+        // transaction: it is idle and has no transaction start time.
+        expect(locks.rows).toHaveLength(1);
+        expect(locks.rows[0].state).toBe('idle'); expect(locks.rows[0].xact_start).toBeNull();
         return [];
       });
       const services = [first, second].map(repository => new ThreadService(repository, new AgentEngine(repository, { model: followupModel(), knowledge: { search } })));
