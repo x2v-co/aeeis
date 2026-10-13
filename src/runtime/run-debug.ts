@@ -10,6 +10,9 @@ const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|acces
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+// Public views must not expose provider completions or schema-repair payloads,
+// even when nested in observations, validation diagnostics or JSON strings.
+const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
 // Also recognize assignments inside prose and incomplete JSON. Quoted values
 // honor escapes so a credential copied into another field can be scrubbed.
 const credentialAssignment = /(?<![\w.-])((["']?[\w.-]{1,160}(?:[ _-](?:key|id|secret))?["']?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;{}\[\]"'\n]+)/gi;
@@ -40,7 +43,7 @@ export function capDebugField(value: string): string {
 /** Remove credential fields and scrub recognizable credentials even inside free text.
  * Values found under credential/environment keys are also scrubbed wherever copied.
  * Callers with their own byte budget can defer field capping. */
-export function redactRunData<T>(value: T, options: { capFields?: boolean; credentialSource?: unknown } = {}): T {
+export function redactRunData<T>(value: T, options: { capFields?: boolean; credentialSource?: unknown; omitRawProviderText?: boolean } = {}): T {
   const capField = (text: string): string => options.capFields === false ? text : capDebugField(text);
   const secrets = new Set<string>();
   let collected = 0, visited = 0;
@@ -101,7 +104,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
       return scrub(item);
     }
     if (Array.isArray(item)) return capArray(item).map(child => visit(child, depth + 1));
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key)).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !isSensitive(key) && !(options.omitRawProviderText && rawProviderKey.test(key.replace(/[ _-]/g, '')))).map(([key, child]) => [scrub(key), visit(child, depth + 1)]));
     return item;
   };
   return visit(value) as T;
@@ -112,6 +115,9 @@ export function modelRawOutput(value: unknown, credentialSource?: unknown): stri
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 export function sharedRunView(run: AgentRun) {
+  return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true });
+}
+export function debugRunView(run: AgentRun) {
   return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
 }
 export function debugBundle(run: AgentRun) {

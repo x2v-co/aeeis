@@ -25,4 +25,32 @@ describe('Temporal AEEIS activity contract', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('busy', { status: 503 })));
     await expect(createAdvanceRunActivity({ api: 'http://127.0.0.1:4323', token: 'test' })('run-3')).rejects.toThrow('retryable HTTP 503');
   });
+
+  it('starts once, polls with short requests and heartbeats while a model tick remains active', async () => {
+    const heartbeat = vi.fn();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'running', progress: 'started' }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'running', progress: 'started' }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'reviewing', progress: 'completed' })));
+    vi.stubGlobal('fetch', fetch);
+    await expect(createAdvanceRunActivity({ api: 'http://localhost', token: 'test', pollIntervalMs: 1, heartbeat })('run')).resolves.toEqual({ status: 'reviewing', progress: 'completed' });
+    expect(fetch.mock.calls.map(call => call[1].method)).toEqual(['POST', 'GET', 'GET']);
+    expect(fetch.mock.calls[0]![1].headers['x-aeeis-advance-async']).toBe('1');
+    expect(fetch.mock.calls[1]![1].body).toBeUndefined();
+    expect(heartbeat).toHaveBeenCalledTimes(6);
+  });
+
+  it('keeps response body disconnects retryable', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => { throw new TypeError('terminated'); } })));
+    await expect(createAdvanceRunActivity({ api: 'http://localhost', token: 'test' })('run')).rejects.toThrow('response transport failed');
+  });
+
+  it('bounds each HTTP request independently of the long polling activity', async () => {
+    const fetch = vi.fn((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetch);
+    await expect(createAdvanceRunActivity({ api: 'http://localhost', token: 'test', requestTimeoutMs: 10, timeoutMs: 1000 })('run')).rejects.toThrow('activity transport failed');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });

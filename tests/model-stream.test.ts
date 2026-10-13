@@ -17,6 +17,53 @@ function response(text: string, byteChunks: boolean | number = false) {
 const adapter = (options = {}) => new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0, ...options });
 
 describe('OpenAI-compatible SSE transport', () => {
+  it.each([false, true])('allows one opt-in zero-byte idle replay with the identical key (enabled: %s)', async enabled => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockImplementationOnce(async () => new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }))
+      .mockResolvedValue(response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const completion = adapter({ retryEmptyIdle: enabled, idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'durable-call-key' });
+    const assertion = enabled ? expect(completion).resolves.toEqual({ value: {} }) : expect(completion).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105);
+    await assertion;
+    expect(fetch).toHaveBeenCalledTimes(enabled ? 2 : 1);
+    if (enabled) {
+      expect(fetch.mock.calls[0]![1].headers['idempotency-key']).toBe('durable-call-key');
+      expect(fetch.mock.calls[1]![1].body).toBe(fetch.mock.calls[0]![1].body);
+      expect(fetch.mock.calls[1]![1].headers['idempotency-key']).toBe('durable-call-key');
+    }
+  });
+
+  it('does not replay a second empty idle timeout or one without an idempotency key', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100, maxAttempts: 10 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(205); await result;
+    expect(fetch).toHaveBeenCalledTimes(2);
+    fetch.mockClear();
+    const noKey = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100 }).complete({ system: 's', input: {} })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105); await noKey;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([': keepalive\n\n', event({ choices: [{ index: 0, delta: { reasoning_content: 'thinking' }, finish_reason: null }] }), 'd'])('never replays idle timeout after any response bytes: %s', async bytes => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(bytes)); } }), { headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105); await result;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry an empty overall timeout', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => new Response(new ReadableStream({ start() {} }), { headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 1000, streamOverallTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105); await result;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it.each(['https://ark.cn-beijing.volces.com/api/v3', 'https://ark.ap-southeast.bytepluses.com/api/v3'])('auto-enables streaming for the ARK endpoint %s', async endpoint => {
     const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
     await new HttpModelAdapter(endpoint, 'ark-model', '').complete({ system: 's', input: {} });
@@ -150,6 +197,6 @@ describe('OpenAI-compatible SSE transport', () => {
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 200000, streamOverallTimeoutMs: 600000 });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 60000, streamOverallTimeoutMs: 600000, retryEmptyIdle: false });
   });
 });

@@ -1,7 +1,7 @@
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
-import { debugBundle, sharedRunView } from './run-debug.js';
+import { debugBundle, redactRunData, sharedRunView } from './run-debug.js';
 import { artifactFilename } from './artifact-download.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
@@ -143,7 +143,7 @@ export function buildApp(options: Options) {
       : publicHosts.has(normalized) || publicHosts.has(withoutPort);
   };
   const httpMetrics: HttpMetrics = { inFlight: 0, routes: new Map() };
-  const app = Fastify({ bodyLimit: 700000, logger: false });
+  const app = Fastify({ bodyLimit: 700000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
   const maxSseConnections = options.maxSseConnections ?? 100;
   if (!Number.isSafeInteger(maxSseConnections) || maxSseConnections < 1) throw new Error('maxSseConnections must be a positive integer');
   let activeSseConnections = 0;
@@ -1483,7 +1483,7 @@ export function buildApp(options: Options) {
   app.get<{ Params: { token: string } }>('/api/share/:token/debug-bundle', async (request, reply) => {
     reply.header('referrer-policy', 'no-referrer');
     const resolved = await resolveShare(request.params.token);
-    if (resolved.kind === 'run') return debugBundle(await options.repository.get(resolved.share.runId));
+    if (resolved.kind === 'run') return redactRunData(debugBundle(await options.repository.get(resolved.share.runId)), { omitRawProviderText: true });
     const thread = await options.repository.getThread(resolved.share.threadId);
     const runs = await readThreadBundleRuns(options.repository, thread, resolved.share.throughSequence);
     return threadDebugBundle(thread, resolved.share.throughSequence, runs, 'share');
@@ -1660,17 +1660,42 @@ export function buildApp(options: Options) {
   app.get<{ Params: { id: string } }>('/internal/runs/:id/status', async request => {
     return { status: (await options.repository.get(request.params.id)).status };
   });
+  const pendingAdvances = new Map<string, Promise<unknown>>();
+  const failedAdvances = new Set<string>();
+  app.addHook('onClose', async () => { await Promise.allSettled([...pendingAdvances.values()]); });
+  const advanceEnvelope = (run: AgentRun, progress: boolean) => progress ? { status: run.status, progress: digest({ status: run.status, plans: run.plans, steps: run.steps,
+    calls: run.calls, artifacts: run.artifacts, answers: run.answers, plannerRepair: run.plannerRepair,
+    toolReceipts: run.toolReceipts, pendingTool: run.pendingTool, pendingDelegation: run.pendingDelegation }) } : { status: run.status };
+  const advanceInFlight = (run: AgentRun) => ['queued', 'planning', 'running', 'reviewing'].includes(run.status)
+    && (pendingAdvances.has(run.id) || run.calls.some(call => call.state === 'started')
+      || Boolean(run.pendingTool?.executionToken || run.pendingDelegation?.executionToken));
+  app.get<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
+    const run = await options.repository.get(request.params.id);
+    if (failedAdvances.delete(run.id)) return reply.code(503).send({ error: 'Advance failed; retry the durable run' });
+    return reply.code(advanceInFlight(run) ? 202 : 200).send(advanceEnvelope(run, true));
+  });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
+    if (request.headers['x-aeeis-advance-async'] === '1') {
+      // Start once and poll separately. A lost response or worker retry cannot
+      // cancel the tick or duplicate a provider call: Engine's active guard and
+      // durable started-call/external execution fences still own single flight.
+      const run = await options.repository.get(request.params.id);
+      if (!advanceInFlight(run)) {
+        failedAdvances.delete(run.id);
+        const pending = options.engine.advance(run.id).catch(error => {
+          failedAdvances.add(run.id); app.log.error(error, 'Async run advance failed');
+        }).finally(() => { pendingAdvances.delete(run.id); });
+        pendingAdvances.set(run.id, pending);
+      }
+      return reply.code(202).send(advanceEnvelope(await options.repository.get(run.id), true));
+    }
     await options.engine.advance(request.params.id);
     // Read the durable state even if another advance owned the in-flight work.
     // Revisions, timestamps and telemetry events alone do not prove progress.
     const run = await options.repository.get(request.params.id);
     // Older workers validate a strict status-only envelope during rollout.
-    if (request.headers['x-aeeis-advance-progress'] !== '1') return { status: run.status };
-    return { status: run.status, progress: digest({ status: run.status, plans: run.plans, steps: run.steps,
-      calls: run.calls, artifacts: run.artifacts, answers: run.answers, plannerRepair: run.plannerRepair,
-      toolReceipts: run.toolReceipts, pendingTool: run.pendingTool, pendingDelegation: run.pendingDelegation }) };
+    return advanceEnvelope(run, request.headers['x-aeeis-advance-progress'] === '1');
   });
   app.post<{ Params: { id: string } }>('/internal/reminders/:id/advance', async (request, reply) => {
     if (!options.reminders || !options.reminderPump) return reply.code(503).send({ error: 'Reminder timer is not configured' });

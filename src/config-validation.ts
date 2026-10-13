@@ -1,4 +1,5 @@
 import { validateHealthEndpoint } from './dependency-health.js';
+import { executionLimitsConfig } from './runtime/execution-limits.js';
 import { validateInternalEndpoint } from './internal-endpoint.js';
 import { createPublicKey } from 'node:crypto';
 
@@ -214,8 +215,10 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   validateFractionConfig(env, 'AEEIS_RSI_LOW_CONFIDENCE_THRESHOLD', 0.5);
   const hasFixedModelBase = Boolean(env.AEEIS_MODEL_BASE_URL?.trim());
   validateIntegerConfig(env, 'AEEIS_MODEL_TIMEOUT_MS', { defaultValue: 180_000, min: 1_000, max: 600_000 });
+  executionLimitsConfig(env);
+  if (env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== undefined && !['0', '1'].includes(env.AEEIS_MODEL_RETRY_EMPTY_IDLE)) throw new Error('AEEIS_MODEL_RETRY_EMPTY_IDLE must be 0 or 1');
   if (env.AEEIS_MODEL_STREAM !== undefined && !['0', '1'].includes(env.AEEIS_MODEL_STREAM)) throw new Error('AEEIS_MODEL_STREAM must be 0 or 1');
-  validateIntegerConfig(env, 'AEEIS_MODEL_IDLE_TIMEOUT_MS', { defaultValue: Number(env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), min: 1_000, max: 600_000 });
+  validateIntegerConfig(env, 'AEEIS_MODEL_IDLE_TIMEOUT_MS', { defaultValue: 60_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS', { defaultValue: 600_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_MAX_ATTEMPTS', { defaultValue: 3, min: 1, max: 10 });
   validateIntegerConfig(env, 'AEEIS_MODEL_RETRY_BASE_MS', { defaultValue: 500, min: 0, max: 60_000 });

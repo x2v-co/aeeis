@@ -174,7 +174,7 @@ export interface ResourceSnapshot extends ResourceSelection {
    * old Runs continue to use their immutable release digests after promotion. */
   registryRevision?: string;
 }
-export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact; hash: string; createdAt: string }
+export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; partial?: boolean; limitations?: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact; hash: string; createdAt: string }
 /**
  * The transport fields are retained for compatibility with static providers.
  * Catalog-routed runs additionally carry the complete aeeis-model-pin/1
@@ -217,6 +217,8 @@ export interface ReconciledModelCall { callId: string; value: unknown; usage?: {
 export interface Event { id: string; seq: number; type: string; at: string; data: Record<string, unknown> }
 export interface RunCorrection { id: string; text: string; candidateId?: string; sourceRefs: string[]; createdAt: string }
 export interface Step {
+  limitReason?: string;
+  finalCallId?: string;
   error?: string; failureReason?: string;
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
@@ -224,6 +226,9 @@ export interface Step {
   finishRepair?: { reason: string; candidate: unknown };
 }
 export interface AgentRun {
+  executionLimits?: import('./execution-limits.js').ExecutionLimits;
+  sourceReadUsage?: { pages: number; chars: number };
+  partial?: boolean;
   schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;
   /** Optional cross-run conversation membership, assigned by the repository. */
   threadId?: string; parentRunId?: string; threadSequence?: number;

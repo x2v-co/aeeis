@@ -4,6 +4,7 @@ import { collaborationPricesSchema, type CollaborationPrices } from './collabora
 import { FileRunRepository, PostgresRunRepository } from './runtime/repository.js';
 import { AgentpayModelAdapter, HttpModelAdapter, modelTransportConfig } from './runtime/model.js';
 import { AgentEngine, digest } from './runtime/engine.js';
+import { executionLimitsConfig } from './runtime/execution-limits.js';
 import { LocalDispatcher, TemporalDispatcher, isBootRecoverableRun } from './runtime/dispatcher.js';
 import type { Dispatcher } from './runtime/dispatcher.js';
 import type { ModelCatalog } from './integrations.js';
@@ -460,7 +461,7 @@ try {
     rsiProposalPump.setSynthesis(synthesis);
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, executionLimits: executionLimitsConfig(process.env), domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
     await new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? 32768)).recover();
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {

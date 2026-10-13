@@ -148,6 +148,7 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
 export interface ModelTransportOptions {
   maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number;
   stream?: boolean; idleTimeoutMs?: number; streamOverallTimeoutMs?: number;
+  retryEmptyIdle?: boolean;
 }
 export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOptions {
   return {
@@ -155,8 +156,9 @@ export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOpti
     retryBaseMs: Number(env.AEEIS_MODEL_RETRY_BASE_MS ?? 500),
     retryMaxMs: Number(env.AEEIS_MODEL_RETRY_MAX_MS ?? 10_000),
     ...(env.AEEIS_MODEL_STREAM === undefined ? {} : { stream: env.AEEIS_MODEL_STREAM === '1' }),
-    idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000),
+    idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? 60_000),
     streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 600_000),
+    retryEmptyIdle: env.AEEIS_MODEL_RETRY_EMPTY_IDLE === '1',
   };
 }
 
@@ -173,12 +175,13 @@ export class HttpModelAdapter implements ModelAdapter {
     }
     const ark = /(^|\.)(?:volces\.com|bytepluses\.com)$/.test(url.hostname) || /ark|volcengine|byteplus/i.test(provider ?? '');
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
-      stream: transport.stream ?? ark, idleTimeoutMs: transport.idleTimeoutMs ?? requestTimeoutMs, streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 600_000 };
+      stream: transport.stream ?? ark, idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 60_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 600_000, retryEmptyIdle: transport.retryEmptyIdle ?? false };
     z.number().int().min(1).max(10).parse(this.transport.maxAttempts);
     z.number().int().min(0).max(60_000).parse(this.transport.retryBaseMs);
     z.number().int().min(this.transport.retryBaseMs).max(60_000).parse(this.transport.retryMaxMs);
     z.number().int().min(1).max(600_000).parse(this.requestTimeoutMs);
     z.boolean().parse(this.transport.stream);
+    z.boolean().parse(this.transport.retryEmptyIdle);
     z.number().int().min(1).max(600_000).parse(this.transport.idleTimeoutMs);
     z.number().int().min(1).max(600_000).parse(this.transport.streamOverallTimeoutMs);
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
@@ -204,9 +207,10 @@ export class HttpModelAdapter implements ModelAdapter {
     const cap = this.pin.maxOutputTokens ?? Number.MAX_SAFE_INTEGER;
     let maxTokens = Math.min(tokenLimit.parse(request.maxTokens ?? this.pin.maxTokens ?? defaultMaxTokens), cap);
     let usage: ModelResponse['usage'];
+    const retryState = { emptyIdleRetried: false };
     for (let attempt = 0; attempt < 2; attempt++) {
       let raw: z.infer<typeof envelope>;
-      try { raw = await this.requestCompletion(request, maxTokens, attempt); }
+      try { raw = await this.requestCompletion(request, maxTokens, attempt, retryState); }
       catch (error) {
         if (error instanceof ModelResponseRejected && attempt > 0) {
           const total = usage && error.usage ? { inputTokens: usage.inputTokens + error.usage.inputTokens, outputTokens: usage.outputTokens + error.usage.outputTokens } : undefined;
@@ -238,7 +242,7 @@ export class HttpModelAdapter implements ModelAdapter {
     }
     throw new ModelResponseRejected('Model response is incomplete', usage);
   }
-  private async requestCompletion(request: ModelRequest, maxTokens: number, lengthAttempt: number): Promise<z.infer<typeof envelope>> {
+  private async requestCompletion(request: ModelRequest, maxTokens: number, lengthAttempt: number, retryState: { emptyIdleRetried: boolean }): Promise<z.infer<typeof envelope>> {
     const started = Date.now();
     for (let attempt = 1; attempt <= this.transport.maxAttempts; attempt++) {
       // A fresh deadline bounds fetch AND response-body consumption on each try.
@@ -255,6 +259,7 @@ export class HttpModelAdapter implements ModelAdapter {
       };
       activity();
       let streamReceived = false;
+      let responseBytes = 0;
       let response: Response | undefined;
       let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let stage: 'request' | 'response' = 'request';
@@ -284,7 +289,11 @@ export class HttpModelAdapter implements ModelAdapter {
           signal.throwIfAborted();
           let abort: () => void = () => {};
           const aborted = new Promise<never>((_resolve, reject) => { abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true }); });
-          try { return await Promise.race([reader.read(), aborted]); }
+          try {
+            const part = await Promise.race([reader.read(), aborted]);
+            if (part.value) responseBytes += part.value.byteLength;
+            return part;
+          }
           finally { signal.removeEventListener('abort', abort); }
         };
         if (streamReceived) return await readStreamCompletion(read, activity);
@@ -317,7 +326,15 @@ export class HttpModelAdapter implements ModelAdapter {
         const retryable = httpError !== undefined
           ? response!.status === 429 || response!.status >= 500
           : network;
-        const willRetry = retryable && !streamReceived && attempt < this.transport.maxAttempts;
+        const idleTimeout = streaming && signal.aborted && timeoutKind === 'idle';
+        // Zero bytes is insufficient proof of zero billing. This opt-in is
+        // only for providers verified to deduplicate the unchanged key/body.
+        // Any byte (including reasoning/keepalive) makes replay unsafe.
+        const emptyIdleRetry = idleTimeout && responseBytes === 0 && Boolean(request.idempotencyKey)
+          && this.transport.retryEmptyIdle && !retryState.emptyIdleRetried;
+        const willRetry = retryable && responseBytes === 0 && attempt < this.transport.maxAttempts
+          && (idleTimeout ? emptyIdleRetry : !streamReceived);
+        if (willRetry && idleTimeout) retryState.emptyIdleRetried = true;
         const delayMs = willRetry ? Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (attempt - 1)) * (0.5 + Math.random() * 0.5)) : 0;
         const redact = (text: string): string => {
           if (this.apiKey) text = text.split(this.apiKey).join('[REDACTED]');
@@ -329,7 +346,7 @@ export class HttpModelAdapter implements ModelAdapter {
           requestId: response?.headers.get('x-request-id') ?? response?.headers.get('x-tt-logid') ?? null,
           attempt, maxAttempts: this.transport.maxAttempts, lengthAttempt, elapsedMs: Date.now() - started,
           errorCode: redact(errorCode ?? (signal.aborted ? 'TIMEOUT' : String((error as NodeJS.ErrnoException)?.code ?? ((error as Error)?.cause as NodeJS.ErrnoException | undefined)?.code ?? (network ? 'NETWORK_ERROR' : (error as Error)?.name ?? 'ERROR')))),
-          bodyExcerpt: redact(bodyExcerpt), retryable, willRetry, retryDelayMs: delayMs,
+          bodyExcerpt: redact(bodyExcerpt), responseBytes, timeoutKind: signal.aborted ? timeoutKind : undefined, retryable, willRetry, retryDelayMs: delayMs,
         }));
         if (willRetry) { await new Promise(resolve => setTimeout(resolve, delayMs)); continue; }
         if (httpError) throw httpError;

@@ -33,6 +33,30 @@ async function setup(adapter = model) {
 }
 
 describe('run sharing HTTP boundary', () => {
+  it('omits raw provider text recursively from public run views and bundles, retaining owner diagnostics', async () => {
+    const { app, repo, run, auth } = await setup();
+    await repo.mutate(run.id, current => {
+      current.calls.push({ id: 'model_1', phase: 'planner', state: 'completed', inputHash: 'hash', startedAt: current.createdAt, rawOutput: 'PRIVATE_PROVIDER_CALL' });
+      current.plannerRepair = { rawOutput: 'PRIVATE_PLANNER_REPAIR', validationError: 'Invalid plan' };
+      current.steps.push({ taskId: 'task', status: 'running', attempts: 1, observations: [{ tool: 'lookup', argument: 'x', result: { items: [{ raw_response: 'PRIVATE_PROVIDER_RESPONSE', providerText: 'PRIVATE_PROVIDER_TEXT', reasoning_content: 'PRIVATE_REASONING', safe: 'RETAINED_TOOL_RESULT' }], encoded: '{"rawOutput":"PRIVATE_ENCODED","safe":"retained"}' } }], finishRepair: { reason: 'Invalid output', candidate: 'PRIVATE_FINISH_CANDIDATE' } });
+      current.events.push({ id: 'event_1', seq: 1, type: 'model.validation_failed', at: current.createdAt, data: { rawOutput: 'PRIVATE_EVENT', validation: { issues: [{ rawText: 'PRIVATE_VALIDATION', message: 'Schema mismatch' }] } } });
+    });
+    const original = await repo.get(run.id);
+    const share = (await app.inject({ method: 'POST', url: `/api/runs/${run.id}/share`, headers: auth })).json();
+    for (const suffix of ['', '/debug-bundle']) {
+      const response = await app.inject({ url: `/api/share/${share.token}${suffix}` });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain('PRIVATE_');
+      for (const field of ['rawOutput', 'raw_response', 'rawText', 'reasoning_content', 'providerText', 'plannerRepair', 'finishRepair', 'modelRawOutput']) expect(response.body).not.toContain(field);
+      expect(response.body).toContain('RETAINED_TOOL_RESULT');
+      expect(response.body).toContain('Schema mismatch');
+    }
+    const owner = await app.inject({ url: `/api/runs/${run.id}/debug-bundle`, headers: auth });
+    expect(owner.body).toContain('PRIVATE_PROVIDER_CALL');
+    expect(owner.body).toContain('PRIVATE_EVENT');
+    expect(owner.body).toContain('PRIVATE_FINISH_CANDIDATE');
+    expect(await repo.get(run.id)).toEqual(original);
+  });
   it('serves deep links, requires owner auth to manage shares, and stores only hashes durably', async () => {
     const { app, run, other, auth, directory, repo } = await setup();
     expect((await app.inject({ url: `/runs/${run.id}` })).statusCode).toBe(200);

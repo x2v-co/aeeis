@@ -6,8 +6,48 @@ import { AgentEngine, event } from '../src/runtime/engine.js';
 import { buildApp } from '../src/runtime/http.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
+import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { decideRunAdvance, maxStalledAdvances } from '../src/temporal/run-advance.js';
 import type { AdvanceRunActivityResult } from '../src/temporal/activity.js';
+
+it('returns 202 during a blocked tick, polls after completion, and never duplicates across activity retries or API instances', async () => {
+  const repository = new InMemoryRunRepository();
+  let resolve!: (value: any) => void;
+  let started!: () => void;
+  const began = new Promise<void>(done => { started = done; });
+  const pending = new Promise<any>(done => { resolve = done; });
+  const complete = vi.fn(async () => { started(); return pending; });
+  const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
+  const engine = new AgentEngine(repository, model);
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  const second = buildApp({ repository, engine: new AgentEngine(repository, model), workerToken: 'worker' });
+  const run = await engine.create({ goal: 'Report' });
+  const request = { method: 'POST' as const, url: `/internal/runs/${run.id}/advance`, headers: { authorization: 'Bearer worker', 'x-aeeis-advance-async': '1' }, payload: {} };
+  try {
+    const first = await app.inject(request);
+    expect(first.statusCode).toBe(202);
+    await began;
+    for (const server of [app, second, app]) {
+      expect((await server.inject(request)).statusCode).toBe(202);
+      const poll = await server.inject({ url: request.url, headers: { authorization: 'Bearer worker' } });
+      expect(poll.statusCode).toBe(202);
+      expect(poll.json().status).toBe('planning');
+    }
+    expect((await second.inject({ url: request.url })).statusCode).toBe(401);
+    expect(complete).toHaveBeenCalledTimes(1);
+    resolve({ value: { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Report', dependsOn: [] }] } });
+    let poll;
+    for (let i = 0; i < 20; i++) {
+      poll = await app.inject({ url: request.url, headers: { authorization: 'Bearer worker' } });
+      if (poll.statusCode === 200) break;
+      await new Promise(done => setTimeout(done, 1));
+    }
+    expect(poll!.statusCode).toBe(200);
+    expect(poll!.json().status).toBe('needs_approval');
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect((await repository.get(run.id)).calls).toHaveLength(1);
+  } finally { resolve({ value: {} }); await app.close(); await second.close(); }
+});
 
 it.each([false, true])('completes all ten tasks without a wake (progress enabled: %s)', async progressEnabled => {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-advance-ten-tasks-'));
