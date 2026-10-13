@@ -84,10 +84,12 @@ function csvCells(record: string): string[] {
 }
 function csvRecords(content: string): string[] { return materialRows(content.replace(/^\uFEFF/, ''), true).filter(row => row !== ''); }
 
+/** Shared CSV parser: BOM, CRLF, quoted newlines, commas and escaped quotes. */
+export function parseCsv(content: string): string[][] { return csvRecords(content).map(csvCells); }
+
 /** Statistics use every data row; sampleRows are the first five rows, not a ranking. */
 export function csvSummary(content: string): CsvSummary {
-  const records = csvRecords(content), header = csvCells(records.shift() ?? '');
-  const rows = records.map(csvCells);
+  const rows = parseCsv(content), header = rows.shift() ?? [''];
   const columns = header.map((name, index): CsvColumnStats => {
     const values = rows.map(row => row[index]?.trim() ?? '').filter(value => value !== '');
     const types = new Set(values.map(value => /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(value) && Number.isFinite(Number(value)) ? 'number'

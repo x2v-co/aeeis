@@ -2,8 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
 import { digest } from '../src/runtime/engine.js';
 import { decisionSchema } from '../src/runtime/contracts.js';
+import { queryCsvSource } from '../src/runtime/csv-query.js';
 
 describe('executor context budget', () => {
+  it('preserves query counts and source hash on compacted observations and retains the latest query', () => {
+    const result = queryCsvSource({ id: 'source.csv', title: 'data.csv', source: 'upload', hash: 'source-hash', content: 'id,note\n' + Array.from({ length: 50 }, (_, i) => `${i},${'x'.repeat(120)}`).join('\n') });
+    const observations = [0, 1].map(() => ({ tool: 'sources.csvQuery', argument: 'source.csv', result }));
+    const expected = { schemaVersion: 'context-reference/1', id: result.id, sourceContentHash: result.sourceContentHash, matchedRowCount: 50, totalResultRows: 50, truncated: true, contentHash: digest(result) };
+    const projected = boundedObservations(observations, () => ['source.csv']);
+    expect(projected[0]!.result).toMatchObject(expected);
+    expect(projected[1]).toEqual(observations[1]);
+    const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(87_000), observations }).observations as typeof observations;
+    expect(overall[0]!.result).toMatchObject(expected);
+    expect(overall[1]).toEqual(observations[1]);
+  });
   it('retains an aggregate reference and hash when individual observation references exceed the budget', () => {
     const observations = Array.from({ length: 100 }, (_, i) => ({ tool: 'sources.read', argument: 'source.csv', result: { id: 'source.csv', content: `page ${i} ` + 'x'.repeat(3000) } }));
     const projected = boundedObservations(observations, () => ['source.csv']);

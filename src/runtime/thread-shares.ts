@@ -60,7 +60,7 @@ export function sharedThreadView(thread: Thread, throughSequence: number, runs: 
     // Source tools copy history and restricted content into durable observations.
     // Search results lack origin metadata, so also require a retained catalog ID.
     for (const step of copy.steps) step.observations = step.observations.flatMap(observation => {
-      if (observation.tool === 'sources.read') return visibleResult(observation.result) ? [observation] : [];
+      if (observation.tool === 'sources.read' || observation.tool === 'sources.csvQuery') return visibleResult(observation.result) ? [observation] : [];
       if (observation.tool === 'sources.search') {
         if (!Array.isArray(observation.result)) return [];
         const result = observation.result.filter(visibleResult);
