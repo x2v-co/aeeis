@@ -41,7 +41,7 @@ describe('HttpModelAdapter', () => {
     } finally { logs.mockRestore(); }
   });
 
-  it.each([400, 401, 403, 404, 408, 422])('does not retry ARK HTTP %s', async status => {
+  it.each([401, 403, 404, 408, 422])('does not retry ARK HTTP %s', async status => {
     const fetch = vi.fn(async () => new Response('invalid request', { status }));
     vi.stubGlobal('fetch', fetch);
     const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret');

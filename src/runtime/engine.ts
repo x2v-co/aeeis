@@ -1127,6 +1127,24 @@ export class AgentEngine {
       // Legacy saved requests predate wire controls: preserve omitted fields
       // on reconciliation even if deployment defaults have since changed.
       ...(existingCallId ? { thinking: request.thinking ?? null, reasoningEffort: request.reasoningEffort ?? null, maxTokens: request.maxTokens ?? model.pin.maxTokens ?? 16_384 } : {}),
+      ...(existingCallId && run.calls.find(call => call.id === existingCallId)?.thinkingUnsupported ? { thinkingUnsupported: true } : {}),
+      ...(existingCallId && run.calls.find(call => call.id === existingCallId)?.midstreamRetries ? { midstreamRetries: run.calls.find(call => call.id === existingCallId)!.midstreamRetries! } : {}),
+      onThinkingUnsupported: async details => {
+        await this.repository.mutate(run.id, current => {
+          const call = current.calls.find(item => item.id === callId)!;
+          call.thinkingUnsupported = true;
+          event(current, 'model.thinking_unsupported', { callId, ...details, thinkingUnsupported: true });
+        });
+      },
+      onMidstreamRetry: async details => {
+        await this.repository.mutate(run.id, current => {
+          const call = current.calls.find(item => item.id === callId)!;
+          call.midstreamRetries = details.midstreamRetries;
+          delete call.usage; // A final-attempt meter cannot account for the abandoned stream.
+          current.modelUsage = deriveModelUsage(current);
+          event(current, 'model.midstream_retry', { callId, ...details, billingRisk: 'duplicate-possible', usageUnknown: true });
+        });
+      },
       includeRawOutput: true, ...(phase === 'planner' ? { allowTextOutput: true } : {}), idempotencyKey, beforeRetry: async usage => {
       const current = await this.repository.get(run.id);
       if (!runnable.has(current.status)) throw new Conflict('Run is no longer runnable');

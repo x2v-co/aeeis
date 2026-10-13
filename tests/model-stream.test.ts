@@ -15,8 +15,212 @@ function response(text: string, byteChunks: boolean | number = false) {
   } }), { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
 }
 const adapter = (options = {}) => new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', 'secret', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0, ...options });
+const stalledResponse = (text: string) => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); } }), { headers: { 'content-type': 'text/event-stream' } });
 
 describe('OpenAI-compatible SSE transport', () => {
+  it('logs UTF-8 content/reasoning counters, all SSE frames and reasoning-token usage without text', async () => {
+    const logs = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const rawOutput = '{"text":"中🙂"}', reasoning = 'private reasoning 中文🙂', alias = 'private alias';
+    const metered = { ...usage, completion_tokens_details: { reasoning_tokens: 18 } };
+    const stream = ': heartbeat\n\n' + event({ choices: [
+      { index: 0, delta: { reasoning_content: reasoning }, finish_reason: null },
+      { index: 1, delta: { content: 'alternate', reasoning: 'other' }, finish_reason: null },
+    ] }) + event({ choices: [{ index: 0, delta: { content: rawOutput, reasoning: alias }, finish_reason: 'stop' }] })
+      + event({ choices: [], usage: metered }) + 'data: [DONE]\n\n';
+    vi.stubGlobal('fetch', vi.fn(async () => response(stream, true)));
+    await expect(adapter().complete({ system: 'private system', input: {} })).resolves.toEqual({ value: { text: '中🙂' }, usage: { inputTokens: 12, outputTokens: 30 } });
+    const contentBytes = Buffer.byteLength(rawOutput + 'alternate'), reasoningBytes = Buffer.byteLength(reasoning + alias + 'other');
+    expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ sseFrames: 5, contentBytes, reasoningBytes,
+      responseBytes: Buffer.byteLength(stream), otherBytes: Buffer.byteLength(stream) - contentBytes - reasoningBytes, finishReason: 'stop', usage: metered });
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private');
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('中🙂');
+  });
+
+  it.each(['idle', 'overall', 'eof', 'invalid'] as const)('retains diagnostics and usage on a partial %s stream', async kind => {
+    vi.useFakeTimers();
+    const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const metered = { ...usage, completion_tokens_details: { reasoning_tokens: 20 } };
+    const prefix = ': heartbeat\n\n' + event({ choices: [{ index: 0, delta: { reasoning_content: 'private reasoning', reasoning: '🙂' }, finish_reason: null }] })
+      + event(chunk('{"secret":"private text"}', 'stop')) + event({ choices: [], usage: metered });
+    const stream = prefix + (kind === 'invalid' ? 'data: {bad JSON}\n\n' : 'data: unfinished');
+    const fetch = vi.fn(async () => kind === 'eof' || kind === 'invalid' ? response(stream, true) : stalledResponse(stream));
+    vi.stubGlobal('fetch', fetch);
+    const result = expect(adapter({ midstreamRetries: 0, idleTimeoutMs: 100, streamOverallTimeoutMs: kind === 'overall' ? 50 : 1000 })
+      .complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105); await result;
+    const contentBytes = Buffer.byteLength('{"secret":"private text"}'), reasoningBytes = Buffer.byteLength('private reasoning🙂');
+    expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ sseFrames: kind === 'invalid' ? 5 : 4,
+      contentBytes, reasoningBytes, otherBytes: Buffer.byteLength(stream) - contentBytes - reasoningBytes,
+      finishReason: 'stop', usage: metered, usageUnknown: true, willRetry: false,
+      retryDecision: kind === 'overall' ? 'overall-timeout' : kind === 'idle' ? 'attempts-exhausted' : 'not-retryable' });
+    expect(JSON.stringify(logs.mock.calls)).not.toContain('private');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([': heartbeat\n\n', 'data: unfinished', event(chunk('{"abandoned":'))])('replays an idle stall once with the same body and a distinct key: %s', async partial => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {}), logs = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(stalledResponse(partial))
+      .mockResolvedValueOnce(response(event(chunk('{"ok":true}', 'stop')) + event({ choices: [], usage }) + 'data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const onMidstreamRetry = vi.fn();
+    const done = expect(adapter({ idleTimeoutMs: 100, maxAttempts: 1 }).complete({ system: 's', input: {}, idempotencyKey: 'stable', onMidstreamRetry }))
+      .resolves.toEqual({ value: { ok: true } }); // Final usage cannot stand in for both billable attempts.
+    await vi.advanceTimersByTimeAsync(105); await done;
+    expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['stable', 'stable:midstream-1']);
+    expect(fetch.mock.calls[0]![1].body).toBe(fetch.mock.calls[1]![1].body);
+    expect(onMidstreamRetry).toHaveBeenCalledWith({ midstreamRetries: 1, responseBytes: Buffer.byteLength(partial) });
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ retryable: true, willRetry: true, retryDecision: 'midstream-retry',
+      billingRisk: 'duplicate-possible', responseBytes: Buffer.byteLength(partial), usageUnknown: true });
+    expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ usage, usageUnknown: true, billingRisk: 'duplicate-possible', midstreamRetries: 1 });
+  });
+
+  it.each([0, 1, 2, 3])('bounds midstream replay independently of normal transport attempts (limit=%s)', async limit => {
+    vi.useFakeTimers(); const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => stalledResponse(event({ choices: [{ index: 0, delta: { reasoning: 'thinking' }, finish_reason: null }] })));
+    vi.stubGlobal('fetch', fetch);
+    const done = expect(adapter({ ...modelTransportConfig({ AEEIS_MODEL_MIDSTREAM_RETRIES: String(limit) }), idleTimeoutMs: 100, maxAttempts: 1, retryBaseMs: 0 })
+      .complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toThrow('idle timeout');
+    await vi.advanceTimersByTimeAsync(100 * (limit + 1) + 5); await done;
+    expect(fetch).toHaveBeenCalledTimes(limit + 1);
+    expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['stable', ...Array.from({ length: limit }, (_, i) => `stable:midstream-${i + 1}`)]);
+    expect(JSON.parse(logs.mock.calls.at(-1)![0])).toMatchObject({ retryable: true, willRetry: false, retryDecision: 'attempts-exhausted', midstreamRetries: limit });
+  });
+
+  it.each(['no-key', 'overall', 'network', 'json', 'http-error'] as const)('does not replay a partial %s outcome', async kind => {
+    vi.useFakeTimers(); const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => kind === 'network' ? new Response(new ReadableStream({ start(c) {
+      c.enqueue(new TextEncoder().encode(event(chunk('{')))); setTimeout(() => c.error(new TypeError('reset')), 10);
+    } }), { headers: { 'content-type': 'text/event-stream' } })
+      : kind === 'json' || kind === 'http-error' ? new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{')); } }), { status: kind === 'http-error' ? 503 : 200 })
+      : stalledResponse(': heartbeat\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const done = expect(adapter({ idleTimeoutMs: 100, streamOverallTimeoutMs: kind === 'overall' ? 50 : 1000 })
+      .complete({ system: 's', input: {}, ...(kind === 'no-key' ? {} : { idempotencyKey: 'stable' }) })).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(105); await done;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ willRetry: false,
+      retryDecision: kind === 'no-key' ? 'no-idempotency-key' : kind === 'overall' ? 'overall-timeout' : 'body-bytes-received' });
+  });
+
+  it('uses the current replay key for subsequent zero-byte retries and keeps the replay bound across length retries', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(stalledResponse(': heartbeat\n\n'))
+      .mockRejectedValueOnce(new TypeError('reset'))
+      .mockResolvedValueOnce(response(event(chunk('{}', 'length')) + event({ choices: [], usage }) + 'data: [DONE]\n\n'))
+      .mockResolvedValueOnce(stalledResponse(': heartbeat\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const beforeRetry = vi.fn();
+    const done = expect(adapter({ idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable', beforeRetry })).rejects.toThrow('idle timeout');
+    await vi.advanceTimersByTimeAsync(205); await done;
+    expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['stable', 'stable:midstream-1', 'stable:midstream-1', 'stable:length-retry:midstream-1']);
+    expect(beforeRetry).toHaveBeenCalledWith(undefined);
+  });
+
+  it('withholds a final HTTP rejection meter after an unknown partial attempt', async () => {
+    vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(stalledResponse(': heartbeat\n\n')).mockResolvedValueOnce(new Response('unauthorized', { status: 401 }));
+    vi.stubGlobal('fetch', fetch);
+    const done = expect(adapter({ idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toMatchObject({ usage: undefined });
+    await vi.advanceTimersByTimeAsync(105); await done;
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([-1, 4, 1.5, NaN])('rejects an invalid midstream retry limit (%s)', limit => {
+    expect(() => adapter({ midstreamRetries: limit })).toThrow();
+  });
+
+  it.each([
+    ['https://ark.cn-beijing.volces.com/api/v3', undefined],
+    ['https://ark.ap-southeast.volcengineapi.com/api/v3', undefined],
+    ['https://gateway.example/v1', 'ark'],
+  ])('defaults ARK thinking to disabled and freezes it (%s)', async (endpoint, provider) => {
+    const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    const model = new HttpModelAdapter(endpoint!, 'ark-model', '', provider);
+    expect(model.requestDefaults()).toMatchObject({ thinking: 'disabled', reasoningEffort: null });
+    await model.complete({ system: 's', input: {} });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).toMatchObject({ thinking: { type: 'disabled' } });
+  });
+
+  it.each(['https://other.example/v1', 'https://evilvolces.com/v1', 'https://volces.com.other.example/v1', 'https://ark.ap-southeast.bytepluses.com/api/v3'])('keeps unset thinking omitted for %s', async endpoint => {
+    const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    const model = new HttpModelAdapter(endpoint, 'model', '');
+    expect(model.requestDefaults()).toMatchObject({ thinking: null, reasoningEffort: null });
+    await model.complete({ system: 's', input: {} });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).not.toHaveProperty('thinking');
+  });
+
+  it('immediately downgrades ARK HTTP 400 once, records it and remembers the omitted controls', async () => {
+    vi.useFakeTimers(); const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(new Response('{"error":{"code":"UnsupportedParameter"}}', { status: 400 }))
+      .mockImplementation(async () => response(event(chunk('{}', 'stop')) + event({ choices: [], usage }) + 'data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const model = adapter({ maxAttempts: 1, retryBaseMs: 5000, thinking: 'enabled', reasoningEffort: 'high' });
+    const onThinkingUnsupported = vi.fn(), request = { system: 's', input: {}, thinking: 'enabled' as const, reasoningEffort: 'high' as const, idempotencyKey: 'stable', onThinkingUnsupported };
+    const frozen = JSON.stringify(request);
+    await expect(model.complete(request)).resolves.toMatchObject({ usage: { inputTokens: 12, outputTokens: 30 } });
+    expect(JSON.stringify(request)).toBe(frozen);
+    expect(onThinkingUnsupported).toHaveBeenCalledWith({ reason: 'http-400' });
+    expect(model.requestDefaults()).toMatchObject({ thinking: null, reasoningEffort: null });
+    await model.complete({ ...model.requestDefaults(), system: 's', input: {}, idempotencyKey: 'next' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const bodies = fetch.mock.calls.map(([, options]) => JSON.parse(options.body));
+    expect(bodies[0]).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: 'high' });
+    for (const body of bodies.slice(1)) { expect(body).not.toHaveProperty('thinking'); expect(body).not.toHaveProperty('reasoning_effort'); }
+    expect(bodies[1]).toEqual(bodies[2]);
+    expect(fetch.mock.calls.map(([, options]) => options.headers['idempotency-key'])).toEqual(['stable', 'stable:thinking-unsupported', 'next']);
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ status: 400, retryable: true, willRetry: true, retryDecision: 'thinking-unsupported', thinkingUnsupported: true, retryDelayMs: 0 });
+  });
+
+  it('records a cached downgrade for an older frozen request before dispatch', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(new Response('unsupported', { status: 400 }))
+      .mockImplementation(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    const model = adapter(); await model.complete({ system: 's', input: {} });
+    const onThinkingUnsupported = vi.fn(async () => { expect(fetch).toHaveBeenCalledTimes(2); });
+    await model.complete({ system: 's', input: {}, thinking: 'disabled', idempotencyKey: 'frozen', onThinkingUnsupported });
+    expect(onThinkingUnsupported).toHaveBeenCalledWith({ reason: 'adapter-cache' });
+    expect(fetch.mock.calls[2]![1].headers['idempotency-key']).toBe('frozen:thinking-unsupported');
+  });
+
+  it('downgrades reasoning_effort alone without requiring an idempotency key', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(new Response('unsupported', { status: 400 }))
+      .mockResolvedValueOnce(response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
+    await adapter({ thinking: 'provider-default', reasoningEffort: 'low' }).complete({ system: 's', input: {} });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).toHaveProperty('reasoning_effort', 'low');
+    expect(JSON.parse(fetch.mock.calls[1]![1].body)).not.toHaveProperty('reasoning_effort');
+  });
+
+  it.each(['provider-default', 'frozen-omission', 'non-ark', 'downgraded', 'error-body-timeout'] as const)('does not downgrade a %s 400', async kind => {
+    vi.useFakeTimers(); const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => kind === 'error-body-timeout' ? new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{')); } }), { status: 400 }) : new Response('invalid', { status: 400 }));
+    vi.stubGlobal('fetch', fetch);
+    const model = kind === 'non-ark' ? new HttpModelAdapter('https://other.example', 'model', '', undefined, 180000, undefined, false, undefined, { reasoningEffort: 'high' })
+      : adapter({ idleTimeoutMs: 50, ...(kind === 'provider-default' ? { thinking: 'provider-default' } : {}) });
+    const done = expect(model.complete({ system: 's', input: {}, ...(kind === 'frozen-omission' ? { thinking: null, reasoningEffort: null } : {}), ...(kind === 'downgraded' ? { thinkingUnsupported: true } : {}) })).rejects.toThrow('HTTP 400');
+    await vi.advanceTimersByTimeAsync(55); await done;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ willRetry: false, retryDecision: 'not-retryable' });
+  });
+
+  it('never downgrades a rejected request more than once', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => new Response('invalid', { status: 400 })); vi.stubGlobal('fetch', fetch);
+    await expect(adapter({ maxAttempts: 10 }).complete({ system: 's', input: {} })).rejects.toThrow('HTTP 400');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(errors.mock.calls[1]![0])).toMatchObject({ willRetry: false, retryDecision: 'not-retryable', thinkingUnsupported: true });
+  });
+
+  it.each(['thinking', 'midstream'] as const)('does not replay when %s history cannot be persisted', async kind => {
+    vi.useFakeTimers(); const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => kind === 'thinking' ? new Response('unsupported', { status: 400 }) : stalledResponse(': heartbeat\n\n')); vi.stubGlobal('fetch', fetch);
+    const record = vi.fn(async () => { throw new Error('repository unavailable'); });
+    const done = expect(adapter({ idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable', onThinkingUnsupported: record, onMidstreamRetry: record })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(105); await done;
+    expect(record).toHaveBeenCalledTimes(1); expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ willRetry: false, retryDecision: 'retry-recording-failed' });
+  });
   it.each([false, true])('retries a first-byte timeout by default before/after headers (headers: %s)', async headers => {
     vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn().mockImplementationOnce((_url, options) => headers
@@ -60,7 +264,7 @@ describe('OpenAI-compatible SSE transport', () => {
     let body!: ReadableStreamDefaultController<Uint8Array>;
     const fetch = vi.fn(async () => new Response(new ReadableStream({ start(c) { body = c; c.enqueue(new TextEncoder().encode(':')); } }), { headers: { 'content-type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetch);
-    const result = expect(adapter({ idleTimeoutMs: 100, firstByteTimeoutMs: 10 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toThrow('100ms (idle timeout)');
+    const result = expect(adapter({ idleTimeoutMs: 100, firstByteTimeoutMs: 10, midstreamRetries: 0 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toThrow('100ms (idle timeout)');
     for (let i = 0; i < 3; i++) { await vi.advanceTimersByTimeAsync(30); body.enqueue(new Uint8Array()); }
     await vi.advanceTimersByTimeAsync(11); await result; expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -77,9 +281,9 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string)).toHaveProperty('reasoning_effort', effort);
   });
 
-  it('omits unset wire controls and respects frozen explicit omissions', async () => {
+  it('omits provider-default wire controls and respects frozen explicit omissions', async () => {
     const fetch = vi.fn(async () => response(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n')); vi.stubGlobal('fetch', fetch);
-    await adapter(modelTransportConfig({})).complete({ system: 's', input: {} });
+    await adapter(modelTransportConfig({ AEEIS_MODEL_THINKING: 'provider-default' })).complete({ system: 's', input: {} });
     await adapter({ thinking: 'enabled', reasoningEffort: 'high' }).complete({ system: 's', input: {}, thinking: null, reasoningEffort: null });
     for (const [, options] of fetch.mock.calls) {
       const body = JSON.parse(options.body as string);
@@ -126,11 +330,11 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it.each([': keepalive\n\n', event({ choices: [{ index: 0, delta: { reasoning_content: 'thinking' }, finish_reason: null }] }), 'd'])('never replays idle timeout after any response bytes: %s', async bytes => {
+  it.each([': keepalive\n\n', event({ choices: [{ index: 0, delta: { reasoning_content: 'thinking' }, finish_reason: null }] }), 'd'])('leaves an idle timeout unknown when midstream replay is disabled: %s', async bytes => {
     vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn(async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(bytes)); } }), { headers: { 'content-type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetch);
-    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    const result = expect(adapter({ retryEmptyIdle: true, idleTimeoutMs: 100, midstreamRetries: 0 }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
     await vi.advanceTimersByTimeAsync(105); await result;
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -276,6 +480,6 @@ describe('OpenAI-compatible SSE transport', () => {
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, retryEmptyIdle: true, maxTokens: 16384 });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, retryEmptyIdle: true, midstreamRetries: 1, maxTokens: 16384 });
   });
 });

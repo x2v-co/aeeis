@@ -14,7 +14,7 @@ const production = {
 
 describe('runtime configuration validation', () => {
   it('validates opt-in thinking/effort and the initial token ceiling', () => {
-    for (const value of ['enabled', 'disabled', 'auto']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_THINKING: value })).not.toThrow();
+    for (const value of ['enabled', 'disabled', 'auto', 'provider-default']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_THINKING: value })).not.toThrow();
     for (const value of ['minimal', 'low', 'medium', 'high']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_REASONING_EFFORT: value })).not.toThrow();
     for (const name of ['AEEIS_MODEL_THINKING', 'AEEIS_MODEL_REASONING_EFFORT']) for (const value of ['', 'true', 'unknown']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
     for (const value of ['1', '4096', '16384', '1000000']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_MAX_TOKENS: value })).not.toThrow();
@@ -23,6 +23,8 @@ describe('runtime configuration validation', () => {
     for (const value of ['', '0', '-1', 'NaN', '65537']) expect(() => validateRuntimeConfig({ ...development, AEEIS_THREAD_CONTEXT_BUDGET_BYTES: value })).toThrow('AEEIS_THREAD_CONTEXT_BUDGET_BYTES');
   });
   it('validates durable execution allowances and explicit idle retry opt-in', () => {
+    for (const value of ['0', '1', '2', '3']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_MIDSTREAM_RETRIES: value })).not.toThrow();
+    for (const value of ['', '-1', '4', '1.5', 'NaN']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_MIDSTREAM_RETRIES: value })).toThrow('AEEIS_MODEL_MIDSTREAM_RETRIES');
     for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: value })).not.toThrow();
     expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: 'true' })).toThrow('AEEIS_MODEL_RETRY_EMPTY_IDLE');
     expect(() => validateRuntimeConfig({ ...development, AEEIS_MAX_NODE_ITERATIONS: '1' })).toThrow();
