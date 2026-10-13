@@ -274,7 +274,10 @@ export interface AgentRun {
   /** Validated external-Agent progress, keyed by the durable delegation. */
   agentProgress?: Array<{ idempotencyKey: string; progress: AgentProgressEvent }>;
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown; disposition?: 'isolated'; isolatedCost?: { tokens?: number | undefined; money?: number | undefined; currency?: string | undefined } }>;
-  plans: Array<PlanDraft & { version: number; hash: string; createdAt: string }>;
+  plans: Array<PlanDraft & { version: number; hash: string; createdAt: string;
+    /** Number of model calls already reserved when this revision was proposed. */
+    modelCallOffset?: number;
+  }>;
   /** One durable schema repair per proposed plan, also used after restart. */
   plannerRepair?: { rawOutput: string; validationError: string };
   steps: Step[]; artifacts: Artifact[]; events: Event[];

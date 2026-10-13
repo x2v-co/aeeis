@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { AgentRun, Step } from './contracts.js';
+import type { AgentRun, ModelCall, Step } from './contracts.js';
 
 export const executionLimitsSchema = z.object({
   // Includes the reserved final finish call and any artifact repair calls.
@@ -29,9 +29,30 @@ export function sourceReadUsage(steps: Step[]): { pages: number; chars: number }
 export function runSourceReadUsage(run: AgentRun): { pages: number; chars: number } {
   return run.sourceReadUsage ?? sourceReadUsage(run.steps);
 }
-export function executionLimitReason(run: AgentRun, step: Step, limits: ExecutionLimits): string | undefined {
+/** Node IDs may recur in later revisions, whose steps/iteration allowance start afresh. */
+export function nodeModelCalls(run: AgentRun, taskId: string): ModelCall[] {
+  const plan = run.plans.at(-1);
+  let offset = plan?.modelCallOffset;
+  if (offset === undefined && plan && plan.version > 1) {
+    // Older Runs have no offset. Locate the planner receipt that emitted this
+    // proposal using durable event order; timestamps can be equal or rewritten
+    // during reconciliation, and a later failed replan is not a new revision.
+    for (let i = run.events.length - 1; i >= 0; i--) {
+      const proposal = run.events[i]!;
+      if (proposal.type !== 'plan.proposed' || proposal.data.version !== plan.version) continue;
+      for (let j = i - 1; j >= 0; j--) {
+        const completed = run.events[j]!;
+        if (completed.type !== 'model.completed') continue;
+        const index = run.calls.findIndex(call => call.id === completed.data.callId && call.phase === 'planner');
+        if (index >= 0) { offset = index + 1; break; }
+      }
+      break;
+    }
+  }
+  return run.calls.slice(offset ?? 0).filter(call => call.phase === 'executor' && call.taskId === taskId && call.id !== run.resumeModelCallId);
+}
+export function executionLimitReason(run: AgentRun, step: Step, limits: ExecutionLimits, calls = nodeModelCalls(run, step.taskId)): string | undefined {
   if (step.limitReason) return step.limitReason;
-  const calls = run.calls.filter(call => call.phase === 'executor' && call.taskId === step.taskId && call.id !== run.resumeModelCallId);
   if (calls.length >= limits.maxNodeIterations - 1) return 'Node model iteration limit reached';
   const node = sourceReadUsage([step]), total = runSourceReadUsage(run);
   if (node.pages >= limits.maxNodeSourcePages) return 'Node source page limit reached';

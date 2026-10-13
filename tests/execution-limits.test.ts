@@ -96,6 +96,98 @@ describe('durable execution allowances', () => {
     expect(runSourceReadUsage(await fixture.repository.get(finished.id)).pages).toBe(2);
   });
 
+  it.each(['offset', 'legacy events'])('restores node iterations for reused IDs after replanning with %s, including after restart', async format => {
+    let acceptFinish = false;
+    const fixture = await setup({ maxNodeIterations: 2 }, input => input.executionBudget.finalOnly && acceptFinish
+      ? { type: 'finish', title: 'Partial', content: 'Inspected relevant rows.', evidenceRefs: [input.sourceCatalog[0].id] }
+      : { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: 0, limit: 20 });
+    const failed = await fixture.drain();
+    expect(failed.status).toBe('failed');
+    expect(failed.calls.filter(call => call.phase === 'executor')).toHaveLength(2);
+    const usage = runSourceReadUsage(failed);
+    // Upgrade an older Run that only kept source consumption in observations.
+    if (format === 'legacy events') await fixture.repository.mutate(failed.id, current => { delete current.sourceReadUsage; });
+    await fixture.engine.command(failed.id, 'replan', {});
+    expect(await fixture.engine.advance(failed.id)).toBe('needs_approval');
+    const proposed = await fixture.repository.get(failed.id);
+    expect(proposed.plans[1]!.hash).toBe(proposed.plans[0]!.hash); // Same IDs and exact draft, new revision.
+    expect(runSourceReadUsage(proposed)).toEqual(usage);
+    await fixture.engine.command(failed.id, 'approve', { planHash: proposed.plans[1]!.hash });
+    if (format === 'legacy events') await fixture.repository.mutate(failed.id, current => {
+      for (const plan of current.plans) delete plan.modelCallOffset;
+      // Equal timestamps must not confuse the proposal/call ordering boundary.
+      for (const call of current.calls) call.startedAt = current.plans[1]!.createdAt;
+    });
+    acceptFinish = true;
+    fixture.replaceEngine();
+    const before = fixture.complete.mock.calls.length;
+    const finished = await fixture.drain();
+    expect(finished.status).toBe('succeeded');
+    const next = fixture.complete.mock.calls[before]![0].input as any;
+    expect(next.executionBudget).toMatchObject({ finalOnly: false, remainingModelCalls: 2, nodeReads: { pages: 0, chars: 0 }, runReads: usage });
+    expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(4);
+    expect(runSourceReadUsage(finished).pages).toBe(2);
+    expect(sourceReadUsage(finished.steps).pages).toBe(1);
+  });
+
+  it('keeps the run source page allowance exhausted after replanning reuses a node ID', async () => {
+    let acceptFinish = false;
+    const fixture = await setup({ maxNodeIterations: 2, maxRunSourcePages: 1 }, input => input.executionBudget.finalOnly && acceptFinish
+      ? { type: 'finish', title: 'Partial', content: 'Run-wide evidence allowance remains exhausted.', evidenceRefs: [input.sourceCatalog[0].id] }
+      : { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: 0, limit: 20 });
+    const failed = await fixture.drain();
+    expect(failed.status).toBe('failed');
+    await fixture.engine.command(failed.id, 'replan', {}); await fixture.engine.advance(failed.id);
+    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash });
+    acceptFinish = true;
+    const before = fixture.complete.mock.calls.length;
+    const finished = await fixture.drain();
+    expect((fixture.complete.mock.calls[before]![0].input as any).executionBudget).toMatchObject({ finalOnly: true, reason: 'Run source page limit reached', remainingModelCalls: 2 });
+    expect(finished.status).toBe('succeeded');
+    expect(runSourceReadUsage(finished).pages).toBe(1);
+    expect(sourceReadUsage(finished.steps).pages).toBe(0);
+    expect(finished.artifacts[0]!.limitations).toEqual(['Run source page limit reached']);
+  });
+
+  it('preserves the run model call budget when replanning resets node iterations', async () => {
+    const fixture = await setup({ maxNodeIterations: 2 }, input => ({ type: 'tool', tool: 'sources.search', argument: 'blocked' }));
+    const failed = await fixture.drain();
+    await fixture.repository.mutate(failed.id, current => { current.maxModelCalls = 5; });
+    await fixture.engine.command(failed.id, 'replan', {}); await fixture.engine.advance(failed.id);
+    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash });
+    const exhausted = await fixture.drain();
+    expect(exhausted.status).toBe('failed');
+    expect(exhausted.error).toContain('Model call budget exhausted');
+    expect(exhausted.calls).toHaveLength(5); // Both planners and all executor revisions still count.
+    expect(fixture.complete).toHaveBeenCalledTimes(5);
+  });
+
+  it('reconciles a pre-offset unknown request that counted a reused ID across all revisions', async () => {
+    const fixture = await setup({ maxNodeIterations: 4 });
+    fixture.complete.mockRejectedValueOnce(new Error('Definite first executor failure'));
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('failed');
+    await fixture.engine.command(fixture.run.id, 'replan', {}); await fixture.engine.advance(fixture.run.id);
+    await fixture.engine.command(fixture.run.id, 'approve', { planHash: (await fixture.repository.get(fixture.run.id)).plans.at(-1)!.hash });
+    fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('Unknown after replanning'));
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
+    const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
+    const original = structuredClone(call.request)!;
+    // The pre-offset builder included the old revision's failed executor call.
+    (original.input as any).executionBudget.remainingModelCalls = 3;
+    const originalHash = digest(original);
+    await fixture.repository.mutate(unknown.id, current => {
+      for (const plan of current.plans) delete plan.modelCallOffset;
+      current.calls.at(-1)!.inputHash = originalHash;
+      delete current.calls.at(-1)!.request;
+    });
+    const providerCalls = fixture.complete.mock.calls.length;
+    await fixture.engine.reconcileModelCall(unknown.id, { callId: call.id, inputHash: originalHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed the pre-offset request', output: { type: 'finish', title: 'Report', content: 'The source summary reports blocked records.', evidenceRefs: [unknown.context.sources[0]!.id] } });
+    expect(await fixture.engine.advance(unknown.id)).toBe('running');
+    const recovered = await fixture.repository.get(unknown.id);
+    expect(recovered.calls.at(-1)).toMatchObject({ id: call.id, inputHash: originalHash, state: 'completed', request: original });
+    expect(fixture.complete).toHaveBeenCalledTimes(providerCalls);
+  });
+
   it('counts artifact repairs within the same model iteration allowance', async () => {
     const fixture = await setup({ maxNodeIterations: 2 }, input => ({ type: 'finish', title: 'Candidate', content: 'Partial', evidenceRefs: [input.sourceCatalog[0].id], ...(input.executionBudget.finalOnly ? {} : { artifactType: 'project-pulse/1' }) }));
     const finished = await fixture.drain();
