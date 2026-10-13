@@ -338,6 +338,8 @@ export class HttpModelAdapter implements ModelAdapter {
     const bodyWithControls = JSON.stringify({ ...baseBody, ...(thinking ? { thinking: { type: thinking } } : {}), ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) });
     const bodyWithoutControls = JSON.stringify(baseBody);
     let transportAttempt = 1;
+    // Pre-connection failures never reach the provider, so they get one extra backoff retry beyond maxAttempts.
+    let connectRetries = 0;
     for (let attempt = 1; ; attempt++) {
       const body = history.thinkingUnsupported ? bodyWithoutControls : bodyWithControls;
       const requestBodyHash = createHash('sha256').update(body).digest('hex');
@@ -473,6 +475,9 @@ export class HttpModelAdapter implements ModelAdapter {
         else if (signal.aborted && timeoutKind !== 'first-byte') retryDecision = 'not-retryable';
         else if (streamReceived && !signal.aborted) retryDecision = 'stream-started';
         else retryDecision = 'retry';
+        const errorCodeRaw = String((error as NodeJS.ErrnoException)?.code ?? ((error as Error)?.cause as NodeJS.ErrnoException | undefined)?.code ?? '');
+        const connectPhase = !signal.aborted && response === undefined && /^(?:UND_ERR_CONNECT_TIMEOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)$/.test(errorCodeRaw);
+        if (connectPhase && retryDecision === 'attempts-exhausted' && connectRetries < 1) retryDecision = 'connect-retry';
         let recordingFailed = false;
         const nextMidstreamRetry = history.midstreamRetries + 1;
         // Persist wire variants before sending them; never mutate the frozen logical request.
@@ -483,9 +488,10 @@ export class HttpModelAdapter implements ModelAdapter {
           }
           if (retryDecision === 'midstream-retry') await request.onMidstreamRetry?.({ midstreamRetries: nextMidstreamRetry, responseBytes });
         } catch { recordingFailed = true; retryDecision = 'retry-recording-failed'; }
-        const willRetry = ['retry', 'midstream-retry', 'thinking-unsupported'].includes(retryDecision);
+        const willRetry = ['retry', 'midstream-retry', 'thinking-unsupported', 'connect-retry'].includes(retryDecision);
         const delayMs = willRetry && retryDecision !== 'thinking-unsupported'
-          ? Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (transportAttempt - 1)) * (0.5 + Math.random() * 0.5)) : 0;
+          ? Math.max(retryDecision === 'connect-retry' || connectPhase ? Math.min(2_000, this.transport.retryMaxMs) : 0,
+            Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (transportAttempt - 1)) * (0.5 + Math.random() * 0.5))) : 0;
         const redact = (text: string): string => {
           if (this.apiKey) text = text.split(this.apiKey).join('[REDACTED]');
           return text.replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]').replace(/[\r\n]/g, ' ').slice(0, 1024);
@@ -502,13 +508,14 @@ export class HttpModelAdapter implements ModelAdapter {
           thinkingUnsupported: thinkingDowngrade || history.thinkingUnsupported || undefined,
           ...(streamReceived && responseBytes > 0 || history.usageUnknown ? { usageUnknown: true } : {}),
           ...(retryDecision === 'midstream-retry' || history.usageUnknown ? { billingRisk: 'duplicate-possible' } : {}),
-          maxTokens, timeoutKind: signal.aborted ? timeoutKind : undefined, retryable, willRetry, retryDecision, retryDelayMs: delayMs,
+          maxTokens, timeoutKind: signal.aborted ? timeoutKind : undefined, connectPhase: connectPhase || undefined, retryable, willRetry, retryDecision, retryDelayMs: delayMs,
         }));
         if (recordingFailed) throw new ModelOutcomeUnknown('Model retry could not be recorded; reconcile before retrying');
         if (willRetry) {
           retryDelayMs = delayMs;
           if (retryDecision === 'midstream-retry') { history.midstreamRetries = nextMidstreamRetry; history.usageUnknown = true; }
           else if (retryDecision === 'thinking-unsupported') history.thinkingUnsupported = true;
+          else if (retryDecision === 'connect-retry') connectRetries++;
           else transportAttempt++;
         } else if (httpError) throw httpError;
         else if (network) throw new ModelOutcomeUnknown(signal.aborted

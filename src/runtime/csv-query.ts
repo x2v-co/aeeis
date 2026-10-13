@@ -121,6 +121,19 @@ export function queryCsvSource(source: Source, input: unknown = {}) {
   const order = (query.orderBy ?? []).map(item => ({ ...item, index: requireColumn(outputColumns, item.column, 'orderBy') }));
   unique(order.map(item => item.column), 'orderBy');
   const predicates = query.filters.map(filter => predicate(filter, requireColumn(header, filter.column, 'filters')));
+  // Date-filter effectiveness: how many rows each ISO-date comparison kept vs. could not parse.
+  const dateFilters = query.filters.flatMap((filter, i) => ['gt', 'gte', 'lt', 'lte'].includes(filter.op) && typeof (filter as { value?: unknown }).value === 'string'
+    && csvNumber(String((filter as { value: unknown }).value)) === undefined && isoDate(String((filter as { value: unknown }).value)) !== undefined
+    ? [{ i, column: filter.column, op: filter.op, index: requireColumn(header, filter.column, 'filters'), passed: 0, nonDateCells: 0 }] : []);
+  if (dateFilters.length) {
+    for (const row of records) for (const stat of dateFilters) {
+      if (isoDate(row[stat.index] ?? '') === undefined) stat.nonDateCells++;
+      else if (predicates[stat.i]!(row)) stat.passed++;
+    }
+    console.info(JSON.stringify({ protocol: 'aeeis-csv-date-filter/1', sourceId: source.id, totalRows: records.length,
+      filters: dateFilters.map(({ column, op, passed, nonDateCells }) => ({ column, op, passed, rejected: records.length - passed - nonDateCells, nonDateCells,
+        effective: passed > 0 && passed < records.length })) }));
+  }
   const numericColumns = [...new Set(aggregates.filter(aggregate => ['sum', 'avg', 'min', 'max'].includes(aggregate.op)).map(aggregate => aggregate.column!))];
   const numericIndexes = numericColumns.map(name => requireColumn(header, name, 'aggregates'));
   const nonNumericCounts = Object.fromEntries(numericColumns.map(name => [name, 0]));
