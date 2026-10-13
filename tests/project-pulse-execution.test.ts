@@ -132,7 +132,7 @@ describe('Project Pulse finish output', () => {
       expect(result.sourceContentHash).toBe(materialContentHash(content));
       received += fragment;
       return result.page.nextRead ? { type: 'tool', tool: 'sources.read', ...result.page.nextRead } : finish(ref);
-    }, {}, [{ title: `brief.${extension}`, source: `browser-file:brief.${extension}`, content }]);
+    }, {}, [{ title: `brief.${extension}`, source: `browser-file:brief.${extension}`, content }], { maxNodeSourceChars: 24000 });
     const completed = await completeRun(engine, repository, run.id);
     expect(completed.status, completed.error).toBe('succeeded');
     expect(received).toBe(content);

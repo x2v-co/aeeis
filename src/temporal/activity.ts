@@ -19,7 +19,7 @@ export function createAdvanceRunActivity(options: AdvanceRunActivityOptions): (i
   // No HTTP exchange waits on the model. Undici/proxy 300s limits therefore
   // cannot interrupt a healthy long model stream. Retried activities rejoin
   // the durable in-flight tick instead of replaying provider requests.
-  const timeoutMs = options.timeoutMs ?? 20 * 60_000;
+  const timeoutMs = options.timeoutMs ?? 60 * 60_000;
   return async (id: string): Promise<AdvanceRunActivityResult> => {
     const overall = AbortSignal.timeout(timeoutMs);
     let context: Context | undefined;

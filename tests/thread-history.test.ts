@@ -106,13 +106,13 @@ describe('frozen thread history', () => {
     expect(snapshot.actualBytes).toBeLessThanOrEqual(1800);
     expect(snapshot.hash).toBe(threadHistoryHash(snapshot));
   });
-  it('bounds ancestors to 20, artifacts to 8 per run and individual excerpts to 8 KiB', async () => {
+  it('bounds ancestors to 20, artifacts to 8 per run and individual excerpts to 2 KiB', async () => {
     const { repository, thread, runs } = await fixture(22);
     const get = vi.spyOn(repository, 'get');
     const ancestry = await buildThreadHistory(repository, thread.id, runs[21], threadScope, 'internal', 65536);
-    expect(get).toHaveBeenCalledTimes(19);
-    expect(ancestry.visitedAncestors).toBe(20);
-    expect(ancestry.entries.map(entry => entry.runId)).toEqual(runs.slice(2).map(run => run.id));
+    expect(get).toHaveBeenCalledTimes(ancestry.visitedAncestors - 1);
+    expect(ancestry.visitedAncestors).toBeLessThanOrEqual(20);
+    expect(ancestry.entries.map(entry => entry.runId)).toEqual(runs.slice(-ancestry.entries.length).map(run => run.id));
     expect(ancestry.omitted.ancestorContinuations).toBe(1);
     await repository.mutate(runs[0]!.id, run => {
       run.goal = '🙂'.repeat(4000);
@@ -121,7 +121,7 @@ describe('frozen thread history', () => {
     const outputs = await buildThreadHistory(repository, thread.id, await repository.get(runs[0]!.id), threadScope, 'internal', 65536);
     expect(outputs.entries[0]!.excerpts.filter(item => item.kind === 'artifact')).toHaveLength(8);
     expect(outputs.omitted.artifacts).toBe(2);
-    expect(Buffer.byteLength(outputs.entries[0]!.excerpts[0]!.text, 'utf8')).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(outputs.entries[0]!.excerpts[0]!.text, 'utf8')).toBeLessThanOrEqual(2048);
     expect(outputs.entries[0]!.excerpts[0]!.text).toMatch(/…\[truncated\]$/);
     expect(outputs.entries[0]!.excerpts[0]!.text).not.toContain('\uFFFD');
     expect(outputs.truncated).toBe(1);

@@ -137,7 +137,7 @@ export class HttpCatalogModelFactory implements CatalogModelFactory {
 }
 
 function withPin(adapter: ModelAdapter, pin: ModelPin): ModelAdapter {
-  return { pin, complete: request => adapter.complete(request), ...(adapter.health ? { health: () => adapter.health!() } : {}) };
+  return { pin, complete: request => adapter.complete(request), ...(adapter.requestDefaults ? { requestDefaults: () => adapter.requestDefaults!() } : {}), ...(adapter.health ? { health: () => adapter.health!() } : {}) };
 }
 
 function endpointHash(endpoint: string): string {

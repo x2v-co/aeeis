@@ -149,7 +149,7 @@ PostgreSQL 的 `PostgresRunRepository.init` 在现有 `runs` migration advisory 
 
 | 环境变量 | 默认值 | 限制与作用 |
 | --- | --- | --- |
-| `AEEIS_THREAD_CONTEXT_BUDGET_BYTES` | `32768` bytes（32 KiB） | 正整数，最大 `65536`；服务端 follow-up history 预算及请求上限；每个请求只能调低 |
+| `AEEIS_THREAD_CONTEXT_BUDGET_BYTES` | `12288` bytes（12 KiB） | 正整数，最大 `65536`；服务端 follow-up history 预算及请求上限；每个请求只能调低；新快照单个摘录最多 2 KiB，渲染后最多 16 KiB |
 | `AEEIS_SHARE_TTL_SECONDS` | `604800` seconds（7 天） | 正整数，最多 `31536000`；有效默认值取本值与 maximum 的较小者，Run 与 Thread share 共用 |
 | `AEEIS_SHARE_MAX_TTL_SECONDS` | `2592000` seconds（30 天） | 正整数，最多 `31536000`；share 请求 `ttlSeconds` 的上限 |
 

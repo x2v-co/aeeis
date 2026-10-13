@@ -13,6 +13,15 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it('validates opt-in thinking/effort and the initial token ceiling', () => {
+    for (const value of ['enabled', 'disabled', 'auto']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_THINKING: value })).not.toThrow();
+    for (const value of ['minimal', 'low', 'medium', 'high']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_REASONING_EFFORT: value })).not.toThrow();
+    for (const name of ['AEEIS_MODEL_THINKING', 'AEEIS_MODEL_REASONING_EFFORT']) for (const value of ['', 'true', 'unknown']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+    for (const value of ['1', '4096', '16384', '1000000']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_MAX_TOKENS: value })).not.toThrow();
+    for (const value of ['', '0', '-1', '1.5', 'NaN', '1000001']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_MAX_TOKENS: value })).toThrow('AEEIS_MODEL_MAX_TOKENS');
+    for (const value of ['12288', '32768', '65536']) expect(() => validateRuntimeConfig({ ...development, AEEIS_THREAD_CONTEXT_BUDGET_BYTES: value })).not.toThrow();
+    for (const value of ['', '0', '-1', 'NaN', '65537']) expect(() => validateRuntimeConfig({ ...development, AEEIS_THREAD_CONTEXT_BUDGET_BYTES: value })).toThrow('AEEIS_THREAD_CONTEXT_BUDGET_BYTES');
+  });
   it('validates durable execution allowances and explicit idle retry opt-in', () => {
     for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: value })).not.toThrow();
     expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_RETRY_EMPTY_IDLE: 'true' })).toThrow('AEEIS_MODEL_RETRY_EMPTY_IDLE');
@@ -25,10 +34,12 @@ describe('runtime configuration validation', () => {
   it('validates streaming configuration and bounded idle/overall deadlines', () => {
     for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).not.toThrow();
     for (const value of ['', 'true', '2']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).toThrow('AEEIS_MODEL_STREAM');
-    for (const name of ['AEEIS_MODEL_IDLE_TIMEOUT_MS', 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS']) {
+    for (const name of ['AEEIS_MODEL_IDLE_TIMEOUT_MS', 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS', 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS']) {
       for (const value of ['1000', '180000', '600000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
-      for (const value of ['0', '999', '-1', 'NaN', '1.5', '600001', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+      for (const value of ['0', '999', '-1', 'NaN', '1.5', name === 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS' ? '1800001' : '600001', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
     }
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS: '900000' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS: '1800000' })).not.toThrow();
   });
   it.each([
     {},

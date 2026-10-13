@@ -115,7 +115,7 @@ Thread releases apply additive run-repository migrations `002-threads.sql`,
 `003-thread-followups.sql` and `004-thread-shares.sql` after 001 under the existing
 migration lock. Rehearse DDL lock duration, preserve the tables on rollback, and
 keep old writers away from threaded runs. Defaults are
-`AEEIS_THREAD_CONTEXT_BUDGET_BYTES=32768`, `AEEIS_SHARE_TTL_SECONDS=604800` and
+`AEEIS_THREAD_CONTEXT_BUDGET_BYTES=12288`, `AEEIS_SHARE_TTL_SECONDS=604800` and
 `AEEIS_SHARE_MAX_TTL_SECONDS=2592000`; the TTL settings are shared with run links.
 See the [thread operator note](../../docs/operations/runbook.md#11-threads-部署与恢复)
 for exact limits, backups and reservation/dispatch recovery.
@@ -140,16 +140,61 @@ for exact limits, backups and reservation/dispatch recovery.
   to terminate the exact listed executions. Pause operator retries while applying;
   unknown, paused and waiting Runs are preserved. Status lookup or termination
   failures abort the tool. The API image must include the new internal status route.
-- Model transport uses `AEEIS_MODEL_TIMEOUT_MS` for each request, including
-  response bodies, and `AEEIS_MODEL_MAX_ATTEMPTS` (default 3). Retryable failures
-  are network errors/timeouts, 429 and 5xx; other 4xx fail immediately. Backoff
-  uses `AEEIS_MODEL_RETRY_BASE_MS` / `AEEIS_MODEL_RETRY_MAX_MS` with jitter.
-  The run activity allows 20 minutes, with a 25 minute Temporal deadline, so
-  the default 180s requests, transport retries and one length retry can finish.
-  Keep custom retry/timeout combinations within that overall activity budget.
-  Inspect `aeeis-model-error/1` logs for status, request ID, attempt, elapsed time,
-  code and a bounded body excerpt. Exhausted network/5xx failures remain unknown;
-  retrying the same idempotency key can still incur additional provider charges.
+- Model transport separates first-byte, idle and overall deadlines. See the
+  [ARK investigation and prompt measurements](../../docs/ark-latency.md).
+  `AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS=120000` bounds waiting for the first body
+  byte, including headers (1000–600000ms). Headers do not reset this clock.
+  After a body byte, `AEEIS_MODEL_IDLE_TIMEOUT_MS=180000` bounds streaming gaps
+  (1000–600000ms); reasoning and heartbeats count as activity.
+  `AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS=900000` bounds each streaming HTTP
+  attempt even with activity (1000–1800000ms). `AEEIS_MODEL_TIMEOUT_MS=180000`
+  remains the non-streaming full-response deadline. There is no 600s total Run
+  deadline. Async advance polling allows 60 minutes per tick; newly scheduled
+  Temporal activities allow 65 minutes, with two-hour schedule-to-close. Old
+  activity commands retain their prior deadlines through a replay-safe patch.
+  Default first-byte retries plus one completed length retry fit this window;
+  keep custom timeout/attempt combinations within it.
+- `AEEIS_MODEL_MAX_ATTEMPTS=3` includes the first attempt (1–10).
+  `AEEIS_MODEL_RETRY_EMPTY_IDLE=1` now enables only zero-byte **first-byte**
+  timeout retries, requiring the unchanged idempotency key and body, up to max
+  attempts. Set `0` to disable. Exhausted calls remain unknown and need explicit
+  reconciliation. No automatic replay follows any body byte, including a
+  heartbeat, reasoning delta, malformed frame or HTTP error body. Empty 429/5xx
+  responses and pre-byte network errors retain bounded transport retries;
+  other 4xx fail immediately. Backoff retains `AEEIS_MODEL_RETRY_BASE_MS=500`
+  and `AEEIS_MODEL_RETRY_MAX_MS=10000` with jitter (both 0–60000; max >= base).
+  **Billing risk:** zero received bytes are not proof that the provider did no
+  work. Even an unchanged key can incur duplicate charges if the provider
+  ignores idempotency. AEEIS cannot meter invisible attempts. Automatic model
+  fallback is not implemented: it needs durable provider-attempt pins and
+  billing/reconciliation records, beyond the current one-provider Run pin.
+- `AEEIS_MODEL_MAX_TOKENS=16384` sets the initial output ceiling (1–1000000).
+  Planner/repair calls start at min(4096, ceiling); executor/finish/reviewer
+  calls use the ceiling or a smaller pin allowance. A completed length retry
+  doubles once, bounded by the provider output cap. Optional
+  `AEEIS_MODEL_THINKING=enabled|disabled|auto` sends ARK `thinking.type`;
+  `AEEIS_MODEL_REASONING_EFFORT=minimal|low|medium|high` sends `reasoning_effort`.
+  Leave both **unset** to omit them (empty strings are invalid). Support and
+  interactions depend on the actual model; for SG, evaluate `thinking=disabled`
+  or `reasoning_effort=low` against output quality before rollout. Controls and
+  initial tokens are saved with each call, so reconciliation preserves its
+  original body after environment changes.
+- Prompts present up to 6000 source chars per phase. CSV retains whole-data
+  statistics/schema and samples, large MD/JSON planning uses outline/shape
+  summaries, and executors use `sources.csvQuery` or bounded source readers.
+  `AEEIS_MAX_NODE_SOURCE_CHARS=12000` / `AEEIS_MAX_RUN_SOURCE_CHARS=36000` bound
+  cumulative serialized source-tool results. Page defaults remain 4/12;
+  character limits can reserve the final partial finish earlier. New follow-up
+  history defaults to 12 KiB, with 2 KiB excerpts and a 16 KiB rendered cap;
+  frozen existing snapshots and saved requests are preserved.
+- On deploy, update any explicit old values in the stack env (they override
+  these defaults), recreate the API and worker, and run the existing Temporal
+  replay gate. Inspect `aeeis-model-completion/1` logs for headers/first-byte/
+  elapsed milliseconds, prompt chars, max tokens and reported usage;
+  `aeeis-model-error/1` adds timeout kind, bytes, attempts and retry decisions.
+  Success logs omit prompts/output; provider error excerpts remain bounded and
+  credential-redacted. Check duplicate billing with
+  the provider using request IDs before authorizing later unknown-call replays.
 - Run workflows complete on `succeeded`, `failed` and `cancelled`. `unknown`
   provider outcomes park without polling until explicit reconciliation signals
   `wake`; Temporal still reports a parked workflow as RUNNING. Unchanged active

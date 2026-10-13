@@ -29,6 +29,7 @@ import { JsonFileStore } from './adapters/json-store.js';
 import { PostgresAeeisStore } from './adapters/postgres-store.js';
 import { AeeisService } from './application/aeeis-service.js';
 import { ThreadService } from './application/thread-service.js';
+import { DEFAULT_THREAD_HISTORY_BYTES } from './runtime/thread-history.js';
 import { oauthClientConfigsSchema } from './oauth.js';
 import { HttpRsiEvaluationHarness, evaluationSuiteSchema } from './evaluation.js';
 import { FeishuAppProjectionSink, FeishuWebhookProjectionSink, FileProjectionOutbox, HermesCliProjectionSink, HttpProjectionSink, PostgresProjectionOutbox, RoutingProjectionSink, type ProjectionSink } from './collaboration-projection.js';
@@ -462,7 +463,7 @@ try {
   }
   if (modelServices) {
     engine = new AgentEngine(repository, { ...modelServices, executionLimits: executionLimitsConfig(process.env), domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
-    await new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? 32768)).recover();
+    await new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? DEFAULT_THREAD_HISTORY_BYTES)).recover();
     await engine.recover();
     if (process.env.AEEIS_RUNNER === 'temporal') {
       if (!process.env.AEEIS_WORKER_TOKEN) throw new Error('Temporal requires AEEIS_WORKER_TOKEN');

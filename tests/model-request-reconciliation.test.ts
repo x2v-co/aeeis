@@ -60,13 +60,13 @@ describe('model request compatibility across upgrades', () => {
     const engine = new AgentEngine(repository, model), run = await engine.create({ goal: 'Preserve exact inputs' });
     expect(await engine.advance(run.id)).toBe('unknown');
     const unknown = await repository.get(run.id), call = unknown.calls[0]!;
-    expect(call.modelRequest).toEqual({ system: original[0]!.system, input: original[0]!.input });
+    expect(call.modelRequest).toEqual({ system: original[0]!.system, input: original[0]!.input, maxTokens: original[0]!.maxTokens });
     expect(digest(call.modelRequest)).toBe(call.inputHash);
     await repository.mutate(run.id, current => { current.goal = 'Changed reconstruction input'; });
     const upgraded = new AgentEngine(repository, model);
     await upgraded.command(run.id, 'reconcile', { reason: 'Provider checked; exact replay authorized' });
     expect(await upgraded.advance(run.id)).toBe('needs_approval');
-    expect({ system: original[1]!.system, input: original[1]!.input }).toEqual(call.modelRequest);
+    expect({ system: original[1]!.system, input: original[1]!.input, maxTokens: original[1]!.maxTokens }).toEqual(call.modelRequest);
     expect(original[1]!.idempotencyKey).toBe(call.idempotencyKey);
     expect((await repository.get(run.id)).calls).toHaveLength(1);
   });
