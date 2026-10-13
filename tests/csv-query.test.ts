@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { csvNumber, queryCsvSource } from '../src/runtime/csv-query.js';
+import { csvNumber, queryCsvSource, CsvQueryInputError } from '../src/runtime/csv-query.js';
 import { materialContentHash, parseCsv } from '../src/runtime/materials.js';
 import type { Source } from '../src/runtime/contracts.js';
 
@@ -177,5 +177,15 @@ describe('strict CSV query validation', () => {
     expect(() => queryCsvSource(source('notes', { title: 'notes.txt' }))).toThrow('requires a CSV source');
     for (const content of ['', '\uFEFF', ',amount\n1,2', 'id, \n1,2']) expect(() => queryCsvSource(source(content))).toThrow('non-empty header');
     expect(() => queryCsvSource(source('id,id\n1,2'))).toThrow('header contains duplicate');
+  });
+});
+
+describe('csvQuery ISO date comparisons', () => {
+  it('compares ISO dates chronologically and skips non-date cells', () => {
+    const result = queryCsvSource(source('id,due\n1,2026-10-01\n2,2026-11-15\n3,\n4,tbd\n5,2026-10-13T08:00:00Z'), { filters: [{ column: 'due', op: 'lt', value: '2026-10-14' }], select: ['id'] });
+    expect(result.rows.map(row => row[0] ?? (row as unknown as Record<string, unknown>).id)).toEqual(['1', '5']);
+  });
+  it('throws a recoverable input error for non-numeric, non-date operands', () => {
+    expect(() => queryCsvSource(source('id,due\n1,2026-10-01'), { filters: [{ column: 'due', op: 'lt', value: 'next week' }] })).toThrow(CsvQueryInputError);
   });
 });

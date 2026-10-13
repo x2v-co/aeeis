@@ -41,12 +41,25 @@ export function csvNumber(value: string): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+/** Invalid model-supplied query arguments; recoverable by the executor. */
+export class CsvQueryInputError extends Error { readonly errorCode = 'invalid_input'; }
+
+const isoDatePattern = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+/** ISO-8601 date/datetime to epoch ms; date-only and zone-less values are treated as UTC. */
+export function isoDate(cell: string): number | undefined {
+  const trimmed = cell.trim();
+  if (!isoDatePattern.test(trimmed)) return undefined;
+  const normalized = trimmed.replace(' ', 'T');
+  const value = Date.parse(/T/.test(normalized) && !/(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? `${normalized}Z` : normalized);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 function unique(values: string[], field: string): void {
-  if (new Set(values).size !== values.length) throw new Error(`CSV query ${field} contains duplicate columns or aliases`);
+  if (new Set(values).size !== values.length) throw new CsvQueryInputError(`CSV query ${field} contains duplicate columns or aliases`);
 }
 function requireColumn(names: string[], name: string, field: string): number {
   const index = names.indexOf(name);
-  if (index < 0) throw new Error(`CSV query ${field}: unknown column ${JSON.stringify(name)}`);
+  if (index < 0) throw new CsvQueryInputError(`CSV query ${field}: unknown column ${JSON.stringify(name)}`);
   return index;
 }
 
@@ -57,10 +70,12 @@ function predicate(filter: CsvQueryOptions['filters'][number], index: number): (
   if (filter.op === 'contains') return row => (row[index] ?? '').trim().includes(filter.value);
   if (filter.op === 'in') return row => filter.value.some(value => equal((row[index] ?? '').trim(), value));
   if (filter.op === 'eq' || filter.op === 'ne') return row => equal((row[index] ?? '').trim(), filter.value) === (filter.op === 'eq');
-  const operand = typeof filter.value === 'number' ? filter.value : typeof filter.value === 'string' ? csvNumber(filter.value) : undefined;
-  if (operand === undefined) throw new Error(`CSV query ${filter.op} filter for ${JSON.stringify(filter.column)} requires a finite numeric value`);
+  const dateOperand = typeof filter.value === 'string' ? isoDate(filter.value) : undefined;
+  const operand = typeof filter.value === 'number' ? filter.value : typeof filter.value === 'string' ? (csvNumber(filter.value) ?? dateOperand) : undefined;
+  if (operand === undefined) throw new CsvQueryInputError(`CSV query ${filter.op} filter for ${JSON.stringify(filter.column)} requires a finite numeric value or an ISO date (YYYY-MM-DD[THH:MM[:SS][Z|±HH:MM]])`);
+  const parse = dateOperand !== undefined && csvNumber(String(filter.value)) === undefined ? isoDate : csvNumber;
   return row => {
-    const value = csvNumber(row[index] ?? '');
+    const value = parse(row[index] ?? '');
     if (value === undefined) return false;
     if (filter.op === 'gt') return value > operand;
     if (filter.op === 'gte') return value >= operand;
@@ -87,9 +102,9 @@ interface AggregateState { count: number; value: number | null; distinct: Set<st
 /** Query all stored rows before limiting/bounding the returned evidence. */
 export function queryCsvSource(source: Source, input: unknown = {}) {
   const parsed = csvQueryOptionsSchema.safeParse(input);
-  if (!parsed.success) throw new Error(`Invalid CSV query arguments: ${parsed.error.issues.map(issue => `${issue.path.join('.') || '$'}: ${issue.message}`).join('; ')}`);
+  if (!parsed.success) throw new CsvQueryInputError(`Invalid CSV query arguments: ${parsed.error.issues.map(issue => `${issue.path.join('.') || '$'}: ${issue.message}`).join('; ')}`);
   const query = parsed.data;
-  if (materialFormat(source) !== 'csv') throw new Error('CSV query requires a CSV source');
+  if (materialFormat(source) !== 'csv') throw new CsvQueryInputError('CSV query requires a CSV source');
   const records = parseCsv(source.content), header = records.shift();
   if (!header?.length || header.some(name => !name.trim())) throw new Error('CSV query requires a non-empty header with non-blank column names');
   unique(header, 'header');
@@ -136,7 +151,7 @@ export function queryCsvSource(source: Source, input: unknown = {}) {
       if (aggregate.op === 'min') state.value = state.value === null ? number : Math.min(state.value, number);
       else if (aggregate.op === 'max') state.value = state.value === null ? number : Math.max(state.value, number);
       else state.value = (state.value ?? 0) + number;
-      if (!Number.isFinite(state.value)) throw new Error(`CSV query aggregate ${JSON.stringify(aggregate.as)} overflowed a finite number`);
+      if (!Number.isFinite(state.value)) throw new CsvQueryInputError(`CSV query aggregate ${JSON.stringify(aggregate.as)} overflowed a finite number`);
     });
   }
   if (grouped) rows = [...groups.values()].map(group => [...group.keys, ...aggregates.map((aggregate, i) => {
@@ -167,6 +182,6 @@ export function queryCsvSource(source: Source, input: unknown = {}) {
   while (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS && result.rows.length) {
     result.rows.pop(); result.returnedRows = result.rows.length; result.truncated = true;
   }
-  if (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS) throw new Error('CSV query metadata exceeds the 6000 character result budget; select fewer or shorter columns/aliases');
+  if (JSON.stringify(result).length > LATEST_OBSERVATION_RESULT_CHARS) throw new CsvQueryInputError('CSV query metadata exceeds the 6000 character result budget; select fewer or shorter columns/aliases');
   return result;
 }
