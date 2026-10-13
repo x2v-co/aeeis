@@ -174,6 +174,7 @@ describe('durable execution allowances', () => {
     const original = structuredClone(call.modelRequest)!;
     // The pre-offset builder included the old revision's failed executor call.
     (original.input as any).executionBudget.remainingModelCalls = 3;
+    delete (original.input as any).clock; // pre-offset requests predate clock injection
     const originalHash = digest(original);
     await fixture.repository.mutate(unknown.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;

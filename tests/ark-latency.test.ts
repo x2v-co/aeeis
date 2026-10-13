@@ -74,6 +74,7 @@ it.each(['saved request', 'legacy hash'])('preserves omitted provider controls a
     const call = current.calls[0]!;
     delete call.modelRequest!.thinking; delete call.modelRequest!.reasoningEffort; delete call.modelRequest!.maxTokens;
     if (format === 'legacy hash') call.modelRequest!.system = call.modelRequest!.system.replace(/\nPlan a small number of useful tasks[^\n]+/, '');
+    if (format === 'legacy hash') delete (call.modelRequest!.input as Record<string, unknown>).clock; // legacy requests predate clock injection
     call.inputHash = digest(call.modelRequest);
     if (format === 'legacy hash') delete call.modelRequest;
   });
