@@ -58,8 +58,8 @@ class MissingSourceFixture implements ModelAdapter {
     if (request.system.includes('Independently review')) {
       return { value: { verdict: 'accepted', summary: 'No review is needed while input is pending', issues: [] } };
     }
-    const input = request.input as { answers?: Array<{ answer: string }> };
-    if (input.answers?.length) return { value: { type: 'finish', title: '补充信息结果', content: `已使用补充信息：${input.answers.at(-1)!.answer}`, evidenceRefs: [] } };
+    const input = request.input as { answers?: Array<{ answer: string }>; sourceCatalog: Array<{ id: string }> };
+    if (input.answers?.length) return { value: { type: 'finish', title: '补充信息结果', content: `已使用补充信息：${input.answers.at(-1)!.answer}`, evidenceRefs: input.sourceCatalog.map(source => source.id) } };
     return { value: { type: 'question', question: '请提供可核验的资料或允许访问天气数据的工具。当前任务没有可用证据来源。' } };
   }
 }
@@ -292,11 +292,11 @@ class StreamingDelegationFixture extends DelegationFixture {
 }
 
 describe('AEEIS runtime', () => {
-  it('asks for input instead of emitting a source tool call without a source', async () => {
+  it('keeps source-backed questions answerable without emitting a source tool call', async () => {
     const repo = await repository();
     const model = new MissingSourceFixture();
     const engine = new AgentEngine(repo, model);
-    const run = await engine.create({ goal: '明天北京天气是什么' });
+    const run = await engine.create({ goal: '明天北京天气是什么', materials: [{ title: '天气说明', content: '北京天气暂无可用实时接口', source: 'user' }] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
     await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });

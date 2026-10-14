@@ -1,5 +1,6 @@
 import type { AgentRun, RunStatus } from './contracts.js';
 import { projectRunGraphs } from './graphs.js';
+import { runInputRequest } from './input-requests.js';
 
 /**
  * A compact, read-only explanation of a Run.  The Run aggregate remains the
@@ -77,7 +78,11 @@ function countState(counter: Counter, state: string): void {
 
 function attentionFor(run: AgentRun): RunExplanation['attention'] {
   if (run.status === 'needs_approval') return { kind: 'approve_plan', nextAction: '核对并批准当前计划的精确 hash 后继续执行。', blockers: [{ kind: 'approval', detail: run.approval ? `等待批准计划 ${run.approval.planHash}` : '当前计划尚未批准', refs: run.approval?.planHash ? [run.approval.planHash] : [] }] };
-  if (run.status === 'needs_input') return { kind: 'provide_input', nextAction: '回答 Agent 的问题，提供继续执行所需的信息。', blockers: [{ kind: 'input', detail: run.question?.text ?? '等待用户输入', refs: run.question?.taskId ? [run.question.taskId] : [] }] };
+  if (run.status === 'needs_input') {
+    const request = runInputRequest(run);
+    const detail = request ? `${request.question} (kind=${request.kind}; missing=${request.missing.join(', ') || 'none'})` : '等待用户输入';
+    return { kind: 'provide_input', nextAction: '回答 Agent 的问题，提供继续执行所需的信息。', blockers: [{ kind: 'input', detail, refs: run.question?.taskId ? [run.question.taskId] : [] }] };
+  }
   if (run.status === 'waiting_external' || run.status === 'unknown') return { kind: 'reconcile_external', nextAction: '核查外部 Tool、Agent 或模型的最终结果；不明结果不会被盲目重试。', blockers: [{ kind: run.status, detail: run.pendingTool ? `等待 Tool ${run.pendingTool.toolId} 的核查` : run.pendingDelegation?.failure ? `Agent 返回被拒绝（${run.pendingDelegation.failure.kind}）：${run.pendingDelegation.failure.message}` : run.pendingDelegation ? `等待 Agent ${run.pendingDelegation.agentId} 的核查` : '存在需要显式核查的外部结果', refs: [ ...(run.pendingTool?.receiptId ? [run.pendingTool.receiptId] : []), ...(run.pendingDelegation?.receiptRef ? [run.pendingDelegation.receiptRef] : []) ] }] };
   if (run.status === 'paused') return { kind: 'resume', nextAction: '确认边界后恢复运行，或取消本次 Run。', blockers: [{ kind: 'paused', detail: 'Run 已暂停，外部结果不会自动唤醒它。', refs: [] }] };
   if (run.status === 'reviewing') return { kind: 'review', nextAction: '等待独立审核完成，或检查审核输入和证据。', blockers: [{ kind: 'review', detail: '产物已生成，正在等待独立 Reviewer。', refs: [] }] };

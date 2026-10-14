@@ -2,6 +2,7 @@ import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
 import { debugBundle, redactRunData, sharedRunView } from './run-debug.js';
+import { runInputRequest } from './input-requests.js';
 import { artifactFilename } from './artifact-download.js';
 import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-material.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
@@ -1336,7 +1337,7 @@ export function buildApp(options: Options) {
     if (!options.brain || !options.brainStore) throw new Error('Brain is not configured');
     options.brain.deleteScope(request.params.scope, principalOf(request)); await options.brainStore.save(options.brain); return { status: 'deleted' };
   });
-  app.get<{ Querystring: { limit?: string } }>('/api/runs', async request => { const principal = principalOf(request); const limit = collectionLimit(request.query); const runs = await listReadableRuns(options.repository, options.domain, principal, limit); return runs.map(({ id, goal, goalId, domainPlanId, taskExecution, followUpPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), ...(taskExecution ? { taskExecution } : {}), ...(followUpPlanId ? { followUpPlanId } : {}), status, updatedAt })); });
+  app.get<{ Querystring: { limit?: string } }>('/api/runs', async request => { const principal = principalOf(request); const limit = collectionLimit(request.query); const runs = await listReadableRuns(options.repository, options.domain, principal, limit); return runs.map(runSummary); });
   app.get<{ Querystring: { limit?: string; cursor?: string } }>('/api/runs/page', async request => {
     const principal = principalOf(request); const limit = cursorCollectionLimit(request.query);
     if (limit === undefined) throw new RangeError('limit is required for cursor pagination');
@@ -1345,7 +1346,7 @@ export function buildApp(options: Options) {
       return { items: result.runs.map(runSummary), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) };
     }
     const result = await pageReadableRuns(options.repository, options.domain, principal, limit, request.query.cursor);
-    return { items: result.runs.map(({ id, goal, goalId, domainPlanId, taskExecution, followUpPlanId, status, updatedAt }) => ({ id, goal, ...(goalId ? { goalId } : {}), ...(domainPlanId ? { domainPlanId } : {}), ...(taskExecution ? { taskExecution } : {}), ...(followUpPlanId ? { followUpPlanId } : {}), status, updatedAt })), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) };
+    return { items: result.runs.map(runSummary), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) };
   });
   app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string } }>('/api/runs/:id/events', async request => {
     const eventsPage = options.repository.eventsPage;
@@ -1792,8 +1793,9 @@ function readableRunAfter(run: AgentRun, cursor: ReadableRunCursor | undefined):
 function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
-function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt'> {
-  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt };
+function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
+  const inputRequest = runInputRequest(run);
+  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}) };
 }
 async function readableRunCandidates(repository: RunRepository, domain: AeeisService | undefined, principal: Principal): Promise<AgentRun[]> {
   const all = principal.roles.includes('operator')
