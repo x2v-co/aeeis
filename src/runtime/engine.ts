@@ -1,3 +1,5 @@
+import { sourceFidelityGuidance, pulseFidelityProblems, inferenceFidelityProblems, normalizeSourceUnknowns } from './sourceFidelityRules.js';
+export { sourceFidelityGuidance, pulseFidelityProblems } from './sourceFidelityRules.js';
 import { modelRawOutput, redactRunData } from './run-debug.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -297,6 +299,10 @@ export function coerceStringArtifactItems(structured: Record<string, unknown>, f
   return out;
 }
 
+function finishProtocolLog(protocol: string, data: Record<string, unknown>): void {
+  console.warn(JSON.stringify({ protocol, ...data }));
+}
+
 function requestFinishRepair(run: AgentRun, step: Step, candidate: unknown, reason: string): void {
   const call = run.calls.at(-1);
   const errors = [{ path: 'finish.structured', code: 'invalid_artifact', message: reason }];
@@ -319,11 +325,11 @@ function canonicalEvidenceRef(ref: string, allowed: Set<string>, known = allowed
   return resolve(trimmed) ?? resolve(trimmed.replace(/^(?:source|artifact|receipt):\s*/i, '')) ?? trimmed;
 }
 
-function normalizeArtifactRefs<T>(value: T, resolve: (ref: string) => string): T {
+function normalizeArtifactRefs<T>(value: T, resolve: (refs: string[]) => string[]): T {
   if (Array.isArray(value)) return value.map(item => normalizeArtifactRefs(item, resolve)) as T;
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-    key === 'evidenceRefs' && Array.isArray(item) ? item.map(resolve) : normalizeArtifactRefs(item, resolve),
+    key === 'evidenceRefs' && Array.isArray(item) && item.every(ref => typeof ref === 'string') ? resolve(item) : normalizeArtifactRefs(item, resolve),
   ])) as T;
 }
 
@@ -338,14 +344,9 @@ export function runClock(run: Pick<AgentRun, 'createdAt'>, timeZone = process.en
     note: 'Use currentDate as "today". Dates inside sources (createdAt, exported_at, etc.) describe the data, not the current date.' };
 }
 
-export const evidenceWritingGuidance = '\nEvidence writing rules: cite concrete evidence IDs copied exactly from availableEvidenceRefs, e.g. [source_…]. Never write placeholders such as [证据], [evidence], [来源], [source], [citation] or [ID]; a finish containing a placeholder or an ID that is not in availableEvidenceRefs is rejected. Facts must be evidence-backed. Put every inference, recommendation or assumption without direct evidence under a separate heading titled exactly "推断" (or "Inference" for English output); never mix them into factual sections. Dates from clock (e.g. "as of today") come from the system clock and are not source facts.';
+export const evidenceWritingGuidance = '\nEvidence writing rules: cite concrete evidence IDs copied exactly from availableEvidenceRefs, e.g. [source_…]. Never write placeholders such as [证据], [evidence], [来源], [source], [citation] or [ID]; a finish containing a placeholder or an ID that is not in availableEvidenceRefs is rejected. Facts must be evidence-backed. Dates from clock (e.g. "as of today") come from the system clock and are not source facts.';
 const placeholderPattern = /\[(?:证据|依据|来源|出处|引用|evidence|source|sources|citation|cite|ref|ID|id)(?:\s*(?:ID|id|\d+|…|\.\.\.))?\]|【(?:证据|来源|引用)】/;
 const inlineIdPattern = /\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
-/** Source-fidelity rules for Project Pulse items (deterministic, pre-review). */
-export const sourceFidelityGuidance = '\nSource fidelity rules: unknowns list only questions or gaps the sources themselves leave open (e.g. a field the source marks TBD/待定 or a missing owner); never put your own inference there. Any inferred blocker, risk or next action must start with "推断：" (or "Inference: " for English output). Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id.';
-const fullDatePattern = /\b(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?/;
-const partialDatePattern = (month: number, day: number) => new RegExp(`(?<![\\d/.-])0?${month}\\s*[-/.月]\\s*0?${day}(?![\\d])`);
-
 /** Resolve refs like "source_x#row3" or "source_x:rows 1-4" to an observed base id. */
 export function baseEvidenceRef(ref: string, observed: Set<string>): string {
   if (observed.has(ref)) return ref;
@@ -355,29 +356,13 @@ export function baseEvidenceRef(ref: string, observed: Set<string>): string {
 
 /** Expand dependency artifact refs into the source evidence they were built from. */
 export function sourceLevelRefs(refs: string[], dependencies: Array<{ id: string; evidenceRefs: string[] }>): string[] {
-  const out: string[] = [];
-  for (const ref of refs) {
+  const expand = (ref: string, seen: Set<string>): string[] => {
+    if (seen.has(ref)) return [ref];
     const dependency = dependencies.find(artifact => artifact.id === ref);
-    if (dependency && dependency.evidenceRefs.length) out.push(...dependency.evidenceRefs); else out.push(ref);
-  }
-  return [...new Set(out)];
-}
-
-/** Dates in a Project Pulse artifact must keep the source's precision: no invented years. */
-export function pulseFidelityProblems(structured: ProjectPulseArtifact, sourceText: (refs: string[]) => string): string[] {
-  const problems: string[] = [];
-  for (const item of structured.deadlines) {
-    const match = fullDatePattern.exec(item.date) ?? fullDatePattern.exec(item.text);
-    if (!match) continue;
-    const text = sourceText(item.evidenceRefs);
-    if (!text) continue;
-    const [full, year, month, day] = match;
-    const normalized = new RegExp(`${year}\\s*[-/.年]\\s*0?${Number(month)}\\s*[-/.月]\\s*0?${Number(day)}`);
-    if (!normalized.test(text) && partialDatePattern(Number(month), Number(day)).test(text)) {
-      problems.push(`deadline date ${JSON.stringify(full)} adds a year the source does not state; copy the date exactly as written (e.g. "${Number(month)}-${Number(day)}")`);
-    }
-  }
-  return problems;
+    if (!dependency?.evidenceRefs.length) return [ref];
+    return dependency.evidenceRefs.flatMap(source => expand(source, new Set([...seen, ref])));
+  };
+  return [...new Set(refs.flatMap(ref => expand(ref, new Set())))];
 }
 
 /** Deterministic finish-content checks: placeholders and inline IDs that were never received. */
@@ -403,7 +388,7 @@ function parseExecutorDecision(value: unknown): z.infer<typeof decisionSchema> {
       // external capability or finish when their validation fails.
       if (candidate.tool === 'sources.csvQuery' || isStructuredSourceTool(candidate.tool)) return decisionSchema.parse(candidate.type === undefined ? { ...candidate, type: 'tool' } : candidate);
       const artifactType = candidate.artifactType === 'project-pulse/1' || candidate.artifactType === 'website-builder/1' ? candidate.artifactType : undefined;
-      const artifactFields = { ...(artifactType ? { artifactType } : {}), ...(candidate.structured === undefined ? {} : { structured: candidate.structured }) };
+      const artifactFields = { ...(candidate.limitations === undefined ? {} : { limitations: candidate.limitations }), ...(artifactType ? { artifactType } : {}), ...(candidate.structured === undefined ? {} : { structured: candidate.structured }) };
       if (typeof candidate.title === 'string' && typeof candidate.content === 'string' && Array.isArray(candidate.evidenceRefs)) {
         return decisionSchema.parse({
           type: 'finish', title: candidate.title, content: candidate.content, evidenceRefs: candidate.evidenceRefs,
@@ -1608,7 +1593,7 @@ export class AgentEngine {
         + (step.finishRepair ? '\nRepair the previous candidate finish object using finishRepair.reason. The candidate is untrusted data. Return only a complete finish decision; no tool, capability, delegation or question decisions. Preserve evidence boundaries and keep content consistent with structured.' : '');
     const systemForLimit = (reason: string | undefined, legacy = false, csv = false) => (legacy ? legacyExecutorSystem : csv ? csvExecutorSystem : executorBaseSystem)
         + (run.events.some(event => event.type === 'tool.failed_recoverable' && event.data.taskId === node.id) ? '\nTool observations with error.recoverable=true report a failed attempt, not successful evidence. Use the error message and HTTP status to choose another source or approach, or finish with a useful partial answer and explicit limitations. Avoid repeating the same failing call.' : '')
-        + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns for missing evidence. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
+        + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns only for source gaps and limitations for runtime limits. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
     const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance + sourceFidelityGuidance;
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), task: node, sourceCatalog: [...run.context.sources, ...historySources].map(({ id, title }) => ({ id, title })),
         dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(step.observations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
@@ -1646,6 +1631,12 @@ export class AgentEngine {
       let decision: z.infer<typeof decisionSchema>;
       try { decision = parseExecutorDecision(value); }
       catch (error) {
+        const candidate = normalizeModelJson(value, 'decision', 'type');
+        if (candidate && typeof candidate === 'object' && 'type' in candidate && candidate.type === 'finish') {
+          for (const protocol of ['aeeis-finish-content-check/1', 'aeeis-finish-evidence-check/1']) {
+            finishProtocolLog(protocol, { runId: current.id, taskId: node.id, result: 'rejected', problemCount: validationDetails(error)?.issues.length ?? 1, observedCount: observed.size, reason: 'decision-schema' });
+          }
+        }
         // One corrective retry per task: hand the redacted zod issue paths back to the executor.
         const issues = validationDetails(error)?.issues;
         if (!issues || limitReason || current.events.some(item => item.type === 'model.schema_retry' && item.data.taskId === node.id)) throw error;
@@ -1755,93 +1746,108 @@ export class AgentEngine {
         current.pendingDelegation = pending;
         event(current, 'agent.requested', { taskId: node.id, agentId: decision.agentId, contextVersion: contextInput.id, idempotencyKey: pending.idempotencyKey });
       } else {
-        decision.evidenceRefs = decision.evidenceRefs.map(resolveRef);
-        let structured: ProjectPulseArtifact | WebsiteBuilderArtifact | undefined;
-        let structuredEvidenceRefs: string[] = [];
+        const contentCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', problems: [] as string[], movedUnknowns: 0, cappedUnknowns: 0 };
+        const evidenceCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', invalidRefs: [] as string[], missingEvidence: false, droppedClaims: 0, mappedRefs: 0, removedRefs: 0, observedCount: observed.size };
         try {
-          if (decision.artifactType !== undefined) {
-            if (decision.structured === undefined) throw new Error(`${decision.artifactType} requires a JSON object in finish.structured`);
-            structured = normalizeArtifactRefs(decision.artifactType === 'project-pulse/1' ? projectPulseArtifactSchema.parse(decision.structured) : websiteBuilderArtifactSchema.parse(decision.structured), resolveRef);
-            decision.structured = structured;
-            structuredEvidenceRefs = decision.artifactType === 'project-pulse/1' ? projectPulseEvidenceRefs(structured as ProjectPulseArtifact) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
-          } else if (decision.structured !== undefined) {
-            throw new Error('finish.structured requires a recognized artifactType');
+          // Normalize after string-item coercion and on every task, before validation can return.
+          const refineRefs = (refs: string[]) => {
+            const based = refs.map(ref => baseEvidenceRef(resolveRef(ref), observed));
+            const mapped = sourceLevelRefs(based, dependencies).map(ref => baseEvidenceRef(ref, observed));
+            evidenceCheck.mappedRefs += based.filter(ref => dependencies.some(artifact => artifact.id === ref)).length;
+            return [...new Set(mapped)];
+          };
+          decision.evidenceRefs = refineRefs(decision.evidenceRefs);
+          const limitationNotes: string[] = [...(decision.limitations ?? [])];
+          if (decision.structured && typeof decision.structured === 'object' && !Array.isArray(decision.structured)) {
+            const normalized = normalizeSourceUnknowns(decision.structured as Record<string, unknown>);
+            limitationNotes.push(...normalized.limitations);
+            contentCheck.movedUnknowns = normalized.moved; contentCheck.cappedUnknowns = normalized.capped;
           }
-          if (expectedArtifactType && (!structured || decision.artifactType !== expectedArtifactType)) throw new Error(`The final artifact must include artifactType "${expectedArtifactType}" and a complete finish.structured object`);
-        } catch (error) {
-          const reason = error instanceof z.ZodError
-            ? `Invalid ${decision.artifactType} finish.structured: ${JSON.stringify(validationDetails(error)?.issues)}`
-            : failureReason(error, 'Invalid finish output contract');
-          if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${reason}`);
-          requestFinishRepair(current, live, value, reason);
-          return;
-        }
-        const limitationNotes: string[] = [];
-        const contentProblems = finishContentProblems(decision.content, observed);
-        if (contentProblems.length) {
-          console.warn(JSON.stringify({ protocol: 'aeeis-finish-content-check/1', runId: current.id, taskId: node.id, problems: contentProblems.map(problem => problem.split(':')[0]) }));
-          if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${contentProblems.join('; ')}`);
-          requestFinishRepair(current, live, value, contentProblems.join('; '));
-          return;
-        }
-        // Normalize refs deterministically: fragment refs to their observed base id, and
-        // (terminal tasks) dependency artifacts to the source evidence they cite.
-        const refineRefs = (refs: string[]) => { const based = [...new Set(refs.map(ref => baseEvidenceRef(ref, observed)))]; return terminal ? sourceLevelRefs(based, dependencies) : based; };
-        decision.evidenceRefs = terminal ? [...new Set([...decision.evidenceRefs.map(ref => baseEvidenceRef(ref, observed)), ...refineRefs(decision.evidenceRefs)])] : refineRefs(decision.evidenceRefs);
-        if (structured) { structured = normalizeArtifactRefs(structured, ref => ref); refineStructuredRefs(structured, refineRefs); decision.structured = structured; structuredEvidenceRefs = structured.schemaVersion === 'project-pulse/1' ? projectPulseEvidenceRefs(structured) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact); }
-        const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
-        if (needsEvidence && decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
-        let invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
-        const droppedClaims: number[] = [];
-        if (invalidRefs.length && limitReason) {
-          // The final limited call cannot be repaired: keep only claims backed by received evidence.
-          const invalid = new Set(invalidRefs);
-          if (structured) droppedClaims.push(pruneStructuredRefs(structured, ref => !invalid.has(ref)));
-          decision.evidenceRefs = decision.evidenceRefs.filter(ref => !invalid.has(ref));
-          if (structured) structuredEvidenceRefs = structured.schemaVersion === 'project-pulse/1' ? projectPulseEvidenceRefs(structured) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
-          if (decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
-          invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
-        }
-        const missingEvidence = needsEvidence && decision.evidenceRefs.length === 0;
-        if (invalidRefs.length || missingEvidence || droppedClaims.some(Boolean)) {
-          console.warn(JSON.stringify({ protocol: 'aeeis-finish-evidence-check/1', runId: current.id, taskId: node.id, limited: Boolean(limitReason), invalidRefs: invalidRefs.slice(0, 10), missingEvidence, droppedClaims: droppedClaims[0] ?? 0, observedCount: observed.size }));
-        }
-        if (invalidRefs.length || missingEvidence) {
-          if (limitReason) throw new Error(`Final limited-evidence finish cited unavailable evidence or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs.slice(0, 10))}`);
-          requestFinishRepair(current, live, value, `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only allowed evidence IDs: ${JSON.stringify([...observed])}`);
-          return;
-        }
-        if (structured?.schemaVersion === 'project-pulse/1') {
+          if (decision.structured) decision.structured = normalizeArtifactRefs(decision.structured, refineRefs);
+          let structured: ProjectPulseArtifact | WebsiteBuilderArtifact | undefined;
+          let structuredEvidenceRefs: string[] = [];
+          try {
+            if (decision.artifactType !== undefined) {
+              if (decision.structured === undefined) throw new Error(`${decision.artifactType} requires a JSON object in finish.structured`);
+              structured = decision.artifactType === 'project-pulse/1' ? projectPulseArtifactSchema.parse(decision.structured) : websiteBuilderArtifactSchema.parse(decision.structured);
+              decision.structured = structured;
+              structuredEvidenceRefs = decision.artifactType === 'project-pulse/1' ? projectPulseEvidenceRefs(structured as ProjectPulseArtifact) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
+            } else if (decision.structured !== undefined) {
+              throw new Error('finish.structured requires a recognized artifactType');
+            }
+            if (expectedArtifactType && (!structured || decision.artifactType !== expectedArtifactType)) throw new Error(`The final artifact must include artifactType "${expectedArtifactType}" and a complete finish.structured object`);
+          } catch (error) {
+            const reason = error instanceof z.ZodError
+              ? `Invalid ${decision.artifactType} finish.structured: ${JSON.stringify(validationDetails(error)?.issues)}`
+              : failureReason(error, 'Invalid finish output contract');
+            if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${reason}`);
+            requestFinishRepair(current, live, value, reason);
+            return;
+          }
+          const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
+          if (needsEvidence && decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
+          let invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref) || ref.startsWith('artifact_'));
+          const droppedClaims: number[] = [];
+          if (invalidRefs.length && (limitReason || [...decision.evidenceRefs, ...structuredEvidenceRefs].some(ref => observed.has(ref) && !ref.startsWith('artifact_')))) {
+            // Preserve useful valid evidence as a partial result on any finish path.
+            const invalid = new Set(invalidRefs);
+            evidenceCheck.removedRefs = invalidRefs.length;
+            limitationNotes.push(`Unavailable evidence refs removed: ${invalidRefs.join(', ')}`);
+            decision.content = decision.content.split('\n').filter(line => !invalidRefs.some(ref => line.includes(ref))).join('\n') || 'Partial answer: see the evidence-backed structured entries.';
+            if (structured) droppedClaims.push(pruneStructuredRefs(structured, ref => !invalid.has(ref)));
+            decision.evidenceRefs = decision.evidenceRefs.filter(ref => !invalid.has(ref));
+            if (structured) structuredEvidenceRefs = structured.schemaVersion === 'project-pulse/1' ? projectPulseEvidenceRefs(structured) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
+            if (decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
+            invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref) || ref.startsWith('artifact_'));
+          }
+          const missingEvidence = needsEvidence && decision.evidenceRefs.length === 0;
+          evidenceCheck.invalidRefs = invalidRefs; evidenceCheck.missingEvidence = missingEvidence;
+          evidenceCheck.droppedClaims = droppedClaims[0] ?? 0;
+          evidenceCheck.result = invalidRefs.length || missingEvidence ? 'rejected' : evidenceCheck.mappedRefs || limitationNotes.some(note => note.startsWith('Unavailable evidence')) ? 'fixed' : 'ok';
+          if (invalidRefs.length || missingEvidence) {
+            if (limitReason) throw new Error(`Final limited-evidence finish cited unavailable evidence or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs.slice(0, 10))}`);
+            requestFinishRepair(current, live, value, `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only allowed evidence IDs: ${JSON.stringify([...observed])}`);
+            return;
+          }
           const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
-          const fidelity = pulseFidelityProblems(structured, refs => refs.map(ref => byId.get(ref) ?? '').join('\n'));
-          if (fidelity.length) {
-            console.warn(JSON.stringify({ protocol: 'aeeis-finish-content-check/1', runId: current.id, taskId: node.id, problems: fidelity.map(problem => problem.split(':')[0]) }));
-            if (limitReason) { decision.content = `${decision.content}\n\n注意：${fidelity.join('; ')}`; }
-            else { requestFinishRepair(current, live, value, fidelity.join('; ')); return; }
+          const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
+          const contentProblems = [
+            ...finishContentProblems(decision.content, observed),
+            ...(structured?.schemaVersion === 'project-pulse/1' ? pulseFidelityProblems(structured, sourceText) : []),
+            ...inferenceFidelityProblems(decision.content, structured, sourceText, decision.evidenceRefs),
+          ];
+          contentCheck.problems = contentProblems;
+          if (contentProblems.length) {
+            if (limitReason) throw new Error(`Final limited-evidence finish is invalid: ${contentProblems.join('; ')}`);
+            requestFinishRepair(current, live, value, contentProblems.join('; ')); return;
           }
+          contentCheck.result = contentCheck.movedUnknowns || contentCheck.cappedUnknowns ? 'fixed' : 'ok';
+          if (droppedClaims[0]) limitationNotes.push(`${droppedClaims[0]} claim(s) removed because they cited evidence not received`);
+          if (usesWebsiteBuilder(current) && terminal && structured && structured.schemaVersion === 'website-builder/1'
+            && (structured.changedFiles.length > 0 || Boolean(structured.preview) || structured.artifacts.length > 0)) {
+            const evidenceRefs = new Set([...decision.evidenceRefs, ...structuredEvidenceRefs]);
+            const authorizedReceipts = current.toolReceipts.filter(receipt => receipt.authorization?.decision === 'authorized' && receipt.status === 'completed');
+            const matchingReceipts = authorizedReceipts.filter(receipt => evidenceRefs.has(receipt.receiptId) || receipt.outputRefs.some(ref => evidenceRefs.has(ref)));
+            const dependencyEvidence = dependencies.some(artifact => evidenceRefs.has(artifact.id));
+            if (structured.changedFiles.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write'))) throw new Error('Website Builder changed files require an authorized write-capable Tool Receipt');
+            if (structured.preview && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder preview requires an authorized execute-capable Tool Receipt');
+            if (structured.artifacts.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write') || receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder artifacts require an authorized write or execute-capable Tool Receipt');
+            if (!matchingReceipts.length && !dependencyEvidence) throw new Error('Website Builder changed files, preview or artifacts require an authorized Tool Receipt or dependency artifact');
+          }
+          const evidenceRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])];
+          const limitations = [...new Set([...(limitReason ? [limitReason] : []), ...limitationNotes, ...dependencies.flatMap(artifact => artifact.limitations ?? [])])];
+          if (limitations.length) {
+            current.partial = true;
+            decision.content = `Partial answer — limited evidence: ${limitations.join('; ')}.\n\n${decision.content}`;
+          }
+          const artifact = { id: id('artifact'), taskId: node.id, title: decision.title, content: decision.content, evidenceRefs, ...(limitations.length ? { partial: true, limitations } : {}), ...(structured ? { artifactType: decision.artifactType!, structured } : {}), hash: digest(decision), createdAt: now() };
+          current.artifacts.push(artifact); live.status = 'succeeded';
+          event(current, 'artifact.created', { artifactId: artifact.id, taskId: node.id, evidenceRefs: artifact.evidenceRefs, modelCallId: current.calls.at(-1)!.id, contextId: current.context.id });
+        } finally {
+          // Existing protocol convention: one-line JSON on stderr in the API process.
+          finishProtocolLog('aeeis-finish-content-check/1', { runId: current.id, taskId: node.id, ...contentCheck, problemCount: contentCheck.problems.length });
+          finishProtocolLog('aeeis-finish-evidence-check/1', { runId: current.id, taskId: node.id, limited: Boolean(limitReason), ...evidenceCheck, invalidCount: evidenceCheck.invalidRefs.length });
         }
-        if (droppedClaims[0]) limitationNotes.push(`${droppedClaims[0]} claim(s) removed because they cited evidence not received`);
-        if (usesWebsiteBuilder(current) && terminal && structured && structured.schemaVersion === 'website-builder/1'
-          && (structured.changedFiles.length > 0 || Boolean(structured.preview) || structured.artifacts.length > 0)) {
-          const evidenceRefs = new Set([...decision.evidenceRefs, ...structuredEvidenceRefs]);
-          const authorizedReceipts = current.toolReceipts.filter(receipt => receipt.authorization?.decision === 'authorized' && receipt.status === 'completed');
-          const matchingReceipts = authorizedReceipts.filter(receipt => evidenceRefs.has(receipt.receiptId) || receipt.outputRefs.some(ref => evidenceRefs.has(ref)));
-          const dependencyEvidence = dependencies.some(artifact => evidenceRefs.has(artifact.id));
-          if (structured.changedFiles.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write'))) throw new Error('Website Builder changed files require an authorized write-capable Tool Receipt');
-          if (structured.preview && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder preview requires an authorized execute-capable Tool Receipt');
-          if (structured.artifacts.length > 0 && !matchingReceipts.some(receipt => receipt.capabilitiesUsed.includes('write') || receipt.capabilitiesUsed.includes('execute'))) throw new Error('Website Builder artifacts require an authorized write or execute-capable Tool Receipt');
-          if (!matchingReceipts.length && !dependencyEvidence) throw new Error('Website Builder changed files, preview or artifacts require an authorized Tool Receipt or dependency artifact');
-        }
-        const evidenceRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])];
-        const limitations = [...new Set([...(limitReason ? [limitReason] : []), ...limitationNotes, ...dependencies.flatMap(artifact => artifact.limitations ?? [])])];
-        if (limitations.length) {
-          current.partial = true;
-          decision.content = `Partial answer — limited evidence: ${limitations.join('; ')}.\n\n${decision.content}`;
-          if (structured?.schemaVersion === 'project-pulse/1' || structured?.schemaVersion === 'website-builder/1') structured.unknowns.push({ text: `Limited evidence: ${limitations.join('; ')}`, evidenceRefs: decision.evidenceRefs });
-        }
-        const artifact = { id: id('artifact'), taskId: node.id, title: decision.title, content: decision.content, evidenceRefs, ...(limitations.length ? { partial: true, limitations } : {}), ...(structured ? { artifactType: decision.artifactType!, structured } : {}), hash: digest(decision), createdAt: now() };
-        current.artifacts.push(artifact); live.status = 'succeeded';
-        event(current, 'artifact.created', { artifactId: artifact.id, taskId: node.id, evidenceRefs: artifact.evidenceRefs, modelCallId: current.calls.at(-1)!.id, contextId: current.context.id });
       }
     }, node.id);
     const after = await this.repository.get(run.id);
@@ -2293,8 +2299,8 @@ export class AgentEngine {
     const currentSystem = legacyRequest.system + (run.partial ? '\nThis run exhausted its execution/evidence allowance. Review it as an explicitly partial answer: assess received evidence and honest limitations, and do not require exhaustive source scans.' : '');
     legacyRequests.push({ system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input } });
     const reviewRepair = run.reviewRepair ? redactRunData(run.reviewRepair) : undefined;
-    const reviewContext = '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Only the final synthesis artifact of a skill Run carries artifactType/structured (already schema-validated); intermediate task artifacts are plain text. Judge content, evidence support and the separation of facts from a section titled "推断"/"Inference".';
-    const reviewSystem = currentSystem + reviewContext + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
+    const reviewContext = '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Artifacts carrying artifactType/structured are already schema-validated. Intermediate task artifacts may be plain text when they contain no inferences. Judge content and evidence support using the shared source fidelity rules.';
+    const reviewSystem = currentSystem + sourceFidelityGuidance + reviewContext + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
     await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
       try { current.review = parseReviewDecision(value); }
       catch (error) {
@@ -2473,10 +2479,6 @@ function structuredItemLists(value: ProjectPulseArtifact | WebsiteBuilderArtifac
   const lists: RefItem[][] = [];
   for (const item of Object.values(record)) if (Array.isArray(item) && item.every(entry => entry && typeof entry === 'object' && Array.isArray((entry as RefItem).evidenceRefs))) lists.push(item as RefItem[]);
   return lists;
-}
-function refineStructuredRefs(value: ProjectPulseArtifact | WebsiteBuilderArtifact, refine: (refs: string[]) => string[]): void {
-  for (const list of structuredItemLists(value)) for (const item of list) item.evidenceRefs = refine(item.evidenceRefs);
-  const preview = (value as { preview?: RefItem }).preview; if (preview) preview.evidenceRefs = refine(preview.evidenceRefs);
 }
 /** Remove disallowed refs; drop items left with no evidence. Returns the number of dropped items. */
 function pruneStructuredRefs(value: ProjectPulseArtifact | WebsiteBuilderArtifact, keep: (ref: string) => boolean): number {

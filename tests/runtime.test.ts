@@ -43,7 +43,7 @@ class PlanningFixture implements ModelAdapter {
     const sourceId = input.sourceCatalog[0]!.id;
     if (input.task.id === 'research' && input.observations.length === 0) return { value: { type: 'tool', tool: 'sources.read', argument: sourceId } };
     if (input.task.id === 'research') return { value: { type: 'finish', title: 'Research notes', content: 'The source says to ship safely.', evidenceRefs: [sourceId] } };
-    return { value: { type: 'finish', title: 'Final report', content: 'The report recommends shipping safely.', evidenceRefs: input.dependencies.map(d => d.id) } };
+    return { value: { type: 'finish', title: 'Final report', content: 'The source says to ship safely.', evidenceRefs: input.dependencies.map(d => d.id) } };
   }
 }
 

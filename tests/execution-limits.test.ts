@@ -42,7 +42,7 @@ describe('durable execution allowances', () => {
     const artifact = finished.artifacts[0]!;
     expect(artifact).toMatchObject({ partial: true, limitations: ['Node source page limit reached'], artifactType: 'project-pulse/1' });
     expect(artifact.content).toContain('Partial answer');
-    expect((artifact.structured as any).unknowns[0].text).toContain('Limited evidence');
+    expect((artifact.structured as any).unknowns).toEqual([]);
     expect(finished.partial).toBe(true);
     expect(finished.steps[0]!.finalCallId).toBe(finished.calls.filter(call => call.phase === 'executor').at(-1)!.id);
     expect(artifact.hash).toBe(digest({ type: 'finish', title: artifact.title, content: artifact.content, evidenceRefs: artifact.evidenceRefs, artifactType: artifact.artifactType, structured: artifact.structured }));

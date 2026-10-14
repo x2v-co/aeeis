@@ -64,7 +64,7 @@ describe('task evidence visibility', () => {
     }, plan);
     const completed = await completeRun(engine, repository, run.id);
     expect(completed.status, completed.error).toBe('succeeded');
-    expect(completed.artifacts[1]?.evidenceRefs).toContain(completed.artifacts[0]!.id);
+    expect(completed.artifacts[1]?.evidenceRefs).toEqual([run.context.sources[0]!.id]);
   });
 
   it('canonicalizes whitespace, case and known prefixes in both finish and structured refs', async () => {
@@ -103,14 +103,15 @@ describe('task evidence visibility', () => {
     expect(completed.artifacts[0]?.evidenceRefs).toEqual([run.context.sources[0]!.id]);
   });
 
-  it('rejects invalid structured citations even when the top-level citation is valid', async () => {
+  it('drops invalid structured citations and preserves valid evidence as partial', async () => {
     const { engine, repository, run } = await setup(input => ({ ...finish([input.sourceCatalog[0]!.id]), artifactType: 'project-pulse/1', structured: {
       schemaVersion: 'project-pulse/1', progress: [{ text: 'Unsupported claim', evidenceRefs: ['invented-source'] }], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [],
     } }), oneTask, 'project-pulse/1');
     const completed = await completeRun(engine, repository, run.id);
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('invented-source');
-    expect(completed.artifacts).toHaveLength(0);
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.partial).toBe(true);
+    expect((completed.artifacts[0]!.structured as ProjectPulseArtifact).progress).toEqual([]);
+    expect(completed.artifacts[0]!.limitations?.join(' ')).toContain('invented-source');
   });
 
   it.each(['isolated-output', 'case-collision'] as const)('never treats isolated tool receipts as received evidence (%s)', async mode => {

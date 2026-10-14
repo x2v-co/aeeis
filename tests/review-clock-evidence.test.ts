@@ -38,7 +38,7 @@ describe('executor placeholder repair and reviewer clock', () => {
       executorCalls++;
       expect(request.system).toContain('推断');
       const ref = input.availableEvidenceRefs[0];
-      return { value: { type: 'finish', title: 'R', content: executorCalls === 1 ? '进度正常 [证据]' : `进度正常 [${ref}]\n\n## 推断\n可能按期完成`, evidenceRefs: [ref] } };
+      return { value: { type: 'finish', title: 'R', content: executorCalls === 1 ? '进度正常 [证据]' : `进度正常 [${ref}]\n\n## 推断\n推断：可能按期完成`, evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: { schemaVersion: 'project-pulse/1', progress: [], completedChanges: [], blockers: [], risks: [{ text: '推断：可能按期完成', evidenceRefs: [ref] }], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [] } } };
     });
     const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete } });
     const run = await engine.create({ goal: 'Summarize', materials: [{ title: 'n.md', source: 'upload', content: '# Notes\nOn track.' }] }, 'owner', 'local');
