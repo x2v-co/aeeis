@@ -36,12 +36,14 @@ describe('runtime configuration validation', () => {
   it('validates streaming configuration and bounded idle/overall deadlines', () => {
     for (const value of ['0', '1']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).not.toThrow();
     for (const value of ['', 'true', '2']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM: value })).toThrow('AEEIS_MODEL_STREAM');
-    for (const name of ['AEEIS_MODEL_IDLE_TIMEOUT_MS', 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS', 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS']) {
+    for (const name of ['AEEIS_MODEL_IDLE_TIMEOUT_MS', 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS', 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS', 'AEEIS_MODEL_CALL_BUDGET_MS']) {
       for (const value of ['1000', '180000', '600000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
-      for (const value of ['0', '999', '-1', 'NaN', '1.5', name === 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS' ? '1800001' : '600001', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+      for (const value of ['0', '999', '-1', 'NaN', '1.5', name === 'AEEIS_MODEL_IDLE_TIMEOUT_MS' || name === 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS' ? '600001' : '1800001', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
     }
     expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS: '900000' })).not.toThrow();
     expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS: '1800000' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_CALL_BUDGET_MS: '600000' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_CALL_BUDGET_MS: '1800000' })).not.toThrow();
   });
   it.each([
     {},

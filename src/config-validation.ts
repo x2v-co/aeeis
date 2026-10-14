@@ -225,6 +225,7 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   validateIntegerConfig(env, 'AEEIS_MODEL_IDLE_TIMEOUT_MS', { defaultValue: 180_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS', { defaultValue: 120_000, min: 1_000, max: 600_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS', { defaultValue: 900_000, min: 1_000, max: 1_800_000 });
+  validateIntegerConfig(env, 'AEEIS_MODEL_CALL_BUDGET_MS', { defaultValue: 600_000, min: 1_000, max: 1_800_000 });
   validateIntegerConfig(env, 'AEEIS_MODEL_MAX_TOKENS', { defaultValue: 16_384, min: 1, max: 1_000_000 });
   if (env.AEEIS_MODEL_THINKING !== undefined && !['enabled', 'disabled', 'auto', 'provider-default'].includes(env.AEEIS_MODEL_THINKING)) throw new Error('AEEIS_MODEL_THINKING must be enabled, disabled, auto or provider-default');
   if (env.AEEIS_MODEL_REASONING_EFFORT !== undefined && !['minimal', 'low', 'medium', 'high'].includes(env.AEEIS_MODEL_REASONING_EFFORT)) throw new Error('AEEIS_MODEL_REASONING_EFFORT must be minimal, low, medium or high');

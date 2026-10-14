@@ -201,6 +201,8 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
 export interface ModelTransportOptions {
   maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number;
   stream?: boolean; firstByteTimeoutMs?: number; idleTimeoutMs?: number; streamOverallTimeoutMs?: number;
+  /** Wall-clock budget for one complete()/requestCompletion including midstream and transport retries. */
+  callBudgetMs?: number;
   retryEmptyIdle?: boolean;
   midstreamRetries?: number;
   maxTokens?: number;
@@ -225,6 +227,7 @@ export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOpti
     idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? 180_000),
     firstByteTimeoutMs: Number(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS ?? 120_000),
     streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 900_000),
+    callBudgetMs: Number(env.AEEIS_MODEL_CALL_BUDGET_MS ?? 600_000),
     retryEmptyIdle: env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== '0',
     midstreamRetries: z.string().trim().min(1).transform(Number).pipe(z.number().int().min(0).max(3)).parse(env.AEEIS_MODEL_MIDSTREAM_RETRIES ?? '1'),
     maxTokens: Number(env.AEEIS_MODEL_MAX_TOKENS ?? defaultMaxTokens),
@@ -254,6 +257,7 @@ export class HttpModelAdapter implements ModelAdapter {
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
       stream: transport.stream ?? ark, firstByteTimeoutMs: transport.firstByteTimeoutMs ?? 120_000,
       idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 180_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 900_000,
+      callBudgetMs: transport.callBudgetMs ?? 600_000,
       retryEmptyIdle: transport.retryEmptyIdle ?? true, midstreamRetries: transport.midstreamRetries ?? 1, maxTokens: transport.maxTokens ?? defaultMaxTokens,
       thinking: transport.thinking === undefined ? (defaultThinkingDisabled ? 'disabled' : null)
         : transport.thinking === 'provider-default' ? null : z.enum(['enabled', 'disabled', 'auto']).parse(transport.thinking),
@@ -269,6 +273,7 @@ export class HttpModelAdapter implements ModelAdapter {
     z.number().int().min(1).max(600_000).parse(this.transport.firstByteTimeoutMs);
     z.number().int().min(1).max(600_000).parse(this.transport.idleTimeoutMs);
     z.number().int().min(1).max(1_800_000).parse(this.transport.streamOverallTimeoutMs);
+    z.number().int().min(1).max(1_800_000).parse(this.transport.callBudgetMs);
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
     if (this.pin.maxTokens !== undefined) tokenLimit.parse(this.pin.maxTokens);
     if (this.pin.maxOutputTokens !== undefined) tokenLimit.parse(this.pin.maxOutputTokens);
@@ -364,14 +369,33 @@ export class HttpModelAdapter implements ModelAdapter {
       // A fresh deadline bounds fetch AND response-body consumption on each try.
       const controller = new AbortController(), signal = controller.signal;
       const streaming = this.transport.stream;
-      const overallMs = Math.min(request.timeoutMs ?? Number.MAX_SAFE_INTEGER, streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs);
+      const callBudgetMs = this.transport.callBudgetMs ?? this.transport.streamOverallTimeoutMs;
+      const elapsedBeforeAttempt = Date.now() - started;
+      const remainingBudgetMs = callBudgetMs - elapsedBeforeAttempt;
+      // Refuse to open another provider attempt once the call wall-clock budget is gone
+      // (midstream/transport retries share one budget so TIMEOUT xN cannot stack to tens of minutes).
+      if (remainingBudgetMs <= 0) {
+        console.error(JSON.stringify({
+          protocol: 'aeeis-model-error/1', provider: this.pin.provider ?? new URL(this.pin.endpoint).hostname,
+          model: this.pin.model, status: null, requestId: null,
+          attempt, maxAttempts: this.transport.maxAttempts, lengthAttempt, elapsedMs: elapsedBeforeAttempt,
+          errorCode: 'TIMEOUT', bodyExcerpt: '', responseBytes: 0, promptChars: request.system.length + JSON.stringify(request.input).length,
+          idempotencyKey, requestBodyHash, transportAttempt, midstreamRetries: history.midstreamRetries, maxMidstreamRetries: this.transport.midstreamRetries,
+          ...(history.usageUnknown ? { usageUnknown: true, billingRisk: 'duplicate-possible' } : {}),
+          maxTokens, retryable: false, willRetry: false, retryDecision: 'call-budget-exhausted',
+        }));
+        throw new ModelOutcomeUnknown(`Model call budget exhausted after ${elapsedBeforeAttempt}ms (budget ${callBudgetMs}ms). The provider outcome is unknown; reconcile before retrying because the request may have been billed.`);
+      }
+      const configuredOverallMs = Math.min(request.timeoutMs ?? Number.MAX_SAFE_INTEGER, streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs);
+      const overallMs = Math.min(configuredOverallMs, remainingBudgetMs);
       const abortRequested = () => controller.abort();
       request.signal?.addEventListener('abort', abortRequested, { once: true });
       if (request.signal?.aborted) controller.abort();
       let timeoutMs = overallMs, timeoutKind = 'overall';
       let overallTimer = setTimeout(() => { timeoutMs = overallMs; timeoutKind = 'overall'; controller.abort(); }, overallMs);
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
-      const firstByteTimer = setTimeout(() => { timeoutMs = this.transport.firstByteTimeoutMs; timeoutKind = 'first-byte'; controller.abort(); }, this.transport.firstByteTimeoutMs);
+      const firstByteMsBudget = Math.min(this.transport.firstByteTimeoutMs, remainingBudgetMs);
+      const firstByteTimer = setTimeout(() => { timeoutMs = firstByteMsBudget; timeoutKind = 'first-byte'; controller.abort(); }, firstByteMsBudget);
       let responseBytes = 0;
       let firstByteMs: number | undefined;
       let headersMs: number | undefined;
@@ -490,8 +514,11 @@ export class HttpModelAdapter implements ModelAdapter {
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
         else if (signal.aborted && timeoutKind === 'idle' && streamReceived && responseBytes > 0) {
+          const budgetLeft = (this.transport.callBudgetMs ?? this.transport.streamOverallTimeoutMs) - (Date.now() - started);
           retryDecision = !request.idempotencyKey ? 'no-idempotency-key'
-            : history.midstreamRetries >= this.transport.midstreamRetries ? 'attempts-exhausted' : 'midstream-retry';
+            : history.midstreamRetries >= this.transport.midstreamRetries ? 'attempts-exhausted'
+            : budgetLeft < this.transport.firstByteTimeoutMs ? 'call-budget-exhausted'
+            : 'midstream-retry';
         } else if (providerBodyError) retryDecision = !request.idempotencyKey ? 'no-idempotency-key'
           : transportAttempt >= this.transport.maxAttempts ? 'attempts-exhausted'
           : diagnostics.contentBytes || diagnostics.reasoningBytes || diagnostics.toolCallBytes ? 'body-bytes-received' : 'provider-error-retry';
@@ -534,7 +561,7 @@ export class HttpModelAdapter implements ModelAdapter {
           idempotencyKey, requestBodyHash, transportAttempt, midstreamRetries: history.midstreamRetries, maxMidstreamRetries: this.transport.midstreamRetries,
           thinkingUnsupported: thinkingDowngrade || history.thinkingUnsupported || undefined,
           ...(streamReceived && responseBytes > 0 || history.usageUnknown || providerBodyError ? { usageUnknown: true } : {}),
-          ...(retryDecision === 'midstream-retry' || history.usageUnknown || providerBodyError ? { billingRisk: 'duplicate-possible' } : {}),
+          ...(retryDecision === 'midstream-retry' || (retryDecision === 'call-budget-exhausted' && (history.usageUnknown || (streamReceived && responseBytes > 0))) || history.usageUnknown || providerBodyError ? { billingRisk: 'duplicate-possible' } : {}),
           maxTokens, timeoutKind: signal.aborted ? timeoutKind : undefined, connectPhase: connectPhase || undefined, retryable, willRetry, retryDecision, retryDelayMs: delayMs,
         }));
         if (recordingFailed) throw new ModelOutcomeUnknown('Model retry could not be recorded; reconcile before retrying');

@@ -30,6 +30,16 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
 }
 
 describe('production source-fidelity regressions', () => {
+  it('emits output.fidelity API logs even when no inferences were labelled', async () => {
+    const { run, logs } = await fixture({ title: 'notes.txt', content: '开发完成' }, input => {
+      const ref = input.sourceCatalog[0].id;
+      return { type: 'finish', title: 'Pulse', content: '开发完成', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ progress: [{ text: '开发完成', evidenceRefs: [ref] }] }) };
+    });
+    expect(run.status, run.error).toBe('succeeded');
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-output-fidelity/1', runId: run.id, labeled: 0, paths: [] }));
+    expect(logs.filter(log => log.protocol === 'aeeis-inference-autolabel/1')).toEqual([]);
+  });
+
   it('run_2867fbfd: labels risks and body before review without repair on a limited CSV finish', async () => {
     const { run, logs, reviewerInputs, systems } = await fixture({ title: 'tasks.csv', content: 'status,due\nopen,10-20' }, input => {
       const ref = input.sourceCatalog[0].id;
@@ -41,6 +51,7 @@ describe('production source-fidelity regressions', () => {
     expect(run.artifacts[0]?.content).toContain('推断：可能需要调整顺序');
     expect(run.artifacts[0]?.structured).toMatchObject({ risks: [{ text: '推断：预计可能延期', derived: true }, { text: '推断：可能需要调整顺序', derived: true }] });
     expect(logs.filter(log => log.rule === 'inference_label')).toEqual([]);
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-output-fidelity/1', runId: run.id, labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }));
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }));
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-finish-content-check/1', autoLabeledInferences: 2 }));
     expect(reviewerInputs[0].artifacts[0]).toEqual(run.artifacts[0]);

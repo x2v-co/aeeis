@@ -1906,6 +1906,8 @@ export class AgentEngine {
             const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
             const autoLabels = labelInferences(candidate, structured, sourceText, candidate.evidenceRefs);
             contentCheck.autoLabeledInferences = autoLabels.labeled;
+            // Emit fidelity to API logs for every finish (csv/txt/md/json), including labeled=0.
+            finishProtocolLog('aeeis-output-fidelity/1', { runId: current.id, taskId: node.id, labeled: autoLabels.labeled, paths: autoLabels.paths });
             if (autoLabels.labeled) {
               finishProtocolLog('aeeis-inference-autolabel/1', { runId: current.id, taskId: node.id, labeled: autoLabels.labeled, paths: autoLabels.paths });
               // Retain notes even if a different field requires a later repair.
