@@ -1,0 +1,4 @@
+Draft: country = US; email = draft@example.test.
+Second note: country = SG; email = maya@example.test.
+Neither note is identified as authoritative. Leave country and email empty and report the conflict.
+Name: Maya Chen.

@@ -1,0 +1,8 @@
+{
+  "name": "Maya Chen",
+  "email": "maya@example.test",
+  "subscribe": true,
+  "contactMethod": "Email",
+  "country": "SG",
+  "interests": ["Music", "Travel"]
+}

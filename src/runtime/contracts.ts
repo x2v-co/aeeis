@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { csvQueryDecisionSchema } from './csv-query.js';
 import { structuredSourceDecisionSchemas } from './source-readers.js';
+import { pdfDecisionSchemas, pdfValueSchema, type PdfOutput } from './fillable-pdf.js';
+import { decodePdfMaterial, isBinaryPdf, MAX_PDF_CONTENT_CHARS } from './pdf-material.js';
 import type { ThreadHistory } from './thread-history.js';
 import type { Receipt, ToolInvocation } from '../integrations.js';
 import type { ProjectSourceSyncReceipt } from '../project-sources.js';
@@ -9,7 +11,10 @@ import type { ActiveEvolution } from '../evolution-activation.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
-  content: z.string().trim().min(1).max(30000),
+  content: z.string().trim().min(1).max(MAX_PDF_CONTENT_CHARS).superRefine((content, context) => {
+    if (!isBinaryPdf(content)) { if (content.length > 30000) context.addIssue({ code: 'custom', message: 'Text material exceeds 30000 characters' }); return; }
+    try { decodePdfMaterial(content); } catch (error) { context.addIssue({ code: 'custom', message: (error as Error).message }); }
+  }),
   source: z.string().trim().min(1).max(1000),
 }).strict();
 export const modelBudgetSchema = z.object({ tokens: z.number().int().positive().optional(), moneyUsd: z.number().nonnegative().optional() }).strict().refine(value => value.tokens !== undefined || value.moneyUsd !== undefined, 'modelBudget must specify tokens or moneyUsd');
@@ -49,7 +54,7 @@ export const requestSchema = z.object({
   taskExecution: z.object({ domainPlanId: z.string().trim().min(1).max(200), taskId: z.string().trim().min(1).max(200) }).strict().optional(),
   materials: z.array(materialSchema).max(20).default([]),
   /** Built-in output contract, independent of external source connectors. */
-  builtinSkill: z.enum(['project-pulse/1', 'website-builder/1']).optional(),
+  builtinSkill: z.enum(['project-pulse/1', 'website-builder/1', 'fillable-pdf/1']).optional(),
   /** Optional compatibility declaration. The Runtime resolves concrete versions
    * and records them in the Run; callers cannot change an approved tool version. */
   resources: resourceSelectionSchema.optional(),
@@ -91,11 +96,12 @@ export const decisionSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000), offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(1).max(100).optional(), characterOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strip(),
     csvQueryDecisionSchema,
     ...structuredSourceDecisionSchemas,
+    ...pdfDecisionSchemas,
   ]),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strip(),
   z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strip(),
-  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100).default([]), artifactType: z.enum(['project-pulse/1', 'website-builder/1']).optional(), structured: z.unknown().optional(), limitations: z.array(z.string().trim().min(1).max(2000)).max(50).optional() }).strip(),
+  z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100).default([]), artifactType: z.enum(['project-pulse/1', 'website-builder/1', 'fillable-pdf/1']).optional(), structured: z.unknown().optional(), limitations: z.array(z.string().trim().min(1).max(2000)).max(50).optional() }).strip(),
 ]);
 export const reviewSchema = z.object({
   verdict: z.enum(['accepted', 'needs_revision']),
@@ -152,12 +158,21 @@ export const projectPulseArtifactSchema = z.object({
   nextActions: z.array(projectPulseItemSchema).max(30),
   unknowns: z.array(projectPulseItemSchema).max(30),
 }).strip();
+export const fillablePdfArtifactSchema = z.object({
+  schemaVersion: z.literal('fillable-pdf/1'),
+  form: z.object({ sourceRef: z.string().trim().min(1).max(200), fieldCount: z.number().int().min(1).max(200) }).strip(),
+  filledFields: z.array(z.object({ name: z.string().min(1).max(200), value: pdfValueSchema, evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50) }).strip()).max(200),
+  unknowns: z.array(z.object({ field: z.string().min(1).max(200).optional(), text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50) }).strip()).max(250),
+  output: z.object({ filename: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,190}\.pdf$/), sha256: resourceDigestSchema, sizeBytes: z.number().int().positive(), ref: z.string().min(1).max(200) }).strip(),
+  blockers: z.array(projectPulseItemSchema).max(50),
+}).strip();
 export type TaskRequest = z.infer<typeof requestSchema>;
 export type PlanDraft = z.infer<typeof planSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Review = z.infer<typeof reviewSchema>;
 export type ProjectPulseArtifact = z.infer<typeof projectPulseArtifactSchema>;
 export type WebsiteBuilderArtifact = z.infer<typeof websiteBuilderArtifactSchema>;
+export type FillablePdfArtifact = z.infer<typeof fillablePdfArtifactSchema>;
 export type ExternalToolInvocation = ToolInvocation & { requestedAt: string; receiptId?: string; globalBudgetAccountKey?: string; /** Durable attempt fence shared by independent Engines. Recovery invalidates it before reconciliation. */ executionToken?: string; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type PendingDelegation = DelegationRequest & { reconcileRequested?: boolean; receiptRef?: string; globalBudgetAccountKey?: string; /** Durable provider-attempt fence shared by independent Engines. */ executionToken?: string; /** Diagnostic for an unknown attempt; the provider result remains untrusted. */ failure?: AgentFailure; /** Durable single-flight marker for cancelled reconciliation. */ reconcileInFlight?: boolean };
 export type RunStatus = 'queued' | 'planning' | 'needs_approval' | 'running' | 'needs_input' | 'waiting_external' | 'paused' | 'reviewing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
@@ -180,7 +195,7 @@ export interface ResourceSnapshot extends ResourceSelection {
    * old Runs continue to use their immutable release digests after promotion. */
   registryRevision?: string;
 }
-export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; partial?: boolean; limitations?: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact; hash: string; createdAt: string }
+export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; partial?: boolean; limitations?: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1' | 'fillable-pdf/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact; hash: string; createdAt: string }
 /**
  * The transport fields are retained for compatibility with static providers.
  * Catalog-routed runs additionally carry the complete aeeis-model-pin/1
@@ -254,6 +269,8 @@ export interface AgentRun {
   privacy: TaskRequest['privacy'];
   skillRuntime?: string;
   builtinSkill?: TaskRequest['builtinSkill'];
+  /** PDF bytes stay in existing Run JSON persistence, outside model context. */
+  pdfOutputs?: PdfOutput[];
   model: ModelPin; modelDecision?: Record<string, unknown>; maxModelCalls: number; modelBudget?: ModelBudget; modelUsage?: ModelUsage; externalBudget?: ExternalBudget; externalUsage?: ExternalUsage; calls: ModelCall[];
   evolution?: ActiveEvolution[];
   evolutionTraffic?: Array<{ routeId: string; target: ActiveEvolution['target']; candidateId: string; percentage: number; bucket: number; selected: boolean }>;

@@ -30,6 +30,9 @@ function observationMetadata(observation: Step['observations'][number]) {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated };
   }
+  if ((observation.tool === 'pdf.formFields' || observation.tool === 'pdf.fill') && result && typeof result === 'object') {
+    return { id: result.id, ...Object.fromEntries(['page', 'fieldCount', 'form', 'output'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };
+  }
   if (isStructuredSourceTool(observation.tool) && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       ...Object.fromEntries(['page', 'path', 'section', 'shape', 'rowCount', 'sampled', 'truncated', 'totalHeadings', 'totalEntries', 'supported'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };

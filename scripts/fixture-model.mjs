@@ -45,6 +45,9 @@ function responseFor(system, input) {
       })),
     };
   }
+  if (system.includes('Plan a real deliverable') && system.includes('fillable-pdf/1')) {
+    return { summary: 'Inspect and fill the supplied AcroForm using source evidence.', nodes: [{ id: 'fill_form', title: 'Fill form', instruction: 'Inspect the form, fill only sourced values, and report every unknown.', dependsOn: [] }] };
+  }
   if (system.includes('Plan a real deliverable')) {
     return {
       summary: 'Local fixture plan: inspect the request, then deliver an evidence-linked result.',
@@ -77,6 +80,34 @@ function responseFor(system, input) {
       return { verdict: 'needs_revision', summary: 'The fixture intentionally emits a bounded low-confidence review to exercise RSI proposal synthesis.', issues: ['The controlled smoke run requires a reversible improvement proposal.'], confidence: 0.2 };
     }
     return { verdict: 'accepted', summary: 'Fixture review accepted the evidence-linked artifact.', issues: [] };
+  }
+
+  if (system.includes('fillable-pdf/1')) {
+    const pdfSource = input.presentedSources?.find(source => source.format === 'pdf');
+    const observations = input.observations ?? [];
+    if (!observations.length) return { type: 'tool', tool: 'pdf.formFields', argument: pdfSource.id };
+    const listing = observations.find(item => item.tool === 'pdf.formFields')?.result;
+    const supplied = [];
+    for (const source of input.presentedSources ?? []) {
+      if (source.format !== 'json') continue;
+      try { supplied.push({ id: source.id, values: JSON.parse(source.content.split('\n').slice(1, -1).join('\n')) }); } catch { /* Fixture only fills intact JSON records. */ }
+    }
+    const filled = observations.find(item => item.tool === 'pdf.fill')?.result;
+    if (!filled) {
+      if (listing.page?.nextRead) throw new Error('Fixture requires a small form');
+      const fields = {};
+      for (const field of listing.fields ?? []) {
+        if (field.readOnly) continue;
+        const evidence = supplied.find(source => Object.hasOwn(source.values, field.name));
+        if (evidence) fields[field.name] = evidence.values[field.name];
+      }
+      return { type: 'tool', tool: 'pdf.fill', argument: pdfSource.id, fields, filename: 'registration-filled.pdf' };
+    }
+    const filledFields = filled.filledFields.map(field => ({ ...field, evidenceRefs: [supplied.find(source => Object.hasOwn(source.values, field.name)).id] }));
+    return { type: 'finish', title: 'Filled PDF', content: 'Filled only source-supported form fields. Missing values remain empty; read-only fields remain untouched.', evidenceRefs: [pdfSource.id, ...supplied.map(source => source.id), filled.output.ref], artifactType: 'fillable-pdf/1', structured: {
+      schemaVersion: 'fillable-pdf/1', form: filled.form, filledFields,
+      unknowns: filled.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only; explicitly untouched.' : 'No source value; left empty.', evidenceRefs: [pdfSource.id] })), output: filled.output, blockers: [],
+    } };
   }
 
   const source = input.sourceCatalog?.[0];

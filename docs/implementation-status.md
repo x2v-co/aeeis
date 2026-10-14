@@ -452,3 +452,13 @@ Web 工作台的每个 Room 现在会读取并展示受当前成员权限约束�
 # 2026-09-26 增量：多终端设备会话边界
 
 AEEIS 现在支持 Web、CLI、桌面或移动端共享同一 Principal 的设备会话。`POST /api/devices` 注册带 label 和 capability 的设备，`GET /api/devices` 列出当前 owner/tenant 的设备，`POST /api/devices/:id/revoke` 幂等撤销；后续请求可带 `X-AEEIS-Device-ID`，API 会校验设备格式、Principal/tenant 归属、撤销状态并更新 `lastSeenAt`。设备 ID 不是认证凭证，Bearer/OIDC Principal 仍是身份根；旧客户端省略 header 时保持兼容。File 模式使用 `${AEEIS_DATA_DIR}/device-sessions.json`，PostgreSQL 模式使用 `aeeis_device_sessions`。新增跨 Principal/tenant、撤销、重复撤销、旧客户端和 JSON 重启持久化回归；定向 4 个测试、typecheck、build 和 diff check 通过。完整 verify 在当前受限沙箱中仍受测试尝试监听 `127.0.0.1` 的 `EPERM` 影响。
+
+# 2026-10-14 增量：fillable-pdf/1 内置业务验证
+
+新增 `fillable-pdf/1` builtinSkill、Zod 结构化产物、实现 revision/digest、finish 包装与字符串条目归一化、证据引用提取/归一化，以及 Executor/Reviewer 指引。`pdf.formFields` 列出 AcroForm 的文本、checkbox、radio、dropdown、optionList 字段，返回值、选项、required/readOnly、多选标志及可用页码；`pdf.fill` 校验字段名、值类型、选项、readOnly 和占位值，生成不 flatten 的可编辑 PDF。每次填写从原始模板开始，未填写的 writable 字段清空，readOnly 字段保持原值并在 unknowns 中说明。最终验证重新用 pdf-lib 读取持久化输出，检查真实写入、结构化值、字段覆盖、收到的来源证据，以及文件名、SHA-256 和大小；无效 finish 进入既有的一次修复流程，不能在最终预算调用中删除证据条目却保留对应 PDF 写入。
+
+二进制资料沿用 `{title, source, content}`，通过显式 `data:application/pdf;base64,` 标记承载 canonical base64，输入/输出 PDF 上限 256 KiB，文本仍上限 30,000 字符。可选 `Run.pdfOutputs` 保存在既有 File/JSONB aggregate（最多八个输出，包含真实写入清单），没有新增数据库表或 migration；模型只收到描述及有界工具结果，不收到 base64。既有 artifact download 路径经 Run 权限和字节完整性检查后返回 `application/pdf`，原有领域继续返回 Markdown。工作台支持 PDF 上传、选择该工作方式、字段/值/证据与 unknowns 展示及 PDF 下载。唯一新增直接依赖为 MIT 的 pdf-lib。
+
+新增生成脚本 `scripts/generate-fillable-pdf.mjs`、`fixtures/fillable-pdf/` 中的八字段 PDF 与 TXT/MD/CSV/JSON 来源，以及 [fillable PDF retest set](fillable-pdf-retest-set.md) 的五个手工验收用例。回归覆盖五类字段、空值/未知字段、无效字段名和选项、readOnly、证据边界、finish 修复、Reviewer 上下文、HTTP fixture model、文件仓库重启、下载权限/完整性、预算边界及工作台展示。XFA、加密 PDF、按钮/签名字段和不可用字体字形采用拒绝的保守默认；更大文件、自定义字体及 flatten 属于后续产品选择。真实模型的来源语义判断和冲突处理仍需手工 retest，fixture 的 accepted review 仅验证协议闭环。
+
+验证结果（Node 22）：`npm run typecheck`、`npm run build`、`git diff --check` 通过；`npm test` 为 129 个测试文件、1,850 个测试通过，26 个文件 / 126 个测试按既有环境条件跳过（包括 PostgreSQL 与 sandbox）。本次新增 70 个领域/工作台回归。仓库未配置 lint 脚本；没有 commit 或 push。

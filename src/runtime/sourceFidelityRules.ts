@@ -1,20 +1,23 @@
-import type { ProjectPulseArtifact, WebsiteBuilderArtifact } from './contracts.js';
+import type { FillablePdfArtifact, ProjectPulseArtifact, WebsiteBuilderArtifact } from './contracts.js';
 
 export const maxSourceUnknowns = 5;
-export const sourceFidelityGuidance = `\nSource fidelity rules: Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. Reviewers must not demand a full date or an empty date. A date range is allowed verbatim when the source itself states a range. Any inference in any field (including nextActions, blockers, unknowns and summary) or body/prose must start with "推断：". Unsourced general assumptions (e.g. "负载测试通常在核心集成之后") are forbidden, even if labelled. Every inference in body/prose must have a corresponding structured entry with evidenceRefs; for Project Pulse use the appropriate section. unknowns list only gaps in source documents, never runtime/run limitations: truncation, row limits, tool limits and timeouts belong in finish.limitations (an array of strings). Keep at most ${maxSourceUnknowns} unknowns. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id. These rules take precedence over any conflicting date or inference instructions in prompt supplements.`;
+export const sourceFidelityGuidance = `\nSource fidelity rules: Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. Reviewers must not demand a full date or an empty date. A date range is allowed verbatim when the source itself states a range. Any inference in any field (including nextActions, blockers, unknowns and summary) or body/prose must start with "推断：". Unsourced general assumptions (e.g. "负载测试通常在核心集成之后") are forbidden, even if labelled. Every inference in body/prose must have a corresponding structured entry with evidenceRefs; for Project Pulse use the appropriate section. unknowns list only gaps in source documents, never runtime/run limitations: truncation, row limits, tool limits and timeouts belong in finish.limitations (an array of strings). Keep at most ${maxSourceUnknowns} unknowns, except fillable-pdf/1 must report every unfilled field with its exact field name and reason. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id. These rules take precedence over any conflicting date or inference instructions in prompt supplements.`;
 
 /** Normalize before schema validation, including models returning string items. */
 export function normalizeSourceUnknowns(structured: Record<string, unknown>): { limitations: string[]; moved: number; capped: number } {
   const limitations: string[] = [];
   let moved = 0;
+  const fieldUnknowns = structured.schemaVersion === 'fillable-pdf/1';
   const unknowns = Array.isArray(structured.unknowns) ? structured.unknowns.filter(item => {
+    // Every unfilled PDF field needs its own reason, including source gaps caused by limits.
+    if (fieldUnknowns && item && typeof item === 'object' && typeof (item as { field?: unknown }).field === 'string') return true;
     const text = typeof item === 'string' ? item : item && typeof item === 'object' ? String((item as { text?: unknown }).text ?? '') : '';
     if (!isRuntimeLimitation(text)) return true;
     limitations.push(text); moved++;
     return false;
   }) : undefined;
-  const capped = Math.max(0, (unknowns?.length ?? 0) - maxSourceUnknowns);
-  if (unknowns) structured.unknowns = unknowns.slice(0, maxSourceUnknowns);
+  const capped = fieldUnknowns ? 0 : Math.max(0, (unknowns?.length ?? 0) - maxSourceUnknowns);
+  if (unknowns) structured.unknowns = fieldUnknowns ? unknowns : unknowns.slice(0, maxSourceUnknowns);
   return { limitations, moved, capped };
 }
 
@@ -48,7 +51,7 @@ const generalAssumption = /通常|一般(?:会|在|需要)|usually|typically/i;
 const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^[\s#*>\-\d.]+/, '').trim();
 
 /** Conservative lexical checks supplement the semantic checks required of both models. */
-export function inferenceFidelityProblems(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): string[] {
+export function inferenceFidelityProblems(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): string[] {
   const problems: string[] = [];
   const entries: string[] = [];
   const check = (text: string, evidence: string, location: string) => {
