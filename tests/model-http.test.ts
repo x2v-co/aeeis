@@ -24,6 +24,36 @@ function fixture(body: unknown, status = 200): Promise<string> {
 }
 
 describe('HttpModelAdapter', () => {
+  it.each(['errorCode', 'error', 'sse'] as const)('ark-200-errorCode: retries %s with backoff and billing-risk diagnostics', async shape => {
+    const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const completions = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const failure = shape === 'error' ? { error: { code: 'ProviderBusy', message: 'try again' } } : { errorCode: 'ProviderBusy', message: 'try again' };
+      const fetch = vi.fn().mockResolvedValueOnce(new Response(shape === 'sse' ? `data: ${JSON.stringify(failure)}\n\n` : JSON.stringify(failure), { headers: { 'content-type': shape === 'sse' ? 'text/event-stream' : 'application/json' } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] })));
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'fixture', '', undefined, 1000, undefined, false, undefined, { retryBaseMs: 1, retryMaxMs: 2 });
+      expect((await adapter.complete({ system: 's', input: {}, idempotencyKey: 'ark-200' })).value).toEqual({ ok: true });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch.mock.calls[0]![1].headers['idempotency-key']).toBe(fetch.mock.calls[1]![1].headers['idempotency-key']);
+      expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ status: 200, errorCode: 'ProviderBusy', retryable: true, willRetry: true, retryDecision: 'provider-error-retry', usageUnknown: true, billingRisk: 'duplicate-possible' });
+      expect(JSON.parse(completions.mock.calls[0]![0])).toMatchObject({ usageUnknown: true, billingRisk: 'duplicate-possible', transportAttempt: 2 });
+    } finally { logs.mockRestore(); completions.mockRestore(); }
+  });
+  it.each(['no-key', 'disabled', 'exhausted', 'partial-stream'])('ark-200-errorCode: respects %s replay fence', async mode => {
+    const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const error = { errorCode: 'Error' };
+      const partial = `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: null }] })}\n\n`;
+      const fetch = vi.fn(async () => new Response(mode === 'partial-stream' ? `${partial}data: ${JSON.stringify(error)}\n\n` : JSON.stringify(error), { headers: { 'content-type': mode === 'partial-stream' ? 'text/event-stream' : 'application/json' } }));
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'fixture', '', undefined, 1000, undefined, false, undefined, { retryBaseMs: 0, maxAttempts: 2 });
+      await expect(adapter.complete({ system: 's', input: {}, ...(mode === 'no-key' ? {} : { idempotencyKey: 'ark-200' }), disableRetries: mode === 'disabled' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+      expect(fetch).toHaveBeenCalledTimes(mode === 'exhausted' ? 2 : 1);
+      expect(JSON.parse(logs.mock.calls.at(-1)![0])).toMatchObject({ status: 200, retryable: true, willRetry: false, billingRisk: 'duplicate-possible' });
+    } finally { logs.mockRestore(); }
+  });
+
   it('never doubles the token allowance or retries a length-limited repair', async () => {
     const fetch = sequence([{ reason: 'length', content: '{"partial":' }]);
     const adapter = new HttpModelAdapter('https://example.com', 'fixture', '');

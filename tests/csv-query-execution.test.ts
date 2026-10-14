@@ -48,6 +48,32 @@ async function setup(decide: (input: Input) => unknown = input => input.observat
 }
 
 describe('executor CSV query tool', () => {
+  it.each(['<', 'less_than', 'BEFORE', ' LT ', '<=', 'LTE', 'less-than-or-equal'])('run_313c8bce: normalizes %s and retains date comparisons', async op => {
+    const fixture = await setup(input => input.observations.length ? finish(input) : {
+      type: 'tool', tool: 'sources.csvQuery', argument: input.sourceCatalog[0]!.id,
+      filters: [{ column: 'status', op: 'NE', value: 'done' }, { column: 'due', op, value: '2026-10-14' }], select: ['id'],
+    }, { materials: [{ title: 'tasks.csv', source: 'upload', content: 'id,status,due\n1,open,2026-10-04\n2,done,2026-10-09\n3,open,2026-10-21\n4,open,2026-10-13\n5,open,2026-10-14' }] });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.some(event => event.type === 'model.schema_retry')).toBe(false);
+    const inclusive = ['<=', 'LTE', 'less-than-or-equal'].includes(op);
+    expect((run.steps[0]!.observations[0]!.result as any).rows).toEqual(inclusive ? [['1'], ['4'], ['5']] : [['1'], ['4']]);
+  });
+  it('run_313c8bce: retry explains filters.1.op and lists valid operators', async () => {
+    const fixture = await setup(input => {
+      if (input.observations.some(item => item.tool === 'sources.csvQuery')) return finish(input);
+      const retry = input.observations.find(item => item.tool === 'output.schema');
+      if (retry) {
+        expect(retry.result.error.message).toContain('eq, ne, gt, gte, lt, lte, contains, in, isEmpty');
+        expect(retry.result.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'filters.1.op', message: expect.stringContaining('Valid ops:') })]));
+      }
+      return { ...query(input), filters: [{ column: 'team', op: 'eq', value: 'A' }, { column: 'amount', op: retry ? 'less_than' : 'unsupported', value: 2000 }] };
+    });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.filter(event => event.type === 'model.schema_retry')).toHaveLength(1);
+  });
+
   it.each([false, true])('executes a built-in query without an external tool allowlist (legacy=%s)', async legacy => {
     const fixture = await setup(undefined, { legacy });
     const completed = await fixture.drain();

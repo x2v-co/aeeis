@@ -46,7 +46,7 @@ describe('six Pulse cases with a deterministic replay model', () => {
     const f = replayModel(input => {
       const ref = input.sourceCatalog[0].id;
       if ((name === 'csv' || name === 'lt' || name === 'follow' && !input.threadHistory) && !input.observations.length) return { type: 'tool', tool: 'sources.csvQuery', argument: ref,
-        ...(name === 'lt' ? { select: ['id', 'title', 'due'], filters: [{ column: 'due', op: 'lt', value: input.clock.currentDate }, ...['done', 'closed', '完成'].map(value => ({ column: 'status', op: 'ne', value }))], orderBy: [{ column: 'due', direction: 'asc' }] } : { groupBy: ['status'], aggregates: [{ op: 'count', as: 'count' }] }) };
+        ...(name === 'lt' ? { select: ['id', 'title', 'due'], filters: [{ column: 'due', op: 'BEFORE', value: input.clock.currentDate }, ...['done', 'closed', '完成'].map(value => ({ column: 'status', op: 'ne', value }))], orderBy: [{ column: 'due', direction: 'asc' }] } : { groupBy: ['status'], aggregates: [{ op: 'count', as: 'count' }] }) };
       if (name === 'lt' && input.observations.length === 1) {
         expect(input.observations[0].result.rows.map((row: any) => row[0])).toEqual(['1', '4']);
         return { type: 'tool', tool: 'sources.csvQuery', argument: ref, filters: input.observations[0].result.query.filters, aggregates: [{ op: 'count', as: 'total' }] };
@@ -55,7 +55,7 @@ describe('six Pulse cases with a deterministic replay model', () => {
         expect(input.observations[1].result.rows[0][0]).toBe(2);
         return { ...finish(ref), content: `总数 2\n1 Fix login 2026-10-04 [${ref}]\n4 Audit logs 2026-10-13 [${ref}]`, structured: { ...pulse(ref), progress: [{ text: '1 Fix login 2026-10-04', evidenceRefs: [ref] }, { text: '4 Audit logs 2026-10-13', evidenceRefs: [ref] }] } };
       }
-      return finish(ref, name === 'txt' ? '推断:' : name === 'json' ? 'Inference:' : '推断：');
+      return finish(ref, name === 'csv' ? '' : name === 'txt' ? '推断:' : name === 'json' ? 'Inference:' : '推断：');
     });
     let run = await approved(f, name === 'follow' ? 'tasks.csv' : `notes.${name === 'lt' ? 'csv' : name}`, name === 'csv' || name === 'follow' ? large : name === 'lt' ? due : name === 'json' ? '{"progress":"开发完成","due":"10-20"}' : '# 计划\n开发完成，截止 10-20');
     if (name === 'lt') await f.repository.mutate(run.id, current => { current.createdAt = '2026-10-14T04:00:00.000Z'; });
@@ -71,7 +71,7 @@ describe('six Pulse cases with a deterministic replay model', () => {
     expect(completed.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
     expect(completed.artifacts[0]?.artifactType).toBe('project-pulse/1');
     expect(projectPulseArtifactSchema.safeParse(completed.artifacts[0]?.structured).success).toBe(true);
-    if (name !== 'lt') expect(completed.artifacts[0]?.structured).toMatchObject({ risks: [{ text: '推断：可能需要调整测试顺序', derived: true, evidenceRefs: completed.artifacts[0]!.evidenceRefs }] });
+    if (name !== 'lt' && name !== 'csv') expect(completed.artifacts[0]?.structured).toMatchObject({ risks: [{ text: '推断：可能需要调整测试顺序', derived: true, evidenceRefs: completed.artifacts[0]!.evidenceRefs }] });
     if (name === 'follow') expect(completed.context.threadHistory?.entries.length).toBeGreaterThan(0);
     if (name === 'lt') expect(logs.some(log => log.protocol === 'aeeis-csv-date-filter/1' && log.filters.some((filter: any) => filter.op === 'lt' && filter.effective))).toBe(true);
     for (const protocol of ['aeeis-finish-content-check/1', 'aeeis-finish-evidence-check/1']) expect(logs.some(log => log.protocol === protocol && log.result !== 'rejected')).toBe(true);

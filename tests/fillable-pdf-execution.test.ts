@@ -18,7 +18,7 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 const materials = [{ title: 'registration.pdf', source: 'upload:registration.pdf', content: formContent }, { title: 'profile.json', source: 'upload:profile.json', content: profileContent }];
 const plan = { summary: 'Fill PDF', nodes: [{ id: 'fill', title: 'Fill', instruction: 'Fill only sourced values', dependsOn: [] }] };
 
-async function setup(options: { alter?: (finish: any, input: any) => unknown; fields?: Record<string, string | boolean | string[]>; invalidTool?: boolean; limits?: any; model?: ModelAdapter } = {}) {
+async function setup(options: { alter?: (finish: any, input: any) => unknown; fields?: Record<string, string | boolean | string[]>; invalidTool?: boolean; resourceAlias?: string; limits?: any; model?: ModelAdapter } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-fillable-pdf-'));
   let repository = new FileRunRepository(directory); await repository.init();
   cleanup.push(async () => { await repository.close(); await rm(directory, { recursive: true, force: true }); });
@@ -35,11 +35,11 @@ async function setup(options: { alter?: (finish: any, input: any) => unknown; fi
     }
     const input = request.input as any, formRef = input.sourceCatalog[0].id, sourceRef = input.sourceCatalog[1].id;
     expect(input.expectedArtifactType).toBe('fillable-pdf/1');
-    if (!input.observations.length) return { value: { type: 'tool', tool: 'pdf.formFields', argument: formRef } };
+    if (!input.observations.length) return { value: { type: 'tool', tool: 'pdf.formFields', argument: options.resourceAlias ?? formRef } };
     const filled = input.observations.find((item: any) => item.tool === 'pdf.fill' && item.result.output)?.result;
     if (!filled) {
       const hadError = input.observations.some((item: any) => item.result.error);
-      return { value: { type: 'tool', tool: 'pdf.fill', argument: formRef, fields: options.invalidTool && !hadError ? { invented: 'Bad' } : options.fields ?? profile } };
+      return { value: { type: 'tool', tool: 'pdf.fill', argument: options.resourceAlias ?? formRef, fields: options.invalidTool && !hadError ? { invented: 'Bad' } : options.fields ?? profile } };
     }
     const finish = { type: 'finish', title: 'Filled PDF', content: `Filled sourced values [${sourceRef}]; phone is empty and caseId untouched [${formRef}].`, evidenceRefs: [sourceRef, formRef, filled.output.ref], artifactType: 'fillable-pdf/1', structured: pdfArtifact({ ...filled.output, writtenFields: filled.filledFields }, formRef, sourceRef) };
     return { value: options.alter ? options.alter(finish, input) : finish };
@@ -70,6 +70,33 @@ async function setup(options: { alter?: (finish: any, input: any) => unknown; fi
 }
 
 describe('fillable PDF execution and downloads', () => {
+  it.each([
+    ['pdf1 run_4e0fa30e', 'normal'], ['pdf2 run_64943ccc', 'null-output'],
+    ['pdf3 run_febf1391', 'final-tool'], ['pdf4 run_0f8a1b50', 'normal'],
+    ['pdf5 run_9da5581d', 'alias'], ['pdf6 run_b1917541', 'redundant-capability'],
+  ])('%s local replay validates persisted fields and reaches accepted review', async (_name, mode) => {
+    const logs: any[] = [];
+    vi.spyOn(console, 'warn').mockImplementation(line => logs.push(JSON.parse(String(line))));
+    try {
+      const fixture = await setup({ resourceAlias: mode === 'alias' ? 'upload:registration.pdf' : undefined, fields: mode === 'alias' ? {} : undefined,
+        limits: mode === 'final-tool' ? { maxNodeSourcePages: 2 } : undefined,
+        alter: finish => {
+          if (mode === 'null-output') finish.structured.output = null;
+          if (mode === 'final-tool' || mode === 'redundant-capability') return { type: 'capability', toolId: 'pdf.fill', toolVersion: '1', input: {}, purpose: 'Repeat PDF fill' };
+          return finish;
+        } });
+      const run = await fixture.drain();
+      expect(run.status, run.error).toBe('succeeded'); expect(run.review?.verdict).toBe('accepted');
+      expect(run.pdfOutputs).toHaveLength(1); expect(run.artifacts).toHaveLength(1);
+      expect(run.artifacts[0]?.structured).toMatchObject({ schemaVersion: 'fillable-pdf/1', filledFields: mode === 'alias' ? [] : expect.arrayContaining([{ name: 'email', value: profile.email, evidenceRefs: [run.context.sources[1]!.id] }]) });
+      if (mode === 'alias') expect(run.artifacts[0]?.structured?.unknowns).toHaveLength(8);
+      expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+      if (mode === 'null-output') expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-pdf-finish-synthesized/1', runId: run.id }));
+      if (mode === 'alias') expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-source-resource-resolved/1', runId: run.id }));
+      if (mode.includes('tool') || mode === 'redundant-capability') expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-pdf-auto-finish/1', runId: run.id, reason: mode === 'final-tool' ? 'final-call-tool-dropped' : 'redundant-call-dropped' }));
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it('rejects requests with zero or two PDFs before creating a run', async () => {
     const fixture = await setup();
     for (const uploads of [[], [materials[0], materials[0]]]) {

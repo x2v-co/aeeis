@@ -9,7 +9,7 @@ afterEach(() => vi.restoreAllMocks());
 const pulse = (items: Partial<ProjectPulseArtifact> = {}): ProjectPulseArtifact => ({ schemaVersion: 'project-pulse/1', progress: [], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [], ...items });
 const nodes = ['read_csv', 'analyze_owners_dates', 'synthesis'].map((id, index, ids) => ({ id, title: id, instruction: id, dependsOn: index ? [ids[index - 1]!] : [] }));
 
-async function fixture(source: { title: string; content: string }, decide: (input: any) => unknown, multiTask = false, limited = false) {
+async function fixture(source: { title: string; content: string }, decide: (input: any) => unknown, multiTask = false, limited = false, iterations = false) {
   const logs: any[] = [];
   vi.spyOn(console, 'warn').mockImplementation(line => logs.push(JSON.parse(String(line))));
   const repository = new InMemoryRunRepository();
@@ -20,7 +20,7 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
     systems.executor.push(request.system);
     return { value: decide(request.input) };
   });
-  const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete }, ...(limited ? { executionLimits: { maxNodeSourcePages: 1 } } : {}) });
+  const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete }, ...(iterations ? { executionLimits: { maxNodeIterations: 8 } } : limited ? { executionLimits: { maxNodeSourcePages: 1 } } : {}) });
   const created = await engine.create({ goal: '项目进展', builtinSkill: 'project-pulse/1', materials: [{ ...source, source: 'upload' }] }, 'owner', 'local');
   await engine.advance(created.id);
   await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
@@ -29,6 +29,32 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
 }
 
 describe('production source-fidelity regressions', () => {
+  it('run_2867fbfd: risks and body inference labels warn without repair on a limited CSV finish', async () => {
+    const { run, logs } = await fixture({ title: 'tasks.csv', content: 'status,due\nopen,10-20' }, input => {
+      const ref = input.sourceCatalog[0].id;
+      if (!input.executionBudget.finalOnly) return { type: 'tool', tool: 'sources.csvQuery', argument: ref };
+      return { type: 'finish', title: 'Pulse', content: '可能需要调整顺序', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ risks: [{ text: '预计可能延期', evidenceRefs: [ref] }] }) };
+    }, false, true);
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+    expect(logs.filter(log => log.marker === 'finish-content-warning')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: run.id, rule: 'inference_label', path: 'content' }),
+      expect.objectContaining({ runId: run.id, rule: 'inference_label', path: 'structured.risks[0].text' }),
+    ]));
+  });
+  it('run_597734ec: iteration 8 forced weather finish accepts missing inference label', async () => {
+    const { run, logs } = await fixture({ title: 'weather.txt', content: '北京天气资料有限，明天天气未确认' }, input => {
+      const ref = input.sourceCatalog[0].id;
+      if (!input.executionBudget.finalOnly) return { type: 'tool', tool: 'sources.search', argument: '天气' };
+      return { type: 'finish', title: '北京明天天气', content: '可能有降雨，天气未确认', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse() };
+    }, false, false, true);
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.calls.filter(call => call.phase === 'executor')).toHaveLength(8);
+    expect(run.artifacts[0]?.limitations).toContain('Node model iteration limit reached');
+    expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+    expect(logs).toContainEqual(expect.objectContaining({ marker: 'finish-content-warning', runId: run.id, path: 'content' }));
+  });
+
   it.each([false, true])('run_3ed71d04: maps artifact refs after string coercion, including intermediate and limited finishes (limited=%s)', async limited => {
     const { run, logs } = await fixture({ title: 'tasks.csv', content: 'owner,deadline\n李,10-20 至 10-25' }, input => {
       const sourceRef = input.sourceCatalog[0].id;
@@ -60,7 +86,7 @@ describe('production source-fidelity regressions', () => {
     }
   });
 
-  it('run_843e7e3d: preserves 10-20, shares the rules in both prompts, and repairs unlabelled nextActions inference', async () => {
+  it('run_843e7e3d: preserves 10-20, shares the rules in both prompts, and warns on unlabelled nextActions inference', async () => {
     const { run, systems, logs } = await fixture({ title: 'plan.md', content: '# 计划\n截止 10-20，开发完成后测试' }, input => {
       const ref = input.sourceCatalog[0].id;
       return { type: 'finish', title: '项目', content: '截止 10-20', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({
@@ -69,15 +95,16 @@ describe('production source-fidelity regressions', () => {
       }) };
     });
     expect(run.status, run.error).toBe('succeeded');
-    expect(run.artifacts[0]!.structured).toMatchObject({ deadlines: [{ date: '10-20' }], nextActions: [{ text: '推断：建议优先安排测试' }] });
-    expect(run.events.find(event => event.type === 'artifact.repair_requested')?.data.reason).toContain('inference must start');
+    expect(run.artifacts[0]!.structured).toMatchObject({ deadlines: [{ date: '10-20' }], nextActions: [{ text: '建议优先安排测试' }] });
+    expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+    expect(logs).toContainEqual(expect.objectContaining({ marker: 'finish-content-warning', runId: run.id, rule: 'inference_label', path: 'structured.nextActions[0].text' }));
     for (const system of [...systems.executor, ...systems.reviewer]) {
       expect(system.split(sourceFidelityGuidance)).toHaveLength(2);
       expect(system).not.toMatch(/(?:full date or leave empty|完整日期或留空)/i);
     }
     expect(systems.reviewer[0]).toContain('Reviewers must not demand a full date or an empty date');
-    expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1').map(log => log.result)).toEqual(['rejected', 'ok']);
-    expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toHaveLength(2);
+    expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1').map(log => log.result)).toEqual(['fixed']);
+    expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toHaveLength(1);
   });
 
   it('run_3fdf9e2f: caps unknowns, repairs unsourced assumptions and derives prose counterparts', async () => {
