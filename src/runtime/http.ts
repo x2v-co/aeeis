@@ -3,6 +3,7 @@ import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
 import { debugBundle, redactRunData, sharedRunView } from './run-debug.js';
 import { artifactFilename } from './artifact-download.js';
+import { decodePdfMaterial, pdfSha256 } from './pdf-material.js';
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -143,7 +144,8 @@ export function buildApp(options: Options) {
       : publicHosts.has(normalized) || publicHosts.has(withoutPort);
   };
   const httpMetrics: HttpMetrics = { inFlight: 0, routes: new Map() };
-  const app = Fastify({ bodyLimit: 700000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
+  // One 256 KiB base64 PDF plus the existing text material allowance.
+  const app = Fastify({ bodyLimit: 1_100_000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
   const maxSseConnections = options.maxSseConnections ?? 100;
   if (!Number.isSafeInteger(maxSseConnections) || maxSseConnections < 1) throw new Error('maxSseConnections must be a positive integer');
   let activeSseConnections = 0;
@@ -1502,6 +1504,16 @@ export function buildApp(options: Options) {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
     const artifact = run.artifacts.find(item => item.id === request.params.artifactId);
     if (!artifact) throw new NotFound('Unknown artifact');
+    if (artifact.structured?.schemaVersion === 'fillable-pdf/1') {
+      const metadata = artifact.structured.output, sourceRef = artifact.structured.form.sourceRef;
+      const output = run.pdfOutputs?.find(output => output.ref === metadata.ref && output.sourceRef === sourceRef);
+      if (!output) throw new NotFound('Unknown PDF output');
+      const bytes = decodePdfMaterial(output.content);
+      if (pdfSha256(bytes) !== metadata.sha256 || bytes.length !== metadata.sizeBytes || output.filename !== metadata.filename) throw new Conflict('PDF output integrity check failed');
+      return reply.type('application/pdf')
+        .header('content-disposition', `attachment; filename="${metadata.filename}"`)
+        .header('x-content-type-options', 'nosniff').send(bytes);
+    }
     const filename = encodeURIComponent(artifactFilename(artifact.title)).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
     return reply.type('text/markdown; charset=utf-8')
       .header('content-disposition', `attachment; filename="aeeis-artifact.md"; filename*=UTF-8''${filename}`)

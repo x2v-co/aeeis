@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { sharedRunView } from '../src/runtime/run-debug.js';
 import type { AgentRun } from '../src/runtime/contracts.js';
+import { fillPdf } from '../src/runtime/fillable-pdf.js';
+import { formSource, profile, pdfArtifact } from './fillable-pdf-fixture.js';
 let source: string, html: string, css: string;
 let dom: JSDOM;
 beforeAll(async () => {
@@ -39,6 +41,30 @@ function start(path: string, fetch: any) {
 }
 const response = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
 describe('run link workbench', () => {
+  it('renders filled PDF fields, unknowns, evidence and a PDF download in the actual workbench', async () => {
+    const run = fixture(), output = await fillPdf(formSource, profile);
+    run.builtinSkill = 'fillable-pdf/1';
+    run.artifacts[0]!.artifactType = 'fillable-pdf/1';
+    run.artifacts[0]!.structured = pdfArtifact(output);
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (url.endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (url.includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.querySelector('.fillable-pdf')?.textContent).toContain('Maya Chen'));
+    const doc = dom.window.document;
+    expect(doc.querySelector('.fillable-pdf')?.textContent).toContain('phone · No source value; left empty.');
+    expect(doc.querySelector('.fillable-pdf')?.textContent).toContain('caseId · Read-only; explicitly untouched.');
+    expect(doc.querySelector('.fillable-pdf')?.textContent).toContain(output.sha256);
+    expect(doc.querySelector('#artifacts a[download]')?.textContent).toBe('下载 PDF');
+    expect(doc.querySelector('#artifacts a[download]')?.getAttribute('download')).toBe('filled-form.pdf');
+    expect(doc.querySelector('#builtin-skill option[value="fillable-pdf/1"]')).not.toBeNull();
+    expect(doc.querySelector('#material-files')?.getAttribute('accept')).toContain('.pdf');
+  });
   it('loads only the shared run without auth and shows all requested read-only details', async () => {
     const run = fixture(), token = 'a'.repeat(43);
     for (let seq = 2; seq <= 100; seq++) run.events.push({ id: `event_${seq}`, seq, type: 'model.completed', at: run.createdAt, data: {} });

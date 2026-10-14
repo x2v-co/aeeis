@@ -193,7 +193,7 @@ export function pdfRead(source: Source, input: unknown = {}) {
   const endPage = query.endPage ?? query.startPage;
   if (endPage < query.startPage || endPage - query.startPage >= 20) throw new Error('PDF page range must be ascending and contain at most 20 pages');
   return requireFit({ ...metadata(source, 'pdf-read/1'), supported: false, startPage: query.startPage, endPage,
-    message: 'PDF text extraction is unsupported: this runtime has no PDF text dependency and stores text sources only. Extract PDF text to Markdown or TXT before supplying it; page boundaries cannot be inferred from raw PDF bytes.' }, query.maxChars);
+    message: 'PDF text extraction is unsupported. Use pdf.formFields for base64 AcroForm materials, or extract PDF text to Markdown or TXT; page boundaries cannot be inferred from raw PDF text.' }, query.maxChars);
 }
 
 export function readStructuredSource(tool: string, source: Source, input: unknown) {

@@ -1,6 +1,7 @@
 import { artifactFilename } from '../runtime/artifact-download.js';
 import { marked } from 'marked';
 import createDOMPurify, { type WindowLike } from 'dompurify';
+import { isFillablePdfArtifact } from './fillable-pdf.js';
 
 /** Model output is untrusted. Only passive document markup reaches the page. */
 export function renderArtifactMarkdown(content: string, doc: Document = document): HTMLElement {
@@ -33,12 +34,14 @@ export function renderArtifactMarkdown(content: string, doc: Document = document
 }
 
 const downloadUrls = new Set<string>();
-export function artifactDownloadLink(runId: string, artifact: { id: string; title: string }, options: { getToken: () => string | null; onError: (text: string) => void }): HTMLAnchorElement {
+export function artifactDownloadLink(runId: string, artifact: { id: string; title: string; structured?: unknown }, options: { getToken: () => string | null; onError: (text: string) => void }): HTMLAnchorElement {
   const link = document.createElement('a');
   link.className = 'artifact-download';
-  link.textContent = '下载 Markdown';
-  link.download = artifactFilename(artifact.title);
-  link.setAttribute('aria-label', `下载 Markdown：${artifact.title}`);
+  const pdf = isFillablePdfArtifact(artifact.structured) ? artifact.structured : undefined;
+  const label = pdf ? '下载 PDF' : '下载 Markdown';
+  link.textContent = label;
+  link.download = pdf?.output.filename ?? artifactFilename(artifact.title);
+  link.setAttribute('aria-label', `${label}：${artifact.title}`);
   link.href = `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}/download`;
   let busy = false;
   link.addEventListener('click', async event => {
@@ -65,7 +68,7 @@ export function artifactDownloadLink(runId: string, artifact: { id: string; titl
       options.onError(error instanceof Error ? error.message : '下载失败，请稍后重试。');
     } finally {
       busy = false;
-      link.textContent = '下载 Markdown';
+      link.textContent = label;
     }
   });
   return link;

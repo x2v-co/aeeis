@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Source } from './contracts.js';
 import { LATEST_OBSERVATION_RESULT_CHARS } from './prompt-context.js';
+import { isBinaryPdf, pdfMaterialDescription } from './pdf-material.js';
 
 /** Hash the bytes that will actually be shown to a model. */
 export function materialContentHash(content: string): string {
@@ -22,6 +23,7 @@ export function materialForModel(source: Source): Source & {
   contentHash: string;
   instructions: string;
 } {
+  if (isBinaryPdf(source.content)) { const content = pdfMaterialDescription(source.content); source = { ...source, content, contentHash: materialContentHash(content) }; }
   const contentHash = source.contentHash ?? materialContentHash(source.content);
   const escapedRef = escapeMaterialRef(source.id);
   return {
@@ -199,6 +201,7 @@ function legacyCsvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: num
 
 /** Full source bytes stay in the repository. Pages fit the latest observation after JSON escaping. */
 export function readMaterialPage(source: Source, options: { offset?: number | undefined; limit?: number | undefined; characterOffset?: number | undefined } = {}) {
+  if (isBinaryPdf(source.content)) return materialForModel(source);
   const full = materialForModel(source), csv = materialFormat(source) === 'csv';
   const fits = (result: unknown) => JSON.stringify(result).length <= LATEST_OBSERVATION_RESULT_CHARS;
   if (options.characterOffset === undefined && fits(full) && (!csv || Buffer.byteLength(source.content, 'utf8') <= LARGE_CSV_BYTES)) return full;
@@ -247,7 +250,7 @@ export function readMaterialPage(source: Source, options: { offset?: number | un
 
 export function materialFormat(source: Pick<Source, 'title' | 'source' | 'content'>): MaterialFormat {
   const name = `${source.title} ${source.source}`;
-  if (/\.pdf(?:$|[\s?#])/i.test(name) || source.content.startsWith('%PDF-')) return 'pdf';
+  if (isBinaryPdf(source.content) || /\.pdf(?:$|[\s?#])/i.test(name) || source.content.startsWith('%PDF-')) return 'pdf';
   if (/\.csv(?:$|[\s?#])/i.test(name)) return 'csv';
   if (/\.json(?:$|[\s?#])/i.test(name)) return 'json';
   if (/\.(?:md|markdown)(?:$|[\s?#])/i.test(name)) return 'markdown';
@@ -277,6 +280,10 @@ function materialRows(content: string, csv: boolean): string[] {
 
 /** One format-aware path for prompt presentation and source search. Never cut a record or line. */
 export function materialExcerpt(source: Pick<Source, 'title' | 'source' | 'content'>, terms: string[], maxLength = 1200): MaterialExcerpt {
+  if (isBinaryPdf(source.content)) {
+    const description = pdfMaterialDescription(source.content);
+    return { content: materialPrefix(description, maxLength), format: 'pdf', truncated: description.length > maxLength, totalChars: source.content.length };
+  }
   const { content } = source;
   const format = materialFormat(source), csv = format === 'csv';
   const rows = materialRows(content, csv);
@@ -313,7 +320,7 @@ export function materialExcerpt(source: Pick<Source, 'title' | 'source' | 'conte
 export function presentedMaterialExcerpts(sources: Source[], terms: string[], budget = PRESENTED_SOURCE_TEXT_BUDGET, legacyHeadSamples = false): MaterialExcerpt[] {
   const allocations = new Array<number>(sources.length).fill(0);
   let remaining = budget;
-  const pending = sources.map((source, index) => ({ index, length: materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES ? Math.min(source.content.length, CSV_SUMMARY_CHARS) : source.content.length })).sort((a, b) => a.length - b.length);
+  const pending = sources.map((source, index) => ({ index, length: isBinaryPdf(source.content) ? pdfMaterialDescription(source.content).length : materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES ? Math.min(source.content.length, CSV_SUMMARY_CHARS) : source.content.length })).sort((a, b) => a.length - b.length);
   for (let index = 0; index < pending.length; index++) {
     const source = pending[index]!;
     const share = Math.min(source.length, Math.floor(remaining / (pending.length - index)));

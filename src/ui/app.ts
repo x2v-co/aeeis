@@ -1,5 +1,6 @@
 import type { PlanComparison } from '../runtime/graphs.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
+import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
 
 window.addEventListener('pagehide', releaseArtifactDownloads);
 
@@ -1681,7 +1682,7 @@ function renderMaterialFiles(status?: string): void {
   if (status) label.textContent = status;
   else if (materialFilesLoading) label.textContent = '正在读取资料…';
   else if (selectedMaterialFiles.length) label.textContent = `${selectedMaterialFiles.length} 个文件已绑定到本次 Run`;
-  else label.textContent = '支持 TXT、Markdown、CSV、JSON；文件只绑定当前 Run。';
+  else label.textContent = '支持 TXT、Markdown、CSV、JSON 和 AcroForm PDF（最多 256 KB）；文件只绑定当前 Run。';
 }
 async function readMaterialFiles(files: FileList | null): Promise<void> {
   const sequence = ++materialFileReadSequence;
@@ -1694,11 +1695,18 @@ async function readMaterialFiles(files: FileList | null): Promise<void> {
   const loaded: Array<{ name: string; content: string; size: number }> = [];
   for (const file of accepted) {
     const extension = file.name.toLocaleLowerCase().split('.').pop() ?? '';
-    const supported = ['txt', 'md', 'markdown', 'csv', 'json'].includes(extension) || ['text/plain', 'text/markdown', 'text/csv', 'application/json'].includes(file.type);
-    if (!supported) { skipped.push(`${file.name}（仅支持文本文件）`); continue; }
+    const pdf = extension === 'pdf' || file.type === 'application/pdf';
+    const supported = pdf || ['txt', 'md', 'markdown', 'csv', 'json'].includes(extension) || ['text/plain', 'text/markdown', 'text/csv', 'application/json'].includes(file.type);
+    if (!supported) { skipped.push(`${file.name}（不支持的文件格式）`); continue; }
+    if (pdf && file.size > 256 * 1024) { skipped.push(`${file.name}（PDF 超过 256 KB）`); continue; }
     if (file.size > MAX_MATERIAL_FILE_BYTES) { skipped.push(`${file.name}（超过 1 MB）`); continue; }
     try {
-      const content = (await file.text()).slice(0, MAX_MATERIAL_CONTENT_LENGTH).trim();
+      let content: string;
+      if (pdf) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
+        content = `data:application/pdf;base64,${btoa(binary)}`;
+      } else content = (await file.text()).slice(0, MAX_MATERIAL_CONTENT_LENGTH).trim();
       if (!content) { skipped.push(`${file.name}（内容为空）`); continue; }
       loaded.push({ name: file.name.slice(0, 200), content, size: file.size });
     } catch { skipped.push(`${file.name}（读取失败）`); }
@@ -2261,6 +2269,7 @@ function render(run: RunView): void {
     if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
     box.append(element('summary', `${artifact.title}${artifact.artifactType ? ` · ${artifact.artifactType}` : ''}`), actions, renderArtifactMarkdown(artifact.content));
     if (isProjectPulseArtifact(artifact.structured)) appendProjectPulse(box, artifact.structured, run);
+    else if (isFillablePdfArtifact(artifact.structured)) box.append(renderFillablePdf(artifact.structured, ref => evidenceDetail(run, ref)));
     else if (artifact.structured) box.append(element('small', '结构化产物'), element('pre', JSON.stringify(artifact.structured, null, 2)));
     box.append(element('small', `证据：${artifact.evidenceRefs.join(', ') || '无外部来源引用'}`)); artifacts.append(box);
     if (!readOnlyShare && run.goalId && artifact.evidenceRefs.length) box.append(memoryWritebackForm(run, artifact));
