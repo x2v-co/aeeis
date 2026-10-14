@@ -142,48 +142,58 @@ describe('AEEIS Temporal workflow', () => {
     }
   }, 120_000);
 
-  it('waits for wake after a permanent activity error and resumes', async () => {
-    let calls = 0;
-    let firstCallResolve!: () => void;
-    const firstCall = new Promise<void>(resolve => { firstCallResolve = resolve; });
-    // This test uses a dedicated workflow task queue so the activity behavior
-    // can be selected without changing the production workflow contract.
+  it('terminalizes a permanent activity error without requiring a wake', async () => {
     const queue = `${taskQueue}-permanent`;
+    let calls = 0, closed = 0;
     const localWorker = await Worker.create({
-      connection: environment.nativeConnection,
-      namespace: environment.namespace,
-      taskQueue: queue,
-      workflowBundle,
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
       activities: {
-        advanceRun: async () => {
-          calls += 1;
-          firstCallResolve();
-          if (calls === 1) {
-            const { ApplicationFailure } = await import('@temporalio/activity');
-            throw ApplicationFailure.nonRetryable('provider configuration is missing', 'AeeisPermanentError');
-          }
-          return { status: 'succeeded' };
-        },
+        advanceRun: async () => { calls++; const { ApplicationFailure } = await import('@temporalio/activity'); throw ApplicationFailure.nonRetryable('provider configuration is missing', 'AeeisPermanentError'); },
+        terminalizeRun: async () => { closed++; return { status: 'failed' }; },
       },
     });
-    const localRun = localWorker.run();
-    try {
-      const handle = await environment.client.workflow.start('agentRunWorkflow', {
-        workflowId: 'temporal-permanent-wake',
-        taskQueue: queue,
-        args: ['run-permanent-wake'],
-      });
-      await firstCall;
-      expect(calls).toBe(1);
-      await handle.signal('wake');
-      await expect(handle.result()).resolves.toBeUndefined();
-    } finally {
-      await localWorker.shutdown();
-      await localRun;
-    }
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: 'temporal-permanent-terminal', taskQueue: queue, args: ['run-permanent'] });
+      await expect(handle.result()).rejects.toThrow();
+      expect((await handle.describe()).status.name).toBe('FAILED');
+      expect(calls).toBe(1); expect(closed).toBe(1);
+      await expect(Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId)).resolves.toBeUndefined();
+    });
   }, 120_000);
 
-  it.each(['needs_approval', 'unknown'])('does not poll %s until the API signals progress', async status => {
+  it.each(['failed', 'succeeded'])('closes unknown outcomes automatically with terminal projection %s', async status => {
+    const queue = `${taskQueue}-unknown-${status}`;
+    let calls = 0;
+    const localWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
+      activities: { advanceRun: async () => { calls++; return { status: 'unknown' }; }, terminalizeRun: async () => ({ status }) },
+    });
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: `temporal-unknown-${status}`, taskQueue: queue, args: ['run-unknown'] });
+      if (status === 'failed') await expect(handle.result()).rejects.toThrow();
+      else await expect(handle.result()).resolves.toBeUndefined();
+      expect(calls).toBe(1);
+      expect((await handle.describe()).status.name).toBe(status === 'failed' ? 'FAILED' : 'COMPLETED');
+      await expect(Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId)).resolves.toBeUndefined();
+    });
+  }, 120_000);
+
+  it('fails the workflow after bounded retries when the API cannot persist terminal state', async () => {
+    const queue = `${taskQueue}-terminal-api-unavailable`;
+    let closed = 0;
+    const localWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
+      activities: { advanceRun: async () => ({ status: 'unknown' }), terminalizeRun: async () => { closed++; throw new Error('API unavailable'); } },
+    });
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: 'temporal-terminal-api-unavailable', taskQueue: queue, args: ['run-unknown'] });
+      await expect(handle.result()).rejects.toThrow();
+      expect(closed).toBe(3);
+      expect((await handle.describe()).status.name).toBe('FAILED');
+    });
+  }, 120_000);
+
+  it.each(['needs_approval'])('does not poll %s until the API signals progress', async status => {
     let calls = 0;
     let firstCallResolve!: () => void;
     let secondCallResolve!: () => void;
@@ -288,27 +298,33 @@ describe('AEEIS Temporal workflow', () => {
     });
   }, 120_000);
 
-  it('schedules a wake timer after exhausting activity transport retries without an external signal', async () => {
+  it('terminalizes after exhausting activity transport retries without an external signal', async () => {
     let calls = 0;
     const queue = `${taskQueue}-retry-exhausted`;
     const localWorker = await Worker.create({
       connection: environment.nativeConnection, namespace: environment.namespace, taskQueue: queue, workflowBundle,
       activities: { advanceRun: async () => {
         calls++;
-        if (calls <= 5) throw new Error('AEEIS activity transport failed: fetch failed');
-        return { status: 'succeeded' };
-      } },
+        throw new Error('AEEIS activity transport failed: fetch failed');
+      }, terminalizeRun: async () => ({ status: 'failed' }) },
     });
     await localWorker.runUntil(async () => {
       const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: 'temporal-retry-exhausted', taskQueue: queue, args: ['run-retry-exhausted'] });
-      await expect(handle.result()).resolves.toBeUndefined();
-      expect(calls).toBe(6);
+      await expect(handle.result()).rejects.toThrow();
+      expect(calls).toBe(5);
+      expect((await handle.describe()).status.name).toBe('FAILED');
       const history = await handle.fetchHistory();
       const timers = history.events?.filter(event => event.timerStartedEventAttributes);
-      expect(timers?.some(event => Number(event.timerStartedEventAttributes!.startToFireTimeout!.seconds) === 30)).toBe(true);
+      expect(timers?.some(event => Number(event.timerStartedEventAttributes!.startToFireTimeout!.seconds) === 30)).toBe(false);
+      const closeActivity = history.events?.find(event => event.activityTaskScheduledEventAttributes?.activityType?.name === 'terminalizeRun')?.activityTaskScheduledEventAttributes;
+      expect(Number(closeActivity?.startToCloseTimeout?.seconds)).toBe(30);
+      expect(Number(closeActivity?.scheduleToCloseTimeout?.seconds)).toBe(120);
+      expect(closeActivity?.retryPolicy?.maximumAttempts).toBe(3);
       const activity = history.events?.find(event => event.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes;
       expect(Number(activity?.heartbeatTimeout?.seconds)).toBe(45);
       expect(Number(activity?.startToCloseTimeout?.seconds)).toBe(65 * 60);
+      expect(Number(activity?.scheduleToCloseTimeout?.seconds)).toBe(2 * 60 * 60);
+      expect(activity?.retryPolicy?.maximumAttempts).toBe(5);
     });
   }, 120_000);
 

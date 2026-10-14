@@ -1669,6 +1669,12 @@ export function buildApp(options: Options) {
     else if (action !== 'dispatch') await options.engine.command(id, action, request.body);
     await notify(id); return getOwnedRun(options.repository, id, principal.id, principal.tenantId);
   });
+  app.post<{ Params: { id: string } }>('/internal/runs/:id/terminalize', async request => {
+    const { reason } = z.object({ reason: z.string().min(1).max(1000) }).strict().parse(request.body);
+    const { terminalizeRun } = await import('./terminalize-run.js');
+    const run = await terminalizeRun(options.repository, request.params.id, reason);
+    return { status: run.status };
+  });
   app.get<{ Params: { id: string } }>('/internal/runs/:id/status', async request => {
     return { status: (await options.repository.get(request.params.id)).status };
   });

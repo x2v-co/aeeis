@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
-import { AgentEngine, event } from '../src/runtime/engine.js';
+import { AgentEngine, digest, event } from '../src/runtime/engine.js';
 import { buildApp } from '../src/runtime/http.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
@@ -10,6 +10,78 @@ import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.
 import { decideRunAdvance, maxStalledAdvances } from '../src/temporal/run-advance.js';
 import type { AdvanceRunActivityResult } from '../src/temporal/activity.js';
 import { InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
+import { randomUUID } from 'node:crypto';
+import { ThreadService } from '../src/application/thread-service.js';
+
+it.each([false, true])('terminalizes a model timeout without a wake, retaining valid evidence as partial (evidence=%s)', async evidence => {
+  const repository = new InMemoryRunRepository();
+  const complete = vi.fn(async () => { throw new ModelOutcomeUnknown('Model timed out after 180000ms'); });
+  const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete });
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  try {
+    const run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1', ...(evidence ? { materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] } : {}) });
+    expect(await engine.advance(run.id)).toBe('unknown');
+    const request = { method: 'POST' as const, url: `/internal/runs/${run.id}/terminalize`, payload: { reason: 'Model outcome unknown' } };
+    expect((await app.inject(request)).statusCode).toBe(401);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await app.inject({ ...request, headers: { authorization: 'Bearer worker' } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe(evidence ? 'succeeded' : 'failed');
+    }
+    const stopped = await repository.get(run.id);
+    expect(stopped.calls[0]?.state).toBe('unknown');
+    expect(stopped.events.filter(event => event.data.terminalized)).toHaveLength(1);
+    if (evidence) expect(stopped.artifacts[0]).toMatchObject({ partial: true, evidenceRefs: [run.context.sources[0]!.id], artifactType: 'project-pulse/1', content: expect.stringContaining('开发完成'), limitations: [expect.stringContaining('Independent review was not completed')] });
+    expect(await engine.advance(run.id)).toBe(evidence ? 'succeeded' : 'failed');
+    expect(complete).toHaveBeenCalledOnce();
+  } finally { await app.close(); }
+});
+
+it('discards a late model result after activity timeout terminalization', async () => {
+  const repository = new InMemoryRunRepository();
+  let resolve!: (result: any) => void, began!: () => void;
+  const started = new Promise<void>(done => { began = done; });
+  const pending = new Promise<any>(done => { resolve = done; });
+  const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete: async () => { began(); return pending; } });
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  const run = await engine.create({ goal: 'Project Pulse', materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] });
+  const advancing = engine.advance(run.id);
+  try {
+    await started;
+    const response = await app.inject({ method: 'POST', url: `/internal/runs/${run.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Activity timeout' } });
+    expect(response.json().status).toBe('succeeded');
+    resolve({ value: { summary: 'Late plan', nodes: [] } });
+    expect(await advancing).toBe('succeeded');
+    const stopped = await repository.get(run.id);
+    expect(stopped.partial).toBe(true); expect(stopped.plans).toHaveLength(0);
+    expect(stopped.artifacts).toHaveLength(1);
+    expect(stopped.events.some(event => event.type === 'model.result_discarded')).toBe(true);
+  } finally { resolve({ value: {} }); await advancing; await app.close(); }
+});
+
+it('retains frozen thread evidence when an unknown follow-up has no new materials', async () => {
+  const repository = new InMemoryRunRepository();
+  const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete: async () => { throw new ModelOutcomeUnknown('No response'); } });
+  const parent = await engine.create({ goal: 'Project Pulse', materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] }, 'owner', 'local');
+  await repository.mutate(parent.id, run => {
+    run.status = 'succeeded';
+    run.artifacts.push({ id: `artifact_${randomUUID()}`, taskId: 'pulse', title: 'Project Pulse', content: '开发完成', evidenceRefs: [run.context.sources[0]!.id], hash: digest('开发完成'), createdAt: run.createdAt });
+  });
+  const thread = { id: `thread_${randomUUID()}`, owner: 'owner', tenantId: 'local', createdAt: new Date().toISOString() };
+  await repository.createThread(thread, parent.id);
+  const child = await new ThreadService(repository, engine).followUp(thread.id, { idempotencyKey: 'unknown-follow', parentRunId: parent.id, request: { goal: 'Follow-up', builtinSkill: 'project-pulse/1' } }, { owner: 'owner', tenantId: 'local' });
+  expect(child.context.sources).toEqual([]);
+  expect(await engine.advance(child.id)).toBe('unknown');
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  try {
+    const response = await app.inject({ method: 'POST', url: `/internal/runs/${child.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Model timeout' } });
+    expect(response.json().status).toBe('succeeded');
+    const stopped = await repository.get(child.id);
+    expect(stopped.partial).toBe(true);
+    expect(stopped.artifacts[0]?.content).toContain('开发完成');
+    expect(stopped.artifacts[0]?.evidenceRefs[0]).toMatch(/^history:/);
+  } finally { await app.close(); }
+});
 
 it.each(['completed', 'in flight'])('refunds a stale tick when another API call is %s after its budget reservation is delayed', async outcome => {
   const repository = new InMemoryRunRepository(), ledger = new InMemoryGlobalBudgetLedger();

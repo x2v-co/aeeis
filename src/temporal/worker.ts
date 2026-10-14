@@ -1,6 +1,6 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { fileURLToPath } from 'node:url';
-import { createAdvanceReminderActivity, createAdvanceRunActivity } from './activity.js';
+import { createAdvanceReminderActivity, createAdvanceRunActivity, createTerminalizeRunActivity } from './activity.js';
 import { closeWorkerHealthServer, startWorkerHealthServer } from './health.js';
 import { parseTemporalWorkerConfig } from './config.js';
 
@@ -23,6 +23,7 @@ try {
     workflowsPath: fileURLToPath(new URL('./workflows.js', import.meta.url)),
     activities: {
       advanceRun: createAdvanceRunActivity({ api, token }),
+      terminalizeRun: createTerminalizeRunActivity({ api, token }),
       advanceReminder: createAdvanceReminderActivity({ api, token }),
     },
   });
