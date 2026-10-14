@@ -14,9 +14,10 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
   vi.spyOn(console, 'warn').mockImplementation(line => logs.push(JSON.parse(String(line))));
   const repository = new InMemoryRunRepository();
   const systems: { executor: string[]; reviewer: string[] } = { executor: [], reviewer: [] };
+  const reviewerInputs: any[] = [];
   const complete = vi.fn(async (request: ModelRequest) => {
     if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Pulse', nodes: multiTask ? nodes : [nodes[0]] } };
-    if (request.system.includes('Independently review')) { systems.reviewer.push(request.system); return { value: { verdict: 'accepted', summary: 'Evidence supported' } }; }
+    if (request.system.includes('Independently review')) { systems.reviewer.push(request.system); reviewerInputs.push(request.input); return { value: { verdict: 'accepted', summary: 'Evidence supported' } }; }
     systems.executor.push(request.system);
     return { value: decide(request.input) };
   });
@@ -25,22 +26,28 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
   await engine.advance(created.id);
   await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
   for (let attempt = 0; attempt < 20; attempt++) if (['succeeded', 'failed'].includes(await engine.advance(created.id))) break;
-  return { run: await repository.get(created.id), logs, systems };
+  return { run: await repository.get(created.id), logs, systems, reviewerInputs };
 }
 
 describe('production source-fidelity regressions', () => {
-  it('run_2867fbfd: risks and body inference labels warn without repair on a limited CSV finish', async () => {
-    const { run, logs } = await fixture({ title: 'tasks.csv', content: 'status,due\nopen,10-20' }, input => {
+  it('run_2867fbfd: labels risks and body before review without repair on a limited CSV finish', async () => {
+    const { run, logs, reviewerInputs, systems } = await fixture({ title: 'tasks.csv', content: 'status,due\nopen,10-20' }, input => {
       const ref = input.sourceCatalog[0].id;
       if (!input.executionBudget.finalOnly) return { type: 'tool', tool: 'sources.csvQuery', argument: ref };
       return { type: 'finish', title: 'Pulse', content: '可能需要调整顺序', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ risks: [{ text: '预计可能延期', evidenceRefs: [ref] }] }) };
     }, false, true);
     expect(run.status, run.error).toBe('succeeded');
     expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
-    expect(logs.filter(log => log.marker === 'finish-content-warning')).toEqual(expect.arrayContaining([
-      expect.objectContaining({ runId: run.id, rule: 'inference_label', path: 'content' }),
-      expect.objectContaining({ runId: run.id, rule: 'inference_label', path: 'structured.risks[0].text' }),
-    ]));
+    expect(run.artifacts[0]?.content).toContain('推断：可能需要调整顺序');
+    expect(run.artifacts[0]?.structured).toMatchObject({ risks: [{ text: '推断：预计可能延期', derived: true }, { text: '推断：可能需要调整顺序', derived: true }] });
+    expect(logs.filter(log => log.rule === 'inference_label')).toEqual([]);
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }));
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-finish-content-check/1', autoLabeledInferences: 2 }));
+    expect(reviewerInputs[0].artifacts[0]).toEqual(run.artifacts[0]);
+    expect(reviewerInputs[0].fidelityNotes).toEqual([{ taskId: 'read_csv', labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }]);
+    expect(systems.reviewer[0]).toContain('不能让无依据的断言冒充事实');
+    expect(systems.reviewer[0]).toContain('Do not require revision solely for inference label wording or format');
+    expect(systems.reviewer[0]).toContain('Reject unsupported assertions presented as fact');
   });
   it('run_597734ec: iteration 8 forced weather finish accepts missing inference label', async () => {
     const { run, logs } = await fixture({ title: 'weather.txt', content: '北京天气资料有限，明天天气未确认' }, input => {
@@ -52,7 +59,8 @@ describe('production source-fidelity regressions', () => {
     expect(run.calls.filter(call => call.phase === 'executor')).toHaveLength(8);
     expect(run.artifacts[0]?.limitations).toContain('Node model iteration limit reached');
     expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
-    expect(logs).toContainEqual(expect.objectContaining({ marker: 'finish-content-warning', runId: run.id, path: 'content' }));
+    expect(run.artifacts[0]?.content).toContain('推断：可能有降雨');
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, paths: ['content[0][0]'] }));
   });
 
   it.each([false, true])('run_3ed71d04: maps artifact refs after string coercion, including intermediate and limited finishes (limited=%s)', async limited => {
@@ -86,7 +94,7 @@ describe('production source-fidelity regressions', () => {
     }
   });
 
-  it('run_843e7e3d: preserves 10-20, shares the rules in both prompts, and warns on unlabelled nextActions inference', async () => {
+  it('run_843e7e3d: preserves 10-20, shares the rules in both prompts, and labels nextActions inference', async () => {
     const { run, systems, logs } = await fixture({ title: 'plan.md', content: '# 计划\n截止 10-20，开发完成后测试' }, input => {
       const ref = input.sourceCatalog[0].id;
       return { type: 'finish', title: '项目', content: '截止 10-20', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({
@@ -95,9 +103,9 @@ describe('production source-fidelity regressions', () => {
       }) };
     });
     expect(run.status, run.error).toBe('succeeded');
-    expect(run.artifacts[0]!.structured).toMatchObject({ deadlines: [{ date: '10-20' }], nextActions: [{ text: '建议优先安排测试' }] });
+    expect(run.artifacts[0]!.structured).toMatchObject({ deadlines: [{ date: '10-20' }], nextActions: [{ text: '推断：建议优先安排测试', derived: true }] });
     expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
-    expect(logs).toContainEqual(expect.objectContaining({ marker: 'finish-content-warning', runId: run.id, rule: 'inference_label', path: 'structured.nextActions[0].text' }));
+    expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, paths: ['structured.nextActions[0].text'] }));
     for (const system of [...systems.executor, ...systems.reviewer]) {
       expect(system.split(sourceFidelityGuidance)).toHaveLength(2);
       expect(system).not.toMatch(/(?:full date or leave empty|完整日期或留空)/i);
@@ -108,15 +116,16 @@ describe('production source-fidelity regressions', () => {
   });
 
   it('run_3fdf9e2f: caps unknowns, repairs unsourced assumptions and derives prose counterparts', async () => {
-    const { run } = await fixture({ title: 'notes.txt', content: '开发已完成，测试负责人、范围、日期尚未说明' }, input => {
+    const { run, reviewerInputs } = await fixture({ title: 'notes.txt', content: '开发已完成，测试负责人、范围、日期尚未说明' }, input => {
       const ref = input.sourceCatalog[0].id;
-      return { type: 'finish', title: '项目', content: input.finishRepair ? '开发已完成' : '负载测试通常在核心集成之后\n推断：可能需要调整测试顺序', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ unknowns: Array.from({ length: 40 }, (_, i) => `源文档未说明字段 ${i}`) as any }) };
+      return { type: 'finish', title: '项目', content: input.finishRepair ? '开发已完成\n推断：可能需要调整测试顺序' : '负载测试通常在核心集成之后\n可能需要调整测试顺序', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ unknowns: Array.from({ length: 40 }, (_, i) => `源文档未说明字段 ${i}`) as any }) };
     });
     expect(run.status, run.error).toBe('succeeded');
     expect((run.artifacts[0]!.structured as ProjectPulseArtifact).unknowns).toHaveLength(maxSourceUnknowns);
     const reason = run.events.find(event => event.type === 'artifact.repair_requested')?.data.reason;
     expect(reason).toContain('unsourced general assumption');
     expect(reason).not.toContain('prose inference requires a corresponding structured entry');
+    expect(reviewerInputs[0].fidelityNotes).toEqual([{ taskId: 'read_csv', labeled: 1, paths: ['content[1][0]'] }]);
   });
 
   it('emits both check logs once for each schema-rejected finish', async () => {

@@ -1,6 +1,7 @@
 import { canonicalEvidenceRef } from './evidence-refs.js';
 import { csvFilterOps } from './csv-query.js';
-import { sourceFidelityGuidance, pulseFidelityProblems, inferenceFidelityProblems, normalizeSourceUnknowns, deriveProseInferences } from './sourceFidelityRules.js';
+import { sourceFidelityGuidance, pulseFidelityProblems, inferenceFidelityProblems, normalizeSourceUnknowns, deriveProseInferences, labelInferences } from './sourceFidelityRules.js';
+import { inputAvailability, inputQuestion, needsExternalLiveData } from './input-requests.js';
 export { sourceFidelityGuidance, pulseFidelityProblems } from './sourceFidelityRules.js';
 import { mergeFinishRepair, pruneFailedFields, repairIsWorse, repairMaxTokens, repairMaxBytes, repairTimeoutMs, type FinishProblem } from './finish-repair.js';
 import { modelRawOutput, redactRunData } from './run-debug.js';
@@ -1688,10 +1689,24 @@ export class AgentEngine {
           return;
         }
       }
-      if (limitReason && decision.type !== 'finish') throw new Error('Final limited-evidence call must return a finish decision; tools are disallowed');
       if (live.finishRepair && decision.type !== 'finish') throw new Error('Model artifact repair must return a finish decision; retry or replan the Run with a model that follows the output contract');
       if (decision.type === 'question') {
-        current.question = { taskId: node.id, text: decision.question }; current.status = 'needs_input'; event(current, 'input.requested', { taskId: node.id });
+        const availability = inputAvailability(current);
+        if (!availability.hasSources && !availability.hasCapabilities && needsExternalLiveData(current.goal)) {
+          const reason = `No data source or capability available: ${decision.question}`;
+          // Reuse finish validation, partial propagation and independent review,
+          // without another model call that could ask the same question again.
+          live.limitReason = reason;
+          event(current, 'input.unavailable_partial', { taskId: node.id, question: decision.question, missing: ['source', 'capability'], reason });
+          decision = {
+            type: 'finish', title: node.title, content: '所需外部数据不可用：当前没有可读取的数据来源或可获取数据的能力，无法核验或完成所请求的数据统计。', evidenceRefs: [], limitations: [reason],
+            ...(expectedArtifactType === 'project-pulse/1' ? { artifactType: expectedArtifactType, structured: { schemaVersion: expectedArtifactType, progress: [], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [] } } : {}),
+          };
+        }
+      }
+      if (limitReason && decision.type !== 'finish') throw new Error('Final limited-evidence call must return a finish decision; tools are disallowed');
+      if (decision.type === 'question') {
+        current.question = inputQuestion(current, node.id, decision.question); current.status = 'needs_input'; event(current, 'input.requested', { taskId: node.id, kind: current.question.kind, missing: current.question.missing });
       } else if (decision.type === 'tool') {
         let result: unknown;
         if (decision.tool !== 'sources.search') {
@@ -1812,11 +1827,11 @@ export class AgentEngine {
         current.pendingDelegation = pending;
         event(current, 'agent.requested', { taskId: node.id, agentId: decision.agentId, contextVersion: contextInput.id, idempotencyKey: pending.idempotencyKey });
       } else {
-        let contentCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', problems: [] as string[], movedUnknowns: 0, cappedUnknowns: 0, derivedInferences: 0 };
+        let contentCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', problems: [] as string[], movedUnknowns: 0, cappedUnknowns: 0, derivedInferences: 0, autoLabeledInferences: 0 };
         let evidenceCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', invalidRefs: [] as string[], missingEvidence: false, droppedClaims: 0, mappedRefs: 0, removedRefs: 0, observedCount: observed.size };
         try {
           const prepareFinish = async (candidate: Extract<z.infer<typeof decisionSchema>, { type: 'finish' }>) => {
-            contentCheck = { result: 'rejected', problems: [], movedUnknowns: 0, cappedUnknowns: 0, derivedInferences: 0 };
+            contentCheck = { result: 'rejected', problems: [], movedUnknowns: 0, cappedUnknowns: 0, derivedInferences: 0, autoLabeledInferences: 0 };
             evidenceCheck = { result: 'rejected', invalidRefs: [], missingEvidence: false, droppedClaims: 0, mappedRefs: 0, removedRefs: 0, observedCount: observed.size };
             const problems: FinishProblem[] = [];
             const add = (path: string, code: string, message: string) => problems.push({ path, code, message });
@@ -1889,6 +1904,13 @@ export class AgentEngine {
             }
             const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
             const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
+            const autoLabels = labelInferences(candidate, structured, sourceText, candidate.evidenceRefs);
+            contentCheck.autoLabeledInferences = autoLabels.labeled;
+            if (autoLabels.labeled) {
+              finishProtocolLog('aeeis-inference-autolabel/1', { runId: current.id, taskId: node.id, labeled: autoLabels.labeled, paths: autoLabels.paths });
+              // Retain notes even if a different field requires a later repair.
+              live.observations.push({ tool: 'output.fidelity', argument: 'deterministic inference labels', result: { taskId: node.id, labeled: autoLabels.labeled, paths: autoLabels.paths } });
+            }
             const inferenceWarnings = inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs).filter(message => message.includes('inference must start'));
             for (const message of inferenceWarnings) finishProtocolLog('aeeis-finish-content-warning/1', { marker: 'finish-content-warning', runId: current.id, taskId: node.id, rule: 'inference_label', path: message.split(':')[0], message });
             // Derivation is deterministic and cannot introduce a repair condition.
@@ -1906,7 +1928,7 @@ export class AgentEngine {
             for (const message of inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs).filter(message => !message.includes('inference must start'))) add(message.split(':')[0]!, 'general_assumption', message);
             if (problems.some(problem => problem.code.startsWith('schema:') || problem.code === 'artifact_contract')) evidenceCheck.result = 'rejected';
             contentCheck.problems = problems.map(problem => problem.message);
-            contentCheck.result = problems.length ? 'rejected' : contentCheck.movedUnknowns || contentCheck.cappedUnknowns || inferences.derived || inferences.warnings.length ? 'fixed' : 'ok';
+            contentCheck.result = problems.length ? 'rejected' : contentCheck.movedUnknowns || contentCheck.cappedUnknowns || autoLabels.labeled || inferences.derived || inferences.warnings.length ? 'fixed' : 'ok';
             if (evidenceCheck.droppedClaims) limitationNotes.push(`${evidenceCheck.droppedClaims} claim(s) removed because they cited evidence not received`);
             if (limitationNotes.length) candidate.limitations = [...new Set(limitationNotes)];
             else delete candidate.limitations;
@@ -2401,7 +2423,7 @@ export class AgentEngine {
         }
         if (live) live.observations.push({ tool: `agent:${pending.agentId}`, argument: JSON.stringify(pending.taskBrief), result: outcome.result ?? outcome });
         if (outcome.status === 'needs_clarification') {
-          current.question = { taskId: pending.taskBrief.taskId, text: outcome.result?.requestedFollowups.join('\n') || 'External Agent needs clarification' };
+          current.question = inputQuestion(current, pending.taskBrief.taskId, outcome.result?.requestedFollowups.join('\n') || 'External Agent needs clarification', true);
           current.status = 'needs_input';
         } else if (['failed', 'rejected'].includes(outcome.status)) {
           current.status = 'failed'; current.error = 'External Agent delegation failed';
@@ -2424,9 +2446,10 @@ export class AgentEngine {
     legacyRequests.push({ system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input } });
     const reviewRepair = run.reviewRepair ? redactRunData(run.reviewRepair) : undefined;
     const reviewContext = '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Artifacts carrying artifactType/structured are already schema-validated. Intermediate task artifacts may be plain text when they contain no inferences. Judge content and evidence support using the shared source fidelity rules.';
-    const reviewSystem = currentSystem + sourceFidelityGuidance + reviewContext + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
+    const reviewSystem = currentSystem + sourceFidelityGuidance + reviewContext + '\nThe runtime has already labelled cue-bearing sentences absent verbatim from evidence with "推断：" deterministically. Judge whether each labelled inference is supported by its cited evidence; labels do not establish support. Reject unsupported assertions presented as fact, including unlabelled assertions absent from evidence, and forbidden general assumptions. 不能让无依据的断言冒充事实。Do not require revision solely for inference label wording or format. input.fidelityNotes lists auto-labelled paths.' + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
     const fidelityWarnings = run.steps.flatMap(step => step.observations.filter(observation => observation.tool === 'output.warning').map(observation => observation.result));
-    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, ...(fidelityWarnings.length ? { fidelityWarnings } : {}), sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
+    const fidelityNotes = run.steps.flatMap(step => step.observations.filter(observation => observation.tool === 'output.fidelity').map(observation => observation.result));
+    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, ...(fidelityWarnings.length ? { fidelityWarnings } : {}), ...(fidelityNotes.length ? { fidelityNotes } : {}), sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
       try { current.review = parseReviewDecision(value); }
       catch (error) {
         const issues = validationDetails(error)?.issues;

@@ -51,6 +51,46 @@ const generalAssumption = /通常|一般(?:会|在|需要)|usually|typically/i;
 const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^[\s#*>\-\d.]+/, '').trim();
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
 const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：').replace(/[。；.!;]+$/, '').trim();
+const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);
+
+/** Mutate structured narrative fields and a content holder. For a string input,
+ * return the labelled content as well, since JavaScript strings are immutable. */
+export function labelInferences(content: { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { labeled: number; paths: string[] };
+export function labelInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { content: string; labeled: number; paths: string[] };
+export function labelInferences(content: string | { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { content?: string; labeled: number; paths: string[] } {
+  const paths: string[] = [];
+  const needsLabel = (text: string, evidence: string) => inferenceCue.test(text) && !generalAssumption.test(text) && !evidence.includes(text) && !inferencePrefix.test(text);
+  const visit = (value: unknown, evidenceRefs = refs, path = 'structured'): void => {
+    if (Array.isArray(value)) { value.forEach((item, index) => visit(item, evidenceRefs, `${path}[${index}]`)); return; }
+    if (!value || typeof value !== 'object') return;
+    const object = value as Record<string, unknown>;
+    const itemRefs = Array.isArray(object.evidenceRefs) ? object.evidenceRefs as string[] : evidenceRefs;
+    for (const [key, item] of Object.entries(object)) {
+      // Only narrative fields: dates, identities, paths and other schema data
+      // must remain literal. PDF structured values are skipped entirely below.
+      if (typeof item === 'string' && narrativeKeys.has(key)) {
+        const evidence = sourceText(itemRefs);
+        if (evidence.includes(item) || !needsLabel(clean(item), evidence)) continue;
+        object[key] = `推断：${clean(item)}`;
+        if (structured?.schemaVersion === 'project-pulse/1' && Array.isArray(object.evidenceRefs)) object.derived = true;
+        paths.push(`${path}.${key}`);
+      } else if (key !== 'evidenceRefs' && key !== 'changedFiles') visit(item, itemRefs, `${path}.${key}`);
+    }
+  };
+  if (structured?.schemaVersion !== 'fillable-pdf/1') visit(structured);
+  const labelledContent = (typeof content === 'string' ? content : content.content).split('\n').map((line, index) => {
+    let sentenceIndex = 0;
+    // Preserve separators and whitespace, using the checker's sentence boundaries.
+    return line.replace(/[^。；]+[。；]?/g, sentence => {
+      const sentencePath = `content[${index}][${sentenceIndex++}]`;
+      if (!needsLabel(clean(sentence), sourceText(refs))) return sentence;
+      paths.push(sentencePath);
+      return sentence.replace(/^(\s*(?:(?:#{1,6}|[-*+>]+|\d+\.)[ \t]*)*)/, '$1推断：');
+    });
+  }).join('\n');
+  if (typeof content !== 'string') content.content = labelledContent;
+  return { ...(typeof content === 'string' ? { content: labelledContent } : {}), labeled: paths.length, paths };
+}
 
 /** Missing prose counterparts are bookkeeping, never a model repair condition. */
 export function deriveProseInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, refs: string[]): { derived: number; warnings: string[] } {

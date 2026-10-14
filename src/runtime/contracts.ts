@@ -127,11 +127,13 @@ const projectPulseItemSchema = z.object({
 const projectPulseOwnerSchema = z.object({
   name: z.string().trim().min(1).max(200),
   responsibility: z.string().trim().min(1).max(1000),
+  derived: z.literal(true).optional(),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
 }).strip();
 const projectPulseDeadlineSchema = z.object({
   text: z.string().trim().min(1).max(1000),
   date: z.string().trim().min(1).max(100),
+  derived: z.literal(true).optional(),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
 }).strip();
 const workspacePathSchema = z.string().trim().min(1).max(1000).refine(value => !value.startsWith('/') && !value.includes('\\') && !value.split('/').some(part => part === '' || part === '.' || part === '..'), 'path must be relative to the Run workspace');
@@ -312,7 +314,7 @@ export interface AgentRun {
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
   approval?: { planHash: string; approved: boolean; actor?: string; at?: string };
-  question?: { taskId: string; text: string };
+  question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;
   error?: string;
