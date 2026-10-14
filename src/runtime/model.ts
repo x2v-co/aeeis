@@ -10,6 +10,12 @@ export interface ModelRequest {
   allowTextOutput?: boolean;
   /** Overrides the pin's initial output allowance. */
   maxTokens?: number;
+  /** Per-call repair bounds, also enforced while consuming the response body. */
+  maxResponseBytes?: number;
+  timeoutMs?: number;
+  disableRetries?: boolean;
+  /** Transport cancellation, excluded from durable request snapshots. */
+  signal?: AbortSignal;
   /** Frozen wire controls; null explicitly preserves an omitted provider field. */
   thinking?: 'enabled' | 'disabled' | 'auto' | null;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null;
@@ -76,7 +82,7 @@ export class AgentpayModelAdapter implements ModelAdapter {
     }
     const purchaseId = `aeeis_${createHash('sha256').update(request.idempotencyKey ?? randomUUID()).digest('hex').slice(0, 48)}`;
     const prompt = `${request.system}\n\n${JSON.stringify(request.input)}`;
-    const result = await this.rpc('tools/call', { name: 'agentpay_credit_purchase', arguments: { request: { purchaseId, paymentMethod: 'toolkit_credits', prompt, outputCap: 4096, model: this.pin.model, maxCredits: this.maxCredits } } }, this.timeoutMs);
+    const result = await this.rpc('tools/call', { name: 'agentpay_credit_purchase', arguments: { request: { purchaseId, paymentMethod: 'toolkit_credits', prompt, outputCap: Math.min(request.maxTokens ?? 4096, 4096), model: this.pin.model, maxCredits: this.maxCredits } } }, Math.min(request.timeoutMs ?? this.timeoutMs, this.timeoutMs));
     const wrapper = result?.structuredContent ?? result;
     const data = wrapper?.data ?? wrapper;
     if (result?.isError || data?.errorCode) {
@@ -311,7 +317,7 @@ export class HttpModelAdapter implements ModelAdapter {
         outputTokens: usage.outputTokens + reported.outputTokens,
       } : undefined;
       const choice = raw.choices[0]!;
-      if (choice.finish_reason === 'length' && attempt === 0) {
+      if (choice.finish_reason === 'length' && attempt === 0 && !request.disableRetries) {
         try { await request.beforeRetry?.(usage); }
         catch (error) { throw new ModelResponseRejected(error instanceof Error ? error.message : 'Model retry budget check failed', usage, choice.message.content); }
         maxTokens = Math.min(maxTokens * 2, cap);
@@ -349,7 +355,10 @@ export class HttpModelAdapter implements ModelAdapter {
       // A fresh deadline bounds fetch AND response-body consumption on each try.
       const controller = new AbortController(), signal = controller.signal;
       const streaming = this.transport.stream;
-      const overallMs = streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs;
+      const overallMs = Math.min(request.timeoutMs ?? Number.MAX_SAFE_INTEGER, streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs);
+      const abortRequested = () => controller.abort();
+      request.signal?.addEventListener('abort', abortRequested, { once: true });
+      if (request.signal?.aborted) controller.abort();
       let timeoutMs = overallMs, timeoutKind = 'overall';
       let overallTimer = setTimeout(() => { timeoutMs = overallMs; timeoutKind = 'overall'; controller.abort(); }, overallMs);
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -406,6 +415,7 @@ export class HttpModelAdapter implements ModelAdapter {
             if (part.value?.byteLength) {
               firstByteMs ??= Date.now() - attemptStarted;
               responseBytes += part.value.byteLength;
+              if (request.maxResponseBytes !== undefined && responseBytes > request.maxResponseBytes) throw new ModelOutcomeUnknown('Repair response exceeds byte cap; provider outcome is unknown');
               activity();
             }
             return part;
@@ -462,7 +472,8 @@ export class HttpModelAdapter implements ModelAdapter {
           : network);
         // Retryability classifies the error. The decision explains the actual replay fence/budget.
         let retryDecision: string;
-        if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
+        if (request.disableRetries || request.signal?.aborted) retryDecision = 'retry-disabled';
+        else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
         else if (signal.aborted && timeoutKind === 'idle' && streamReceived && responseBytes > 0) {
@@ -477,7 +488,7 @@ export class HttpModelAdapter implements ModelAdapter {
         else retryDecision = 'retry';
         const errorCodeRaw = String((error as NodeJS.ErrnoException)?.code ?? ((error as Error)?.cause as NodeJS.ErrnoException | undefined)?.code ?? '');
         const connectPhase = !signal.aborted && response === undefined && /^(?:UND_ERR_CONNECT_TIMEOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)$/.test(errorCodeRaw);
-        if (connectPhase && retryDecision === 'attempts-exhausted' && connectRetries < 1) retryDecision = 'connect-retry';
+        if (!request.disableRetries && connectPhase && retryDecision === 'attempts-exhausted' && connectRetries < 1) retryDecision = 'connect-retry';
         let recordingFailed = false;
         const nextMidstreamRetry = history.midstreamRetries + 1;
         // Persist wire variants before sending them; never mutate the frozen logical request.
@@ -522,7 +533,7 @@ export class HttpModelAdapter implements ModelAdapter {
           ? `Model ${stage} timed out after ${timeoutMs}ms${streaming || timeoutKind === 'first-byte' ? ` (${timeoutKind} timeout)` : ''}. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`
           : `Model ${stage} connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`);
         else throw error;
-      } finally { clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); void bodyReader?.cancel().catch(() => undefined); }
+      } finally { request.signal?.removeEventListener('abort', abortRequested); clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); void bodyReader?.cancel().catch(() => undefined); }
       if (retryDelayMs > 0) await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }

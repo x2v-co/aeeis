@@ -1,9 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createAdvanceRunActivity } from '../src/temporal/activity.js';
+import { createAdvanceRunActivity, createTerminalizeRunActivity } from '../src/temporal/activity.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Temporal AEEIS activity contract', () => {
+  it('bounds a polling activity that never receives a completed tick', async () => {
+    const heartbeat = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'running', progress: 'started' }), { status: 202 })));
+    await expect(createAdvanceRunActivity({ api: 'http://localhost', token: 'test', timeoutMs: 20, pollIntervalMs: 1, heartbeat })('run')).rejects.toThrow();
+    expect(heartbeat).toHaveBeenCalled();
+  });
+  it('projects a terminal outcome through an authenticated bounded request', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ status: 'succeeded' })));
+    vi.stubGlobal('fetch', fetch);
+    await expect(createTerminalizeRunActivity({ api: 'http://localhost', token: 'test' })('run', 'unknown model outcome')).resolves.toEqual({ status: 'succeeded' });
+    expect(fetch).toHaveBeenCalledWith('http://localhost/internal/runs/run/terminalize', expect.objectContaining({ method: 'POST', body: JSON.stringify({ reason: 'unknown model outcome' }), headers: expect.objectContaining({ authorization: 'Bearer test' }), signal: expect.any(AbortSignal) }));
+  });
   it.each([{ status: 'running' }, { status: 'unknown', progress: 'durable-progress' }])('returns the bounded run status envelope %j', async result => {
     const fetch = vi.fn(async () => new Response(JSON.stringify(result)));
     vi.stubGlobal('fetch', fetch);

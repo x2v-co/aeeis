@@ -24,6 +24,24 @@ function fixture(body: unknown, status = 200): Promise<string> {
 }
 
 describe('HttpModelAdapter', () => {
+  it('never doubles the token allowance or retries a length-limited repair', async () => {
+    const fetch = sequence([{ reason: 'length', content: '{"partial":' }]);
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '');
+    await expect(adapter.complete({ system: 'repair', input: {}, maxTokens: 4096, disableRetries: true })).rejects.toThrow('incomplete');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetch.mock.calls[0]![1].body).max_tokens).toBe(4096);
+  });
+  it.each([false, true])('caps repair response bytes before a stream can hang (stream=%s)', async stream => {
+    const content = 'x'.repeat(651 * 1024);
+    const body = stream ? `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n` : JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] });
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(body)); }, cancel } ), { headers: { 'content-type': stream ? 'text/event-stream' : 'application/json' } });
+    const fetch = vi.fn(async () => response);
+    vi.stubGlobal('fetch', fetch);
+    const adapter = new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, { stream, retryBaseMs: 0 });
+    await expect(adapter.complete({ system: 'repair', input: {}, idempotencyKey: 'repair-cap', maxResponseBytes: 65536, disableRetries: true })).rejects.toThrow('byte cap');
+    expect(fetch).toHaveBeenCalledTimes(1); expect(cancel).toHaveBeenCalledOnce();
+  });
   it.each([429, 500, 502, 503])('does not replay HTTP %s after any body bytes, retaining structured diagnostics', async status => {
     const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {

@@ -193,8 +193,13 @@ describe('model schema normalization', () => {
     const { run } = await runModel({ skill, executor: ref => ({ type: 'finish', title: 'Report', content: 'Report', evidenceRefs: [ref], artifactType: skill,
       structured: { schemaVersion: skill, progress: [{ text: 'Claim', evidenceRefs: [] }], validation: [{ name: 'Check', status: 'passed', evidenceRefs: [] }], extra: true },
     }) });
-    expect(run.status).toBe('failed');
-    expect(run.artifacts).toHaveLength(0);
-    expect(run.calls.filter(call => call.phase === 'executor').every(call => call.rawOutput && call.validationErrors?.length)).toBe(true);
+    expect(run.status).toBe(skill === 'project-pulse/1' ? 'succeeded' : 'failed');
+    expect(run.artifacts).toHaveLength(skill === 'project-pulse/1' ? 1 : 0);
+    if (skill === 'project-pulse/1') {
+      expect(run.partial).toBe(true);
+      expect(run.artifacts[0]?.structured).toMatchObject({ progress: [], unknowns: [] });
+    }
+    expect(run.calls.find(call => call.phase === 'executor')?.validationErrors?.length).toBeGreaterThan(0);
+    expect(run.calls.filter(call => call.phase === 'executor').every(call => call.rawOutput)).toBe(true);
   });
 });

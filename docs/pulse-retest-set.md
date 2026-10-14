@@ -23,3 +23,9 @@ id,title,status,due,createdAt
 ```
 
 Expected: ids 1 and 4 (2 is done, 3 is future, 5 has no date).
+
+Local replay-model retest (2026-10-14, inference auto-derivation):
+
+Run `npx vitest run tests/pulse-inference-replay.test.ts` to replay all six shapes with a deterministic model adapter, real source tools, finish validation and review. This is a local fixture replay, not a production-provider retest. All six finish successfully without an inference-correspondence repair: CSV uses an aggregate query; follow-up uses frozen parent-thread evidence; MD, TXT and JSON derive missing labelled prose into structured risk entries with source refs and `derived: true`; the `lt` case returns ids 1 and 4, an aggregate count of 2, and an effective `lt` log.
+
+Regression coverage also exercises a 651 KiB response, a repair with no response, dropped/altered artifact identity, and repairs introducing additional problems or new error types. Repairs merge only failed fields, use at most 4,096 output tokens and 64 KiB of response bytes, disable transport/length retries, and have a 180-second deadline. Rejected repairs retain valid pre-repair evidence as a partial result with limitations. Unknown outcomes and exhausted activity retries now close Temporal execution automatically: valid evidence produces `succeeded` plus `partial`; no evidence produces `failed`. If terminal projection cannot reach the API within its bounded retry policy, the workflow fails. Date precision, source unknowns, source-level refs, unconditional finish logs, and fillable-PDF/CJK checks remain covered.

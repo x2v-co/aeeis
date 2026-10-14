@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine } from '../src/runtime/engine.js';
-import { inferenceFidelityProblems, maxSourceUnknowns, normalizeSourceUnknowns, sourceFidelityGuidance } from '../src/runtime/sourceFidelityRules.js';
+import { inferenceFidelityProblems, maxSourceUnknowns, normalizeSourceUnknowns, sourceFidelityGuidance, deriveProseInferences } from '../src/runtime/sourceFidelityRules.js';
 import type { ProjectPulseArtifact } from '../src/runtime/contracts.js';
 import type { ModelRequest } from '../src/runtime/model.js';
 
@@ -80,7 +80,7 @@ describe('production source-fidelity regressions', () => {
     expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toHaveLength(2);
   });
 
-  it('run_3fdf9e2f: caps unknowns and repairs unsourced assumptions and prose without a structured counterpart', async () => {
+  it('run_3fdf9e2f: caps unknowns, repairs unsourced assumptions and derives prose counterparts', async () => {
     const { run } = await fixture({ title: 'notes.txt', content: '开发已完成，测试负责人、范围、日期尚未说明' }, input => {
       const ref = input.sourceCatalog[0].id;
       return { type: 'finish', title: '项目', content: input.finishRepair ? '开发已完成' : '负载测试通常在核心集成之后\n推断：可能需要调整测试顺序', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse({ unknowns: Array.from({ length: 40 }, (_, i) => `源文档未说明字段 ${i}`) as any }) };
@@ -89,14 +89,15 @@ describe('production source-fidelity regressions', () => {
     expect((run.artifacts[0]!.structured as ProjectPulseArtifact).unknowns).toHaveLength(maxSourceUnknowns);
     const reason = run.events.find(event => event.type === 'artifact.repair_requested')?.data.reason;
     expect(reason).toContain('unsourced general assumption');
-    expect(reason).toContain('prose inference requires a corresponding structured entry');
+    expect(reason).not.toContain('prose inference requires a corresponding structured entry');
   });
 
   it('emits both check logs once for each schema-rejected finish', async () => {
     const { run, logs } = await fixture({ title: 'notes.txt', content: '开发完成' }, input => ({ type: 'finish', title: '项目', content: '开发完成', evidenceRefs: [input.sourceCatalog[0].id], artifactType: 'project-pulse/1', structured: { schemaVersion: 'project-pulse/1' } }));
-    expect(run.status).toBe('failed');
+    expect(run.status).toBe('succeeded');
+    expect(run.partial).toBe(true);
     for (const protocol of ['aeeis-finish-content-check/1', 'aeeis-finish-evidence-check/1']) {
-      expect(logs.filter(log => log.protocol === protocol).map(log => log.result)).toEqual(['rejected', 'rejected']);
+      expect(logs.filter(log => log.protocol === protocol).map(log => log.result)).toEqual(['rejected', 'ok']);
     }
   });
 
@@ -113,13 +114,32 @@ describe('production source-fidelity regressions', () => {
 });
 
 describe('inference checks in every field', () => {
+  it('derives each labelled sentence, accepts prefix aliases, and avoids duplicate entries', () => {
+    const structured = pulse({ nextActions: [{ text: '推断：可能延期', evidenceRefs: ['s'] }] });
+    const content = '推断:可能延期。推断：预计需要复核。\nInference: likely needs review.';
+    expect(deriveProseInferences(content, structured, ['s'])).toEqual({ derived: 2, warnings: [] });
+    expect(deriveProseInferences(content, structured, ['s'])).toEqual({ derived: 0, warnings: [] });
+    expect(structured.risks.every(item => item.derived && item.evidenceRefs[0] === 's')).toBe(true);
+    expect(inferenceFidelityProblems(content, structured, () => '开发完成', ['s'])).toEqual([]);
+  });
+  it('records a non-blocking warning when derivation cannot fit the artifact shape', () => {
+    const content = 'Inference: likely needs review';
+    expect(deriveProseInferences(content, undefined, ['s'])).toEqual({ derived: 0, warnings: [expect.stringContaining('no structured counterpart')] });
+    expect(inferenceFidelityProblems(content, undefined, () => '开发完成', ['s'])).toEqual([]);
+    const full = pulse({ risks: Array.from({ length: 30 }, () => ({ text: '开发完成', evidenceRefs: ['s'] })) });
+    expect(deriveProseInferences(content, full, ['s']).warnings).toHaveLength(1);
+    expect(full.risks).toHaveLength(30);
+  });
   it.each(['progress', 'completedChanges', 'blockers', 'risks', 'decisions', 'nextActions', 'unknowns'] as const)('checks %s', field => {
     expect(inferenceFidelityProblems('', pulse({ [field]: [{ text: '可能延期', evidenceRefs: ['s'] }] }), () => '开发完成', ['s']).join(' ')).toContain('inference must start');
   });
-  it('forbids general assumptions even when labelled, and requires a prose counterpart', () => {
+  it('forbids general assumptions even when labelled, and derives missing prose counterparts', () => {
     expect(inferenceFidelityProblems('推断：负载测试通常在核心集成之后', pulse(), () => '开发完成', ['s']).join(' ')).toContain('unsourced general assumption');
     expect(inferenceFidelityProblems('推断：可能延期', pulse({ risks: [{ text: '推断：可能延期', evidenceRefs: ['s'] }] }), () => '开发完成', ['s'])).toEqual([]);
-    expect(inferenceFidelityProblems('推断：可能在 10-20 延期', pulse({ deadlines: [{ text: '截止', date: '10-20', evidenceRefs: ['s'] }] }), () => '截止 10-20', ['s']).join(' ')).toContain('corresponding structured entry');
+    const structured = pulse({ deadlines: [{ text: '截止', date: '10-20', evidenceRefs: ['s'] }] });
+    expect(inferenceFidelityProblems('推断：可能在 10-20 延期', structured, () => '截止 10-20', ['s'])).toEqual([]);
+    expect(deriveProseInferences('推断：可能在 10-20 延期', structured, ['s'])).toEqual({ derived: 1, warnings: [] });
+    expect(structured.risks).toEqual([{ text: '推断：可能在 10-20 延期', evidenceRefs: ['s'], derived: true }]);
   });
   it('keeps source gaps about timeout policy in unknowns', () => {
     const structured = { unknowns: ['服务超时策略未说明', 'csvQuery 结果被截断'] };

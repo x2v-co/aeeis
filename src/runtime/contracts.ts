@@ -122,6 +122,7 @@ export const reviewSchema = z.object({
 const projectPulseItemSchema = z.object({
   text: z.string().trim().min(1).max(2000),
   evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50),
+  derived: z.literal(true).optional(),
 }).strip();
 const projectPulseOwnerSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -221,7 +222,7 @@ export interface ExternalBudget { calls?: number; tokens?: number; moneyUsd?: nu
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
   /** Exact logical request reserved for this call, before transport callbacks/options. */
-  modelRequest?: { system: string; input: unknown; maxTokens?: number; thinking?: 'enabled' | 'disabled' | 'auto' | null; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null };
+  modelRequest?: { system: string; input: unknown; maxTokens?: number; maxResponseBytes?: number; timeoutMs?: number; disableRetries?: boolean; thinking?: 'enabled' | 'disabled' | 'auto' | null; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null };
   rawOutput?: string;
   validationErrors?: Array<{ path: string; code: string; message: string }>;
   id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
@@ -249,7 +250,7 @@ export interface Step {
   taskId: string; status: 'pending' | 'running' | 'succeeded';
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
   /** One bounded, durable model attempt to repair a candidate finish object. */
-  finishRepair?: { reason: string; candidate: unknown };
+  finishRepair?: { reason: string; candidate: unknown; problems?: Array<{ path: string; code: string; message: string }>; discarded?: string };
 }
 export interface AgentRun {
   executionLimits?: import('./execution-limits.js').ExecutionLimits;

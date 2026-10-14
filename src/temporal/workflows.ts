@@ -1,4 +1,4 @@
-import { condition, continueAsNew, defineSignal, patched, proxyActivities, setHandler } from '@temporalio/workflow';
+import { ApplicationFailure, condition, continueAsNew, defineSignal, patched, proxyActivities, setHandler } from '@temporalio/workflow';
 import type { AdvanceReminderActivityResult, AdvanceRunActivityResult } from './activity.js';
 import { decideRunAdvance } from './run-advance.js';
 
@@ -22,6 +22,20 @@ const { advanceRun: advanceRunLong } = proxyActivities<{ advanceRun(id: string):
   // One tick can include first-byte retries and a completed length retry.
   startToCloseTimeout: '65 minutes', scheduleToCloseTimeout: '2 hours', heartbeatTimeout: '45 seconds', retry,
 });
+const { terminalizeRun } = proxyActivities<{ terminalizeRun(id: string, reason: string): Promise<AdvanceRunActivityResult> }>({
+  startToCloseTimeout: '30 seconds', scheduleToCloseTimeout: '2 minutes', retry: { ...retry, maximumAttempts: 3 },
+});
+async function closeUnknownRun(runId: string, reason: string): Promise<boolean> {
+  let result: AdvanceRunActivityResult;
+  try {
+    result = await terminalizeRun(runId, reason);
+  } catch { throw ApplicationFailure.nonRetryable('Run could not be terminalized after bounded activity retries', 'AeeisRunTimeout'); }
+  if (result.status === 'failed') throw ApplicationFailure.nonRetryable(reason, 'AeeisRunFailed');
+  if (['succeeded', 'cancelled'].includes(result.status)) return true;
+  // A business wait may win the race with terminalization; keep its workflow alive.
+  if (['needs_approval', 'needs_input', 'paused', 'waiting_external'].includes(result.status)) return false;
+  throw ApplicationFailure.nonRetryable('Run could not be terminalized after bounded activity retries', 'AeeisRunTimeout');
+}
 export async function agentRunWorkflow(runId: string, pollState?: { previousProgress?: string; stalled: number }): Promise<void> {
   let wake = false;
   let previousProgress = pollState?.previousProgress;
@@ -34,12 +48,20 @@ export async function agentRunWorkflow(runId: string, pollState?: { previousProg
       ? patched('run-advance-long-model-v1') ? advanceRunLong : advanceRunPolling
       : advanceRun)(runId); }
     catch (error) {
+      if (patched('run-advance-terminal-unknown-v1')) {
+        if (await closeUnknownRun(runId, 'Run activity failed after bounded retries')) return;
+        continue;
+      }
       // Permanent auth/config/protocol failures wait for an explicit wake after
       // operator correction. Transport failures get a durable timer retry.
       await condition(() => wake, hasNonRetryableCause(error) ? undefined : '30 seconds');
       continue;
     }
     const status = result.status;
+    if (status === 'unknown' && patched('run-advance-terminal-unknown-v1')) {
+      if (await closeUnknownRun(runId, 'Model or activity outcome is unknown')) return;
+      continue;
+    }
     if (['succeeded', 'cancelled'].includes(status)) return;
     // Preserve old histories that already emitted a wait command for failed.
     if (status === 'failed' && patched('terminal-failed-run-v1')) return;

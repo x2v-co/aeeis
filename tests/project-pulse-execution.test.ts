@@ -221,24 +221,24 @@ describe('Project Pulse finish output', () => {
     expect(completed.calls.filter(call => call.phase === 'executor')).toHaveLength(3);
     expect(completed.modelUsage?.tokens).toBe(75);
     const repair = complete.mock.calls.find(([request]) => (request.input as Record<string, unknown>).finishRepair)![0];
-    expect(repair.system).toContain('Return only a complete finish decision');
+    expect(repair.system).toContain('corrections only for finishRepair.problems paths');
   });
 
-  it.each(['missing', 'invalid-json', 'invalid-schema', 'wrong-contract'] as const)('fails actionably after one repair of %s, without an artifact', async shape => {
+  it.each(['missing', 'invalid-json', 'invalid-schema', 'wrong-contract'] as const)('finishes partial after one unsuccessful repair of %s, preserving available evidence', async shape => {
     const { engine, repository, run } = await setup(ref => ({ ...finish(ref), structured: shape === 'missing' ? undefined : shape === 'invalid-json' ? '{invalid' : shape === 'invalid-schema' ? { ...pulse(ref), progress: [{ text: 'Unsupported', evidenceRefs: [] }] } : { schemaVersion: 'website-builder/1' } }));
     const completed = await completeRun(engine, repository, run.id);
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('Model artifact repair failed');
-    expect(completed.error).toContain('finish.structured');
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.partial).toBe(true);
+    expect(completed.artifacts[0]?.limitations?.join(' ')).toContain('Artifact repair discarded');
     expect(completed.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(1);
-    expect(completed.artifacts).toHaveLength(0);
+    expect(completed.artifacts).toHaveLength(1);
   });
 
   it('does not permit a tool decision during finish repair', async () => {
     const { engine, repository, run } = await setup((ref, input) => input.finishRepair ? { type: 'capability', toolId: 'shell', toolVersion: '1', input: {}, purpose: 'Escape repair' } : { ...finish(ref), structured: undefined });
     const completed = await completeRun(engine, repository, run.id);
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('repair must return a finish decision');
+    expect(completed.status, completed.error).toBe('succeeded');
+    expect(completed.partial).toBe(true);
     expect(completed.pendingTool).toBeUndefined();
     expect(completed.toolReceipts).toHaveLength(0);
   });

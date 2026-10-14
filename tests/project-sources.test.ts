@@ -130,7 +130,7 @@ describe('Project Pulse source provider', () => {
     } finally { await repository.close(); }
   });
 
-  it('rejects an unstructured terminal artifact when Project Pulse is enabled', async () => {
+  it('retains source evidence as partial after an unsuccessful structured finish repair', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-project-pulse-contract-'));
     const path = join(directory, 'sources.json');
     const record = source({ id: 'task:contract', title: 'Release blocker', content: 'Blocked by migration.', source: 'fixture:task', kind: 'task', tenantId: 'team-a', updatedAt: '2026-09-19T00:00:00.000Z' });
@@ -144,8 +144,10 @@ describe('Project Pulse source provider', () => {
       await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('running'); // one bounded finish repair
-      expect(await engine.advance(run.id)).toBe('failed');
-      expect((await repository.get(run.id)).error).toContain('final artifact must include artifactType "project-pulse/1"');
+      expect(await engine.advance(run.id)).toBe('succeeded');
+      const partial = await repository.get(run.id);
+      expect(partial.partial).toBe(true);
+      expect(partial.artifacts[0]).toMatchObject({ artifactType: 'project-pulse/1', partial: true, limitations: expect.arrayContaining([expect.stringContaining('Artifact repair discarded')]) });
     } finally { await repository.close(); }
   });
 

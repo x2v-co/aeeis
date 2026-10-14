@@ -5,6 +5,18 @@ export interface AdvanceRunActivityResult { status: string; progress?: string }
 export interface AdvanceReminderActivityResult { status: string; terminal: boolean; wakeAt?: string }
 export interface AdvanceRunActivityOptions { api: string; token: string; timeoutMs?: number; requestTimeoutMs?: number; pollIntervalMs?: number; heartbeat?: (details: unknown) => void }
 
+export function createTerminalizeRunActivity(options: AdvanceRunActivityOptions): (id: string, reason: string) => Promise<AdvanceRunActivityResult> {
+  return async (id, reason) => {
+    const response = await fetch(`${options.api}/internal/runs/${encodeURIComponent(id)}/terminalize`, {
+      method: 'POST', headers: { authorization: `Bearer ${options.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ reason }), signal: AbortSignal.timeout(options.requestTimeoutMs ?? 15_000), redirect: 'error',
+    });
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Run terminalization returned HTTP ${response.status}`); }
+    const parsed = responseSchema.parse(await response.json());
+    return parsed.progress === undefined ? { status: parsed.status } : { status: parsed.status, progress: parsed.progress };
+  };
+}
+
 const responseSchema = z.object({ status: z.string().min(1).max(40), progress: z.string().min(1).max(200).optional() }).strict();
 const reminderResponseSchema = z.object({ protocol: z.literal('aeeis-reminder-advance/1'), status: z.string().min(1).max(40), terminal: z.boolean(), wakeAt: z.string().datetime({ offset: true }).optional() }).strict();
 
