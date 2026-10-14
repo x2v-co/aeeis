@@ -176,8 +176,8 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
           return { choices: [{ message: { content }, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
         }
         let chunk: z.infer<typeof streamChunk>;
-        try { chunk = streamChunk.parse(JSON.parse(data)); }
-        catch { throw new ModelOutcomeUnknown('Model stream contained an invalid event; the provider outcome requires reconciliation'); }
+        try { const parsed = JSON.parse(data); checkProviderBody(parsed); chunk = streamChunk.parse(parsed); }
+        catch (error) { if (error instanceof ProviderBodyError) throw error; throw new ModelOutcomeUnknown('Model stream contained an invalid event; the provider outcome requires reconciliation'); }
         if (chunk.usage) diagnostics.usage = usage = chunk.usage;
         // Repeated metadata, reasoning and keepalives do not consume the retained content allowance.
         for (const choice of chunk.choices) {
@@ -206,6 +206,15 @@ export interface ModelTransportOptions {
   maxTokens?: number;
   thinking?: 'enabled' | 'disabled' | 'auto' | 'provider-default';
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+}
+class ProviderBodyError extends ModelOutcomeUnknown {
+  constructor(readonly providerCode: string, readonly excerpt: string) { super('Model provider returned an error body; execution outcome requires reconciliation'); }
+}
+function checkProviderBody(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  const body = value as Record<string, unknown>;
+  const nestedCode = body.error && typeof body.error === 'object' && 'code' in body.error ? body.error.code : undefined;
+  if (body.errorCode || body.error) throw new ProviderBodyError(String(body.errorCode ?? nestedCode ?? body.code ?? 'PROVIDER_ERROR'), JSON.stringify(body).slice(0, 1024));
 }
 export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOptions {
   return {
@@ -458,7 +467,9 @@ export class HttpModelAdapter implements ModelAdapter {
           try { const parsed = JSON.parse(responseBody); errorCode = String(parsed.error?.code ?? parsed.code ?? '') || undefined; } catch { /* text error */ }
           throw httpError;
         }
-        return completed(envelope.parse(JSON.parse(responseBody)));
+        const parsed = JSON.parse(responseBody);
+        checkProviderBody(parsed);
+        return completed(envelope.parse(parsed));
       } catch (error) {
         // The HTTP attempt has ended. Storage callbacks/backoff must not change its timeout classification.
         clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer);
@@ -466,8 +477,10 @@ export class HttpModelAdapter implements ModelAdapter {
         const network = stage === 'request' || signal.aborted || error instanceof TypeError || (
           error instanceof Error && /ECONN|ENOTFOUND|EAI_AGAIN|UND_ERR/.test(String((error as NodeJS.ErrnoException).code ?? (error.cause as NodeJS.ErrnoException | undefined)?.code ?? ''))
         );
+        const providerBodyError = this.arkProvider && response?.status === 200 && error instanceof ProviderBodyError;
+        if (error instanceof ProviderBodyError) { errorCode = error.providerCode; bodyExcerpt = error.excerpt; }
         const thinkingDowngrade = this.arkProvider && response?.status === 400 && !signal.aborted && !history.thinkingUnsupported && Boolean(thinking || reasoningEffort);
-        const retryable = thinkingDowngrade || (httpError !== undefined
+        const retryable = providerBodyError || thinkingDowngrade || (httpError !== undefined
           ? response!.status === 429 || response!.status >= 500
           : network);
         // Retryability classifies the error. The decision explains the actual replay fence/budget.
@@ -479,7 +492,10 @@ export class HttpModelAdapter implements ModelAdapter {
         else if (signal.aborted && timeoutKind === 'idle' && streamReceived && responseBytes > 0) {
           retryDecision = !request.idempotencyKey ? 'no-idempotency-key'
             : history.midstreamRetries >= this.transport.midstreamRetries ? 'attempts-exhausted' : 'midstream-retry';
-        } else if (responseBytes > 0) retryDecision = 'body-bytes-received';
+        } else if (providerBodyError) retryDecision = !request.idempotencyKey ? 'no-idempotency-key'
+          : transportAttempt >= this.transport.maxAttempts ? 'attempts-exhausted'
+          : diagnostics.contentBytes || diagnostics.reasoningBytes || diagnostics.toolCallBytes ? 'body-bytes-received' : 'provider-error-retry';
+        else if (responseBytes > 0) retryDecision = 'body-bytes-received';
         else if (signal.aborted && timeoutKind === 'first-byte' && !request.idempotencyKey) retryDecision = 'no-idempotency-key';
         else if (signal.aborted && timeoutKind === 'first-byte' && !this.transport.retryEmptyIdle) retryDecision = 'retry-disabled';
         else if (transportAttempt >= this.transport.maxAttempts) retryDecision = 'attempts-exhausted';
@@ -499,7 +515,7 @@ export class HttpModelAdapter implements ModelAdapter {
           }
           if (retryDecision === 'midstream-retry') await request.onMidstreamRetry?.({ midstreamRetries: nextMidstreamRetry, responseBytes });
         } catch { recordingFailed = true; retryDecision = 'retry-recording-failed'; }
-        const willRetry = ['retry', 'midstream-retry', 'thinking-unsupported', 'connect-retry'].includes(retryDecision);
+        const willRetry = ['retry', 'midstream-retry', 'thinking-unsupported', 'connect-retry', 'provider-error-retry'].includes(retryDecision);
         const delayMs = willRetry && retryDecision !== 'thinking-unsupported'
           ? Math.max(retryDecision === 'connect-retry' || connectPhase ? Math.min(2_000, this.transport.retryMaxMs) : 0,
             Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (transportAttempt - 1)) * (0.5 + Math.random() * 0.5))) : 0;
@@ -517,8 +533,8 @@ export class HttpModelAdapter implements ModelAdapter {
           ...logDiagnostics(diagnostics, responseBytes),
           idempotencyKey, requestBodyHash, transportAttempt, midstreamRetries: history.midstreamRetries, maxMidstreamRetries: this.transport.midstreamRetries,
           thinkingUnsupported: thinkingDowngrade || history.thinkingUnsupported || undefined,
-          ...(streamReceived && responseBytes > 0 || history.usageUnknown ? { usageUnknown: true } : {}),
-          ...(retryDecision === 'midstream-retry' || history.usageUnknown ? { billingRisk: 'duplicate-possible' } : {}),
+          ...(streamReceived && responseBytes > 0 || history.usageUnknown || providerBodyError ? { usageUnknown: true } : {}),
+          ...(retryDecision === 'midstream-retry' || history.usageUnknown || providerBodyError ? { billingRisk: 'duplicate-possible' } : {}),
           maxTokens, timeoutKind: signal.aborted ? timeoutKind : undefined, connectPhase: connectPhase || undefined, retryable, willRetry, retryDecision, retryDelayMs: delayMs,
         }));
         if (recordingFailed) throw new ModelOutcomeUnknown('Model retry could not be recorded; reconcile before retrying');
@@ -527,7 +543,7 @@ export class HttpModelAdapter implements ModelAdapter {
           if (retryDecision === 'midstream-retry') { history.midstreamRetries = nextMidstreamRetry; history.usageUnknown = true; }
           else if (retryDecision === 'thinking-unsupported') history.thinkingUnsupported = true;
           else if (retryDecision === 'connect-retry') connectRetries++;
-          else transportAttempt++;
+          else { if (providerBodyError) history.usageUnknown = true; transportAttempt++; }
         } else if (httpError) throw httpError;
         else if (network) throw new ModelOutcomeUnknown(signal.aborted
           ? `Model ${stage} timed out after ${timeoutMs}ms${streaming || timeoutKind === 'first-byte' ? ` (${timeoutKind} timeout)` : ''}. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`

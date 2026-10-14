@@ -44,7 +44,8 @@
     "test:sandbox": "AEEIS_TEST_SANDBOX=1 vitest run tests/local-tools.test.ts --testTimeout=60000 --hookTimeout=30000",
     "sandbox:up": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts up",
     "sandbox:doctor": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts doctor",
-    "sandbox:release": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts release"
+    "sandbox:release": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts release",
+    "replay:retest": "vitest run tests/pulse-inference-replay.test.ts tests/fillable-pdf-execution.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --no-file-parallelism --testNamePattern=\"source tools, inference derivation|local replay validates\""
   },
   "devDependencies": {
     "@temporalio/testing": "^1.24.0",

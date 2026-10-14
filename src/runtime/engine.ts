@@ -1,3 +1,5 @@
+import { canonicalEvidenceRef } from './evidence-refs.js';
+import { csvFilterOps } from './csv-query.js';
 import { sourceFidelityGuidance, pulseFidelityProblems, inferenceFidelityProblems, normalizeSourceUnknowns, deriveProseInferences } from './sourceFidelityRules.js';
 export { sourceFidelityGuidance, pulseFidelityProblems } from './sourceFidelityRules.js';
 import { mergeFinishRepair, pruneFailedFields, repairIsWorse, repairMaxTokens, repairMaxBytes, repairTimeoutMs, type FinishProblem } from './finish-repair.js';
@@ -28,7 +30,7 @@ import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger
 import { escapeMaterialRef, materialContentHash, materialQueryTerms, materialExcerpt, materialFormat, materialForModel, presentedMaterials, readMaterialPage } from './materials.js';
 import { CsvQueryInputError, queryCsvSource } from './csv-query.js';
 import { readStructuredSource } from './source-readers.js';
-import { fillPdf, pdfFormFields, pdfOutputForModel, fillablePdfEvidenceRefs, validateFillablePdfArtifact, PdfInputError, type PdfOutput } from './fillable-pdf.js';
+import { resolveSourceResource, synthesizePdfArtifact, pdfOutputMetadata, fillPdf, pdfFormFields, pdfOutputForModel, fillablePdfEvidenceRefs, validateFillablePdfArtifact, PdfInputError, type PdfOutput } from './fillable-pdf.js';
 import { isBinaryPdf, MAX_RUN_PDF_OUTPUT_BYTES } from './pdf-material.js';
 import { isSourceReadTool, isSourceTool, isStructuredSourceTool, isPdfTool } from './source-tools.js';
 import { boundedExecutorInput, boundedObservations } from './prompt-context.js';
@@ -320,17 +322,6 @@ function requestFinishRepair(run: AgentRun, step: Step, candidate: unknown, prob
   event(run, 'artifact.repair_requested', { taskId: step.taskId, reason });
 }
 
-/** Resolve formatting variants only against known identities. Preserve exact
- * denied IDs and reject ambiguous case variants instead of granting access. */
-function canonicalEvidenceRef(ref: string, allowed: Set<string>, known = allowed): string {
-  const trimmed = ref.trim().replace(/^`([^`]+)`$/, '$1');
-  const resolve = (candidate: string): string | undefined => {
-    if (known.has(candidate)) return candidate;
-    const matches = [...known].filter(id => id.toLowerCase() === candidate.toLowerCase());
-    return matches.length === 1 && allowed.has(matches[0]!) ? matches[0] : undefined;
-  };
-  return resolve(trimmed) ?? resolve(trimmed.replace(/^(?:source|artifact|receipt):\s*/i, '')) ?? trimmed;
-}
 
 function normalizeArtifactRefs<T>(value: T, resolve: (refs: string[]) => string[]): T {
   if (Array.isArray(value)) return value.map(item => normalizeArtifactRefs(item, resolve)) as T;
@@ -1661,6 +1652,19 @@ export class AgentEngine {
       const live = current.steps.find(s => s.taskId === node.id)!;
       const pendingRepair = live.finishRepair;
       if (pendingRepair) value = mergeFinishRepair(pendingRepair, normalizeFinishOutput(value));
+      if (current.builtinSkill === 'fillable-pdf/1') {
+        value = normalizeFinishOutput(value);
+        const candidate = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+        const output = current.pdfOutputs?.at(-1);
+        if (candidate && output && candidate.type !== 'finish' && (terminal || limitReason || candidate.tool === 'pdf.fill' || candidate.toolId === 'pdf.fill')) {
+          const artifact = await synthesizePdfArtifact(output, current.context.sources, observed);
+          if (artifact) {
+            value = { type: 'finish', title: 'Filled PDF', content: 'PDF output is available. See filledFields and unknowns for sourced values and unfilled fields.', artifactType: 'fillable-pdf/1', structured: artifact, evidenceRefs: fillablePdfEvidenceRefs(artifact) };
+            finishProtocolLog('aeeis-pdf-auto-finish/1', { runId: current.id, taskId: node.id, reason: limitReason ? 'final-call-tool-dropped' : 'redundant-call-dropped', outputRef: output.ref });
+            event(current, 'pdf.auto_finished', { taskId: node.id, outputRef: output.ref });
+          }
+        }
+      }
       let decision: z.infer<typeof decisionSchema>;
       try { decision = parseExecutorDecision(value); }
       catch (error) {
@@ -1678,7 +1682,7 @@ export class AgentEngine {
           const issues = validationDetails(error)?.issues;
           if (!issues || limitReason || current.events.some(item => item.type === 'model.schema_retry' && item.data.taskId === node.id)) throw error;
           const safeIssues = redactRunData(issues.map(({ path, code, message }) => ({ path, code, message: message.slice(0, 200) })));
-          live.observations.push({ tool: 'output.schema', argument: 'executor decision', result: { error: { recoverable: true, errorCode: 'schema_validation', message: 'Your previous output failed the decision schema. Return one JSON object matching the documented decision types exactly.', issues: safeIssues } } });
+          live.observations.push({ tool: 'output.schema', argument: 'executor decision', result: { error: { recoverable: true, errorCode: 'schema_validation', message: `Your previous output failed the decision schema. Return one JSON object matching the documented decision types exactly. sources.csvQuery filters[].op must be one of: ${csvFilterOps.join(', ')}. Use lt for dates before the cutoff and lte for dates on or before it.`, issues: safeIssues } } });
           event(current, 'model.schema_retry', { taskId: node.id, issues: safeIssues });
           console.warn(JSON.stringify({ protocol: 'aeeis-model-schema-retry/1', runId: current.id, taskId: node.id, issues: safeIssues.map(issue => ({ path: issue.path, code: issue.code })) }));
           return;
@@ -1692,7 +1696,10 @@ export class AgentEngine {
         let result: unknown;
         if (decision.tool !== 'sources.search') {
           const sources = [...current.context.sources, ...historySources];
-          const source = sources.find(s => s.id === canonicalEvidenceRef(decision.argument, new Set(sources.map(source => source.id))));
+          const pdfArtifact = isPdfTool(decision.tool) ? current.artifacts.find(artifact => artifact.id === canonicalEvidenceRef(decision.argument, new Set(current.artifacts.map(item => item.id))) && artifact.structured?.schemaVersion === 'fillable-pdf/1') : undefined;
+          const resourceRef = pdfArtifact?.structured?.schemaVersion === 'fillable-pdf/1' ? pdfArtifact.structured.form.sourceRef : decision.argument;
+          const source = resolveSourceResource(resourceRef, sources, current.pdfOutputs ?? []);
+          if (source && source.id !== decision.argument) finishProtocolLog('aeeis-source-resource-resolved/1', { runId: current.id, taskId: node.id, sourceRef: source.id });
           if (!source) throw new Error('Source tool denied an unknown resource');
           let pdfOutput: PdfOutput | undefined;
           if (isPdfTool(decision.tool)) {
@@ -1700,6 +1707,7 @@ export class AgentEngine {
               if (decision.tool === 'pdf.fill') {
                 if (current.builtinSkill !== 'fillable-pdf/1') throw new PdfInputError('pdf.fill requires the fillable-pdf/1 built-in contract');
                 pdfOutput = await fillPdf(source, decision.fields, decision.filename);
+                finishProtocolLog('aeeis-pdf-filled/1', { runId: current.id, taskId: node.id, sourceRef: source.id, outputRef: pdfOutput.ref, writtenFields: pdfOutput.writtenFields.length });
                 if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref) && (current.pdfOutputs?.length ?? 0) >= 8) throw new PdfInputError('Run PDF output limit reached (8 outputs)');
                 if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref) && (current.pdfOutputs ?? []).reduce((total, output) => total + output.sizeBytes, pdfOutput.sizeBytes) > MAX_RUN_PDF_OUTPUT_BYTES) throw new PdfInputError('Run PDF output storage limit reached (4 MiB total)');
                 result = pdfOutputForModel(pdfOutput);
@@ -1819,6 +1827,17 @@ export class AgentEngine {
               return [...new Set(mapped)];
             };
             if (expectedArtifactType) candidate.artifactType = expectedArtifactType;
+            if (candidate.artifactType === 'fillable-pdf/1' && candidate.structured && typeof candidate.structured === 'object') {
+              const pdf = candidate.structured as Record<string, unknown>;
+              if (pdf.output == null && current.pdfOutputs?.length) {
+                const sourceRef = pdf.form && typeof pdf.form === 'object' && 'sourceRef' in pdf.form ? String(pdf.form.sourceRef) : '';
+                const output = current.pdfOutputs.filter(item => item.sourceRef === resolveSourceResource(sourceRef, current.context.sources, current.pdfOutputs ?? [])?.id).at(-1);
+                if (output) {
+                  pdf.output = pdfOutputMetadata(output);
+                  finishProtocolLog('aeeis-pdf-finish-synthesized/1', { runId: current.id, taskId: node.id, path: 'structured.output', outputRef: output.ref });
+                }
+              }
+            }
             if (candidate.artifactType && candidate.structured && typeof candidate.structured === 'object' && !Array.isArray(candidate.structured)) (candidate.structured as Record<string, unknown>).schemaVersion = candidate.artifactType;
             candidate.evidenceRefs = refineRefs(candidate.evidenceRefs);
             const limitationNotes = [...(candidate.limitations ?? [])];
@@ -1834,13 +1853,13 @@ export class AgentEngine {
               if (candidate.artifactType !== undefined) {
                 if (candidate.structured === undefined) throw new Error(`${candidate.artifactType} requires a JSON object in finish.structured`);
                 structured = candidate.artifactType === 'fillable-pdf/1' ? fillablePdfArtifactSchema.parse(candidate.structured) : candidate.artifactType === 'project-pulse/1' ? projectPulseArtifactSchema.parse(candidate.structured) : websiteBuilderArtifactSchema.parse(candidate.structured);
-                if (structured.schemaVersion === 'fillable-pdf/1') { structured.form.sourceRef = resolveRef(structured.form.sourceRef); structured.output.ref = resolveRef(structured.output.ref); }
+                if (structured.schemaVersion === 'fillable-pdf/1') { structured.form.sourceRef = resolveSourceResource(structured.form.sourceRef, current.context.sources, current.pdfOutputs ?? [])?.id ?? resolveRef(structured.form.sourceRef); structured.output.ref = resolveRef(structured.output.ref); }
                 candidate.structured = structured;
                 structuredEvidenceRefs = artifactEvidenceRefs(structured);
               } else if (candidate.structured !== undefined) throw new Error('finish.structured requires a recognized artifactType');
               if (expectedArtifactType && (!structured || candidate.artifactType !== expectedArtifactType)) throw new Error(`The final artifact must include artifactType "${expectedArtifactType}" and a complete finish.structured object`);
             } catch (error) {
-              if (error instanceof z.ZodError) for (const issue of error.issues) add(`structured.${issue.path.map(String).join('.')}`, `schema:${issue.code}`, issue.message);
+              if (error instanceof z.ZodError) for (const issue of error.issues) add(`structured.${issue.path.map(String).join('.')}`, `schema:${issue.code}`, issue.path[0] === 'output' && (candidate.structured as { output?: unknown })?.output == null ? 'finish.structured.output must copy filename, sha256, sizeBytes and ref from a successful pdf.fill result. No matching stored PDF exists; call pdf.fill with sourced fields (or {} for an empty form) before finishing.' : issue.message);
               else add('structured', 'artifact_contract', failureReason(error, 'Invalid finish output contract'));
             }
             const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
@@ -1870,8 +1889,12 @@ export class AgentEngine {
             }
             const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
             const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
+            const inferenceWarnings = inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs).filter(message => message.includes('inference must start'));
+            for (const message of inferenceWarnings) finishProtocolLog('aeeis-finish-content-warning/1', { marker: 'finish-content-warning', runId: current.id, taskId: node.id, rule: 'inference_label', path: message.split(':')[0], message });
             // Derivation is deterministic and cannot introduce a repair condition.
             const inferences = deriveProseInferences(candidate.content, structured, candidate.evidenceRefs.filter(ref => observed.has(ref) && !ref.startsWith('artifact_')));
+            for (const message of inferences.warnings) finishProtocolLog('aeeis-finish-content-warning/1', { marker: 'finish-content-warning', runId: current.id, taskId: node.id, rule: 'inference_correspondence', path: 'content', message });
+            inferences.warnings.push(...inferenceWarnings);
             contentCheck.derivedInferences = inferences.derived;
             if (structured) structuredEvidenceRefs = artifactEvidenceRefs(structured);
             for (const message of finishContentProblems(candidate.content, observed)) add('content', 'content_evidence', message);
@@ -1880,7 +1903,7 @@ export class AgentEngine {
               const fullDate = /deadline date "([^"\n]+)"/.exec(message)?.[1];
               if (fullDate && candidate.content.includes(fullDate)) add('content', 'date_verbatim', 'content adds a year the source does not state');
             }
-            for (const message of inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs)) add(message.split(':')[0]!, message.includes('general assumption') ? 'general_assumption' : 'inference_label', message);
+            for (const message of inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs).filter(message => !message.includes('inference must start'))) add(message.split(':')[0]!, 'general_assumption', message);
             if (problems.some(problem => problem.code.startsWith('schema:') || problem.code === 'artifact_contract')) evidenceCheck.result = 'rejected';
             contentCheck.problems = problems.map(problem => problem.message);
             contentCheck.result = problems.length ? 'rejected' : contentCheck.movedUnknowns || contentCheck.cappedUnknowns || inferences.derived || inferences.warnings.length ? 'fixed' : 'ok';

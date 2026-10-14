@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import fontkit from '@pdf-lib/fontkit';
-import { PDFDocument, PDFName, type PDFFont, PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, type PDFField } from 'pdf-lib';
+import { PDFDocument, PDFName, StandardFonts, defaultTextFieldAppearanceProvider, layoutMultilineText, setTextMatrix, type PDFFont, PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, type PDFField } from 'pdf-lib';
 import type { Source, FillablePdfArtifact } from './contracts.js';
 import { decodePdfMaterial, isBinaryPdf, MAX_PDF_OUTPUT_BYTES, PDF_BASE64_PREFIX, pdfSha256 } from './pdf-material.js';
 import { materialFormat } from './materials.js';
+import { canonicalEvidenceRef } from './evidence-refs.js';
 
 export const pdfValueSchema = z.union([z.string().max(4000), z.boolean(), z.array(z.string().min(1).max(1000)).max(100)]);
 export type PdfValue = z.infer<typeof pdfValueSchema>;
@@ -146,8 +147,41 @@ export async function fillPdf(source: Source, fields: Record<string, PdfValue>, 
       else if (field instanceof PDFCheckBox) field.uncheck();
       else field.clear();
     }
-    // Latin-only fills keep pdf-lib's default Helvetica appearances; other text embeds a CJK subset.
-    if (needsCjkFont(fields)) form.updateFieldAppearances(await embedCjkFont(doc, fields));
+    const font = needsCjkFont(fields) ? await embedCjkFont(doc, fields) : await doc.embedFont(StandardFonts.Helvetica);
+    for (const field of form.getFields()) {
+      if (!(field instanceof PDFTextField) || field.isReadOnly()) continue;
+      field.updateAppearances(font, (textField, widget, appearanceFont) => {
+        const rectangle = widget.getRectangle(), padding = (widget.getBorderStyle()?.getWidth() ?? 0) + 1;
+        const rotation = widget.getAppearanceCharacteristics()?.getRotation() ?? 0;
+        const sideways = Math.abs(rotation % 180) === 90;
+        const width = Math.max(1, (sideways ? rectangle.height : rectangle.width) - 2 * padding);
+        const height = Math.max(1, (sideways ? rectangle.width : rectangle.height) - 2 * padding);
+        const text = textField.getText() ?? '';
+        let size = Math.min(12, height / appearanceFont.heightAtSize(1));
+        const fits = (size: number) => {
+          if (!textField.isMultiline()) return appearanceFont.widthOfTextAtSize(text.replace(/[\r\n]/g, ' '), size) <= width;
+          const layout = layoutMultilineText(text, { alignment: textField.getAlignment(), fontSize: size, font: appearanceFont, bounds: { x: 0, y: 0, width, height } });
+          return layout.lines.every(line => line.width <= width) && layout.lines.length * layout.lineHeight <= height;
+        };
+        while (size > 6 && !fits(size)) size = Math.max(6, size - 0.25);
+        textField.setFontSize(size);
+        // Widget DA overrides field DA; replace only its font size, preserving color.
+        const da = widget.getDefaultAppearance();
+        if (da) widget.setDefaultAppearance(da.replace(/(\/[^\s]+)\s+[-\d.]+\s+Tf/g, `$1 ${size} Tf`));
+        if (!fits(size)) console.warn(JSON.stringify({ protocol: 'aeeis-pdf-text-fit/1', field: textField.getName(), result: 'minimum-size-overflow', fontSize: size }));
+        const operators = defaultTextFieldAppearanceProvider(textField, widget, appearanceFont);
+        console.info(JSON.stringify({ protocol: 'aeeis-pdf-text-fit/1', sourceRef: source.id, field: textField.getName(), fontSize: size, multiline: textField.isMultiline(), result: fits(size) ? 'fit' : 'minimum-size-overflow' }));
+        if (!Array.isArray(operators)) return operators;
+        // pdf-lib centers the ascender only. Include descenders to raise the baseline
+        // by half their depth and prevent y/p/g clipping in shallow text widgets.
+        const shift = (appearanceFont.heightAtSize(size) - appearanceFont.heightAtSize(size, { descender: false })) / 2;
+        return textField.isMultiline() || textField.isCombed() ? operators : operators.map(operator => {
+          const match = /^([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) Tm$/.exec(operator.toString());
+          return match ? setTextMatrix(Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]) + shift) : operator;
+        });
+      });
+    }
+    form.updateFieldAppearances(font);
     const bytes = await doc.save(); // Preserve fields and update their appearances; never flatten.
     if (bytes.length > MAX_PDF_OUTPUT_BYTES) throw new PdfInputError('Filled PDF exceeds the 1 MiB output size cap');
     const sha256 = pdfSha256(bytes), content = PDF_BASE64_PREFIX + Buffer.from(bytes).toString('base64');
@@ -164,6 +198,46 @@ export async function fillPdf(source: Source, fields: Record<string, PdfValue>, 
 export function pdfOutputForModel(output: PdfOutput) {
   const { content: _content, encoding: _encoding, mediaType: _mediaType, writtenFields, sourceRef, fieldCount, unfilledFields, ...metadata } = output;
   return { schemaVersion: 'pdf-fill/1', id: output.ref, form: { sourceRef, fieldCount }, output: metadata, filledFields: writtenFields, unfilledFields, untrusted: true };
+}
+export function pdfOutputMetadata(output: PdfOutput) {
+  return { filename: output.filename, sha256: output.sha256, sizeBytes: output.sizeBytes, ref: output.ref };
+}
+
+/** Resolve only the run's frozen resources. Ambiguous filenames never grant access. */
+export function resolveSourceResource(ref: string, sources: Source[], outputs: PdfOutput[] = []): Source | undefined {
+  const ids = new Set(sources.map(source => source.id));
+  const canonical = canonicalEvidenceRef(ref, ids);
+  const exact = sources.find(source => source.id === canonical);
+  if (exact) return exact;
+  const output = outputs.find(output => output.ref === ref);
+  if (output) return sources.find(source => source.id === output.sourceRef);
+  const alias = (text: string) => text.trim().replace(/^(?:upload:|file:|artifact:)/i, '').normalize('NFC').toLowerCase();
+  const outputSources = new Set(outputs.filter(output => alias(output.filename) === alias(ref)).map(output => output.sourceRef));
+  const matches = sources.filter(source => outputSources.has(source.id) || [source.title, source.source, ...(source.origin ? [source.origin.ref] : [])].some(name => alias(name) === alias(ref)));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** Reconstruct metadata from bytes and cite only received materials matching each write. */
+export async function synthesizePdfArtifact(output: PdfOutput, sources: Source[], observed: Set<string>): Promise<FillablePdfArtifact | undefined> {
+  const evidence = sources.filter(source => observed.has(source.id) && materialFormat(source) !== 'pdf' && source.kind !== 'run-evidence');
+  const filledFields = output.writtenFields.map(field => {
+    const values = Array.isArray(field.value) ? field.value : [field.value];
+    const evidenceRefs = evidence.filter(source => {
+      // For JSON, require the actual field/value pair, including boolean false.
+      try {
+        const data = JSON.parse(source.content);
+        if (data && typeof data === 'object' && Object.hasOwn(data, field.name) && same(data[field.name], field.value)) return true;
+      } catch { /* Other material formats use literal source spelling. */ }
+      return values.every(value => typeof value === 'string' && source.content.normalize('NFC').includes(value.normalize('NFC')));
+    }).map(source => source.id);
+    return { ...field, evidenceRefs };
+  });
+  if (filledFields.some(field => !field.evidenceRefs.length)) return undefined;
+  const artifact: FillablePdfArtifact = { schemaVersion: 'fillable-pdf/1', form: { sourceRef: output.sourceRef, fieldCount: output.fieldCount },
+    filledFields, output: pdfOutputMetadata(output), blockers: [],
+    unknowns: output.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only field left untouched.' : 'No sourced write; left empty.', evidenceRefs: [output.sourceRef] })) };
+  try { await validateFillablePdfArtifact(artifact, sources, [output], observed); return artifact; }
+  catch (error) { if (error instanceof PdfInputError) return undefined; throw error; }
 }
 export function fillablePdfEvidenceRefs(value: FillablePdfArtifact): string[] {
   return [...new Set([value.form.sourceRef, value.output.ref, ...[...value.filledFields, ...value.unknowns, ...value.blockers].flatMap(item => item.evidenceRefs)])];

@@ -5,13 +5,29 @@ import { LATEST_OBSERVATION_RESULT_CHARS } from './prompt-context.js';
 
 const column = z.string().min(1).max(1000).refine(value => value.trim().length > 0, 'Column names must not be blank');
 const scalar = z.union([z.string().max(2000), z.number().finite(), z.boolean()]);
-const filterSchema = z.discriminatedUnion('op', [
+export const csvFilterOps = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in', 'isEmpty'] as const;
+const opAliases: Record<string, string> = {
+  '=': 'eq', '==': 'eq', equals: 'eq', equal: 'eq', '!=': 'ne', '<>': 'ne', not_equal: 'ne',
+  '>': 'gt', greater_than: 'gt', after: 'gt', '>=': 'gte', ge: 'gte', greater_than_or_equal: 'gte',
+  '<': 'lt', less_than: 'lt', before: 'lt', '<=': 'lte', le: 'lte', less_than_or_equal: 'lte',
+  isempty: 'isEmpty', is_empty: 'isEmpty', empty: 'isEmpty',
+};
+const filterSchema = z.preprocess((value, ctx) => {
+  if (!value || typeof value !== 'object' || !('op' in value) || typeof value.op !== 'string') return value;
+  const op = value.op.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const canonical = opAliases[op] ?? op;
+  if (!(csvFilterOps as readonly string[]).includes(canonical)) {
+    ctx.addIssue({ code: 'custom', path: ['op'], message: `Invalid filter op ${JSON.stringify(value.op)}. Valid ops: ${csvFilterOps.join(', ')}; use lt for before, lte for on or before.` });
+    return z.NEVER;
+  }
+  return { ...value, op: canonical };
+}, z.discriminatedUnion('op', [
   z.object({ column, op: z.enum(['eq', 'ne']), value: scalar }).strict(),
   z.object({ column, op: z.enum(['gt', 'gte', 'lt', 'lte']), value: z.union([z.string().min(1).max(2000), z.number().finite()]) }).strict(),
   z.object({ column, op: z.literal('contains'), value: z.string().max(2000) }).strict(),
   z.object({ column, op: z.literal('in'), value: z.array(scalar).min(1).max(200) }).strict(),
   z.object({ column, op: z.literal('isEmpty') }).strict(),
-]);
+]));
 const aggregateSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('count'), column: column.optional(), as: column }).strict(),
   z.object({ op: z.enum(['sum', 'avg', 'min', 'max', 'countDistinct']), column, as: column }).strict(),
