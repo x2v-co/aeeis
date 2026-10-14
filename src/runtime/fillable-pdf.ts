@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import { PDFDocument, PDFName, PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, type PDFField } from 'pdf-lib';
+import { readFile } from 'node:fs/promises';
+import fontkit from '@pdf-lib/fontkit';
+import { PDFDocument, PDFName, type PDFFont, PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, type PDFField } from 'pdf-lib';
 import type { Source, FillablePdfArtifact } from './contracts.js';
-import { decodePdfMaterial, isBinaryPdf, MAX_PDF_BYTES, PDF_BASE64_PREFIX, pdfSha256 } from './pdf-material.js';
+import { decodePdfMaterial, isBinaryPdf, MAX_PDF_OUTPUT_BYTES, PDF_BASE64_PREFIX, pdfSha256 } from './pdf-material.js';
 import { materialFormat } from './materials.js';
 
 export const pdfValueSchema = z.union([z.string().max(4000), z.boolean(), z.array(z.string().min(1).max(1000)).max(100)]);
@@ -40,12 +42,13 @@ function valueOf(field: SupportedField): PdfValue {
   return field.isMultiselect() ? selected : selected[0] ?? '';
 }
 function empty(value: PdfValue): boolean { return value === '' || value === false || Array.isArray(value) && value.length === 0; }
+const nfc = (value: PdfValue): PdfValue => typeof value === 'string' ? value.normalize('NFC') : Array.isArray(value) ? value.map(item => item.normalize('NFC')).sort() : value;
 function same(a: PdfValue, b: PdfValue): boolean {
-  return JSON.stringify(Array.isArray(a) ? [...a].sort() : a) === JSON.stringify(Array.isArray(b) ? [...b].sort() : b);
+  return JSON.stringify(nfc(a)) === JSON.stringify(nfc(b));
 }
-async function load(content: string): Promise<PDFDocument> {
+async function load(content: string, maxBytes?: number): Promise<PDFDocument> {
   try {
-    const doc = await PDFDocument.load(decodePdfMaterial(content), { updateMetadata: false });
+    const doc = await PDFDocument.load(decodePdfMaterial(content, maxBytes), { updateMetadata: false });
     // Inspect before getForm(), which automatically removes XFA in pdf-lib.
     if (doc.catalog.getAcroForm()?.dict.has(PDFName.of('XFA'))) throw new PdfInputError('XFA forms are unsupported; supply an AcroForm-only PDF');
     const fields = doc.getForm().getFields();
@@ -102,6 +105,29 @@ function write(field: SupportedField, value: PdfValue): void {
   if (field.isMultiselect() ? !Array.isArray(value) : typeof value !== 'string') throw new PdfInputError(`Choice value must respect multiselect flag: ${field.getName()}`);
   field.select(value as string | string[]);
 }
+/**
+ * Noto Sans SC (SIL OFL 1.1), GB2312 + Latin/punctuation subset with TrueType outlines,
+ * shipped in the image (assets/fonts, built by scripts/build-cjk-font.py). Never fetched at runtime.
+ */
+export const CJK_FONT_PATH = process.env.AEEIS_CJK_FONT_PATH || new URL('../../assets/fonts/NotoSansSC-GB2312.ttf', import.meta.url).pathname;
+let cjkFontBytes: Promise<Uint8Array> | undefined;
+/** Standard 14 fonts only encode WinAnsi; anything outside Latin-1 switches to the embedded CJK font. */
+export function needsCjkFont(fields: Record<string, PdfValue>): boolean {
+  return Object.values(fields).some(value => (Array.isArray(value) ? value : [value]).some(item => typeof item === 'string' && /[^\u0000-\u00ff]/.test(item)));
+}
+async function embedCjkFont(doc: PDFDocument, fields: Record<string, PdfValue>): Promise<PDFFont> {
+  cjkFontBytes ??= readFile(CJK_FONT_PATH).then(bytes => new Uint8Array(bytes)).catch(error => { cjkFontBytes = undefined; throw error; });
+  let bytes: Uint8Array;
+  try { bytes = await cjkFontBytes; } catch { throw new Error(`CJK font is not installed at ${CJK_FONT_PATH}`); }
+  doc.registerFontkit(fontkit);
+  const font = await doc.embedFont(bytes, { subset: true });
+  const supportedChars = new Set(font.getCharacterSet());
+  for (const [name, value] of Object.entries(fields)) {
+    const missing = [...new Set((Array.isArray(value) ? value : [value]).flatMap(item => typeof item === 'string' ? [...item.replace(/[\r\n\t]/g, '')] : []))].filter(char => !supportedChars.has(char.codePointAt(0)!));
+    if (missing.length) throw new PdfInputError(`Field ${name} contains characters the embedded font cannot render (${missing.slice(0, 10).join(' ')}); supply the source spelling in supported characters or leave the field empty and report it`);
+  }
+  return font;
+}
 /** Each fill starts from the frozen template. Omitted writable fields are cleared. */
 export async function fillPdf(source: Source, fields: Record<string, PdfValue>, filename = 'filled-form.pdf'): Promise<PdfOutput> {
   const doc = await load(source.content), form = doc.getForm();
@@ -118,10 +144,12 @@ export async function fillPdf(source: Source, fields: Record<string, PdfValue>, 
       else if (field instanceof PDFCheckBox) field.uncheck();
       else field.clear();
     }
+    // Latin-only fills keep pdf-lib's default Helvetica appearances; other text embeds a CJK subset.
+    if (needsCjkFont(fields)) form.updateFieldAppearances(await embedCjkFont(doc, fields));
     const bytes = await doc.save(); // Preserve fields and update their appearances; never flatten.
-    if (bytes.length > MAX_PDF_BYTES) throw new PdfInputError('Filled PDF exceeds the 256 KiB size cap');
+    if (bytes.length > MAX_PDF_OUTPUT_BYTES) throw new PdfInputError('Filled PDF exceeds the 1 MiB output size cap');
     const sha256 = pdfSha256(bytes), content = PDF_BASE64_PREFIX + Buffer.from(bytes).toString('base64');
-    const reread = describe(await load(content));
+    const reread = describe(await load(content, MAX_PDF_OUTPUT_BYTES));
     const writtenFields = Object.keys(fields).map(name => ({ name, value: reread.find(field => field.name === name)!.value }));
     const ref = `pdf_${pdfSha256(Buffer.from(JSON.stringify({ sha256, sourceRef: source.id, filename, writtenFields })))}`;
     return { ref, sourceRef: source.id, filename, sha256, sizeBytes: bytes.length, encoding: 'base64', mediaType: 'application/pdf', content, writtenFields,
@@ -144,9 +172,9 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
   if (!source || !observed.has(source.id)) throw new PdfInputError('form.sourceRef must identify the received PDF material');
   const output = outputs.find(output => output.ref === value.output.ref && output.sourceRef === source.id);
   if (!output || !observed.has(output.ref)) throw new PdfInputError('output.ref must identify a received pdf.fill output');
-  const bytes = decodePdfMaterial(output.content);
+  const bytes = decodePdfMaterial(output.content, MAX_PDF_OUTPUT_BYTES);
   if (value.output.sha256 !== pdfSha256(bytes) || value.output.sizeBytes !== bytes.length || value.output.filename !== output.filename) throw new PdfInputError('Output filename, sha256 or sizeBytes does not match stored PDF bytes');
-  const original = await inspectPdf(source), actual = describe(await load(output.content));
+  const original = await inspectPdf(source), actual = describe(await load(output.content, MAX_PDF_OUTPUT_BYTES));
   if (value.form.fieldCount !== original.length || actual.length !== original.length || original.some(field => !actual.some(other => other.name === field.name && other.type === field.type && other.readOnly === field.readOnly && other.required === field.required))) throw new PdfInputError('Form fieldCount or output form does not match the input form');
   const receivedSources = new Set(sources.filter(source => materialFormat(source) !== 'pdf' && source.kind !== 'run-evidence' && observed.has(source.id)).map(source => source.id));
   const names = new Set<string>();

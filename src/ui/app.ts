@@ -1682,7 +1682,7 @@ function renderMaterialFiles(status?: string): void {
   if (status) label.textContent = status;
   else if (materialFilesLoading) label.textContent = '正在读取资料…';
   else if (selectedMaterialFiles.length) label.textContent = `${selectedMaterialFiles.length} 个文件已绑定到本次 Run`;
-  else label.textContent = '支持 TXT、Markdown、CSV、JSON 和 AcroForm PDF（最多 256 KB）；文件只绑定当前 Run。';
+  else label.textContent = '支持 TXT、Markdown、CSV、JSON 和 AcroForm PDF（最多 512 KB）；文件只绑定当前 Run。';
 }
 async function readMaterialFiles(files: FileList | null): Promise<void> {
   const sequence = ++materialFileReadSequence;
@@ -1698,7 +1698,7 @@ async function readMaterialFiles(files: FileList | null): Promise<void> {
     const pdf = extension === 'pdf' || file.type === 'application/pdf';
     const supported = pdf || ['txt', 'md', 'markdown', 'csv', 'json'].includes(extension) || ['text/plain', 'text/markdown', 'text/csv', 'application/json'].includes(file.type);
     if (!supported) { skipped.push(`${file.name}（不支持的文件格式）`); continue; }
-    if (pdf && file.size > 256 * 1024) { skipped.push(`${file.name}（PDF 超过 256 KB）`); continue; }
+    if (pdf && file.size > 512 * 1024) { skipped.push(`${file.name}（PDF 超过 512 KB）`); continue; }
     if (file.size > MAX_MATERIAL_FILE_BYTES) { skipped.push(`${file.name}（超过 1 MB）`); continue; }
     try {
       let content: string;
