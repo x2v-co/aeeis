@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { evidenceWritingGuidance, AgentEngine, digest } from '../src/runtime/engine.js';
+import { evidenceWritingGuidance, sourceFidelityGuidance, AgentEngine, digest } from '../src/runtime/engine.js';
 import { executionLimitsConfig, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from '../src/runtime/execution-limits.js';
 import { ModelOutcomeUnknown, type ModelRequest } from '../src/runtime/model.js';
 
@@ -175,7 +175,7 @@ describe('durable execution allowances', () => {
     // The pre-offset builder included the old revision's failed executor call.
     (original.input as any).executionBudget.remainingModelCalls = 3;
     delete (original.input as any).clock; // pre-offset requests predate clock injection
-    original.system = original.system.replace(evidenceWritingGuidance, ''); // ...and the evidence-writing rules
+    original.system = original.system.replace(evidenceWritingGuidance, '').replace(sourceFidelityGuidance, ''); // ...and the evidence-writing/source-fidelity rules
     const originalHash = digest(original);
     await fixture.repository.mutate(unknown.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;

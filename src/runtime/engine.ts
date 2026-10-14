@@ -298,6 +298,45 @@ export function runClock(run: Pick<AgentRun, 'createdAt'>, timeZone = process.en
 export const evidenceWritingGuidance = '\nEvidence writing rules: cite concrete evidence IDs copied exactly from availableEvidenceRefs, e.g. [source_…]. Never write placeholders such as [证据], [evidence], [来源], [source], [citation] or [ID]; a finish containing a placeholder or an ID that is not in availableEvidenceRefs is rejected. Facts must be evidence-backed. Put every inference, recommendation or assumption without direct evidence under a separate heading titled exactly "推断" (or "Inference" for English output); never mix them into factual sections. Dates from clock (e.g. "as of today") come from the system clock and are not source facts.';
 const placeholderPattern = /\[(?:证据|依据|来源|出处|引用|evidence|source|sources|citation|cite|ref|ID|id)(?:\s*(?:ID|id|\d+|…|\.\.\.))?\]|【(?:证据|来源|引用)】/;
 const inlineIdPattern = /\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
+/** Source-fidelity rules for Project Pulse items (deterministic, pre-review). */
+export const sourceFidelityGuidance = '\nSource fidelity rules: unknowns list only questions or gaps the sources themselves leave open (e.g. a field the source marks TBD/待定 or a missing owner); never put your own inference there. Any inferred blocker, risk or next action must start with "推断：" (or "Inference: " for English output). Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id.';
+const fullDatePattern = /\b(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?/;
+const partialDatePattern = (month: number, day: number) => new RegExp(`(?<![\\d/.-])0?${month}\\s*[-/.月]\\s*0?${day}(?![\\d])`);
+
+/** Resolve refs like "source_x#row3" or "source_x:rows 1-4" to an observed base id. */
+export function baseEvidenceRef(ref: string, observed: Set<string>): string {
+  if (observed.has(ref)) return ref;
+  const base = ref.split(/[#:@\s]|\/rows?|\[/)[0]!;
+  return base && observed.has(base) ? base : ref;
+}
+
+/** Expand dependency artifact refs into the source evidence they were built from. */
+export function sourceLevelRefs(refs: string[], dependencies: Array<{ id: string; evidenceRefs: string[] }>): string[] {
+  const out: string[] = [];
+  for (const ref of refs) {
+    const dependency = dependencies.find(artifact => artifact.id === ref);
+    if (dependency && dependency.evidenceRefs.length) out.push(...dependency.evidenceRefs); else out.push(ref);
+  }
+  return [...new Set(out)];
+}
+
+/** Dates in a Project Pulse artifact must keep the source's precision: no invented years. */
+export function pulseFidelityProblems(structured: ProjectPulseArtifact, sourceText: (refs: string[]) => string): string[] {
+  const problems: string[] = [];
+  for (const item of structured.deadlines) {
+    const match = fullDatePattern.exec(item.date) ?? fullDatePattern.exec(item.text);
+    if (!match) continue;
+    const text = sourceText(item.evidenceRefs);
+    if (!text) continue;
+    const [full, year, month, day] = match;
+    const normalized = new RegExp(`${year}\\s*[-/.年]\\s*0?${Number(month)}\\s*[-/.月]\\s*0?${Number(day)}`);
+    if (!normalized.test(text) && partialDatePattern(Number(month), Number(day)).test(text)) {
+      problems.push(`deadline date ${JSON.stringify(full)} adds a year the source does not state; copy the date exactly as written (e.g. "${Number(month)}-${Number(day)}")`);
+    }
+  }
+  return problems;
+}
+
 /** Deterministic finish-content checks: placeholders and inline IDs that were never received. */
 export function finishContentProblems(content: string, observed: Set<string>): string[] {
   const problems: string[] = [];
@@ -1527,7 +1566,7 @@ export class AgentEngine {
     const systemForLimit = (reason: string | undefined, legacy = false, csv = false) => (legacy ? legacyExecutorSystem : csv ? csvExecutorSystem : executorBaseSystem)
         + (run.events.some(event => event.type === 'tool.failed_recoverable' && event.data.taskId === node.id) ? '\nTool observations with error.recoverable=true report a failed attempt, not successful evidence. Use the error message and HTTP status to choose another source or approach, or finish with a useful partial answer and explicit limitations. Avoid repeating the same failing call.' : '')
         + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns for missing evidence. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
-    const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance;
+    const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance + sourceFidelityGuidance;
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), task: node, sourceCatalog: [...run.context.sources, ...historySources].map(({ id, title }) => ({ id, title })),
         dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(step.observations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
         ...(expectedArtifactType ? { expectedArtifactType } : {}), ...(step.finishRepair ? { finishRepair: step.finishRepair } : {}) };
@@ -1694,6 +1733,7 @@ export class AgentEngine {
           requestFinishRepair(current, live, value, reason);
           return;
         }
+        const limitationNotes: string[] = [];
         const contentProblems = finishContentProblems(decision.content, observed);
         if (contentProblems.length) {
           console.warn(JSON.stringify({ protocol: 'aeeis-finish-content-check/1', runId: current.id, taskId: node.id, problems: contentProblems.map(problem => problem.split(':')[0]) }));
@@ -1701,12 +1741,43 @@ export class AgentEngine {
           requestFinishRepair(current, live, value, contentProblems.join('; '));
           return;
         }
-        const invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
-        if (invalidRefs.length || ((current.context.sources.length > 0 || historySources.length > 0) && decision.evidenceRefs.length === 0)) {
-          if (limitReason) throw new Error('Final limited-evidence finish cited unavailable evidence or omitted required evidence');
+        // Normalize refs deterministically: fragment refs to their observed base id, and
+        // (terminal tasks) dependency artifacts to the source evidence they cite.
+        const refineRefs = (refs: string[]) => { const based = [...new Set(refs.map(ref => baseEvidenceRef(ref, observed)))]; return terminal ? sourceLevelRefs(based, dependencies) : based; };
+        decision.evidenceRefs = terminal ? [...new Set([...decision.evidenceRefs.map(ref => baseEvidenceRef(ref, observed)), ...refineRefs(decision.evidenceRefs)])] : refineRefs(decision.evidenceRefs);
+        if (structured) { structured = normalizeArtifactRefs(structured, ref => ref); refineStructuredRefs(structured, refineRefs); decision.structured = structured; structuredEvidenceRefs = structured.schemaVersion === 'project-pulse/1' ? projectPulseEvidenceRefs(structured) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact); }
+        const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
+        if (needsEvidence && decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
+        let invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
+        const droppedClaims: number[] = [];
+        if (invalidRefs.length && limitReason) {
+          // The final limited call cannot be repaired: keep only claims backed by received evidence.
+          const invalid = new Set(invalidRefs);
+          if (structured) droppedClaims.push(pruneStructuredRefs(structured, ref => !invalid.has(ref)));
+          decision.evidenceRefs = decision.evidenceRefs.filter(ref => !invalid.has(ref));
+          if (structured) structuredEvidenceRefs = structured.schemaVersion === 'project-pulse/1' ? projectPulseEvidenceRefs(structured) : websiteBuilderEvidenceRefs(structured as WebsiteBuilderArtifact);
+          if (decision.evidenceRefs.length === 0) decision.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
+          invalidRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref));
+        }
+        const missingEvidence = needsEvidence && decision.evidenceRefs.length === 0;
+        if (invalidRefs.length || missingEvidence || droppedClaims.some(Boolean)) {
+          console.warn(JSON.stringify({ protocol: 'aeeis-finish-evidence-check/1', runId: current.id, taskId: node.id, limited: Boolean(limitReason), invalidRefs: invalidRefs.slice(0, 10), missingEvidence, droppedClaims: droppedClaims[0] ?? 0, observedCount: observed.size }));
+        }
+        if (invalidRefs.length || missingEvidence) {
+          if (limitReason) throw new Error(`Final limited-evidence finish cited unavailable evidence or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs.slice(0, 10))}`);
           requestFinishRepair(current, live, value, `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only allowed evidence IDs: ${JSON.stringify([...observed])}`);
           return;
         }
+        if (structured?.schemaVersion === 'project-pulse/1') {
+          const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
+          const fidelity = pulseFidelityProblems(structured, refs => refs.map(ref => byId.get(ref) ?? '').join('\n'));
+          if (fidelity.length) {
+            console.warn(JSON.stringify({ protocol: 'aeeis-finish-content-check/1', runId: current.id, taskId: node.id, problems: fidelity.map(problem => problem.split(':')[0]) }));
+            if (limitReason) { decision.content = `${decision.content}\n\n注意：${fidelity.join('; ')}`; }
+            else { requestFinishRepair(current, live, value, fidelity.join('; ')); return; }
+          }
+        }
+        if (droppedClaims[0]) limitationNotes.push(`${droppedClaims[0]} claim(s) removed because they cited evidence not received`);
         if (usesWebsiteBuilder(current) && terminal && structured && structured.schemaVersion === 'website-builder/1'
           && (structured.changedFiles.length > 0 || Boolean(structured.preview) || structured.artifacts.length > 0)) {
           const evidenceRefs = new Set([...decision.evidenceRefs, ...structuredEvidenceRefs]);
@@ -1719,7 +1790,7 @@ export class AgentEngine {
           if (!matchingReceipts.length && !dependencyEvidence) throw new Error('Website Builder changed files, preview or artifacts require an authorized Tool Receipt or dependency artifact');
         }
         const evidenceRefs = [...new Set([...decision.evidenceRefs, ...structuredEvidenceRefs])];
-        const limitations = [...new Set([...(limitReason ? [limitReason] : []), ...dependencies.flatMap(artifact => artifact.limitations ?? [])])];
+        const limitations = [...new Set([...(limitReason ? [limitReason] : []), ...limitationNotes, ...dependencies.flatMap(artifact => artifact.limitations ?? [])])];
         if (limitations.length) {
           current.partial = true;
           decision.content = `Partial answer — limited evidence: ${limitations.join('; ')}.\n\n${decision.content}`;
@@ -2353,6 +2424,29 @@ function evidenceRefsFromObservation(value: unknown): string[] {
   return [...refs];
 }
 
+type RefItem = { evidenceRefs: string[] };
+function structuredItemLists(value: ProjectPulseArtifact | WebsiteBuilderArtifact): RefItem[][] {
+  const record = value as unknown as Record<string, unknown>;
+  const lists: RefItem[][] = [];
+  for (const item of Object.values(record)) if (Array.isArray(item) && item.every(entry => entry && typeof entry === 'object' && Array.isArray((entry as RefItem).evidenceRefs))) lists.push(item as RefItem[]);
+  return lists;
+}
+function refineStructuredRefs(value: ProjectPulseArtifact | WebsiteBuilderArtifact, refine: (refs: string[]) => string[]): void {
+  for (const list of structuredItemLists(value)) for (const item of list) item.evidenceRefs = refine(item.evidenceRefs);
+  const preview = (value as { preview?: RefItem }).preview; if (preview) preview.evidenceRefs = refine(preview.evidenceRefs);
+}
+/** Remove disallowed refs; drop items left with no evidence. Returns the number of dropped items. */
+function pruneStructuredRefs(value: ProjectPulseArtifact | WebsiteBuilderArtifact, keep: (ref: string) => boolean): number {
+  let dropped = 0;
+  for (const list of structuredItemLists(value)) {
+    for (let index = list.length - 1; index >= 0; index--) {
+      list[index]!.evidenceRefs = list[index]!.evidenceRefs.filter(keep);
+      if (!list[index]!.evidenceRefs.length) { list.splice(index, 1); dropped++; }
+    }
+  }
+  const preview = (value as { preview?: RefItem }).preview; if (preview) preview.evidenceRefs = preview.evidenceRefs.filter(keep);
+  return dropped;
+}
 function projectPulseEvidenceRefs(value: ProjectPulseArtifact): string[] {
   const refs = new Set<string>();
   for (const key of ['progress', 'completedChanges', 'blockers', 'risks', 'decisions', 'nextActions', 'unknowns'] as const) {
