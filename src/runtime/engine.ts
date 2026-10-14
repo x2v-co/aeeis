@@ -251,7 +251,50 @@ export function normalizeFinishOutput(value: unknown): unknown {
   const structured = candidate.structured;
   if (candidate.artifactType === undefined && structured && typeof structured === 'object' && 'schemaVersion' in structured
     && ['project-pulse/1', 'website-builder/1'].includes(String(structured.schemaVersion))) candidate.artifactType = structured.schemaVersion;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    const coerced = coerceStringArtifactItems(structured as Record<string, unknown>, Array.isArray(candidate.evidenceRefs) ? candidate.evidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []);
+    if (coerced.length) {
+      candidate.structured = { ...(structured as Record<string, unknown>), ...Object.fromEntries(coerced.map(({ key, items }) => [key, items])) };
+      console.warn(JSON.stringify({ protocol: 'aeeis-finish-normalized/1', shape: 'string-items', fields: coerced.map(({ key, count }) => ({ key, count })) }));
+    }
+  }
   return candidate;
+}
+
+/** Text-item sections per artifact contract (items are {text, evidenceRefs}). */
+const textItemSections: Record<string, readonly string[]> = {
+  'project-pulse/1': ['progress', 'completedChanges', 'blockers', 'risks', 'decisions', 'nextActions', 'unknowns'],
+  'website-builder/1': ['blockers', 'unknowns'],
+};
+/** Weaker models return text-item sections as plain strings. Wrap each string as
+ * {text, evidenceRefs}; refs come from the finish's own evidenceRefs (or other items)
+ * and are still validated against received evidence afterwards. */
+export function coerceStringArtifactItems(structured: Record<string, unknown>, finishRefs: string[]): Array<{ key: string; items: unknown[]; count: number }> {
+  const sections = textItemSections[String(structured.schemaVersion)];
+  if (!sections) return [];
+  let fallback = finishRefs;
+  if (!fallback.length) {
+    const refs = new Set<string>();
+    for (const value of Object.values(structured)) if (Array.isArray(value)) for (const item of value)
+      if (item && typeof item === 'object' && Array.isArray((item as { evidenceRefs?: unknown }).evidenceRefs))
+        for (const ref of (item as { evidenceRefs: unknown[] }).evidenceRefs) if (typeof ref === 'string') refs.add(ref);
+    fallback = [...refs];
+  }
+  const out: Array<{ key: string; items: unknown[]; count: number }> = [];
+  for (const key of sections) {
+    const list = structured[key];
+    if (!Array.isArray(list) || !list.some(item => typeof item === 'string')) continue;
+    let count = 0;
+    const items = list.flatMap(item => {
+      if (typeof item !== 'string') return [item];
+      const text = item.trim();
+      if (!text) return [];
+      count++;
+      return [{ text, evidenceRefs: [...fallback] }];
+    });
+    out.push({ key, items, count });
+  }
+  return out;
 }
 
 function requestFinishRepair(run: AgentRun, step: Step, candidate: unknown, reason: string): void {

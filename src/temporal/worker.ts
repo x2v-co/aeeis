@@ -28,6 +28,9 @@ try {
   });
   const health = await startWorkerHealthServer(worker, { host: healthHost, port: healthPort, taskQueue, buildId: versioning.buildId });
   console.log(`AEEIS Temporal worker ready: http://${healthHost}:${healthPort}/readyz (queue=${taskQueue}, build=${versioning.buildId}, rollout=${versioning.rollout})`);
+  // Runs execute in the API process (activities call /internal/runs/:id/advance), so engine
+  // protocol logs (aeeis-csv-date-filter/1, aeeis-finish-*-check/1, …) appear in the api container.
+  console.log(JSON.stringify({ protocol: 'aeeis-worker-log-routing/1', engineLogs: 'api', api }));
   try { await worker.run(); }
   finally { await closeWorkerHealthServer(health); }
 } finally {
