@@ -28,7 +28,7 @@ import { escapeMaterialRef, materialContentHash, materialQueryTerms, materialExc
 import { CsvQueryInputError, queryCsvSource } from './csv-query.js';
 import { readStructuredSource } from './source-readers.js';
 import { fillPdf, pdfFormFields, pdfOutputForModel, fillablePdfEvidenceRefs, validateFillablePdfArtifact, PdfInputError, type PdfOutput } from './fillable-pdf.js';
-import { isBinaryPdf } from './pdf-material.js';
+import { isBinaryPdf, MAX_RUN_PDF_OUTPUT_BYTES } from './pdf-material.js';
 import { isSourceReadTool, isSourceTool, isStructuredSourceTool, isPdfTool } from './source-tools.js';
 import { boundedExecutorInput, boundedObservations } from './prompt-context.js';
 import { executionLimitReason, executionLimitsSchema, nodeModelCalls, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from './execution-limits.js';
@@ -1672,6 +1672,7 @@ export class AgentEngine {
                 if (current.builtinSkill !== 'fillable-pdf/1') throw new PdfInputError('pdf.fill requires the fillable-pdf/1 built-in contract');
                 pdfOutput = await fillPdf(source, decision.fields, decision.filename);
                 if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref) && (current.pdfOutputs?.length ?? 0) >= 8) throw new PdfInputError('Run PDF output limit reached (8 outputs)');
+                if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref) && (current.pdfOutputs ?? []).reduce((total, output) => total + output.sizeBytes, pdfOutput.sizeBytes) > MAX_RUN_PDF_OUTPUT_BYTES) throw new PdfInputError('Run PDF output storage limit reached (4 MiB total)');
                 result = pdfOutputForModel(pdfOutput);
                 if (JSON.stringify(result).length > 6000) throw new PdfInputError('PDF fill result exceeds the result budget; use fewer/shorter values');
               } else if (decision.tool === 'pdf.formFields') result = await pdfFormFields(source, decision.offset, decision.limit);

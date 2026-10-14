@@ -7,6 +7,7 @@ COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
 COPY fixtures ./fixtures
+COPY assets ./assets
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
@@ -21,6 +22,8 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/public ./public
 COPY --from=build --chown=node:node /app/scripts ./scripts
 COPY --from=build --chown=node:node /app/fixtures ./fixtures
+# Noto Sans SC GB2312 subset (OFL), used only for non-Latin fillable-pdf values (~2.2 MB).
+COPY --from=build --chown=node:node /app/assets ./assets
 RUN chmod +x /app/scripts/fixture-ownhow.mjs
 RUN mkdir -p /app/data/runs && chown -R node:node /app/data
 USER node

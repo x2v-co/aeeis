@@ -2,7 +2,7 @@
 
 Manual retest cases run after each aeeis deploy. Select **PDF 表单**
 (`builtinSkill: "fillable-pdf/1"`), upload `fixtures/fillable-pdf/registration.pdf`
-and the source below. Record Run ID, review verdict, output filename/hash/size,
+(case 6: `contact-zh.pdf`) and the source below. Record Run ID, review verdict, output filename/hash/size,
 and any `tool.failed_recoverable` or `artifact.repair_requested` events.
 
 | # | Input alongside the PDF | Goal | Expected filled fields | Expected unknowns / must observe |
@@ -12,6 +12,7 @@ and any `tool.failed_recoverable` or `artifact.repair_requested` events.
 | 3 | `profile.csv` | Fill the form from the single CSV row | name=Maya Chen; email=maya@example.test; subscribe=false; contactMethod=Email; country=SG; interests=[Music] | phone empty; caseId untouched. False is a sourced checkbox write and appears in filledFields, separate from unknown checkboxes. |
 | 4 | `conflicting.txt` | Fill uncontested facts and leave conflicting values empty | name=Maya Chen | email and country empty with conflict reasons; phone, subscribe, contactMethod, interests missing; caseId untouched. No guessed source priority. |
 | 5 | JSON `{"name":"TBD","country":"XX","invented":"value","caseId":"NEW"}` | Inspect fields and fill only valid supported values | none | All eight fields accounted for in unknowns; name stays empty despite required=true; caseId unchanged. Tools reject invented names, bad options, placeholders and readOnly writes. A corrected empty map may produce an editable blank output. |
+| 6 | **Upload `contact-zh.pdf` instead of registration.pdf**, plus `profile-zh.json` | 用中文资料填写联系表（姓名、地址、城市、邮箱） | fullName=陈美雅; address=北京市朝阳区建国路88号SOHO现代城3号楼1205室; city=北京; email=maya@example.test | note empty with reason. Accepted, every filled field cites `profile-zh.json`; structured values match the PDF character for character. Downloaded PDF shows the Chinese glyphs (not boxes/blank) in a viewer and stays editable; output roughly 11 KB. No `tool.failed_recoverable` about unsupported characters. |
 
 For every successful case, download the PDF from the artifact card, reopen it in
 a PDF viewer and verify that all eight fields are still editable except caseId.
@@ -24,11 +25,14 @@ with the same SHA-256. Check that another owner or tenant cannot download it.
 
 The material shape remains `{title, source, content}`. PDF `content` is explicitly
 `data:application/pdf;base64,` followed by canonical base64; binary data cannot be
-silently treated as ordinary text. Both input and output PDFs are capped at
-256 KiB decoded. Text materials retain the existing 30,000 character cap.
+silently treated as ordinary text. Input PDFs are capped at 512 KiB decoded and
+filled outputs at 1 MiB (an embedded CJK subset adds roughly 2–4 KB per 100
+distinct characters; 200 fields of rare text stay well below 1 MiB). A Run keeps
+at most 4 MiB of output bytes in total. Text materials retain the existing
+30,000 character cap.
 `fillable-pdf/1` requires exactly one marked PDF material. The workbench encodes
-PDF uploads without truncating them; the HTTP body limit is 1,100,000 bytes to
-accommodate one PDF plus existing text materials.
+PDF uploads without truncating them; the HTTP body limit is 1,500,000 bytes to
+accommodate one 512 KiB PDF (about 700 KB as base64) plus existing text materials.
 
 `Run.pdfOutputs` is an optional array in the existing File/JSONB Run aggregate:
 ref, sourceRef, filename, sha256, sizeBytes, encoding=base64,
@@ -56,9 +60,17 @@ flattens. Even a no-source run must call `pdf.fill` with `{}` and report every
 field in unknowns.
 
 Encrypted PDFs, XFA, buttons/signature fields and non-form PDFs are rejected.
-Text that cannot be rendered by the available PDF font is rejected with a
-recoverable tool error; it is never silently replaced or transliterated. Custom
-font embedding, larger size caps and flattening remain future product choices.
+Latin-1 values keep pdf-lib's standard Helvetica appearances (unchanged output).
+When any value contains a character outside Latin-1, `pdf.fill` embeds a subset
+of Noto Sans SC (SIL OFL 1.1) shipped in the image at
+`assets/fonts/NotoSansSC-GB2312.ttf` (about 2.2 MB: ASCII/Latin-1, punctuation,
+CJK symbols, full-width forms and all 6,763 GB2312 hanzi, TrueType outlines;
+rebuild with `scripts/build-cjk-font.py`). Only glyphs actually used are embedded
+and field appearances are regenerated with that font. The font is never fetched
+at runtime; `AEEIS_CJK_FONT_PATH` can override the path. Characters outside the
+bundled subset (rare hanzi, Traditional-only forms, emoji) are rejected with a
+recoverable tool error naming them; they are never silently replaced or
+transliterated. Flattening remains a future product choice.
 Unknowns must use `{field, text, evidenceRefs}` for each unfilled field; a
 readOnly field is explicitly untouched with a reason. False checkbox writes
 require source evidence. Required flags never justify invented values.

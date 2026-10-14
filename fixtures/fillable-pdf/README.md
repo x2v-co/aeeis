@@ -8,3 +8,8 @@ Upload the PDF with the workbench, or put
 `data:application/pdf;base64,` followed by the PDF's canonical base64 bytes in a
 material's `content`. Select `builtinSkill: "fillable-pdf/1"` and supply one or
 more of the source files. See `docs/fillable-pdf-retest-set.md` for expectations.
+
+`contact-zh.pdf` (`node scripts/generate-fillable-pdf-zh.mjs`) has five text
+fields (`fullName` required, `address`, `city`, `email`, `note`) and is filled from
+`profile-zh.json`, whose keys and values are Chinese, to exercise the embedded
+CJK font path.
