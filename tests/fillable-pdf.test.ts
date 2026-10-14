@@ -71,7 +71,7 @@ describe('fillable PDF materials and tools', () => {
     await expect(validateFillablePdfArtifact(pdfArtifact(output), [formSource, evidence], [output], observed)).resolves.toBeUndefined();
     expect((await inspectPdf({ ...formSource, content: output.content })).find(field => field.name === 'subscribe')?.value).toBe(false);
     const blank = await fillPdf(formSource, {});
-    await validateFillablePdfArtifact(pdfArtifact(blank), [formSource], [blank], new Set([formSource.id, blank.ref]));
+    await validateFillablePdfArtifact(pdfArtifact(blank, formSource.id, ''), [formSource], [blank], new Set([formSource.id, blank.ref]));
     expect(pdfArtifact(blank).unknowns).toHaveLength(8);
   });
   it('starts each fill from the source template and gives each write manifest a distinct ref', async () => {
@@ -85,13 +85,19 @@ describe('fillable PDF materials and tools', () => {
   it.each([
     [{ invented: 'value' }, 'Unknown form field'], [{ caseId: 'NEW' }, 'readOnly'],
     [{ subscribe: 'true' }, 'boolean'], [{ name: true }, 'string'], [{ name: '' }, 'non-empty'],
-    [{ country: 'XX' }, 'Invalid option'], [{ country: ['SG', 'US'] }, 'multiselect'],
+    [{ country: 'CA' }, 'Invalid option'], [{ country: 'XX' }, 'Placeholder'], [{ country: ['SG', 'US'] }, 'multiselect'],
     [{ contactMethod: ['Email'] }, 'one option'], [{ interests: 'Music' }, 'multiselect'],
     [{ interests: ['Music', 'Music'] }, 'Invalid option'], [{ name: 'TBD' }, 'Placeholder'],
     [{ name: '[evidence]' }, 'Placeholder'], [{ name: '{{name}}' }, 'Placeholder'],
     [{ name: 'x'.repeat(81) }, 'maxLength'],
   ])('rejects invalid writes %j', async (fields, error) => {
     await expect(fillPdf(formSource, fields as any)).rejects.toThrow(error as string);
+  });
+  it.each(['TBD', 'XX', 'NEW', 'N/A', 'TODO', '?', 'NA', 'N.A.', 'unknown', 'null', 'not provided', '  todo  '])('PDF5: rejects placeholder %s and permits omission with a sourced reason', async value => {
+    await expect(fillPdf(formSource, { name: value })).rejects.toThrow('Placeholder');
+    const output = await fillPdf(formSource, {});
+    await validateFillablePdfArtifact(pdfArtifact(output), [formSource, profileSource], [output], new Set([formSource.id, profileSource.id, output.ref]));
+    expect((await inspectPdf({ ...formSource, content: output.content })).find(field => field.name === 'name')?.value).toBe('');
   });
   it('rejects non-form, unsupported and XFA PDFs without changing their bytes', async () => {
     const doc = await PDFDocument.create(); doc.addPage();
@@ -110,6 +116,23 @@ describe('fillable PDF materials and tools', () => {
 });
 
 describe('fillable PDF finish validation', () => {
+  it('PDF3: maps writes to the referenced output, retaining explicitly sourced false and excluding other versions', async () => {
+    const evidence = { ...profileSource, content: '{"name":"Maya Chen","subscribe":false}' };
+    const first = await fillPdf(formSource, { name: 'Maya Chen', subscribe: false });
+    const second = await fillPdf(formSource, { name: 'Maya Chen' });
+    const artifact = pdfArtifact(first);
+    const observed = new Set([formSource.id, evidence.id, first.ref, second.ref]);
+    await expect(validateFillablePdfArtifact(artifact, [formSource, evidence], [second, first], observed)).resolves.toBeUndefined();
+    artifact.filledFields = artifact.filledFields.filter(field => field.name !== 'subscribe');
+    await expect(validateFillablePdfArtifact(artifact, [formSource, evidence], [second, first], observed)).rejects.toThrow('subscribe');
+  });
+  it('PDF5: requires unknowns to cite the PDF and every consulted case source', async () => {
+    const { artifact, validate } = await fixture();
+    artifact.unknowns[0]!.evidenceRefs = [formSource.id];
+    await expect(validate()).rejects.toThrow(`Missing: ["${profileSource.id}"]`);
+    artifact.unknowns[0]!.evidenceRefs = [formSource.id, profileSource.id];
+    await expect(validate()).resolves.toBeUndefined();
+  });
   it('extracts form/output/field/unknown evidence refs and accepts complete output', async () => {
     const { artifact, validate, output } = await fixture();
     expect(fillablePdfArtifactSchema.parse(artifact)).toEqual(artifact);

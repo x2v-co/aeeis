@@ -106,7 +106,7 @@ function responseFor(system, input) {
     const filledFields = filled.filledFields.map(field => ({ ...field, evidenceRefs: [supplied.find(source => Object.hasOwn(source.values, field.name)).id] }));
     return { type: 'finish', title: 'Filled PDF', content: 'Filled only source-supported form fields. Missing values remain empty; read-only fields remain untouched.', evidenceRefs: [pdfSource.id, ...supplied.map(source => source.id), filled.output.ref], artifactType: 'fillable-pdf/1', structured: {
       schemaVersion: 'fillable-pdf/1', form: filled.form, filledFields,
-      unknowns: filled.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only; explicitly untouched.' : 'No source value; left empty.', evidenceRefs: [pdfSource.id] })), output: filled.output, blockers: [],
+      unknowns: filled.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only; explicitly untouched.' : 'No source value; left empty.', evidenceRefs: [pdfSource.id, ...supplied.map(source => source.id)] })), output: filled.output, blockers: [],
     } };
   }
 
