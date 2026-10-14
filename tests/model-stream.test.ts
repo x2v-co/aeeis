@@ -87,6 +87,24 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(JSON.parse(logs.mock.calls.at(-1)![0])).toMatchObject({ retryable: true, willRetry: false, retryDecision: 'attempts-exhausted', midstreamRetries: limit });
   });
 
+  it('refuses midstream replay once the call wall-clock budget is exhausted and keeps duplicate-possible billingRisk', async () => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => stalledResponse(': heartbeat\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const done = expect(adapter({
+      idleTimeoutMs: 100, firstByteTimeoutMs: 80, callBudgetMs: 150, streamOverallTimeoutMs: 10_000,
+      midstreamRetries: 3, maxAttempts: 1, retryBaseMs: 0,
+    }).complete({ system: 's', input: {}, idempotencyKey: 'stable' })).rejects.toBeInstanceOf(ModelOutcomeUnknown);
+    await vi.advanceTimersByTimeAsync(120); await done;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const last = JSON.parse(errors.mock.calls.at(-1)![0]);
+    expect(last).toMatchObject({
+      willRetry: false, retryDecision: 'call-budget-exhausted',
+      billingRisk: 'duplicate-possible', usageUnknown: true, responseBytes: expect.any(Number),
+    });
+  });
+
   it.each(['no-key', 'overall', 'network', 'json', 'http-error'] as const)('does not replay a partial %s outcome', async kind => {
     vi.useFakeTimers(); const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn(async () => kind === 'network' ? new Response(new ReadableStream({ start(c) {
@@ -480,6 +498,6 @@ describe('OpenAI-compatible SSE transport', () => {
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, retryEmptyIdle: true, midstreamRetries: 1, maxTokens: 16384 });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, callBudgetMs: 600000, retryEmptyIdle: true, midstreamRetries: 1, maxTokens: 16384 });
   });
 });

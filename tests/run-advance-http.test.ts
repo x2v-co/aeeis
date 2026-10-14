@@ -13,27 +13,57 @@ import { InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 import { randomUUID } from 'node:crypto';
 import { ThreadService } from '../src/application/thread-service.js';
 
-it.each([false, true])('terminalizes a model timeout without a wake, retaining valid evidence as partial (evidence=%s)', async evidence => {
+it.each([false, true])('terminalizes a model timeout without a wake; sources alone do not salvage a zero-output run (materials=%s)', async materials => {
   const repository = new InMemoryRunRepository();
   const complete = vi.fn(async () => { throw new ModelOutcomeUnknown('Model timed out after 180000ms'); });
   const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete });
   const app = buildApp({ repository, engine, workerToken: 'worker' });
   try {
-    const run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1', ...(evidence ? { materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] } : {}) });
+    const run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1', ...(materials ? { materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] } : {}) });
     expect(await engine.advance(run.id)).toBe('unknown');
     const request = { method: 'POST' as const, url: `/internal/runs/${run.id}/terminalize`, payload: { reason: 'Model outcome unknown' } };
     expect((await app.inject(request)).statusCode).toBe(401);
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await app.inject({ ...request, headers: { authorization: 'Bearer worker' } });
       expect(response.statusCode).toBe(200);
-      expect(response.json().status).toBe(evidence ? 'succeeded' : 'failed');
+      expect(response.json().status).toBe('failed');
     }
     const stopped = await repository.get(run.id);
     expect(stopped.calls[0]?.state).toBe('unknown');
+    expect(stopped.status).toBe('failed');
+    expect(stopped.partial).toBeFalsy();
+    expect(stopped.artifacts).toHaveLength(0);
+    expect(stopped.error).toContain('Independent review was not completed');
     expect(stopped.events.filter(event => event.data.terminalized)).toHaveLength(1);
-    if (evidence) expect(stopped.artifacts[0]).toMatchObject({ partial: true, evidenceRefs: [run.context.sources[0]!.id], artifactType: 'project-pulse/1', content: expect.stringContaining('开发完成'), limitations: [expect.stringContaining('Independent review was not completed')] });
-    expect(await engine.advance(run.id)).toBe(evidence ? 'succeeded' : 'failed');
+    expect(stopped.events.some(event => event.type === 'run.failed' && event.data.producedArtifacts === 0)).toBe(true);
+    expect(await engine.advance(run.id)).toBe('failed');
     expect(complete).toHaveBeenCalledOnce();
+  } finally { await app.close(); }
+});
+
+it('terminalizes a timeout as succeeded(partial) only when a model-produced artifact already exists', async () => {
+  const repository = new InMemoryRunRepository();
+  const complete = vi.fn(async () => { throw new ModelOutcomeUnknown('Model timed out after 180000ms'); });
+  const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete });
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  try {
+    const run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1', materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] });
+    await repository.mutate(run.id, current => {
+      current.artifacts.push({
+        id: `artifact_${randomUUID()}`, taskId: 'pulse', title: 'Project Pulse', content: '开发完成',
+        evidenceRefs: [current.context.sources[0]!.id], hash: digest('开发完成'), createdAt: current.createdAt,
+      });
+      current.status = 'running';
+      current.calls.push({ id: 'inflight', phase: 'executor', state: 'started', inputHash: 'hash', startedAt: current.createdAt });
+    });
+    const response = await app.inject({ method: 'POST', url: `/internal/runs/${run.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Model outcome unknown' } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe('succeeded');
+    const stopped = await repository.get(run.id);
+    expect(stopped.partial).toBe(true);
+    expect(stopped.artifacts).toHaveLength(1);
+    expect(stopped.artifacts[0]).toMatchObject({ partial: true, limitations: [expect.stringContaining('Independent review was not completed')] });
+    expect(stopped.events.some(event => event.type === 'run.partial' && event.data.producedArtifacts === 1)).toBe(true);
   } finally { await app.close(); }
 });
 
@@ -49,17 +79,19 @@ it('discards a late model result after activity timeout terminalization', async 
   try {
     await started;
     const response = await app.inject({ method: 'POST', url: `/internal/runs/${run.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Activity timeout' } });
-    expect(response.json().status).toBe('succeeded');
+    expect(response.json().status).toBe('failed');
     resolve({ value: { summary: 'Late plan', nodes: [] } });
-    expect(await advancing).toBe('succeeded');
+    expect(await advancing).toBe('failed');
     const stopped = await repository.get(run.id);
-    expect(stopped.partial).toBe(true); expect(stopped.plans).toHaveLength(0);
-    expect(stopped.artifacts).toHaveLength(1);
+    expect(stopped.status).toBe('failed');
+    expect(stopped.partial).toBeFalsy();
+    expect(stopped.plans).toHaveLength(0);
+    expect(stopped.artifacts).toHaveLength(0);
     expect(stopped.events.some(event => event.type === 'model.result_discarded')).toBe(true);
   } finally { resolve({ value: {} }); await advancing; await app.close(); }
 });
 
-it('retains frozen thread evidence when an unknown follow-up has no new materials', async () => {
+it('fails an unknown follow-up with no produced artifacts even when thread history has sources', async () => {
   const repository = new InMemoryRunRepository();
   const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete: async () => { throw new ModelOutcomeUnknown('No response'); } });
   const parent = await engine.create({ goal: 'Project Pulse', materials: [{ title: 'notes.txt', content: '开发完成', source: 'upload' }] }, 'owner', 'local');
@@ -75,11 +107,12 @@ it('retains frozen thread evidence when an unknown follow-up has no new material
   const app = buildApp({ repository, engine, workerToken: 'worker' });
   try {
     const response = await app.inject({ method: 'POST', url: `/internal/runs/${child.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Model timeout' } });
-    expect(response.json().status).toBe('succeeded');
+    expect(response.json().status).toBe('failed');
     const stopped = await repository.get(child.id);
-    expect(stopped.partial).toBe(true);
-    expect(stopped.artifacts[0]?.content).toContain('开发完成');
-    expect(stopped.artifacts[0]?.evidenceRefs[0]).toMatch(/^history:/);
+    expect(stopped.status).toBe('failed');
+    expect(stopped.partial).toBeFalsy();
+    expect(stopped.artifacts).toHaveLength(0);
+    expect(stopped.error).toContain('Model timeout');
   } finally { await app.close(); }
 });
 
