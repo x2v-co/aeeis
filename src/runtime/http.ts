@@ -1500,7 +1500,11 @@ export function buildApp(options: Options) {
     return threadDebugBundle(thread, throughSequence, runs, 'owner');
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id/debug-bundle', async request => debugBundle(await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request))));
-  app.get<{ Params: { id: string } }>('/api/runs/:id', async request => { const principal = principalOf(request); return getReadableRun(options.repository, options.domain, request.params.id, principal); });
+  app.get<{ Params: { id: string } }>('/api/runs/:id', async request => {
+    const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
+    const inputRequest = runInputRequest(run);
+    return { ...run, ...(inputRequest ? { inputRequest } : {}) };
+  });
   app.get<{ Params: { id: string; artifactId: string } }>('/api/runs/:id/artifacts/:artifactId/download', async (request, reply) => {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
     const artifact = run.artifacts.find(item => item.id === request.params.artifactId);

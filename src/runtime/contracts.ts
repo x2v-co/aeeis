@@ -100,7 +100,7 @@ export const decisionSchema = z.discriminatedUnion('type', [
   ]),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strip(),
   z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
-  z.object({ type: z.literal('question'), question: z.string().min(1).max(2000) }).strip(),
+  z.object({ type: z.literal('question'), question: z.string().min(1).max(2000), missing: z.array(z.string().trim().min(1).max(200)).max(30).optional() }).strip(),
   z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100).default([]), artifactType: z.enum(['project-pulse/1', 'website-builder/1', 'fillable-pdf/1']).optional(), structured: z.unknown().optional(), limitations: z.array(z.string().trim().min(1).max(2000)).max(50).optional() }).strip(),
 ]);
 export const reviewSchema = z.object({
@@ -253,6 +253,9 @@ export interface Step {
   attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
   /** One bounded, durable model attempt to repair a candidate finish object. */
   finishRepair?: { reason: string; candidate: unknown; problems?: Array<{ path: string; code: string; message: string }>; discarded?: string };
+  /** Bounded corrective turns, independent of the exhausted ordinary allowance. */
+  outputRecovery?: { reason: string; candidate: unknown; problems: Array<{ path: string; code: string; message: string }>; toolsAllowed: boolean; callOffset: number };
+  outputRecoveryAttempts?: number;
 }
 export interface AgentRun {
   executionLimits?: import('./execution-limits.js').ExecutionLimits;

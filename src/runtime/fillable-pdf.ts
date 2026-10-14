@@ -31,7 +31,7 @@ export interface FormField {
   options?: string[]; required: boolean; readOnly: boolean; page?: number; multiselect?: boolean;
 }
 export function pdfPlaceholder(value: PdfValue): boolean {
-  return (Array.isArray(value) ? value : [value]).some(item => typeof item === 'string' && (/^(?:tbd|todo|unknown|n\/a|placeholder|待定|未知|未提供|[-?…]+)$/i.test(item.trim()) || /\[(?:evidence|source|citation|id|证据|来源)\]/i.test(item) || /\{\{.*?\}\}|<[^>]+>/.test(item)));
+  return (Array.isArray(value) ? value : [value]).some(item => typeof item === 'string' && (/^(?:tbd|todo|unknown|xx|new|n\s*[/.]?\s*a\.?|none|null|nil|not\s+(?:provided|available|known)|placeholder|待定|未知|未提供|[-?…]+)$/i.test(item.trim()) || /\[(?:evidence|source|citation|id|证据|来源)\]/i.test(item) || /\{\{.*?\}\}|<[^>]+>/.test(item)));
 }
 function supported(field: PDFField): SupportedField {
   if (field instanceof PDFTextField || field instanceof PDFCheckBox || field instanceof PDFRadioGroup || field instanceof PDFDropdown || field instanceof PDFOptionList) return field;
@@ -89,8 +89,8 @@ export async function pdfFormFields(source: Source, offset = 0, limit = 50) {
   return result;
 }
 function write(field: SupportedField, value: PdfValue): void {
-  if (field.isReadOnly()) throw new PdfInputError(`Cannot fill readOnly field: ${field.getName()}`);
-  if (pdfPlaceholder(value)) throw new PdfInputError(`Placeholder value rejected for field: ${field.getName()}`);
+  if (field.isReadOnly()) throw new PdfInputError(`Cannot fill readOnly field: ${field.getName()}. Omit this write, preserve the template value and state the reason in unknowns.`);
+  if (pdfPlaceholder(value)) throw new PdfInputError(`Placeholder value rejected for field: ${field.getName()}. Omit this write, leave the field empty and state the missing source value in unknowns.`);
   if (field instanceof PDFTextField) {
     if (typeof value !== 'string' || !value.trim()) throw new PdfInputError(`Text field requires a non-empty string: ${field.getName()}`);
     field.setText(value); return;
@@ -100,7 +100,7 @@ function write(field: SupportedField, value: PdfValue): void {
     value ? field.check() : field.uncheck(); return;
   }
   const values = Array.isArray(value) ? value : [value];
-  if (!values.length || values.some(value => typeof value !== 'string' || !field.getOptions().includes(value)) || new Set(values).size !== values.length) throw new PdfInputError(`Invalid option value for field: ${field.getName()}`);
+  if (!values.length || values.some(value => typeof value !== 'string' || !field.getOptions().includes(value)) || new Set(values).size !== values.length) throw new PdfInputError(`Invalid option value for field: ${field.getName()}; allowed options: ${JSON.stringify(field.getOptions())}. Use a sourced allowed option or omit the write and explain the gap in unknowns.`);
   if (field instanceof PDFRadioGroup) {
     if (typeof value !== 'string') throw new PdfInputError(`Radio field requires one option string: ${field.getName()}`);
     field.select(value); return;
@@ -235,19 +235,25 @@ export async function synthesizePdfArtifact(output: PdfOutput, sources: Source[]
   if (filledFields.some(field => !field.evidenceRefs.length)) return undefined;
   const artifact: FillablePdfArtifact = { schemaVersion: 'fillable-pdf/1', form: { sourceRef: output.sourceRef, fieldCount: output.fieldCount },
     filledFields, output: pdfOutputMetadata(output), blockers: [],
-    unknowns: output.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only field left untouched.' : 'No sourced write; left empty.', evidenceRefs: [output.sourceRef] })) };
+    unknowns: output.unfilledFields.map(field => ({ field: field.name, text: field.readOnly ? 'Read-only field left untouched.' : 'No sourced write; left empty.', evidenceRefs: [output.sourceRef, ...evidence.map(source => source.id)] })) };
   try { await validateFillablePdfArtifact(artifact, sources, [output], observed); return artifact; }
   catch (error) { if (error instanceof PdfInputError) return undefined; throw error; }
 }
 export function fillablePdfEvidenceRefs(value: FillablePdfArtifact): string[] {
   return [...new Set([value.form.sourceRef, value.output.ref, ...[...value.filledFields, ...value.unknowns, ...value.blockers].flatMap(item => item.evidenceRefs)])];
 }
+export function pdfArtifactContent(value: FillablePdfArtifact): string {
+  const cite = (refs: string[]) => refs.map(ref => `[${ref}]`).join(' ');
+  return [`Editable PDF: ${value.output.filename} ${cite([value.output.ref])}`,
+    ...value.filledFields.map(field => `${field.name}: ${JSON.stringify(field.value)} ${cite(field.evidenceRefs)}`),
+    ...value.unknowns.map(field => `${field.field ?? 'Unknown'}: ${field.text} ${cite(field.evidenceRefs)}`)].join('\n');
+}
 /** Validate persisted bytes, never a model's account of what it wrote. */
 export async function validateFillablePdfArtifact(value: FillablePdfArtifact, sources: Source[], outputs: PdfOutput[], observed: Set<string>): Promise<void> {
   const source = sources.find(source => source.id === value.form.sourceRef && isBinaryPdf(source.content));
   if (!source || !observed.has(source.id)) throw new PdfInputError('form.sourceRef must identify the received PDF material', 'structured.form.sourceRef');
   const output = outputs.find(output => output.ref === value.output.ref && output.sourceRef === source.id);
-  if (!output || !observed.has(output.ref)) throw new PdfInputError('output.ref must identify a received pdf.fill output', 'structured.output.ref');
+  if (!output || !observed.has(output.ref)) throw new PdfInputError('output.ref must identify a received pdf.fill output. No matching stored PDF exists; call pdf.fill with the complete sourced field map (or {} for an empty form), then copy filename, sha256, sizeBytes and ref from its result.', 'structured.output.ref');
   const bytes = decodePdfMaterial(output.content, MAX_PDF_OUTPUT_BYTES);
   if (value.output.sha256 !== pdfSha256(bytes) || value.output.sizeBytes !== bytes.length || value.output.filename !== output.filename) throw new PdfInputError('Output filename, sha256 or sizeBytes does not match stored PDF bytes', value.output.sha256 !== pdfSha256(bytes) ? 'structured.output.sha256' : value.output.sizeBytes !== bytes.length ? 'structured.output.sizeBytes' : 'structured.output.filename');
   const original = await inspectPdf(source), actual = describe(await load(output.content, MAX_PDF_OUTPUT_BYTES));
@@ -262,6 +268,8 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
     if (field.readOnly) throw new PdfInputError(`readOnly field cannot be claimed as filled: ${item.name}`, `structured.filledFields.${index}`);
     if (!item.evidenceRefs.length || item.evidenceRefs.some(ref => !receivedSources.has(ref))) throw new PdfInputError(`Filled field must cite received source evidence: ${item.name}`, `structured.filledFields.${index}.evidenceRefs`);
     if (pdfPlaceholder(item.value) || empty(item.value) && item.value !== false) throw new PdfInputError(`Empty or placeholder filled value: ${item.name}`, `structured.filledFields.${index}.value`);
+    const options = original.find(original => original.name === item.name)!.options;
+    if (options && (Array.isArray(item.value) ? item.value : [item.value]).some(option => typeof option !== 'string' || !options.includes(option))) throw new PdfInputError(`Invalid option value for field: ${item.name}; allowed options: ${JSON.stringify(options)}`, `structured.filledFields.${index}.value`);
     const written = output.writtenFields.find(field => field.name === item.name);
     if (!written || !same(item.value, field.value) || !same(written.value, field.value)) throw new PdfInputError(`Structured value does not match output PDF write: ${item.name}`, `structured.filledFields.${index}.value`);
   }
@@ -269,8 +277,12 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
     if (item.field && !original.some(field => field.name === item.field)) throw new PdfInputError(`Invented unknown field name: ${item.field}`, `structured.unknowns.${index}.field`);
     if (item.field && names.has(item.field)) throw new PdfInputError(`Field cannot be both filled and unknown: ${item.field}`, `structured.unknowns.${index}.field`);
     if (item.evidenceRefs.some(ref => !observed.has(ref))) throw new PdfInputError('Unknown entry cites unavailable evidence', `structured.unknowns.${index}.evidenceRefs`);
+    const consulted = [source.id, ...receivedSources];
+    const missing = consulted.filter(ref => !item.evidenceRefs.includes(ref));
+    if (missing.length) throw new PdfInputError(`Unknown entry must cite all consulted sources, including the PDF and case data. Missing: ${JSON.stringify(missing)}`, `structured.unknowns.${index}.evidenceRefs`);
   }
-  if (output.writtenFields.some(field => !names.has(field.name))) throw new PdfInputError('Every actual PDF write must appear in filledFields with source evidence', 'structured.filledFields');
+  const missingWrites = output.writtenFields.filter(field => !names.has(field.name));
+  if (missingWrites.length) throw new PdfInputError(`Every actual PDF write must appear in filledFields with source evidence. Missing writes for output ${output.ref}: ${JSON.stringify(missingWrites)}. Copy the exact field names and values from this output's pdf.fill result and cite received case sources.`, 'structured.filledFields');
   for (const field of actual) {
     if (names.has(field.name)) continue;
     if (!value.unknowns.some(item => item.field === field.name && item.text.trim())) throw new PdfInputError(`Unfilled field must appear in unknowns with a reason: ${field.name}`, 'structured.unknowns');

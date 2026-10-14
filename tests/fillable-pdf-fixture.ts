@@ -15,6 +15,6 @@ export function pdfArtifact(output: PdfOutput, formRef = formSource.id, evidence
   return { schemaVersion: 'fillable-pdf/1', form: { sourceRef: formRef, fieldCount: 8 },
     filledFields: output.writtenFields.map(field => ({ ...field, evidenceRefs: [evidenceRef] })),
     unknowns: ['name', 'email', 'phone', 'caseId', 'subscribe', 'contactMethod', 'country', 'interests'].filter(name => !output.writtenFields.some(field => field.name === name))
-      .map(field => ({ field, text: field === 'caseId' ? 'Read-only; explicitly untouched.' : 'No source value; left empty.', evidenceRefs: [formRef] })),
+      .map(field => ({ field, text: field === 'caseId' ? 'Read-only; explicitly untouched.' : 'No source value; left empty.', evidenceRefs: [formRef, ...(evidenceRef ? [evidenceRef] : [])] })),
     output: { filename: output.filename, sha256: output.sha256, sizeBytes: output.sizeBytes, ref: output.ref }, blockers: [] };
 }

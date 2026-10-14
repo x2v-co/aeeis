@@ -6,6 +6,18 @@ import { queryCsvSource } from '../src/runtime/csv-query.js';
 import { jsonRead, markdownSection, sampleSource } from '../src/runtime/source-readers.js';
 
 describe('executor context budget', () => {
+  it('PDF3: preserves exact writes and output metadata when compacting an older pdf.fill result', () => {
+    const result = { id: 'pdf_output', form: { sourceRef: 'source_pdf', fieldCount: 8 },
+      output: { ref: 'pdf_output', filename: 'filled.pdf', sha256: 'a'.repeat(64), sizeBytes: 100 },
+      filledFields: [{ name: 'name', value: 'Maya Chen' }, { name: 'subscribe', value: false }],
+      unfilledFields: [{ name: 'caseId', readOnly: true }], extra: 'x'.repeat(14000) };
+    const observations = [{ tool: 'pdf.fill', argument: 'source_pdf', result }, { tool: 'sources.read', argument: 'source_case', result: { id: 'source_case', content: 'Case facts' } }];
+    const expected = { output: result.output, form: result.form, filledFields: result.filledFields, unfilledFields: result.unfilledFields };
+    expect(boundedObservations(observations, () => ['pdf_output'])[0]!.result).toMatchObject(expected);
+    const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(89000), observations });
+    expect((overall.observations as typeof observations)[0]!.result).toMatchObject(expected);
+    expect(JSON.stringify(overall).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+  });
   it('preserves structured reader selectors, counts, continuation and hashes through both projections', () => {
     const source = { id: 'source-fixture', source: 'upload', hash: 'stored-hash' };
     const reads = [

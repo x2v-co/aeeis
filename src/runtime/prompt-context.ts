@@ -31,7 +31,7 @@ function observationMetadata(observation: Step['observations'][number]) {
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated };
   }
   if ((observation.tool === 'pdf.formFields' || observation.tool === 'pdf.fill') && result && typeof result === 'object') {
-    return { id: result.id, ...Object.fromEntries(['page', 'fieldCount', 'form', 'output'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };
+    return { id: result.id, ...Object.fromEntries(['page', 'fieldCount', 'form', 'output', 'filledFields', 'unfilledFields'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };
   }
   if (isStructuredSourceTool(observation.tool) && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,

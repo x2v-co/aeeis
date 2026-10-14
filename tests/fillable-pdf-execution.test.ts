@@ -116,7 +116,8 @@ describe('fillable PDF execution and downloads', () => {
     expect(run.status, run.error).toBe('succeeded');
     expect(run.review?.verdict).toBe('accepted');
     expect(run.artifacts[0]?.structured).toMatchObject({ schemaVersion: 'fillable-pdf/1', form: { fieldCount: 8 }, unknowns: [{ field: 'phone' }, { field: 'caseId' }] });
-    expect(run.allowedTools).toEqual([]); expect(run.toolReceipts).toEqual([]);
+    expect(run.allowedTools).toEqual([]); expect(run.toolReceipts).toHaveLength(1);
+    expect(run.toolReceipts[0]).toMatchObject({ operation: 'pdf.fill', outputRefs: [run.pdfOutputs![0]!.ref], authorization: { decision: 'authorized', taskId: 'fill' } });
     const url = `/api/runs/${run.id}/artifacts/${run.artifacts[0]!.id}/download`;
     const response = await fixture.app.inject({ url, headers: { authorization: 'Bearer alice' } });
     expect(response.statusCode).toBe(200);
@@ -157,7 +158,8 @@ describe('fillable PDF execution and downloads', () => {
     } });
     const run = await fixture.drain();
     expect(run.status).toBe('failed'); expect(run.artifacts).toEqual([]);
-    expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(1);
+    expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
+    expect(run.error).toContain('retries exhausted');
     expect(run.review).toBeUndefined();
     expect(fixture.complete.mock.calls.some(([request]) => request.system.includes('Independently review'))).toBe(false);
   });
@@ -165,7 +167,7 @@ describe('fillable PDF execution and downloads', () => {
     const fixture = await setup({ alter: (finish, input) => {
       finish.structured.form.sourceRef = `source: ${input.sourceCatalog[0].id.toUpperCase()}`;
       finish.structured.filledFields.forEach((field: any) => { field.evidenceRefs = [`${input.sourceCatalog[1].id}#line1`]; });
-      if (!input.finishRepair) finish.structured.filledFields[0].value = 'Wrong';
+      if (!input.outputRecovery) finish.structured.filledFields[0].value = 'Wrong';
       return { type: 'finish', result: finish };
     } });
     const run = await fixture.drain();
@@ -213,10 +215,10 @@ describe('fillable PDF execution and downloads', () => {
       const run = await fixture.drain();
       expect(run.status).toBe('failed'); expect(run.artifacts).toEqual([]);
       expect(run.pdfOutputs?.[0]?.writtenFields).toHaveLength(6);
-      expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+      expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
       const logs = warnings.mock.calls.map(([message]) => JSON.parse(String(message)));
-      expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1')).toEqual([expect.objectContaining({ result: 'rejected' })]);
-      expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toEqual([expect.objectContaining({ result: 'rejected', invalidRefs: ['unreceived'], removedRefs: 0, droppedClaims: 0 })]);
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1')).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected' })));
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected', invalidRefs: ['unreceived'], removedRefs: 0, droppedClaims: 0 })));
     } finally { warnings.mockRestore(); }
   });
   it('completes through the real HTTP fixture-model transport', async () => {

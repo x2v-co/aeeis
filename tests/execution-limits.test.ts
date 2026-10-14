@@ -58,7 +58,7 @@ describe('durable execution allowances', () => {
     expect(finished.artifacts[0]!.limitations).toEqual(['Node model iteration limit reached']);
   });
 
-  it.each(['tool', 'capability', 'delegate', 'question'])('rejects a %s in the final call without executing it or repairing again', async type => {
+  it.each(['tool', 'capability', 'delegate', 'question'])('retries a %s in the final call without executing it and fails only after bounded retries', async type => {
     const fixture = await setup({ maxNodeIterations: 2 }, () => type === 'tool' ? { type, tool: 'sources.search', argument: 'blocked' }
       : type === 'capability' ? { type, toolId: 'forbidden', toolVersion: '1', input: {}, purpose: 'Forbidden' }
       : type === 'delegate' ? { type, agentId: 'forbidden', goal: 'Forbidden', expectedOutput: 'result-envelope/1', mode: 'sync' }
@@ -72,7 +72,31 @@ describe('durable execution allowances', () => {
     expect(finished.pendingTool).toBeUndefined();
     expect(finished.pendingDelegation).toBeUndefined();
     await fixture.engine.advance(finished.id);
-    expect(fixture.complete).toHaveBeenCalledTimes(2); // planner + final
+    expect(finished.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
+    expect(finished.error).toContain('retries exhausted');
+    expect(fixture.complete).toHaveBeenCalledTimes(4); // planner + final + two corrective turns
+  });
+
+  it.each(['tool', 'capability', 'delegate', 'question'])('repairs a final %s decision using existing evidence without executing the action', async type => {
+    const fixture = await setup({ maxNodeIterations: 2 }, input => input.outputRecovery
+      ? { type: 'finish', title: 'Partial report', content: 'The supplied summary reports blocked items; further inspection remains unverified.', evidenceRefs: [input.sourceCatalog[0].id] }
+      : type === 'tool' ? { type, tool: 'sources.search', argument: 'blocked' }
+      : type === 'capability' ? { type, toolId: 'forbidden', toolVersion: '1', input: {}, purpose: 'Forbidden' }
+      : type === 'delegate' ? { type, agentId: 'forbidden', goal: 'Forbidden', expectedOutput: 'result-envelope/1', mode: 'sync' }
+      : { type, question: 'Read more?' });
+    await fixture.repository.mutate(fixture.run.id, current => { current.steps[0]!.limitReason = 'Node source page limit reached'; });
+    await fixture.engine.advance(fixture.run.id);
+    fixture.replaceEngine();
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.steps[0]!.observations).toEqual([]);
+    expect(run.pendingTool).toBeUndefined();
+    expect(run.pendingDelegation).toBeUndefined();
+    expect(run.question).toBeUndefined();
+    expect(run.artifacts[0]!.partial).toBe(true);
+    expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(1);
+    const retry = fixture.complete.mock.calls.filter(([request]) => request.system.includes('Execute the current task'))[1]![0];
+    expect(retry.input).toMatchObject({ executionBudget: { finalOnly: true, remainingModelCalls: 1 }, outputRecovery: { toolsAllowed: false } });
   });
 
   it.each(['maxNodeSourceChars', 'maxRunSourceChars'] as const)('never admits a page larger than remaining %s', async name => {
@@ -103,7 +127,7 @@ describe('durable execution allowances', () => {
       : { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: 0, limit: 20 });
     const failed = await fixture.drain();
     expect(failed.status).toBe('failed');
-    expect(failed.calls.filter(call => call.phase === 'executor')).toHaveLength(2);
+    expect(failed.calls.filter(call => call.phase === 'executor')).toHaveLength(4);
     const usage = runSourceReadUsage(failed);
     // Upgrade an older Run that only kept source consumption in observations.
     if (format === 'legacy events') await fixture.repository.mutate(failed.id, current => { delete current.sourceReadUsage; });
@@ -125,7 +149,7 @@ describe('durable execution allowances', () => {
     expect(finished.status).toBe('succeeded');
     const next = fixture.complete.mock.calls[before]![0].input as any;
     expect(next.executionBudget).toMatchObject({ finalOnly: false, remainingModelCalls: 2, nodeReads: { pages: 0, chars: 0 }, runReads: usage });
-    expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(4);
+    expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(6);
     expect(runSourceReadUsage(finished).pages).toBe(2);
     expect(sourceReadUsage(finished.steps).pages).toBe(1);
   });
@@ -152,14 +176,14 @@ describe('durable execution allowances', () => {
   it('preserves the run model call budget when replanning resets node iterations', async () => {
     const fixture = await setup({ maxNodeIterations: 2 }, input => ({ type: 'tool', tool: 'sources.search', argument: 'blocked' }));
     const failed = await fixture.drain();
-    await fixture.repository.mutate(failed.id, current => { current.maxModelCalls = 5; });
+    await fixture.repository.mutate(failed.id, current => { current.maxModelCalls = 7; });
     await fixture.engine.command(failed.id, 'replan', {}); await fixture.engine.advance(failed.id);
     await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash });
     const exhausted = await fixture.drain();
     expect(exhausted.status).toBe('failed');
     expect(exhausted.error).toContain('Model call budget exhausted');
-    expect(exhausted.calls).toHaveLength(5); // Both planners and all executor revisions still count.
-    expect(fixture.complete).toHaveBeenCalledTimes(5);
+    expect(exhausted.calls).toHaveLength(7); // Both planners and all executor revisions still count.
+    expect(fixture.complete).toHaveBeenCalledTimes(7);
   });
 
   it('reconciles a pre-offset unknown request that counted a reused ID across all revisions', async () => {
@@ -175,7 +199,7 @@ describe('durable execution allowances', () => {
     // The pre-offset builder included the old revision's failed executor call.
     (original.input as any).executionBudget.remainingModelCalls = 3;
     delete (original.input as any).clock; // pre-offset requests predate clock injection
-    original.system = original.system.replace(evidenceWritingGuidance, '').replace(sourceFidelityGuidance, ''); // ...and the evidence-writing/source-fidelity rules
+    original.system = original.system.replace(evidenceWritingGuidance, '').replace(sourceFidelityGuidance, '').replace(/\nFor questions, include missing[^\n]*/, ''); // ...and the newer evidence/question rules
     const originalHash = digest(original);
     await fixture.repository.mutate(unknown.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;

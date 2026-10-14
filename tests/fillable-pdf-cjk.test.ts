@@ -34,7 +34,7 @@ describe('fillable PDF CJK values', () => {
     expect(output.sizeBytes).toBeLessThan(64 * 1024);
     const artifact: FillablePdfArtifact = { schemaVersion: 'fillable-pdf/1', form: { sourceRef: zhForm.id, fieldCount: 5 },
       filledFields: Object.entries(fields).map(([name, value]) => ({ name, value, evidenceRefs: [zhProfile.id] })),
-      unknowns: [{ field: 'note', text: '来源资料没有备注。', evidenceRefs: [zhProfile.id] }],
+      unknowns: [{ field: 'note', text: '来源资料没有备注。', evidenceRefs: [zhForm.id, zhProfile.id] }],
       output: { filename: output.filename, sha256: output.sha256, sizeBytes: output.sizeBytes, ref: output.ref }, blockers: [] };
     const observed = new Set([zhForm.id, zhProfile.id, output.ref]);
     await expect(validateFillablePdfArtifact(artifact, [zhForm, zhProfile], [output], observed)).resolves.toBeUndefined();

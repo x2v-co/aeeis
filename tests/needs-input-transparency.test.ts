@@ -12,7 +12,7 @@ import type { ModelRequest } from '../src/runtime/model.js';
 
 afterEach(() => vi.restoreAllMocks());
 
-async function questionRun(repository: RunRepository, options: { source?: boolean; capability?: 'tool' | 'agent'; pulse?: boolean; finalOnly?: boolean; goal?: string; question?: string } = {}) {
+async function questionRun(repository: RunRepository, options: { source?: boolean; capability?: 'tool' | 'agent'; pulse?: boolean; finalOnly?: boolean; goal?: string; question?: string; missing?: string[] } = {}) {
   const requests: ModelRequest[] = [];
   const question = options.question ?? '请提供天气数据来源或允许访问天气数据的工具。';
   const engine = new AgentEngine(repository, {
@@ -21,7 +21,7 @@ async function questionRun(repository: RunRepository, options: { source?: boolea
       requests.push(request);
       if (request.system.includes('Plan a real deliverable')) return { value: { summary: '天气统计', nodes: [{ id: 'weather', title: '天气统计', instruction: '统计本周天气', dependsOn: [] }] } };
       if (request.system.includes('Independently review')) return { value: { verdict: 'accepted', summary: 'Explicitly limited to unavailable data', issues: [] } };
-      return { value: { type: 'question', question } };
+      return { value: { type: 'question', question, ...(options.missing ? { missing: options.missing } : {}) } };
     },
   });
   const created = await engine.create({ goal: options.goal ?? '统计北京本周天气', ...(options.pulse ? { builtinSkill: 'project-pulse/1' } : {}), ...(options.source ? { materials: [{ title: '天气说明', content: '本周天气资料尚未核验', source: 'upload' }] } : {}) });
@@ -79,10 +79,12 @@ describe('input requests and unavailable live data', () => {
       const page = await app.inject({ url: '/api/runs/page?limit=10' });
       expect(page.statusCode).toBe(200);
       expect(page.json().items).toEqual([expect.objectContaining({ id, inputRequest: expected })]);
+      expect((await app.inject({ url: `/api/runs/${id}` })).json()).toMatchObject({ id, inputRequest: expected });
       expect(explainRun(run).attention.blockers[0]?.detail).toBe(`${question} (kind=missing_capability; missing=capability)`);
       await repository.mutate(id, current => { current.status = 'running'; });
       expect((await app.inject({ url: '/api/runs' })).json()[0]).not.toHaveProperty('inputRequest');
       expect((await app.inject({ url: '/api/runs/page?limit=10' })).json().items[0]).not.toHaveProperty('inputRequest');
+      expect((await app.inject({ url: `/api/runs/${id}` })).json()).not.toHaveProperty('inputRequest');
     } finally {
       await app.close();
       if (repository instanceof FileRunRepository) await repository.close();
@@ -113,8 +115,28 @@ describe('input requests and unavailable live data', () => {
     const { id } = await questionRun(repository, { goal: '写一段介绍', question: '介绍的目标读者是谁？' });
     const run = await repository.get(id);
     expect(run.status).toBe('needs_input');
-    expect(run.question).toMatchObject({ kind: 'clarification', missing: ['source', 'capability'] });
+    expect(run.question).toMatchObject({ kind: 'clarification', missing: ['target audience'] });
     expect(inputQuestion(run, 'external', '确认范围', true)).toMatchObject({ kind: 'external_clarification', missing: ['source', 'capability'] });
+  });
+
+  it.each(['请提供型号、数量和交付城市。', 'Please provide the model, quantity and delivery city.'])('classifies concrete missing purchase facts and returns them in detail and list: %s', async question => {
+    const repository = new InMemoryRunRepository();
+    const { id } = await questionRun(repository, { source: true, goal: 'Prepare a purchase order', question });
+    const app = buildApp({ repository });
+    try {
+      const expected = { taskId: 'weather', question, kind: 'clarification', missing: ['model', 'quantity', 'delivery city'] };
+      expect((await app.inject({ url: '/api/runs' })).json()[0].inputRequest).toEqual(expected);
+      expect((await app.inject({ url: `/api/runs/${id}` })).json().inputRequest).toEqual(expected);
+      await repository.mutate(id, current => { current.question!.kind = 'missing_capability'; current.question!.missing = ['capability']; });
+      expect((await app.inject({ url: '/api/runs' })).json()[0].inputRequest).toEqual(expected);
+      expect((await app.inject({ url: `/api/runs/${id}` })).json().inputRequest).toEqual(expected);
+    } finally { await app.close(); }
+  });
+
+  it('preserves model-specified concrete missing facts beyond the known field names', async () => {
+    const repository = new InMemoryRunRepository();
+    const { id } = await questionRun(repository, { source: true, question: 'Who should receive the invoice?', missing: ['invoice recipient'] });
+    expect(runInputRequest(await repository.get(id))).toMatchObject({ kind: 'clarification', missing: ['invoice recipient'] });
   });
 
   it('derives metadata for questions persisted before the optional fields existed', async () => {
