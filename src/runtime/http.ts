@@ -1702,6 +1702,7 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/advance', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
+    if (options.engine.isDraining) return reply.code(503).send({ error: 'Runtime is draining for shutdown; retry the durable run' });
     if (request.headers['x-aeeis-advance-async'] === '1') {
       // Start once and poll separately. A lost response or worker retry cannot
       // cancel the tick or duplicate a provider call: Engine's active guard and

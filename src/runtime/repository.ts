@@ -404,6 +404,9 @@ export class FileRunRepository implements RunRepository {
   private summary(run: AgentRun): FileRunSummary {
     const needsRecovery = run.calls.some(call => call.state === 'started')
       || Boolean(run.pendingTool && (!run.pendingTool.receiptId || run.pendingTool.executionToken || run.pendingTool.reconcileInFlight === true))
+      // An `unknown` run whose pending tool carries a receipt may be an
+      // interrupted read-only call that boot recovery re-queues.
+      || Boolean(run.status === 'unknown' && run.pendingTool?.receiptId)
       || Boolean(run.pendingDelegation && (!run.pendingDelegation.receiptRef || run.pendingDelegation.executionToken || run.pendingDelegation.reconcileInFlight === true))
       // Recovery also performs idempotent domain and Project Pulse projection
       // after a crash between the Run commit and the projection commit.
@@ -1009,6 +1012,7 @@ export class PostgresRunRepository implements RunRepository {
           AND (
             EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(state->'calls', '[]'::jsonb)) call WHERE call->>'state'='started')
             OR (state->'pendingTool' IS NOT NULL AND ((state->'pendingTool'->>'receiptId') IS NULL OR (state->'pendingTool'->>'executionToken') IS NOT NULL OR (state->'pendingTool'->>'reconcileInFlight')='true'))
+            OR (state->>'status'='unknown' AND (state->'pendingTool'->>'receiptId') IS NOT NULL)
             OR (state->'pendingDelegation' IS NOT NULL AND ((state->'pendingDelegation'->>'receiptRef') IS NULL OR (state->'pendingDelegation'->>'executionToken') IS NOT NULL OR (state->'pendingDelegation'->>'reconcileInFlight')='true'))
             OR state->'taskExecution' IS NOT NULL
             OR (state->>'goalId' IS NOT NULL AND state->>'domainPlanId' IS NOT NULL)
