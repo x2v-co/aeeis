@@ -132,7 +132,7 @@ print("verified")` });
       const run = await engine.create({ goal: 'Compute six times seven', allowedTools: ['python'] });
       for (let tick = 0; tick < 12; tick++) {
         const current = await repository.get(run.id);
-        if (current.status === 'needs_approval') await engine.command(run.id, 'approve', { planHash: current.plans.at(-1)!.hash });
+        if (current.status === 'needs_approval') await engine.command(run.id, 'approve', { planHash: current.plans.at(-1)!.hash, planVersion: current.plans.at(-1)!.version });
         if (current.status === 'succeeded') break;
         await engine.advance(run.id);
       }

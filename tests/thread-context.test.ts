@@ -75,7 +75,7 @@ async function fixture(model = new HistoryModel()) {
   };
 }
 async function approve(engine: AgentEngine, repository: FileRunRepository, run: AgentRun) {
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans.at(-1)!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans.at(-1)!.hash, planVersion: (await repository.get(run.id)).plans.at(-1)!.version });
 }
 
 describe('thread history model context', () => {
@@ -183,7 +183,7 @@ describe('thread history model context', () => {
   it('keeps threadless prompt/input shape and permits empty threaded roots', async () => {
     const repository = new InMemoryRunRepository(), model = new HistoryModel(), engine = new AgentEngine(repository, model);
     const plain = await engine.create({ goal: 'Standalone goal' });
-    await engine.advance(plain.id); await engine.command(plain.id, 'approve', { planHash: (await repository.get(plain.id)).plans[0]!.hash });
+    await engine.advance(plain.id); await engine.command(plain.id, 'approve', { planHash: (await repository.get(plain.id)).plans[0]!.hash, planVersion: (await repository.get(plain.id)).plans[0]!.version });
     for (let tick = 0; tick < 3; tick++) await engine.advance(plain.id);
     for (const request of model.requests) { expect(request.input).not.toHaveProperty('threadHistory'); expect(request.system).not.toContain('untrusted_thread_history'); }
     expect(explainRun(await repository.get(plain.id)).evidence).not.toHaveProperty('threadHistory');

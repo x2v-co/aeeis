@@ -30,7 +30,7 @@ async function setup(decide: (input: any, request: ModelRequest) => unknown, opt
   const run = await engine.create({ goal: 'Fill registration from case JSON, explaining every unresolved field', builtinSkill: 'fillable-pdf/1', maxModelCalls: options.maxModelCalls ?? 20,
     materials: [{ title: 'registration.pdf', source: 'upload', content: formContent }, { title: options.caseTitle ?? 'case.json', source: 'upload', content: options.caseContent ?? profileContent }] });
   await engine.advance(run.id);
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   return { repository, id: run.id, complete, get engine() { return engine; }, restart() { engine = new AgentEngine(repository, { model }); }, async drain() {
     for (let i = 0; i < 30; i++) if (['succeeded', 'failed'].includes(await engine.advance(run.id))) return repository.get(run.id);
     throw new Error('Retest exceeded bounded turns');

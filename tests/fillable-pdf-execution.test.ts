@@ -56,7 +56,7 @@ async function setup(options: { alter?: (finish: any, input: any) => unknown; fi
   expect(await engine.advance(id)).toBe('needs_approval');
   const proposed = await repository.get(id);
   expect(proposed.resourceSnapshot?.skill).toMatchObject({ id: 'fillable-pdf', interface: 'fillable-pdf/1', digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
-  await engine.command(id, 'approve', { planHash: proposed.plans[0]!.hash });
+  await engine.command(id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
   return { id, complete, get engine() { return engine; }, get repository() { return repository; }, get app() { return app; },
     async restart() {
       await app.close(); await repository.close(); repository = new FileRunRepository(directory); await repository.init();

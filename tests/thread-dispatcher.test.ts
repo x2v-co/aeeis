@@ -27,9 +27,10 @@ describe('thread run dispatch linkage', () => {
       expect(client.workflow.start).toHaveBeenCalledWith('agentRunWorkflow', { taskQueue: 'thread-queue', workflowId: child.id, args: [child.id] });
       expect(signal).toHaveBeenCalledTimes(2);
       await repository.mutate(child.id, run => {
+        run.plans = [{ version: 1, hash: 'child-hash', summary: 'Next', createdAt: run.createdAt, nodes: [{ id: 'draft', title: 'Draft', instruction: 'Draft next result', dependsOn: [] }] }];
         run.status = 'needs_approval'; run.approval = { planHash: 'child-hash', approved: false };
       });
-      expect((await app.inject({ method: 'POST', url: `/api/runs/${child.id}/approve`, headers, payload: { planHash: 'child-hash' } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'POST', url: `/api/runs/${child.id}/approve`, headers, payload: { planHash: 'child-hash', planVersion: 1 } })).statusCode).toBe(200);
       await repository.mutate(child.id, run => { run.status = 'needs_input'; run.question = { taskId: 'draft', text: 'Which audience?' }; });
       expect((await app.inject({ method: 'POST', url: `/api/runs/${child.id}/answer`, headers, payload: { answer: 'the team' } })).statusCode).toBe(200);
       const retry = await app.inject({ method: 'POST', url, headers, payload });

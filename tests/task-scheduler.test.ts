@@ -49,7 +49,7 @@ async function setup(fileDispatches = false) {
 
 async function approve(engine: AgentEngine, runs: FileRunRepository, id: string) {
   const run = await runs.get(id);
-  await engine.command(id, 'approve', { planHash: run.plans.at(-1)!.hash });
+  await engine.command(id, 'approve', { planHash: run.plans.at(-1)!.hash, planVersion: run.plans.at(-1)!.version });
 }
 
 describe('durable domain task scheduler', () => {

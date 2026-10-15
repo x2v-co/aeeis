@@ -270,7 +270,7 @@ async function approveRun(runId) {
   if (run.status !== 'needs_approval') throw new Error(`Expected ${runId} to need approval, got ${run.status}: ${run.error ?? 'no error'}`);
   const latestPlan = run.plans?.at(-1);
   if (!latestPlan?.hash) throw new Error(`Run ${runId} did not return an approvable plan hash`);
-  await request(`/api/runs/${runId}/approve`, { method: 'POST', body: JSON.stringify({ planHash: latestPlan.hash }) });
+  await request(`/api/runs/${runId}/approve`, { method: 'POST', body: JSON.stringify({ planHash: latestPlan.hash, planVersion: latestPlan.version }) });
   return waitForRun(runId, ['succeeded', 'failed', 'cancelled']);
 }
 

@@ -540,7 +540,7 @@ describe('AEEIS HTTP boundary', () => {
     run = (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json();
     expect(run.status).toBe('needs_approval');
     expect(run.taskExecution).toMatchObject({ domainPlanId: plan.id, taskId: 'release_task' });
-    await app.inject({ method: 'POST', url: `/api/runs/${runId}/approve`, payload: { planHash: run.plans.at(-1)!.hash } });
+    await app.inject({ method: 'POST', url: `/api/runs/${runId}/approve`, payload: { planHash: run.plans.at(-1)!.hash, planVersion: run.plans.at(-1)!.version } });
     // Full-suite workers can temporarily starve the local dispatcher; wait
     // long enough to observe the durable terminal state instead of making
     // this integration test depend on a 400ms scheduling window.

@@ -246,3 +246,118 @@ describe('run link workbench', () => {
     expect(fetch.mock.calls.some(([url, options]) => url === `/api/threads/${threadId}/share/share_one` && options.method === 'DELETE')).toBe(true);
   });
 });
+
+describe('plan review workbench', () => {
+  async function workbench(options: { readOnly?: boolean; shared?: boolean; stale?: boolean } = {}) {
+    const run = fixture();
+    run.status = 'needs_approval'; run.steps = []; run.artifacts = []; delete run.error; delete run.review;
+    run.plans[0]!.summary = '初始计划';
+    run.plans[0]!.nodes = [
+      { id: 'read', title: '读取资料', instruction: '整理资料', dependsOn: [] },
+      { id: 'write', title: '生成报告', instruction: '撰写报告', dependsOn: ['read'] },
+    ];
+    const posts: Array<{ action: string; body: any }> = [];
+    const fetch = vi.fn(async (url: string, options: any) => {
+      if (options.method === 'POST') {
+        const action = url.split('/').at(-1)!, body = JSON.parse(options.body); posts.push({ action, body });
+        if (action === 'approve' && optionsForFetch.stale) return { ok: false, status: 409, text: async () => JSON.stringify({ error: '计划已更新，请刷新后批准最新版本' }) };
+        run.revision++;
+        if (action === 'edit-plan') run.plans.push({ ...body.plan, version: body.planVersion + 1, hash: `hash${body.planVersion + 1}`, createdAt: run.createdAt, author: { type: 'user', actor: 'owner' } });
+        if (action === 'budgets') { run.modelBudget = body.modelBudget; run.externalBudget = body.externalBudget; }
+        if (action === 'revise-plan') run.status = 'planning';
+        if (action === 'approve') run.status = 'running';
+        return response(run);
+      }
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url.startsWith('/api/share/')) return response(sharedRunView(run));
+      if (url.endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (url.endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (url === `/api/runs/${run.id}`) return response({ ...run, canEdit: !optionsForFetch.readOnly });
+      if (url.includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    const optionsForFetch = options;
+    start(options.shared ? `/share/${'s'.repeat(43)}` : `/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.querySelector('.plan-review-editor')).not.toBeNull());
+    const doc = dom.window.document;
+    const click = (label: string, parent: ParentNode = doc) => {
+      const button = [...parent.querySelectorAll('button')].find(button => button.textContent === label);
+      expect(button, label).toBeDefined(); button!.click();
+    };
+    const fill = (label: string, value: string) => {
+      const input = doc.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[aria-label="${label}"]`)!;
+      expect(input, label).not.toBeNull(); input.value = value; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    };
+    return { run, posts, doc, click, fill };
+  }
+
+  it('edits tasks inline, deletes, adds, reorders and displays version changes before approval', async () => {
+    const f = await workbench();
+    f.fill('任务 1 标题', '核查资料'); f.fill('任务 1 目标', '核对原始资料'); f.fill('任务 1 证据要求', '引用原始文件');
+    f.doc.getElementById('decision-next-button')!.click();
+    await vi.waitFor(() => expect(f.doc.body.textContent).toContain('请先将任务修改保存为新版本'));
+    expect(f.posts).toHaveLength(0);
+    const tasks = f.doc.querySelectorAll('.plan-review-editor fieldset');
+    f.click('删除任务', tasks[2]!);
+    await vi.waitFor(() => expect(f.doc.querySelector('[aria-label="任务 2 标题"]')).toBeNull());
+    f.click('添加任务');
+    await vi.waitFor(() => expect(f.doc.querySelector('[aria-label="任务 2 标题"]')).not.toBeNull());
+    f.fill('任务 2 标题', '生成简报'); f.fill('任务 2 目标', '整理简报');
+    f.click('上移', f.doc.querySelectorAll('.plan-review-editor fieldset')[2]!);
+    await vi.waitFor(() => expect((f.doc.querySelector('[aria-label="任务 1 标题"]') as HTMLInputElement).value).toBe('生成简报'));
+    f.click('保存为新版本');
+    await vi.waitFor(() => expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('计划版本历史 · 2 个版本'));
+    expect(f.posts[0]).toMatchObject({ action: 'edit-plan', body: { planVersion: 1, plan: { nodes: [
+      { id: 'task_1', title: '生成简报', instruction: '整理简报' },
+      { id: 'read', title: '核查资料', instruction: '核对原始资料', evidenceRequirements: '引用原始文件' },
+    ] } } });
+    expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('删除任务：生成报告');
+    expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('新增任务：生成简报');
+    expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('证据要求：未设置 → 引用原始文件');
+    expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('任务顺序：');
+    f.doc.getElementById('decision-next-button')!.click();
+    await vi.waitFor(() => expect(f.posts.at(-1)).toMatchObject({ action: 'approve', body: { planVersion: 2, planHash: 'hash2' } }));
+  });
+
+  it('submits free-text feedback and rejects empty feedback without a request', async () => {
+    const f = await workbench(); f.click('提交要求并重新规划');
+    await vi.waitFor(() => expect(f.doc.querySelector('.plan-review-editor [role="alert"]')?.textContent).toContain('请填写补充要求'));
+    expect(f.posts).toHaveLength(0);
+    f.fill('补充要求', '  增加风险和证据核查  '); f.click('提交要求并重新规划');
+    await vi.waitFor(() => expect(f.posts).toEqual([{ action: 'revise-plan', body: { planVersion: 1, feedback: '增加风险和证据核查' } }]));
+    await vi.waitFor(() => expect(f.doc.getElementById('decision-review')?.hidden).toBe(true));
+  });
+
+  it('preserves draft inputs through refresh and sends all budget limits with approval', async () => {
+    const f = await workbench();
+    f.fill('补充要求', '保留未提交的反馈'); f.fill('任务 1 标题', '待保存的标题');
+    f.fill('模型 Token 上限', '1000'); f.fill('模型金额上限（美元）', '0.5');
+    f.fill('外部调用次数上限', '3'); f.fill('外部 Token 上限', '100'); f.fill('外部金额上限（美元）', '1.2');
+    f.click('保存预算');
+    await vi.waitFor(() => expect(f.posts).toHaveLength(1));
+    await vi.waitFor(() => expect([...f.doc.querySelectorAll('.plan-review-editor button')].find(button => button.textContent === '保存预算')?.disabled).toBe(false));
+    expect((f.doc.querySelector('[aria-label="补充要求"]') as HTMLTextAreaElement).value).toBe('保留未提交的反馈');
+    expect((f.doc.querySelector('[aria-label="任务 1 标题"]') as HTMLInputElement).value).toBe('待保存的标题');
+    f.click('保存为新版本');
+    await vi.waitFor(() => expect(f.doc.querySelector('.plan-review-editor')?.textContent).toContain('2 个版本'));
+    f.click('批准并执行', f.doc.getElementById('decision-review-actions')!);
+    await vi.waitFor(() => expect(f.posts.at(-1)).toEqual({ action: 'approve', body: { planVersion: 2, planHash: 'hash2', modelBudget: { tokens: 1000, moneyUsd: 0.5 }, externalBudget: { calls: 3, tokens: 100, moneyUsd: 1.2 } } }));
+  });
+
+  it('shows stale approval conflicts and keeps the review form available', async () => {
+    const f = await workbench({ stale: true }); f.fill('外部调用次数上限', '2');
+    f.click('批准并执行', f.doc.getElementById('decision-review-actions')!);
+    await vi.waitFor(() => expect(f.doc.body.textContent).toContain('计划已更新，请刷新后批准最新版本'));
+    expect(f.posts[0]).toMatchObject({ action: 'approve', body: { planVersion: 1, externalBudget: { calls: 2 } } });
+    expect(f.doc.getElementById('decision-review')?.hidden).toBe(false);
+  });
+
+  it.each([{ readOnly: true }, { shared: true }])('omits editing and approval controls in read-only views (%j)', async options => {
+    const f = await workbench(options);
+    expect(f.doc.querySelector('.plan-review-editor input, .plan-review-editor textarea, .plan-review-editor button')).toBeNull();
+    expect(f.doc.getElementById('decision-review-actions')?.textContent).not.toContain('批准并执行');
+    expect(f.doc.getElementById('decision-next-button')?.hidden).toBe(true);
+    expect(f.doc.getElementById('controls')?.hidden).toBe(true);
+    expect(f.posts).toHaveLength(0);
+  });
+});

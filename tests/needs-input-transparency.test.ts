@@ -31,7 +31,7 @@ async function questionRun(repository: RunRepository, options: { source?: boolea
     else current.approvedAgents = [{ agentId: 'agent.weather', name: 'Weather', cardVersion: '1', cardDigest: 'a'.repeat(64), capabilities: [], inputSchemas: [], outputSchemas: [], privacy: { dataRetention: 'none', regions: ['local'] }, pricing: { unit: 'run' } }];
   });
   await engine.advance(created.id);
-  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
+  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash, planVersion: (await repository.get(created.id)).plans[0]!.version });
   if (options.finalOnly) await repository.mutate(created.id, current => { current.steps[0]!.limitReason = 'Node model iteration limit reached'; });
   await engine.advance(created.id);
   return { engine, id: created.id, requests, question };

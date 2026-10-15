@@ -51,7 +51,7 @@ for (const [name, content] of [['tasks.csv', csv], ['tasks.txt', text], ['tasks.
     run = await threads.followUp(thread.id, { idempotencyKey: 'measurement', request: { goal: 'Project Pulse follow-up', builtinSkill: 'project-pulse/1' }, parentRunId: parent.id }, scope);
   } else run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1', materials: [{ title: name, source: `browser-file:${name}`, content }] });
   await engine.advance(run.id);
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   for (let i = 0; i < 8; i++) if (['succeeded', 'failed', 'unknown'].includes(await engine.advance(run.id))) break;
   const completed = await repository.get(run.id);
   console.log(JSON.stringify({ name, sourceChars: content.length, status: completed.status, error: completed.error,

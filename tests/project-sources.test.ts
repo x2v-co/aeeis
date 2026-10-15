@@ -119,7 +119,7 @@ describe('Project Pulse source provider', () => {
       const run = await engine.create({ goal: 'Summarize blockers', projectSourceQuery: 'blocked' }, 'alice', 'team-a');
       expect(await engine.advance(run.id)).toBe('needs_approval');
       const proposed = await repository.get(run.id);
-      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('reviewing');
@@ -141,7 +141,7 @@ describe('Project Pulse source provider', () => {
       const run = await engine.create({ goal: 'Summarize blockers', projectSourceQuery: 'blocker' }, 'alice', 'team-a');
       await engine.advance(run.id);
       const proposed = await repository.get(run.id);
-      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('running'); // one bounded finish repair
       expect(await engine.advance(run.id)).toBe('succeeded');

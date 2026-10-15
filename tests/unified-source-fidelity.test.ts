@@ -24,7 +24,7 @@ async function fixture(source: { title: string; content: string }, decide: (inpu
   const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete }, ...(iterations ? { executionLimits: { maxNodeIterations: 8 } } : limited ? { executionLimits: { maxNodeSourcePages: 1 } } : {}) });
   const created = await engine.create({ goal: '项目进展', builtinSkill: 'project-pulse/1', materials: [{ ...source, source: 'upload' }] }, 'owner', 'local');
   await engine.advance(created.id);
-  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
+  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash, planVersion: (await repository.get(created.id)).plans[0]!.version });
   for (let attempt = 0; attempt < 20; attempt++) if (['succeeded', 'failed'].includes(await engine.advance(created.id))) break;
   return { run: await repository.get(created.id), logs, systems, reviewerInputs };
 }

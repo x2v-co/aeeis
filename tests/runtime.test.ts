@@ -299,7 +299,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: '明天北京天气是什么', materials: [{ title: '天气说明', content: '北京天气暂无可用实时接口', source: 'user' }] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('needs_input');
     current = await repo.get(run.id);
     expect(current.question?.text).toContain('可核验');
@@ -343,7 +343,7 @@ describe('AEEIS runtime', () => {
     expect(secondProposed.domainPlanId).toBeDefined();
     expect(secondProposed.domainPlanId).not.toBe(proposed.domainPlanId);
 
-    await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
     for (let i = 0; i < 10; i += 1) {
       const status = await engine.advance(run.id);
       if (['succeeded', 'failed'].includes(status)) break;
@@ -354,7 +354,7 @@ describe('AEEIS runtime', () => {
     expect(snapshot.plan.nodes.every(node => node.status === 'succeeded')).toBe(true);
 
     // Finish the second Run against its own revision.
-    await engine.command(second.id, 'approve', { planHash: secondProposed.plans[0]!.hash });
+    await engine.command(second.id, 'approve', { planHash: secondProposed.plans[0]!.hash, planVersion: secondProposed.plans[0]!.version });
     for (let i = 0; i < 10; i += 1) {
       const status = await engine.advance(second.id);
       if (['succeeded', 'failed'].includes(status)) break;
@@ -393,7 +393,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: goal.title, goalId: goal.id, materials: [{ title: 'Brief', source: 'fixture', content: 'Evidence' }] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     for (let index = 0; index < 12; index += 1) {
       const status = await engine.advance(run.id);
       if (['succeeded', 'failed'].includes(status)) break;
@@ -419,7 +419,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: goal.title, goalId: goal.id });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('failed');
     current = await repo.get(run.id);
     const plan = (await domain.listPlans(goal.id)).find(item => item.id === current.domainPlanId)!;
@@ -437,8 +437,8 @@ describe('AEEIS runtime', () => {
     let current = await repo.get(run.id);
     expect(current.plans[0]?.nodes).toHaveLength(2);
     expect(current.calls.some(call => call.phase === 'executor')).toBe(false);
-    await expect(engine.command(run.id, 'approve', { planHash: 'wrong' })).rejects.toThrow('match');
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await expect(engine.command(run.id, 'approve', { planHash: 'wrong', planVersion: 1 })).rejects.toThrow('计划已更新');
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     for (let i = 0; i < 10; i += 1) {
       const status = await engine.advance(run.id);
       if (['succeeded', 'failed'].includes(status)) break;
@@ -672,7 +672,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Check service status', allowedTools: ['fixture.lookup'], materials: [] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     for (let i = 0; i < 20; i++) {
       const status = await engine.advance(run.id);
       if (status === 'succeeded' || status === 'failed') break;
@@ -696,7 +696,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Update the website landing page', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     for (let i = 0; i < 20; i += 1) {
       const state = await engine.advance(run.id);
       if (state === 'succeeded' || state === 'failed') break;
@@ -728,7 +728,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Fake website change', builtinSkill: 'website-builder/1' });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     const planned = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash, planVersion: planned.plans[0]!.version });
     for (let i = 0; i < 12; i += 1) { const state = await engine.advance(run.id); if (['succeeded', 'failed'].includes(state)) break; }
     const current = await repo.get(run.id);
     expect(current.status).toBe('failed');
@@ -742,7 +742,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Check tool evidence binding', allowedTools: ['fixture.lookup@1'] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     const planned = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: planned.plans[0]!.hash, planVersion: planned.plans[0]!.version });
     for (let i = 0; i < 12; i += 1) { const state = await engine.advance(run.id); if (['unknown', 'succeeded', 'failed'].includes(state)) break; }
     const current = await repo.get(run.id);
     expect(current.status).toBe('unknown');
@@ -758,7 +758,7 @@ describe('AEEIS runtime', () => {
     const run = await first.create({ goal: 'Serialize tool execution', allowedTools: ['fixture.lookup@1'] });
     expect(await first.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     // The executor records the pending capability; the next tick crosses the
     // provider boundary and holds the durable execution token.
     await first.advance(run.id);
@@ -781,7 +781,7 @@ describe('AEEIS runtime', () => {
     const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
     const run = await engine.create({ goal: 'Late tool result', allowedTools: ['fixture.lookup@1'] });
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
     const tick = engine.advance(run.id);
     await tools.started.promise;
@@ -804,7 +804,7 @@ describe('AEEIS runtime', () => {
     const engine = new AgentEngine(repo, { model: new CapabilityFixture(), tools, globalBudget });
     const run = await engine.create({ goal: 'Late budget result', allowedTools: ['fixture.lookup@1'] });
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
     const entered = deferred<void>(), release = deferred<void>();
     const reservation = vi.spyOn(ledger, 'reserve').mockImplementationOnce(async () => {
@@ -832,7 +832,7 @@ describe('AEEIS runtime', () => {
     const run = await first.create({ goal: 'Fence a late provider result', allowedTools: ['fixture.lookup@1'] }, 'alice', 'team-a');
     expect(await first.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id);
     const inFlight = first.advance(run.id);
     await tools.started.promise;
@@ -970,7 +970,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Denied capability' });
     await engine.advance(run.id);
     const current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('failed');
     expect((await repo.get(run.id)).error).toContain('allowedTools');
     await repo.close();
@@ -985,7 +985,7 @@ describe('AEEIS runtime', () => {
     expect((await repo.get(run.id)).approvedTools?.[0]?.version).toBe('1');
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('running');
     expect(await engine.advance(run.id)).toBe('unknown');
     expect(tools.invokes).toBe(1);
@@ -1008,7 +1008,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Cancel and reconcile tool status', allowedTools: ['fixture.lookup@1'] });
     await engine.advance(run.id);
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await engine.advance(run.id);
     expect(await engine.advance(run.id)).toBe('unknown');
     await engine.command(run.id, 'cancel', {});
@@ -1031,7 +1031,7 @@ describe('AEEIS runtime', () => {
     const run = await first.create({ goal: 'Recover cancelled reconciliation', allowedTools: ['fixture.lookup@1'] });
     await first.advance(run.id);
     let current = await repo.get(run.id);
-    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id);
     expect(await first.advance(run.id)).toBe('unknown');
     await first.command(run.id, 'cancel', {});
@@ -1056,7 +1056,7 @@ describe('AEEIS runtime', () => {
     const run = await first.create({ goal: 'Serialize cancelled reconciliation', allowedTools: ['fixture.lookup@1'] });
     await first.advance(run.id);
     let current = await repo.get(run.id);
-    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id);
     expect(await first.advance(run.id)).toBe('unknown');
     await first.command(run.id, 'cancel', {});
@@ -1082,7 +1082,7 @@ describe('AEEIS runtime', () => {
     const run = await engine.create({ goal: 'Use the governed method', skillRuntime: 'aeeis-test', materials: [{ title: 'Brief', source: 'fixture', content: 'Ship safely.' }] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     for (let i = 0; i < 20; i++) { const status = await engine.advance(run.id); if (status === 'succeeded' || status === 'failed') break; }
     current = await repo.get(run.id);
     expect(current.status).toBe('succeeded');
@@ -1103,7 +1103,7 @@ describe('AEEIS runtime', () => {
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
     const run = await engine.create({ goal: 'Use a partner Agent', allowedAgents: ['agent.partner'] });
     expect(await engine.advance(run.id)).toBe('needs_approval');
-    let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('running');
     current = await repo.get(run.id);
     expect(current.pendingDelegation?.agentId).toBe('agent.partner');
@@ -1127,7 +1127,7 @@ describe('AEEIS runtime', () => {
     } });
     const engine = new AgentEngine(repo, { model: new StreamingDelegationFixture(), agents });
     const run = await engine.create({ goal: 'Stream a partner Agent update', allowedAgents: ['agent.partner'] });
-    await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await engine.advance(run.id);
     expect(await engine.advance(run.id)).toBe('running');
     current = await repo.get(run.id);
@@ -1147,7 +1147,7 @@ describe('AEEIS runtime', () => {
     directory.register({ ...card, cardVersion: '2', name: 'Changed partner' });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     const proposed = await repo.get(run.id);
-    await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('running');
     expect(await engine.advance(run.id)).toBe('failed');
     expect((await repo.get(run.id)).error).toContain('Agent Card changed');
@@ -1166,7 +1166,7 @@ describe('AEEIS runtime', () => {
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
     const run = await engine.create({ goal: 'Late Agent acceptance', allowedAgents: ['agent.partner'] });
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
     const tick = engine.advance(run.id);
     await entered.promise;
@@ -1190,7 +1190,7 @@ describe('AEEIS runtime', () => {
     });
     const run = await new AgentEngine(repo, { model: new DelegationFixture(), agents }).create({ goal: 'Use an asynchronous partner Agent', allowedAgents: ['agent.partner'] });
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
-    await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await engine.advance(run.id);
     expect(await engine.advance(run.id)).toBe('waiting_external');
     current = await repo.get(run.id);
@@ -1210,7 +1210,7 @@ describe('AEEIS runtime', () => {
     const firstGateway = new AgentGateway(directory, unknownTransport);
     const first = new AgentEngine(repo, { model: new DelegationFixture(), agents: firstGateway });
     const run = await first.create({ goal: 'Recover delegated work', allowedAgents: ['agent.partner'] });
-    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id); expect(await first.advance(run.id)).toBe('unknown');
     const unknownCurrent = await repo.get(run.id);
     const recoveredGateway = new AgentGateway(directory, { submit: async () => ({ status: 'unknown' as const, receiptRef: 'unused' }), reconcile: async (_card, request, receipt) => ({ status: 'completed' as const, receiptRef: 'receipt.after-restart', acknowledgement: { schemaVersion: 'context-ack/1' as const, taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { schemaVersion: 'result-envelope/1' as const, taskId: request.taskBrief.taskId, agentId: 'agent.partner', status: 'completed' as const, resultType: 'research/1', summary: 'reconciled', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.after-restart' } }) });
@@ -1231,7 +1231,7 @@ describe('AEEIS runtime', () => {
     };
     const first = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
     const run = await first.create({ goal: 'Recover tool call', allowedTools: ['fixture.lookup'] });
-    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
+    await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id);
     await repo.mutate(run.id, saved => { saved.status = 'running'; delete saved.pendingTool!.receiptId; });
     const recovered = new AgentEngine(repo, { model: new CapabilityFixture(), tools });

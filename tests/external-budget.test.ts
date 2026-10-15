@@ -72,7 +72,7 @@ async function setup(options: { cost?: Receipt['cost']; sequence?: Array<'tool' 
   const prepare = async (externalBudget?: ExternalBudget, extra: Record<string, unknown> = {}) => {
     const run = await engine.create({ goal: 'Deliver', allowedTools: ['lookup'], allowedAgents: ['agent.partner'], ...(externalBudget ? { externalBudget } : {}), ...extra });
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
     return run.id;
   };

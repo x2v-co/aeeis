@@ -71,6 +71,15 @@ npm run verify
 npm run dev
 ```
 
+计划进入 `needs_approval` 后，运行所有者可在审批区编辑任务标题、目标（`instruction`）、证据要求（`evidenceRequirements`）、依赖和顺序，或补充要求后重新规划；历史版本和相邻版本差异会保留。审批相关接口均使用现有身份认证及 owner/tenant 检查，分享链接和工作区只读成员不能修改：
+
+- `POST /api/runs/:id/revise-plan`：`{ planVersion, feedback }`，保存用户反馈事件和来源记录，通过原规划器生成下一版计划，再次等待批准。
+- `POST /api/runs/:id/edit-plan`：`{ planVersion, plan: { summary, nodes } }`，保存为新的用户编辑版本；任务 ID 必须唯一，依赖须存在且无环，任务数量为 1–12。
+- `POST /api/runs/:id/budgets`：`{ planVersion, modelBudget?, externalBudget? }`，保存本次运行的预算；模型支持 `tokens`、`moneyUsd`，外部支持 `calls`、`tokens`、`moneyUsd`。`null` 清除对应预算，省略则保留原值。
+- `POST /api/runs/:id/approve`：必须提交 `{ planVersion, planHash }`，也可同时提交预算。版本过期或状态已变化返回 `409`，只批准并执行最新版本。预算包含规划阶段的累计用量；金额预算要求可核验的模型价格。
+
+任务标题最多 200 字符，目标、证据要求和计划摘要最多 4000 字符，反馈最多 8000 字符。绑定已有领域任务的运行保留原有指令不可变约束。读取运行详情会返回 `canEdit`，只读页面不显示编辑入口。
+
 `npm run verify` is the default local quality gate. It runs type checking, the
 unit test suite in a single worker (to keep HTTP fixture tests deterministic)
 and the production TypeScript build in a fixed order. Optional

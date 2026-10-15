@@ -81,16 +81,29 @@ export const requestSchema = z.object({
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   instruction: z.string().trim().min(1).max(4000),
+  evidenceRequirements: z.string().trim().min(1).max(4000).optional(),
   dependsOn: z.array(z.string()).max(20).default([]),
 }).strip();
 // Model planning metadata is not part of the executable plan. Strip it before
 // graph validation and hashing; request/authorization schemas stay strict.
 export const planSchema = z.object({
-  summary: z.string().min(1).max(4000),
+  summary: z.string().trim().min(1).max(4000),
   nodes: z.array(nodeSchema).min(1).max(12),
 }).strip();
+const planVersionSchema = z.number().int().positive();
+export const approvalBudgetsSchema = z.object({
+  planVersion: planVersionSchema,
+  modelBudget: modelBudgetSchema.nullable().optional(),
+  externalBudget: externalBudgetSchema.nullable().optional(),
+}).strict();
+export const approvePlanSchema = approvalBudgetsSchema.extend({ planHash: z.string().min(1) });
+export const revisePlanSchema = z.object({ planVersion: planVersionSchema, feedback: z.string().trim().min(1).max(8000) }).strict();
+export const editPlanSchema = z.object({
+  planVersion: planVersionSchema,
+  plan: planSchema.extend({ nodes: z.array(nodeSchema.strict()).min(1).max(12) }).strict(),
+}).strict();
 export const decisionSchema = z.discriminatedUnion('type', [
   z.discriminatedUnion('tool', [
     z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000), offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(1).max(100).optional(), characterOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strip(),
@@ -309,16 +322,18 @@ export interface AgentRun {
   agentProgress?: Array<{ idempotencyKey: string; progress: AgentProgressEvent }>;
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown; disposition?: 'isolated'; isolatedCost?: { tokens?: number | undefined; money?: number | undefined; currency?: string | undefined } }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string;
+    author?: { type: 'user' | 'model'; actor?: string; provenanceRef?: string };
     /** Number of model calls already reserved when this revision was proposed. */
     modelCallOffset?: number;
   }>;
+  planProvenance?: Array<{ id: string; source: 'user'; actor: string; kind: 'feedback' | 'edit' | 'budget'; basePlanVersion: number; planVersion?: number; planHash?: string; feedback?: string; createdAt: string }>;
   /** One durable schema repair per proposed plan, also used after restart. */
   plannerRepair?: { rawOutput: string; validationError: string };
   /** One corrective reviewer retry: redacted zod issues from the rejected review. */
   reviewRepair?: { issues: Array<{ path: string; code: string; message: string }> };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
-  approval?: { planHash: string; approved: boolean; actor?: string; at?: string };
+  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;

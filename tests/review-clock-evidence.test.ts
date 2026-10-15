@@ -43,7 +43,7 @@ describe('executor placeholder repair and reviewer clock', () => {
     const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete } });
     const run = await engine.create({ goal: 'Summarize', materials: [{ title: 'n.md', source: 'upload', content: '# Notes\nOn track.' }] }, 'owner', 'local');
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
     let status = '';
     for (let i = 0; i < 16 && !['succeeded', 'failed'].includes(status); i++) status = await engine.advance(run.id);
     const done = await repository.get(run.id);

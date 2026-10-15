@@ -67,7 +67,7 @@ describe('regression: lt date filter', () => {
     const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete } });
     const run = await engine.create({ goal: 'Which tasks are due before 2026-10-14?', materials: [{ title: 'tasks.csv', source: 'upload', content }] }, 'owner', 'local');
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
     let status = '';
     for (let i = 0; i < 16 && !['succeeded', 'failed'].includes(status); i++) status = await engine.advance(run.id);
     const done = await repository.get(run.id);

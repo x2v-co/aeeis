@@ -29,7 +29,7 @@ async function approved(f: ReturnType<typeof replayModel>, title = 'notes.txt', 
 }
 async function approve(f: ReturnType<typeof replayModel>, run: AgentRun) {
   expect(await f.engine.advance(run.id)).toBe('needs_approval');
-  await f.engine.command(run.id, 'approve', { planHash: (await f.repository.get(run.id)).plans[0]!.hash });
+  await f.engine.command(run.id, 'approve', { planHash: (await f.repository.get(run.id)).plans[0]!.hash, planVersion: (await f.repository.get(run.id)).plans[0]!.version });
 }
 async function drain(f: ReturnType<typeof replayModel>, run: AgentRun) {
   for (let tick = 0; tick < 12; tick++) if (['succeeded', 'failed', 'unknown'].includes(await f.engine.advance(run.id))) break;

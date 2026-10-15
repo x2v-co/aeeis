@@ -11,7 +11,7 @@ type TaskDefinition = PlanSnapshot['nodes'][number];
 export interface PlanChange {
   taskId: string;
   kind: 'added' | 'removed' | 'modified';
-  fields: Array<'title' | 'instruction' | 'dependsOn'>;
+  fields: Array<'title' | 'instruction' | 'dependsOn' | 'evidenceRequirements'>;
   before?: TaskDefinition;
   after?: TaskDefinition;
 }
@@ -19,6 +19,7 @@ export interface PlanComparison {
   fromVersion: number; toVersion: number; fromHash: string; toHash: string;
   summary?: { before: string; after: string };
   changes: PlanChange[];
+  order?: { before: string[]; after: string[] };
 }
 export interface RunGraphs { plan: PlanGraph | undefined; planHistory: PlanGraph[]; planComparisons: PlanComparison[]; execution: ExecutionGraph; evidence: EvidenceGraph }
 
@@ -33,6 +34,7 @@ export function comparePlans(before: PlanSnapshot, after: PlanSnapshot): PlanCom
     const fields: PlanChange['fields'] = [];
     if (old.title !== node.title) fields.push('title');
     if (old.instruction !== node.instruction) fields.push('instruction');
+    if (old.evidenceRequirements !== node.evidenceRequirements) fields.push('evidenceRequirements');
     if (JSON.stringify([...old.dependsOn].sort()) !== JSON.stringify([...node.dependsOn].sort())) fields.push('dependsOn');
     if (fields.length) changes.push({ taskId: node.id, kind: 'modified', fields, before: structuredClone(old), after: structuredClone(node) });
   }
@@ -40,6 +42,7 @@ export function comparePlans(before: PlanSnapshot, after: PlanSnapshot): PlanCom
   return {
     fromVersion: before.version, toVersion: after.version, fromHash: before.hash, toHash: after.hash,
     ...(before.summary === after.summary ? {} : { summary: { before: before.summary, after: after.summary } }), changes,
+    ...(JSON.stringify(before.nodes.map(node => node.id)) === JSON.stringify(after.nodes.map(node => node.id)) ? {} : { order: { before: before.nodes.map(node => node.id), after: after.nodes.map(node => node.id) } }),
   };
 }
 

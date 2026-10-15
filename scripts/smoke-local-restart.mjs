@@ -131,7 +131,7 @@ try {
   }
   await request(baseUrl, `/api/runs/${created.id}/approve`, {
     method: 'POST',
-    body: JSON.stringify({ planHash }),
+    body: JSON.stringify({ planHash, planVersion: restored.plans.at(-1).version }),
   });
   const completed = await waitFor(baseUrl, `/api/runs/${created.id}`, body => ['succeeded', 'failed', 'cancelled'].includes(body.status), 'restored Run completion');
   if (completed.status !== 'succeeded' || completed.review?.verdict !== 'accepted') {

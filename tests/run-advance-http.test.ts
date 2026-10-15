@@ -245,7 +245,7 @@ it.each([false, true])('completes all ten tasks without a wake (progress enabled
       return response.json();
     };
     expect((await advance()).status).toBe('needs_approval');
-    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
     let previousProgress: string | undefined;
     let stalled = 0, completedTasks = 0, ticks = 0;
     for (; ticks < 100; ticks++) {

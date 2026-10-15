@@ -23,7 +23,7 @@ async function setup(output: (input: Input) => unknown, plan = oneTask, builtinS
   const engine = new AgentEngine(repository, model);
   const run = await engine.create({ goal: 'Summarize migration status', ...(builtinSkill ? { builtinSkill } : {}), materials: [{ title: 'Migration status', source: 'user-input', content: `Migration is blocked. ${'Background. '.repeat(400)}` }] });
   expect(await engine.advance(run.id)).toBe('needs_approval');
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   return { engine, repository, model, complete, run };
 }
 async function completeRun(engine: AgentEngine, repository: FileRunRepository, id: string) {

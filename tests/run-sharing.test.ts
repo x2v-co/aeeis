@@ -202,7 +202,7 @@ describe('durable model failure diagnostics', () => {
     const { engine, repo } = await setup(bad);
     const run = await engine.create({ goal: 'Project Pulse', builtinSkill: 'project-pulse/1' }, 'alice', 'team-a');
     await engine.advance(run.id);
-    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+    await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('running');
     const repairing = await repo.get(run.id);
     expect(repairing.calls.at(-1)?.validationErrors?.[0]?.message).toContain('finish.structured');

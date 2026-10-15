@@ -64,7 +64,7 @@ try {
       if (csv.length > 30_000) await repository.mutate(run.id, current => { const source = current.context.sources[0]!; source.content = csv; source.hash = source.contentHash = materialContentHash(csv); });
       await engine.advance(run.id);
       const proposed = await repository.get(run.id);
-      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
       for (let i = 0; i < 12; i++) {
         const status = await engine.advance(run.id);
         if (['succeeded', 'failed', 'unknown'].includes(status)) break;

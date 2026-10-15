@@ -62,7 +62,7 @@ function engines(h: AgentFencingHarness, transport: AgentTransport) {
 async function prepare(engine: AgentEngine, repo: RunRepository) {
   const run = await engine.create({ goal: 'Durable external research', allowedAgents: [card.agentId] }, 'alice', 'team-a');
   expect(await engine.advance(run.id)).toBe('needs_approval');
-  await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
   expect(await engine.advance(run.id)).toBe('running');
   expect((await repo.get(run.id)).pendingDelegation).toBeDefined();
   return run.id;

@@ -36,7 +36,7 @@ async function setup(decide: (input: Input) => unknown = input => input.observat
   } : undefined);
   if (options.legacy) await repository.mutate(run.id, current => { delete current.capabilityCatalogVersion; });
   await engine.advance(run.id);
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   return { repository, run, complete, get engine() { return engine; }, restart() { engine = new AgentEngine(repository, { model }); },
     async drain() {
       for (let i = 0; i < 16; i++) {
@@ -77,7 +77,7 @@ describe('executor CSV query tool', () => {
       let engine = new AgentEngine(repository, { model, executionLimits: { maxNodeIterations: 2, maxNodeSourcePages: 1 } });
       const run = await engine.create({ goal: 'Calculate team totals', materials: [{ title: 'totals.csv', source: 'upload', content }] });
       await engine.advance(run.id);
-      await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
       for (let i = 0; i < 12; i++) {
         const status = await engine.advance(run.id);
         if ((await repository.get(run.id)).events.some(event => event.type === 'review.revision_requested')) engine = new AgentEngine(repository, { model });
