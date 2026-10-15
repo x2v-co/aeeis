@@ -9,7 +9,9 @@ const execute = promisify(execFile);
 
 test('production stack deployment, online backup, notifications and systemd paths', async () => {
   const { stdout: output } = await execute('bash', [resolve('deploy/stack/bin/selftest.sh')], {
-    encoding: 'utf8', timeout: 60_000,
+    encoding: 'utf8', timeout: 300_000, killSignal: 'SIGKILL',
+    // selftest.sh is hermetic but CPU-bound (~45s alone: hundreds of fake docker/python spawns);
+    // under parallel vitest load on small hosts it exceeded 60s. Budget generously.
     // Exercise root-run containers mounting a checkout owned by the host user.
     env: { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' },
   }).catch((error: Error & { stdout?: string; stderr?: string }) => {
@@ -19,7 +21,7 @@ test('production stack deployment, online backup, notifications and systemd path
   expect(output).toContain('git commit build, label/tag fallback, env precedence and restart persistence passed');
   expect(output).toContain('post-pull startup metadata and unlabeled image environment preservation passed');
   expect(output).toContain('online atomic backups, failure exits, retention, notifications and configurable systemd paths passed');
-}, 65_000);
+}, 310_000);
 
 test('container release metadata reaches both stack services without empty env_file overrides', () => {
   const stack = parse(readFileSync('deploy/stack/compose.yml', 'utf8'), { merge: true });
