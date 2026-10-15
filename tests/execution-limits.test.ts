@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { evidenceWritingGuidance, sourceFidelityGuidance, AgentEngine, digest } from '../src/runtime/engine.js';
 import { executionLimitsConfig, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from '../src/runtime/execution-limits.js';
 import { ModelOutcomeUnknown, type ModelRequest } from '../src/runtime/model.js';
+
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 const csv = ['id,status', ...Array.from({ length: 800 }, (_, i) => `${i},blocked`)].join('\n');
 async function setup(limits: Partial<ExecutionLimits> = {}, decide?: (input: any) => unknown, nodes = 1, pulse = false) {
@@ -56,6 +58,19 @@ describe('durable execution allowances', () => {
     expect(finished.status).toBe('succeeded');
     expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(3);
     expect(finished.artifacts[0]!.limitations).toEqual(['Node model iteration limit reached']);
+  });
+
+  it('reuses an identical built-in read without charging source allowances, but executes changed offsets', async () => {
+    const fixture = await setup({}, input => input.observations.length >= 3
+      ? { type: 'finish', title: 'Report', content: 'The received rows report blocked items.', evidenceRefs: [input.sourceCatalog[0].id] }
+      : { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: input.observations.length === 2 ? 1 : 0, limit: 1 });
+    const finished = await fixture.drain();
+    expect(finished.status).toBe('succeeded');
+    expect(finished.steps[0]!.observations.map(observation => observation.tool)).toEqual(['sources.read', 'sources.read.duplicate', 'sources.read']);
+    expect(finished.steps[0]!.observations[1]!.result).toMatchObject({ duplicateOf: 'observations/0' });
+    expect(sourceReadUsage(finished.steps).pages).toBe(2);
+    expect(runSourceReadUsage(finished).pages).toBe(2);
+    expect(finished.events.filter(event => event.type === 'tool.completed')).toHaveLength(2);
   });
 
   it.each(['tool', 'capability', 'delegate', 'question'])('retries a %s in the final call without executing it and fails only after bounded retries', async type => {
@@ -199,7 +214,7 @@ describe('durable execution allowances', () => {
     // The pre-offset builder included the old revision's failed executor call.
     (original.input as any).executionBudget.remainingModelCalls = 3;
     delete (original.input as any).clock; // pre-offset requests predate clock injection
-    original.system = original.system.replace(evidenceWritingGuidance, '').replace(sourceFidelityGuidance, '').replace(/\nFor questions, include missing[^\n]*/, ''); // ...and the newer evidence/question rules
+    original.system = original.system.replace(/\nWhen executionBudget.remainingModelCalls[^\n]*/, '').replace(evidenceWritingGuidance, '').replace(sourceFidelityGuidance, '').replace(/\nFor questions, include missing[^\n]*/, ''); // ...and the newer evidence/question rules
     const originalHash = digest(original);
     await fixture.repository.mutate(unknown.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;
@@ -222,22 +237,68 @@ describe('durable execution allowances', () => {
     expect(finished.artifacts[0]!.partial).toBe(true);
   });
 
-  it.each(['snapshot', 'hash only'])('reconciles an unknown final call with %s using its original input without another provider request', async format => {
+  it.each(['running', 'succeeded'])('reconciles billing for an unknown final call while %s without replacing its partial artifact', async status => {
     const fixture = await setup({ maxNodeIterations: 2 });
-    await fixture.engine.advance(fixture.run.id); // first read
+    await fixture.engine.advance(fixture.run.id);
     fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('idle timeout'));
-    expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
-    const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;
-    if (format === 'hash only') await fixture.repository.mutate(unknown.id, current => { delete current.calls.at(-1)!.modelRequest; });
-    expect(unknown.steps[0]!.finalCallId).toBe(call.id);
-    expect(await fixture.engine.advance(unknown.id)).toBe('unknown');
-    expect(fixture.complete).toHaveBeenCalledTimes(3);
-    await fixture.engine.reconcileModelCall(unknown.id, { callId: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed the exact original request', output: { type: 'finish', title: 'Partial', content: 'Observed source summary.', evidenceRefs: [unknown.context.sources[0]!.id] } });
-    expect(await fixture.engine.advance(unknown.id)).toBe('running');
-    const resumed = await fixture.repository.get(unknown.id);
-    expect(resumed.calls.at(-1)).toMatchObject({ id: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, state: 'completed' });
-    expect(resumed.artifacts[0]!.partial).toBe(true);
-    expect(fixture.complete).toHaveBeenCalledTimes(3);
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('running');
+    const partial = await fixture.repository.get(fixture.run.id), call = partial.calls.at(-1)!;
+    expect(call.state).toBe('unknown');
+    expect(partial.steps[0]).toMatchObject({ status: 'succeeded', finalCallId: call.id });
+    expect(partial.artifacts[0]).toMatchObject({ partial: true, limitations: ['Node model iteration limit reached', 'Final synthesis failed: idle timeout'] });
+    if (status === 'succeeded') expect((await fixture.drain()).status).toBe('succeeded');
+    const count = fixture.complete.mock.calls.length;
+    await fixture.engine.reconcileModelCall(partial.id, { callId: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed billing', output: { type: 'finish', title: 'Late result', content: 'Discard this late synthesis', evidenceRefs: [] }, usage: { inputTokens: 10, outputTokens: 5 } });
+    const reconciled = await fixture.repository.get(partial.id);
+    expect(reconciled.status).toBe(status);
+    expect(reconciled.calls.find(receipt => receipt.id === call.id)).toMatchObject({ id: call.id, state: 'discarded', usage: { inputTokens: 10, outputTokens: 5 } });
+    expect(reconciled.artifacts).toEqual(partial.artifacts);
+    expect(fixture.complete).toHaveBeenCalledTimes(count);
+  });
+
+  it('continues to dependent nodes after final synthesis becomes unknown', async () => {
+    const fixture = await setup({ maxNodeIterations: 2 }, input => {
+      if (input.task.id === 'task_1') {
+        expect(input.dependencies[0]).toMatchObject({ taskId: 'task_0', partial: true });
+        expect(input.dependencies[0].content).toContain('blocked');
+        return { type: 'finish', title: 'Combined report', content: 'The retained observations report blocked items; further investigation remains unverified.', evidenceRefs: [input.dependencies[0].id] };
+      }
+      if (input.executionBudget.finalOnly) throw new ModelOutcomeUnknown('idle timeout');
+      return { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: 0, limit: 2 };
+    }, 2);
+    const finished = await fixture.drain();
+    expect(finished.status, finished.error).toBe('succeeded');
+    expect(finished.steps.every(step => step.status === 'succeeded')).toBe(true);
+    expect(finished.artifacts).toHaveLength(2);
+    expect(finished.artifacts.every(artifact => artifact.partial)).toBe(true);
+    expect(finished.calls.filter(call => call.state === 'unknown')).toHaveLength(1);
+    expect(finished.calls.filter(call => call.phase === 'executor')).toHaveLength(3);
+    expect(finished.modelUsage?.unreportedCalls).toBeGreaterThan(0);
+    expect(finished.events.some(event => event.type === 'run.failed')).toBe(false);
+  });
+
+  it('bounds a hung final-only call with the configured timeout and retains its unknown receipt', async () => {
+    vi.stubEnv('AEEIS_FINAL_CALL_TIMEOUT_MS', '25');
+    const fixture = await setup({ maxNodeIterations: 2 });
+    await fixture.engine.advance(fixture.run.id);
+    vi.useFakeTimers();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    fixture.complete.mockImplementationOnce(async request => {
+      expect(request.timeoutMs).toBe(25);
+      expect(request.system).toContain('executionBudget.remainingModelCalls <= 2');
+      started();
+      return new Promise<never>(() => {});
+    });
+    const advance = fixture.engine.advance(fixture.run.id);
+    await ready;
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await advance).toBe('running');
+    const partial = await fixture.repository.get(fixture.run.id);
+    expect(partial.calls.at(-1)?.state).toBe('unknown');
+    expect(partial.artifacts[0]?.partial).toBe(true);
+    expect(partial.steps[0]?.status).toBe('succeeded');
+    expect((fixture.complete.mock.calls.at(-1)![0].signal as AbortSignal).aborted).toBe(true);
   });
 
   it('withholds the next page once cumulative characters exceed the remaining allowance', async () => {
@@ -253,21 +314,22 @@ describe('durable execution allowances', () => {
     expect(finished.artifacts[0]!.partial).toBe(true);
   });
 
-  it('reserves a final call durably before a rejected provider response and never repeats it on retry', async () => {
+  it('retains a partial node artifact after a definite final-only provider failure', async () => {
     const fixture = await setup({ maxNodeSourcePages: 1 });
     await fixture.engine.advance(fixture.run.id);
     fixture.complete.mockRejectedValueOnce(new Error('Provider rejected the finish'));
-    expect(await fixture.engine.advance(fixture.run.id)).toBe('failed');
-    const failed = await fixture.repository.get(fixture.run.id);
-    expect(failed.steps[0]!.finalCallId).toBe(failed.calls.at(-1)!.id);
-    await fixture.engine.command(failed.id, 'retry');
-    expect(await fixture.engine.advance(failed.id)).toBe('failed');
-    expect((await fixture.repository.get(failed.id)).error).toContain('final finish call exhausted');
-    expect(fixture.complete).toHaveBeenCalledTimes(3);
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('running');
+    const partial = await fixture.repository.get(fixture.run.id);
+    expect(partial.steps[0]).toMatchObject({ status: 'succeeded', finalCallId: partial.calls.at(-1)!.id });
+    expect(partial.calls.at(-1)?.state).toBe('failed');
+    expect(partial.artifacts[0]).toMatchObject({ partial: true, limitations: ['Node source page limit reached', 'Final synthesis failed: Provider rejected the finish'] });
+    expect((await fixture.drain()).status).toBe('succeeded');
+    expect(fixture.complete.mock.calls.filter(([request]) => request.system.includes('Execute the current task'))).toHaveLength(2);
+    expect(fixture.complete.mock.calls[2]![0].timeoutMs).toBe(180_000);
   });
 
   it('validates configuration and defaults', () => {
-    expect(executionLimitsConfig({}).maxNodeIterations).toBe(8);
+    expect(executionLimitsConfig({}).maxNodeIterations).toBe(12);
     expect(executionLimitsConfig({ AEEIS_MAX_NODE_ITERATIONS: '3' }).maxNodeIterations).toBe(3);
     expect(() => executionLimitsConfig({ AEEIS_MAX_NODE_ITERATIONS: '1' })).toThrow();
     for (const value of ['NaN', '0', '-1', '1.5']) expect(() => executionLimitsConfig({ AEEIS_MAX_RUN_SOURCE_CHARS: value })).toThrow();

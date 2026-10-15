@@ -97,7 +97,7 @@ describe('executor CSV query tool', () => {
         expect(input.executionBudget.remainingModelCalls).toBeGreaterThan(1);
         expect(system).toContain('Tools are allowed');
         expect(input.outputRecovery.reason).toContain('Include the numeric total');
-        value = query(input);
+        value = { ...query(input), limit: 51 }; // A distinct query; identical completed queries reuse the prior result.
       } else {
         if (!input.outputRecovery && connectFailures++ < 2) throw new TypeError('fetch failed', { cause: Object.assign(new Error('Connection timed out'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) });
         value = { ...finish(input), content: input.outputRecovery ? 'Total: 200,000.' : 'Calculated totals.' };
