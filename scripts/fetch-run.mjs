@@ -16,7 +16,7 @@ async function readBounded(response) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 export function resolveRunTarget(input, env = process.env) {
-  if (!input) throw new Error('Usage: node scripts/fetch-run.mjs <url|id>');
+  if (!input) throw new Error('Usage: node scripts/fetch-run.mjs <url|id> | --from-db <run_id>');
   let url;
   if (input.startsWith('//')) throw new Error('Protocol-relative URLs are not accepted');
   if (/^https?:\/\//i.test(input)) url = new URL(input);
@@ -55,7 +55,38 @@ export async function fetchRun(input, env = process.env) {
   finally { await file.close(); }
   return filename;
 }
+const runIdPattern = /^run_[a-f0-9-]{36}$/;
+/**
+ * Read-only export straight from Postgres for operators inside the api
+ * container (no access token, no curl). Uses a READ ONLY transaction, applies
+ * the same redaction as /api/runs/:id/debug-bundle and writes a 0600 file.
+ * deps.query / deps.debugBundle are injectable for tests.
+ */
+export async function exportRunFromDb(runId, env = process.env, deps = {}) {
+  if (!runIdPattern.test(runId ?? '')) throw new Error('Usage: node scripts/fetch-run.mjs --from-db <run_id>');
+  const debugBundle = deps.debugBundle ?? (await import(new URL('../dist/runtime/run-debug.js', import.meta.url).href)).debugBundle;
+  let state;
+  if (deps.query) state = await deps.query(runId);
+  else {
+    if (!env.DATABASE_URL) throw new Error('DATABASE_URL is required for --from-db');
+    const { default: pg } = await import('pg');
+    const client = new pg.Client({ connectionString: env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      state = (await client.query('SELECT state FROM aeeis_runs WHERE id=$1', [runId])).rows[0]?.state;
+      await client.query('ROLLBACK');
+    } finally { await client.end(); }
+  }
+  if (!state) throw new Error('Unknown run');
+  const bundle = debugBundle(state);
+  const filename = `run-${runId}.debug.json`;
+  const file = await open(filename, 'w', 0o600);
+  try { await file.chmod(0o600); await file.writeFile(`${JSON.stringify(bundle, null, 2)}\n`); }
+  finally { await file.close(); }
+  return filename;
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try { console.log(await fetchRun(process.argv[2])); }
+  try { console.log(process.argv[2] === '--from-db' ? await exportRunFromDb(process.argv[3]) : await fetchRun(process.argv[2])); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
