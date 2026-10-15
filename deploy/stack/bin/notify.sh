@@ -2,7 +2,7 @@
 # OnFailure handler. stdout/stderr go to the unit journal. Notification must
 # never mask the original failure or fail hard if configuration/tools are absent.
 notify() (
-set -u
+set -uo pipefail
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 env_file="${AEEIS_ENV_FILE:-$STACK_DIR/stack.env}"
 if [[ -r "$env_file" ]]; then

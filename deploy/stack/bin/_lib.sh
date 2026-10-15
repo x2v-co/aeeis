@@ -1,5 +1,6 @@
 # shellcheck shell=bash
 # Shared helpers for deploy/stack/bin/*.sh (sourced, not executed).
+set -o pipefail
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="$(cd "$STACK_DIR/../.." && pwd)"
 export REPO_DIR

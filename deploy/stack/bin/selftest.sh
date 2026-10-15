@@ -2,10 +2,25 @@
 # shellcheck source-path=SCRIPTDIR
 # No daemon/network required: exercise the production entrypoints with Docker
 # mocked on PATH. Also run from the normal unit-test suite.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "selftest failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A root-run container may mount a checkout owned by the host user. Trust only
+# this checkout for this test and its children; never change global Git config.
+repo_dir="$(cd "$STACK_DIR/../.." && pwd)"
+export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT:-0}=safe.directory"
+export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT:-0}=$repo_dir"
+export GIT_CONFIG_COUNT="$((${GIT_CONFIG_COUNT:-0} + 1))"
+for dependency in git python3; do
+  if ! command -v "$dependency" >/dev/null; then
+    echo "stack selftest: required dependency missing: $dependency" >&2
+    exit 1
+  fi
+done
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
+# Most entrypoints are captured here. Show their diagnostics before cleanup.
+trap 'echo "selftest failed at line $LINENO: $BASH_COMMAND" >&2; if [[ -f "$test_dir/output" ]]; then cat "$test_dir/output" >&2; fi' ERR
 mkdir -p "$test_dir/bin"
 # Same repository root, isolated deploy state. Never write real release files.
 selftest_stack="$(mktemp -d "$STACK_DIR/../.selftest.XXXXXX")"
@@ -54,6 +69,7 @@ if args[0] == 'compose':
         elif '--format' in args:
             print(json.dumps({'services': {'api': {'container_name': os.getenv('FAKE_TARGET_CONTAINER', 'new-api')}},
                               'volumes': {'pg': {'name': 'aeeis-cn-prod-postgres'}}}))
+        if mode == 'config-fail': sys.exit(42)
     elif 'ps' in args and '-q' in args:
         print('temporal-id')
     elif 'workflow' in args and 'list' in args:
@@ -162,6 +178,12 @@ no_container_mutation
 reset_fake
 export FAKE_MODE=daemon-fail
 expect_failure deploy
+no_container_mutation
+# Valid-looking output must not hide a failed producer in either pipeline.
+reset_fake
+export FAKE_MODE=config-fail
+expect_failure guard
+expect_failure "$STACK_DIR/bin/images.sh" list
 no_container_mutation
 reset_fake
 export FAKE_LEGACY=shared
@@ -315,7 +337,8 @@ grep -Fxq 'AEEIS_GIT_COMMIT=ddddddd' "$STACK_DIR/.current.aeeis-drill.env"
 sed -i '/^AEEIS_GIT_COMMIT=/d' "$AEEIS_ENV_FILE"
 reset_fake
 "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" > "$test_dir/output" 2>&1
-export FAKE_EXPECT_COMMIT="$(git -C "$STACK_DIR/../.." rev-parse HEAD)"
+FAKE_EXPECT_COMMIT="$(git -C "$STACK_DIR/../.." rev-parse HEAD)"
+export FAKE_EXPECT_COMMIT
 python3 - <<'PY'
 import json,os
 calls=list(map(json.loads,open(os.environ['FAKE_RELEASE_LOG'])))
@@ -349,7 +372,10 @@ export FAKE_IMAGE_ENV_COMMIT=ffffffffffffffffffffffffffffffffffffffff
 AEEIS_GIT_COMMIT=unknown AEEIS_CURRENT_FILE="$test_dir/startup-without-state.env" \
   "$STACK_DIR/bin/stack.sh" start > "$test_dir/output" 2>&1
 AEEIS_GIT_COMMIT=unknown deploy > "$test_dir/output" 2>&1
-! grep -q '^AEEIS_GIT_COMMIT=' "$STACK_DIR/.current.aeeis-drill.env"
+if grep -q '^AEEIS_GIT_COMMIT=' "$STACK_DIR/.current.aeeis-drill.env"; then
+  echo 'unknown commit must not override the image environment' >&2
+  exit 1
+fi
 python3 - <<'PY'
 import json,os
 release=list(map(json.loads,open(os.environ['FAKE_RELEASE_LOG'])))
@@ -535,5 +561,7 @@ if command -v systemd-analyze >/dev/null; then
       exit 1
     fi
   fi
+else
+  echo 'stack selftest: skipping systemd-analyze verification (dependency absent); unit command checks passed'
 fi
 echo 'stack selftest: online atomic backups, failure exits, retention, notifications and configurable systemd paths passed'
