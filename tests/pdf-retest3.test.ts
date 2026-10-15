@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PDFDocument, StandardFonts, decodePDFRawStream, type PDFRawStream } from 'pdf-lib';
-import { fillPdf, resolveSourceResource, synthesizePdfArtifact } from '../src/runtime/fillable-pdf.js';
+import { fillPdf, pdfFormFields, resolveSourceResource, synthesizePdfArtifact } from '../src/runtime/fillable-pdf.js';
 import { PDF_BASE64_PREFIX, decodePdfMaterial } from '../src/runtime/pdf-material.js';
 import { formSource, profileSource, profile, source } from './fillable-pdf-fixture.js';
 
@@ -19,6 +19,22 @@ function appearance(doc: PDFDocument) {
 }
 
 describe('PDF retest rendering and resource boundaries', () => {
+  it('splits PDF field reads to a smaller allowance without losing fields', async () => {
+    const names: string[] = [];
+    let offset = 0;
+    do {
+      const result = await pdfFormFields(formSource, offset, 200, 750);
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(750);
+      expect(result.fields.length).toBeGreaterThan(0);
+      names.push(...result.fields.map(field => field.name));
+      if (!result.page.nextRead) break;
+      expect(result.page.nextRead.offset).toBeGreaterThan(offset);
+      offset = result.page.nextRead.offset;
+    } while (offset < 200);
+    const full = await pdfFormFields(formSource);
+    expect(names).toEqual(full.fields.map(field => field.name));
+    expect(new Set(names).size).toBe(names.length);
+  });
   it.each([false, true])('address-fit: shrinks single-line text and wraps multiline fields (multiline=%s)', async multiline => {
     const template = await addressTemplate(multiline);
     const address = '99 Example Street, Unit 08-01, Sample District, Singapore';

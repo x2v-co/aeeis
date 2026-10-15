@@ -1942,14 +1942,30 @@ export class AgentEngine {
             }
           } else if (decision.tool !== 'sources.read') {
             const { type: _type, tool, argument: _argument, ...query } = decision;
-            result = readStructuredSource(tool, source, query);
+            const remainingPages = Math.min(limits.maxNodeSourcePages - sourceReadUsage([live]).pages, limits.maxRunSourcePages - runSourceReadUsage(current).pages);
+            result = readStructuredSource(tool, source, query, remainingPages);
           } else {
             // Escape historical delimiters on the wrapped raw source-read path.
             const safeSource = historySources.includes(source) ? { ...source, content: escapeMaterialRef(source.content), contentHash: materialContentHash(escapeMaterialRef(source.content)) } : source;
             result = readMaterialPage(safeSource, decision);
           }
-          const chars = JSON.stringify(result).length;
           const totalReads = runSourceReadUsage(current);
+          const remainingChars = Math.min(limits.maxNodeSourceChars - sourceReadUsage([live]).chars, limits.maxRunSourceChars - totalReads.chars);
+          // Shrink read-only results into a real continuation instead of losing
+          // the entire read when the remaining node/run allowance is smaller.
+          if (JSON.stringify(result).length > remainingChars) {
+            try {
+              if (decision.tool === 'pdf.formFields') result = await pdfFormFields(source, decision.offset, decision.limit, remainingChars);
+              else if (decision.tool === 'sources.read') {
+                const safeSource = historySources.includes(source) ? { ...source, content: escapeMaterialRef(source.content), contentHash: materialContentHash(escapeMaterialRef(source.content)) } : source;
+                result = readMaterialPage(safeSource, decision, remainingChars);
+              } else if (isStructuredSourceTool(decision.tool) && remainingChars >= 256) {
+                const { type: _type, tool, argument: _argument, ...query } = decision;
+                result = readStructuredSource(tool, source, { ...query, maxChars: Math.min(6000, remainingChars) });
+              }
+            } catch { /* Metadata or one indivisible field cannot fit; finalize with the limit below. */ }
+          }
+          const chars = JSON.stringify(result).length;
           if (sourceReadUsage([live]).chars + chars > limits.maxNodeSourceChars || totalReads.chars + chars > limits.maxRunSourceChars) {
             live.limitReason = 'Source page exceeds remaining node/run character allowance';
             live.observations.push({ tool: `${decision.tool}.limit`, argument: decision.argument, result: { reason: live.limitReason } });

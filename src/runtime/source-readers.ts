@@ -188,22 +188,24 @@ export function jsonRead(source: Source, input: unknown = {}) {
   return textPage(JSON.stringify(value), query.characterOffset, query.maxChars, { ...base, representation: 'json-fragment' as const }, { argument: source.id, path: query.path, maxChars: query.maxChars });
 }
 
-export function pdfRead(source: Source, input: unknown = {}) {
+export function pdfRead(source: Source, input: unknown = {}, maxPages = 20) {
   const query = options(pdfReadOptionsSchema, input); requireFormat(source, 'pdf');
-  const endPage = query.endPage ?? query.startPage;
-  if (endPage < query.startPage || endPage - query.startPage >= 20) throw new Error('PDF page range must be ascending and contain at most 20 pages');
+  const requestedEndPage = query.endPage ?? query.startPage;
+  if (requestedEndPage < query.startPage) throw new Error('PDF page range must be ascending');
+  const endPage = Math.min(requestedEndPage, query.startPage + Math.max(1, Math.min(20, maxPages)) - 1);
   return requireFit({ ...metadata(source, 'pdf-read/1'), supported: false, startPage: query.startPage, endPage,
+    page: { nextRead: endPage < requestedEndPage ? { argument: source.id, startPage: endPage + 1, endPage: requestedEndPage, maxChars: query.maxChars } : null },
     message: 'PDF text extraction is unsupported. Use pdf.formFields for base64 AcroForm materials, or extract PDF text to Markdown or TXT; page boundaries cannot be inferred from raw PDF text.' }, query.maxChars);
 }
 
-export function readStructuredSource(tool: string, source: Source, input: unknown) {
+export function readStructuredSource(tool: string, source: Source, input: unknown, maxPages?: number) {
   switch (tool) {
     case 'sources.sample': return sampleSource(source, input);
     case 'sources.markdownOutline': return markdownOutline(source, input);
     case 'sources.markdownSection': return markdownSection(source, input);
     case 'sources.jsonSummary': return jsonSummary(source, input);
     case 'sources.jsonRead': return jsonRead(source, input);
-    case 'sources.pdfRead': return pdfRead(source, input);
+    case 'sources.pdfRead': return pdfRead(source, input, maxPages);
     default: throw new Error('Unknown structured source tool');
   }
 }

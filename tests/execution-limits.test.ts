@@ -301,7 +301,7 @@ describe('durable execution allowances', () => {
     expect((fixture.complete.mock.calls.at(-1)![0].signal as AbortSignal).aborted).toBe(true);
   });
 
-  it('withholds the next page once cumulative characters exceed the remaining allowance', async () => {
+  it('withholds the next page when even metadata cannot fit the remaining allowance', async () => {
     const fixture = await setup();
     await fixture.engine.advance(fixture.run.id);
     const first = await fixture.repository.get(fixture.run.id), used = sourceReadUsage(first.steps);
@@ -312,6 +312,20 @@ describe('durable execution allowances', () => {
     expect(finished.sourceReadUsage).toEqual(used);
     expect(finished.steps[0]!.observations.at(-1)!.tool).toBe('sources.read.limit');
     expect(finished.artifacts[0]!.partial).toBe(true);
+  });
+
+  it('chunks a source read to the remaining character allowance with a usable continuation', async () => {
+    const fixture = await setup({ maxNodeSourceChars: 1800 });
+    await fixture.engine.advance(fixture.run.id);
+    const first = await fixture.repository.get(fixture.run.id);
+    const observation = first.steps[0]!.observations[0]!;
+    expect(observation.tool).toBe('sources.read');
+    expect(JSON.stringify(observation.result).length).toBeLessThanOrEqual(1800);
+    expect((observation.result as any).page.nextRead.offset).toBeGreaterThan(0);
+    const finished = await fixture.drain();
+    expect(finished.status, finished.error).toBe('succeeded');
+    expect(finished.artifacts[0]!.partial).toBe(true);
+    expect(sourceReadUsage(finished.steps).chars).toBeLessThanOrEqual(1800);
   });
 
   it('retains a partial node artifact after a definite final-only provider failure', async () => {
