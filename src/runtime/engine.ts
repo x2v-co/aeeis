@@ -984,7 +984,7 @@ export class AgentEngine {
             const receipt = receiptSchema.parse({
               schemaVersion: 'receipt/1', receiptId: `receipt_${randomUUID()}`, provider: 'aeeis-recovery', operation: pending.toolId,
               requestHash: digest(toolProviderRequest(pending)), inputRefs: [pending.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: pending.requestedAt,
-              completedAt: now(), status: 'unknown', errorCode: 'worker_interrupted',
+              completedAt: now(), status: 'unknown', errorCode: 'worker_interrupted', costStatus: 'interrupted',
             });
             current.toolReceipts ??= [];
             current.toolReceipts.push(receipt);
@@ -2419,7 +2419,7 @@ export class AgentEngine {
             const receipt = receiptSchema.parse({
               schemaVersion: 'receipt/1', receiptId: `receipt_${randomUUID()}`, provider: 'aeeis-recovery', operation: pending!.toolId,
               requestHash: digest(toolProviderRequest(pending!)), inputRefs: [pending!.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: pending!.requestedAt,
-              completedAt: now(), status: 'unknown', errorCode: 'global_budget_reservation_exists',
+              completedAt: now(), status: 'unknown', errorCode: 'global_budget_reservation_exists', costStatus: 'interrupted',
             });
             current.toolReceipts ??= [];
             current.toolReceipts.push(receipt);

@@ -12,8 +12,10 @@ export const receiptSchema = z.object({
   responseHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), inputRefs: z.array(z.string().max(200)).max(1000),
   outputRefs: z.array(z.string().max(200)).max(1000), capabilitiesUsed: z.array(z.string().max(100)).max(100),
   startedAt: z.string().datetime({ offset: true }), completedAt: z.string().datetime({ offset: true }).optional(),
-  status: z.enum(['completed', 'failed', 'unknown']), cost: z.object({ tokens: z.number().int().nonnegative().optional(), money: z.number().nonnegative().optional(), currency: z.string().max(10).optional() }).strict().optional(),
+  status: z.enum(['completed', 'failed', 'unknown']), cost: z.object({ tokens: z.number().int().nonnegative().optional(), credits: z.number().int().nonnegative().optional(), money: z.number().nonnegative().optional(), currency: z.string().max(10).optional() }).strict().optional(),
   latencyMs: z.number().nonnegative().optional(), errorCode: z.string().max(100).optional(),
+  /** Whether the provider reported a charge: reported (cost.credits set), unreported (provider returned none) or interrupted (call never settled). */
+  costStatus: z.enum(['reported', 'unreported', 'interrupted']).optional(),
   /** AEEIS-side admission decision, added only after the durable Run commit. */
   authorization: z.object({
     toolId: z.string().min(1).max(200), toolVersion: z.string().min(1).max(100), taskId: z.string().min(1).max(200),
@@ -501,12 +503,24 @@ function normalizeToolkitInput(input: unknown): { input: string; params?: Record
   return { input: JSON.stringify(input) };
 }
 
+/** Integer ToolkitFun credits charged for one call: receipt.credits, else the response cost.amount. */
+export function toolkitCredits(response: unknown): number | undefined {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return undefined;
+  const body = response as Record<string, unknown>;
+  const pick = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  const receipt = body.receipt && typeof body.receipt === 'object' ? body.receipt as Record<string, unknown> : undefined;
+  const cost = body.cost && typeof body.cost === 'object' ? body.cost as Record<string, unknown> : undefined;
+  return pick(receipt?.credits) ?? pick(cost?.amount);
+}
+
 function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
+  const credits = toolkitCredits(input.response);
   return receiptSchema.parse({
     schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_new', operation: input.request.toolId,
     requestHash: input.requestHash, ...(input.response === undefined ? {} : { responseHash: digest(input.response) }),
     inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: ['execute'],
     startedAt: input.started.toISOString(), completedAt: new Date().toISOString(), status: input.status, ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+    ...(credits === undefined ? { costStatus: input.response === undefined ? 'interrupted' : 'unreported' } : { cost: { credits }, costStatus: 'reported' }),
   });
 }
 
