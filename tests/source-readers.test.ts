@@ -170,7 +170,8 @@ describe('source reader validation and unsupported PDF', () => {
     expect(result.message).toContain('PDF text extraction is unsupported');
     expect(JSON.stringify(result).length).toBeLessThanOrEqual(6000);
     expect(() => pdfRead(source('report.pdf', 'pdf'), { startPage: 3, endPage: 2 })).toThrow('ascending');
-    expect(() => pdfRead(source('report.pdf', 'pdf'), { endPage: 21 })).toThrow('at most 20');
+    expect(pdfRead(source('report.pdf', 'pdf'), { endPage: 21 })).toMatchObject({ startPage: 1, endPage: 20, page: { nextRead: { startPage: 21, endPage: 21 } } });
+    expect(pdfRead(source('report.pdf', 'pdf'), { startPage: 2, endPage: 12 }, 4)).toMatchObject({ startPage: 2, endPage: 5, page: { nextRead: { startPage: 6, endPage: 12 } } });
   });
   it.each(structuredSourceTools)('rejects extra fields and invalid size bounds for %s', tool => {
     for (const fields of [{ extra: true }, { maxChars: 6001 }, { maxChars: 0 }, { maxChars: 2.5 }]) expect(() => decisionSchema.parse({ type: 'tool', tool, argument: 'id', ...(tool === 'sources.markdownSection' ? { heading: 'Root' } : {}), ...fields })).toThrow();

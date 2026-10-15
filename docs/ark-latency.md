@@ -78,7 +78,8 @@ adapter pin after dispatch is unsafe. `AEEIS_MODEL_FALLBACK*` is not implemented
 
 ## Implemented controls and measured effect
 
-First-byte waiting now has its own 120,000ms deadline, from dispatch through the
+First-byte waiting has its own 240,000ms Ark deadline (120,000ms for other
+providers; `AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS` overrides), from dispatch through the
 first non-empty body chunk. Headers and empty chunks do not reset it. Idle
 180,000ms applies only after body activity. The historical
 `AEEIS_MODEL_RETRY_EMPTY_IDLE` switch defaults to `1` and now governs only
@@ -132,7 +133,7 @@ smaller. These figures establish input size reductions, not provider speedups.
 Active-stream overall increases from 600,000 to **900,000ms per attempt**, with
 validation up to 1,800,000ms. Reducing it to 420s would tighten the existing MD
 failure boundary, so 15 minutes gives active reasoning streams more room while
-first-byte failures still cut off at two minutes. Temporal advance polling
+first-byte failures cut off at the configured deadline (four minutes for Ark by default). Temporal advance polling
 allows 60 minutes per tick; new activity commands allow 65 minutes through a
 replay-safe patch, with a two-hour schedule-to-close window. The default upper
 bound with two empty waits, one active call and one completed length retry is

@@ -31,6 +31,13 @@ export function needsExternalLiveData(goal: string): boolean {
   return /天气|气温|降雨|weather|forecast|实时|最新(?:新闻|消息|数据|价格)|今日(?:新闻|股价|汇率)|股价|汇率|live\s+data|real[ -]?time|current\s+(?:weather|price|news|exchange\s+rate)|latest\s+(?:news|price|data)/i.test(goal);
 }
 
+/** Supplied observations may be summarized; this notice applies without a data source. */
+export function unsupportedWeatherNotice(run: AgentRun): string | undefined {
+  const { hasSources, hasCapabilities } = inputAvailability(run);
+  if (hasSources || hasCapabilities || !/天气|气温|降雨|\bweather\b|\b(?:weather\s+)?forecast\b/i.test(run.goal)) return undefined;
+  return '当前不支持实时天气或天气预报，且未提供天气数据来源，无法核验实时结果。可改为参考气候常年值，或查询当地气象部门的官方预报。 Real-time weather and forecasts are not supported without a weather data source. Consider climate norms or check the official meteorological forecast.';
+}
+
 export function runInputRequest(run: AgentRun): { taskId: string; question: string; kind: NonNullable<NonNullable<AgentRun['question']>['kind']>; missing: string[] } | undefined {
   if (run.status !== 'needs_input' || !run.question) return undefined;
   const fallback = inputQuestion(run, run.question.taskId, run.question.text);

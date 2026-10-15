@@ -205,10 +205,10 @@ function legacyCsvSummaryExcerpt(source: Pick<Source, 'content'>, maxLength: num
 }
 
 /** Full source bytes stay in the repository. Pages fit the latest observation after JSON escaping. */
-export function readMaterialPage(source: Source, options: { offset?: number | undefined; limit?: number | undefined; characterOffset?: number | undefined } = {}) {
+export function readMaterialPage(source: Source, options: { offset?: number | undefined; limit?: number | undefined; characterOffset?: number | undefined } = {}, maxChars = LATEST_OBSERVATION_RESULT_CHARS) {
   if (isBinaryPdf(source.content)) return materialForModel(source);
   const full = materialForModel(source), csv = materialFormat(source) === 'csv';
-  const fits = (result: unknown) => JSON.stringify(result).length <= LATEST_OBSERVATION_RESULT_CHARS;
+  const fits = (result: unknown) => JSON.stringify(result).length <= Math.min(maxChars, LATEST_OBSERVATION_RESULT_CHARS);
   if (options.characterOffset === undefined && fits(full) && (!csv || Buffer.byteLength(source.content, 'utf8') <= LARGE_CSV_BYTES)) return full;
   const sourceContentHash = source.contentHash ?? materialContentHash(source.content);
   const characterPage = () => {

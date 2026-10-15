@@ -271,7 +271,7 @@ export interface Step {
   /** One bounded, durable model attempt to repair a candidate finish object. */
   finishRepair?: { reason: string; candidate: unknown; problems?: Array<{ path: string; code: string; message: string }>; discarded?: string };
   /** Bounded corrective turns, independent of the exhausted ordinary allowance. */
-  outputRecovery?: { reason: string; candidate: unknown; problems: Array<{ path: string; code: string; message: string }>; toolsAllowed: boolean; callOffset: number };
+  outputRecovery?: { reason: string; candidate: unknown; problems: Array<{ path: string; code: string; message: string }>; toolsAllowed: boolean; callOffset: number; exhausted?: boolean };
   outputRecoveryAttempts?: number;
 }
 export interface AgentRun {

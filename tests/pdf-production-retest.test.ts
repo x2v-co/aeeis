@@ -41,6 +41,37 @@ async function setup(decide: (input: any, request: ModelRequest) => unknown, opt
 }
 
 describe('production PDF retest regressions', () => {
+  it('finalizes verified PDF bytes as partial when tool recovery uses its three calls', async () => {
+    let reviews = 0;
+    const fixture = await setup(input => {
+      if (!lastFill(input)) return fill(input);
+      if (input.outputRecovery) return { type: 'tool', tool: 'sources.search', argument: 'registration' };
+      return finish(input);
+    }, { review: () => { reviews++; return { verdict: 'needs_revision', summary: 'Clarify gaps', issues: ['Explain remaining unknowns'] }; } });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.partial).toBe(true);
+    expect(reviews).toBe(1);
+    expect(run.calls.filter(call => call.phase === 'executor')).toHaveLength(5);
+    expect(run.artifacts).toHaveLength(1);
+    expect((run.artifacts[0]!.structured as any).output.sha256).toBe(run.pdfOutputs![0]!.sha256);
+    expect(run.artifacts[0]!.limitations!.join(' ')).toContain('Output recovery call allowance exhausted');
+    expect(run.artifacts[0]!.limitations!.join(' ')).toContain('Explain remaining unknowns');
+    expect(run.events.find(event => event.type === 'artifact.recovery_fallback')?.data.validationNotes).toEqual([expect.objectContaining({ code: 'review_revision' })]);
+  });
+
+  it('fails clearly when exhausted recovery has no valid candidate or stored PDF', async () => {
+    const fixture = await setup(() => ({ type: 'tool', tool: 'sources.search', argument: 'registration' }));
+    await fixture.repository.mutate(fixture.id, run => {
+      run.steps[0]!.outputRecovery = { reason: 'Missing PDF output', candidate: { type: 'finish', title: 'Invalid', content: 'No PDF', evidenceRefs: [] }, problems: [{ path: 'structured.output', code: 'artifact_contract', message: 'Missing PDF output' }], toolsAllowed: false, callOffset: 0, exhausted: true };
+    });
+    const run = await fixture.drain();
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('no valid artifact candidate remains');
+    expect(run.error).toContain('Missing PDF output');
+    expect(run.calls).toHaveLength(1); // No speculative recovery call.
+    expect(run.artifacts).toEqual([]);
+  });
   it.each(['finish', 'repair', 'review', 'review-repair', 'revision', 'revised-fill'] as const)('preserves the PDF and unknown billing receipt when %s is interrupted', async phase => {
     let reviews = 0;
     const interrupted = () => { throw new ModelOutcomeUnknown('Model request connection was interrupted; reconcile before retrying'); };
