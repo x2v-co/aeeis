@@ -5,6 +5,12 @@
 # each archive and manifest before atomically publishing the complete set.
 # Never prints secrets.
 set -eu
+# BusyBox ash (the backup image) supports pipefail; Debian dash does not.
+# Keep this script usable with either shell and avoid pipelines below.
+# shellcheck disable=SC3040
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi
 stamp="${BACKUP_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 backup_root="${AEEIS_BACKUP_ROOT:-/backups}"
 out="$backup_root/$stamp"
@@ -25,4 +31,5 @@ dump temporal_visibility temporal-postgres temporal temporal_visibility "$TEMPOR
 (cd "$tmp" && sha256sum aeeis.dump temporal.dump temporal_visibility.dump > SHA256SUMS \
   && sha256sum -c SHA256SUMS >/dev/null)
 mv -T "$tmp" "$out"
-echo "backup ok: $out ($(du -sh "$out" | cut -f1))"
+backup_size="$(du -sh "$out")"
+echo "backup ok: $out (${backup_size%%[[:space:]]*})"

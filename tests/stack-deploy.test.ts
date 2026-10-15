@@ -10,6 +10,10 @@ const execute = promisify(execFile);
 test('production stack deployment, online backup, notifications and systemd paths', async () => {
   const { stdout: output } = await execute('bash', [resolve('deploy/stack/bin/selftest.sh')], {
     encoding: 'utf8', timeout: 60_000,
+    // Exercise root-run containers mounting a checkout owned by the host user.
+    env: { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' },
+  }).catch((error: Error & { stdout?: string; stderr?: string }) => {
+    throw new Error(`${error.message}\nstdout:\n${error.stdout ?? ''}\nstderr:\n${error.stderr ?? ''}`, { cause: error });
   });
   expect(output).toContain('replay gate and stack state isolation passed');
   expect(output).toContain('git commit build, label/tag fallback, env precedence and restart persistence passed');

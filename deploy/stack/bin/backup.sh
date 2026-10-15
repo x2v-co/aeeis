@@ -30,4 +30,5 @@ find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name '20*Z' -mtime +"${AEEIS
 if [[ -n "${AEEIS_BACKUP_UPLOAD_CMD:-}" ]]; then
   bash -c "$AEEIS_BACKUP_UPLOAD_CMD" upload "$dest"
 fi
-echo "aeeis backup ok: $dest ($(du -sh "$dest" | cut -f1))"
+backup_size="$(du -sh "$dest")"
+echo "aeeis backup ok: $dest (${backup_size%%[[:space:]]*})"

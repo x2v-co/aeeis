@@ -1,4 +1,6 @@
+# shellcheck shell=bash
 # Image transport helpers; source after _lib.sh.
+set -o pipefail
 stack_images() { dc --profile '*' config --images | sort -u; }
 
 verify_images() {
