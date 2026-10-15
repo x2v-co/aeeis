@@ -48,6 +48,25 @@ async function setup(reader: ReaderCase, options: { decide?: (input: Input) => u
     } };
 }
 
+it('splits a broad PDF range over iterations within the frozen node allowance', async () => {
+  const reader = cases[5];
+  const fixture = await setup(reader, { limits: { maxNodeSourcePages: 4 }, decide: input => {
+    if (input.executionBudget.finalOnly) return finish(input);
+    const nextRead = input.observations.at(-1)?.result.page?.nextRead;
+    return { type: 'tool', tool: 'sources.pdfRead', ...(nextRead ?? { argument: input.sourceCatalog[0]!.id, startPage: 1, endPage: 10 }) };
+  } });
+  await fixture.engine.advance(fixture.run.id);
+  fixture.restart();
+  const run = await fixture.drain();
+  expect(run.status, run.error).toBe('succeeded');
+  expect(run.steps[0]!.observations.map(observation => {
+    const result = observation.result as any;
+    expect(result.supported).toBe(false); // Ranges do not imply PDF extraction.
+    return [result.startPage, result.endPage];
+  })).toEqual([[1, 4], [5, 7], [8, 9], [10, 10]]);
+  expect(sourceReadUsage(run.steps).pages).toBe(4);
+});
+
 describe.each(cases)('$tool executor integration', reader => {
   it.each([false, true])('works without an external allowlist and reaches reviewer evidence (legacy=%s)', async legacy => {
     const fixture = await setup(reader, { legacy });

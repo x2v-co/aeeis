@@ -33,6 +33,21 @@ async function setup(limits: Partial<ExecutionLimits> = {}, decide?: (input: any
 }
 
 describe('durable execution allowances', () => {
+  it('keeps a valid non-tool recovery candidate after its single call is spent', async () => {
+    const fixture = await setup();
+    await fixture.repository.mutate(fixture.run.id, run => {
+      const candidate = { type: 'finish', title: 'Partial', content: 'The supplied CSV reports blocked items.', evidenceRefs: [run.context.sources[0]!.id] };
+      run.steps[0]!.outputRecovery = { reason: 'Explain coverage', candidate, problems: [{ path: 'review', code: 'review_revision', message: 'Explain coverage' }], toolsAllowed: false, callOffset: run.calls.length };
+      run.calls.push({ id: 'spent', phase: 'executor', taskId: 'task_0', state: 'completed', inputHash: 'hash', startedAt: run.createdAt });
+    });
+    fixture.replaceEngine();
+    const finished = await fixture.drain();
+    expect(finished.status, finished.error).toBe('succeeded');
+    expect(finished.calls).toHaveLength(2);
+    expect(fixture.complete).toHaveBeenCalledTimes(1); // Only the original planner.
+    expect(finished.artifacts[0]).toMatchObject({ partial: true, title: 'Partial' });
+    expect(finished.artifacts[0]!.limitations!.join(' ')).toContain('Explain coverage');
+  });
   it('stops runaway CSV nextRead after four pages and makes one partial Project Pulse finish', async () => {
     const fixture = await setup({}, undefined, 1, true);
     await fixture.engine.advance(fixture.run.id);

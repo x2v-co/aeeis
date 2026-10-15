@@ -46,9 +46,9 @@ describe('input requests and unavailable live data', () => {
     const run = await repository.get(id);
     expect(run.status, run.error).toBe('succeeded');
     expect(run.partial).toBe(true);
-    expect(run.limitations).toEqual([`No data source or capability available: ${question}`]);
+    expect(run.limitations).toEqual(expect.arrayContaining([`No data source or capability available: ${question}`, expect.stringContaining('Real-time weather and forecasts are not supported')]));
     expect(run.question).toBeUndefined();
-    expect(run.artifacts[0]).toMatchObject({ partial: true, limitations: [`No data source or capability available: ${question}`] });
+    expect(run.artifacts[0]).toMatchObject({ partial: true, limitations: expect.arrayContaining([`No data source or capability available: ${question}`]) });
     expect(run.artifacts[0]?.content).toContain('数据来源');
     expect(run.artifacts[0]?.content).toContain('无法核验');
     expect(run.steps[0]?.limitReason).toContain('No data source or capability available');

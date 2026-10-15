@@ -143,7 +143,7 @@ describe('fillable PDF execution and downloads', () => {
     expect(run.events.filter(event => event.type === 'tool.failed_recoverable')).toHaveLength(1);
     expect(run.steps[0]!.observations.find(item => (item.result as any).error)?.result).toMatchObject({ error: { recoverable: true, message: 'Unknown form field: invented' } });
   });
-  it.each(['evidence', 'value', 'unknownField', 'missingUnknown', 'placeholder', 'placeholderContent', 'unknownId', 'outputHash', 'missingStructured'] as const)('repairs and rejects invalid %s before review', async problem => {
+  it.each(['evidence', 'value', 'unknownField', 'missingUnknown', 'placeholder', 'placeholderContent', 'unknownId', 'outputHash', 'missingStructured'] as const)('discards invalid %s and retains verified PDF bytes as partial after recovery', async problem => {
     const fixture = await setup({ alter: (finish, input) => {
       if (problem === 'evidence') finish.structured.filledFields[0].evidenceRefs = [input.sourceCatalog[0].id];
       if (problem === 'value') finish.structured.filledFields[0].value = 'Forged';
@@ -157,9 +157,11 @@ describe('fillable PDF execution and downloads', () => {
       return finish;
     } });
     const run = await fixture.drain();
-    expect(run.status).toBe('failed'); expect(run.artifacts).toEqual([]);
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.artifacts[0]).toMatchObject({ partial: true, structured: { output: { sha256: run.pdfOutputs![0]!.sha256 } } });
+    expect((run.artifacts[0]!.structured as any).filledFields.map((field: any) => ({ name: field.name, value: field.value }))).toEqual(run.pdfOutputs![0]!.writtenFields);
     expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
-    expect(run.error).toContain('retries exhausted');
+    expect(run.limitations!.join(' ')).toContain('retries exhausted');
     expect(run.review).toBeUndefined();
     expect(fixture.complete.mock.calls.some(([request]) => request.system.includes('Independently review'))).toBe(false);
   });
@@ -206,19 +208,23 @@ describe('fillable PDF execution and downloads', () => {
       expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toEqual([expect.objectContaining({ result: 'ok' })]);
     } finally { warnings.mockRestore(); }
   });
-  it('rejects invalid final-call evidence without pruning fields that remain written in the PDF', async () => {
+  it('rebuilds invalid final-call evidence from verified sources without pruning PDF writes', async () => {
     const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const fixture = await setup({ limits: { maxNodeSourcePages: 2 }, alter: finish => {
         finish.structured.filledFields[0].evidenceRefs = ['unreceived']; return finish;
       } });
       const run = await fixture.drain();
-      expect(run.status).toBe('failed'); expect(run.artifacts).toEqual([]);
+      expect(run.status, run.error).toBe('succeeded');
+      expect(run.artifacts[0]!.partial).toBe(true);
+      expect((run.artifacts[0]!.structured as any).filledFields).toHaveLength(6);
       expect(run.pdfOutputs?.[0]?.writtenFields).toHaveLength(6);
       expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
       const logs = warnings.mock.calls.map(([message]) => JSON.parse(String(message)));
-      expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1')).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected' })));
-      expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1')).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected', invalidRefs: ['unreceived'], removedRefs: 0, droppedClaims: 0 })));
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1').slice(0, 3)).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected' })));
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-content-check/1').at(-1)).toMatchObject({ result: 'ok' });
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1').slice(0, 3)).toEqual(Array(3).fill(expect.objectContaining({ result: 'rejected', invalidRefs: ['unreceived'], removedRefs: 0, droppedClaims: 0 })));
+      expect(logs.filter(log => log.protocol === 'aeeis-finish-evidence-check/1').at(-1)).toMatchObject({ result: 'ok', invalidRefs: [] });
     } finally { warnings.mockRestore(); }
   });
   it('completes through the real HTTP fixture-model transport', async () => {
