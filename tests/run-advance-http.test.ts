@@ -13,6 +13,28 @@ import { InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 import { randomUUID } from 'node:crypto';
 import { ThreadService } from '../src/application/thread-service.js';
 
+it.each([false, true])('terminalization deduplicates unavailable-input reasons at run level (produced=%s)', async produced => {
+  const repository = new InMemoryRunRepository();
+  const engine = new AgentEngine(repository, { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete: async () => ({ value: {} }) });
+  const app = buildApp({ repository, engine, workerToken: 'worker' });
+  try {
+    const run = await engine.create({ goal: 'Weather' });
+    await repository.mutate(run.id, current => {
+      current.status = 'running'; current.limitations = ['Existing limitation'];
+      for (let i = 0; i < 2; i++) event(current, 'input.unavailable_partial', { reason: 'No data source or capability available' });
+      event(current, 'input.unavailable_partial', { reason: null });
+      if (produced) current.artifacts.push({ id: 'artifact_weather', taskId: 'weather', title: 'Weather', content: 'Partial weather report', evidenceRefs: ['source_weather'], hash: digest('weather'), createdAt: current.createdAt });
+    });
+    const request = { method: 'POST' as const, url: `/internal/runs/${run.id}/terminalize`, headers: { authorization: 'Bearer worker' }, payload: { reason: 'Timeout' } };
+    expect((await app.inject(request)).statusCode).toBe(200);
+    const stopped = await repository.get(run.id);
+    expect(stopped.status).toBe(produced ? 'succeeded' : 'failed');
+    expect(stopped.limitations).toEqual(['Existing limitation', 'No data source or capability available', ...(produced ? ['Execution stopped: Timeout. Independent review was not completed.'] : [])]);
+    await app.inject(request);
+    expect((await repository.get(run.id)).limitations).toEqual(stopped.limitations);
+  } finally { await app.close(); }
+});
+
 it.each([false, true])('terminalizes a model timeout without a wake; sources alone do not salvage a zero-output run (materials=%s)', async materials => {
   const repository = new InMemoryRunRepository();
   const complete = vi.fn(async () => { throw new ModelOutcomeUnknown('Model timed out after 180000ms'); });

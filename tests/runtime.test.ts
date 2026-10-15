@@ -77,7 +77,7 @@ class RevisionFixture implements ModelAdapter {
     }
     if (request.system.includes('Independently review')) {
       this.reviewerCalls += 1;
-      return { value: this.reviewerCalls === 1
+      return { value: this.plannerCalls === 1
         ? { verdict: 'needs_revision', summary: 'The plan needs a second research step', issues: ['Add independent research'] }
         : { verdict: 'accepted', summary: 'Revised plan is supported', issues: [] } };
     }
@@ -394,7 +394,7 @@ describe('AEEIS runtime', () => {
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
     await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash });
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 12; index += 1) {
       const status = await engine.advance(run.id);
       if (['succeeded', 'failed'].includes(status)) break;
     }

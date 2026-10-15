@@ -5,7 +5,8 @@ import { PDFDocument, PDFName, StandardFonts, defaultTextFieldAppearanceProvider
 import type { Source, FillablePdfArtifact } from './contracts.js';
 import { decodePdfMaterial, isBinaryPdf, MAX_PDF_OUTPUT_BYTES, PDF_BASE64_PREFIX, pdfSha256 } from './pdf-material.js';
 import { materialFormat } from './materials.js';
-import { canonicalEvidenceRef } from './evidence-refs.js';
+import { baseEvidenceRef, canonicalEvidenceRef } from './evidence-refs.js';
+import { hasProseInference } from './sourceFidelityRules.js';
 
 export const pdfValueSchema = z.union([z.string().max(4000), z.boolean(), z.array(z.string().min(1).max(1000)).max(100)]);
 export type PdfValue = z.infer<typeof pdfValueSchema>;
@@ -240,7 +241,7 @@ export async function synthesizePdfArtifact(output: PdfOutput, sources: Source[]
   catch (error) { if (error instanceof PdfInputError) return undefined; throw error; }
 }
 export function fillablePdfEvidenceRefs(value: FillablePdfArtifact): string[] {
-  return [...new Set([value.form.sourceRef, value.output.ref, ...[...value.filledFields, ...value.unknowns, ...value.blockers].flatMap(item => item.evidenceRefs)])];
+  return [...new Set([value.form.sourceRef, value.output.ref, ...[...value.filledFields, ...value.unknowns, ...value.blockers, ...(value.inferences ?? [])].flatMap(item => item.evidenceRefs)])];
 }
 export function pdfArtifactContent(value: FillablePdfArtifact): string {
   const cite = (refs: string[]) => refs.map(ref => `[${ref}]`).join(' ');
@@ -249,7 +250,7 @@ export function pdfArtifactContent(value: FillablePdfArtifact): string {
     ...value.unknowns.map(field => `${field.field ?? 'Unknown'}: ${field.text} ${cite(field.evidenceRefs)}`)].join('\n');
 }
 /** Validate persisted bytes, never a model's account of what it wrote. */
-export async function validateFillablePdfArtifact(value: FillablePdfArtifact, sources: Source[], outputs: PdfOutput[], observed: Set<string>): Promise<void> {
+export async function validateFillablePdfArtifact(value: FillablePdfArtifact, sources: Source[], outputs: PdfOutput[], observed: Set<string>, content = ''): Promise<void> {
   const source = sources.find(source => source.id === value.form.sourceRef && isBinaryPdf(source.content));
   if (!source || !observed.has(source.id)) throw new PdfInputError('form.sourceRef must identify the received PDF material', 'structured.form.sourceRef');
   const output = outputs.find(output => output.ref === value.output.ref && output.sourceRef === source.id);
@@ -259,6 +260,9 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
   const original = await inspectPdf(source), actual = describe(await load(output.content, MAX_PDF_OUTPUT_BYTES));
   if (value.form.fieldCount !== original.length || actual.length !== original.length || original.some(field => !actual.some(other => other.name === field.name && other.type === field.type && other.readOnly === field.readOnly && other.required === field.required))) throw new PdfInputError('Form fieldCount or output form does not match the input form', 'structured.form.fieldCount');
   const receivedSources = new Set(sources.filter(source => materialFormat(source) !== 'pdf' && source.kind !== 'run-evidence' && observed.has(source.id)).map(source => source.id));
+  const knownSources = new Set(sources.map(source => source.id));
+  const receivedRefs = (refs: string[]) => refs.length > 0 && refs.every(ref => receivedSources.has(baseEvidenceRef(ref, receivedSources, knownSources)));
+  const repairField = (name: string) => `Cite the received non-PDF source id (scoped row/column refs resolve to that id), or clear ${JSON.stringify(name)}: re-run pdf.fill with the complete desired field map without it, remove it from filledFields, copy the new output metadata, and list it in unknowns with a reason and all consulted source ids.`;
   const names = new Set<string>();
   for (const [index, item] of value.filledFields.entries()) {
     const field = actual.find(field => field.name === item.name);
@@ -266,10 +270,15 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
     if (names.has(item.name)) throw new PdfInputError(`Duplicate filled field: ${item.name}`, `structured.filledFields.${index}.name`);
     names.add(item.name);
     if (field.readOnly) throw new PdfInputError(`readOnly field cannot be claimed as filled: ${item.name}`, `structured.filledFields.${index}`);
-    if (!item.evidenceRefs.length || item.evidenceRefs.some(ref => !receivedSources.has(ref))) throw new PdfInputError(`Filled field must cite received source evidence: ${item.name}`, `structured.filledFields.${index}.evidenceRefs`);
+    if (!receivedRefs(item.evidenceRefs)) throw new PdfInputError(`Filled field must cite received source evidence: ${item.name}. ${repairField(item.name)} Received source ids: ${JSON.stringify([...receivedSources])}`, `structured.filledFields.${index}.evidenceRefs`);
     if (pdfPlaceholder(item.value) || empty(item.value) && item.value !== false) throw new PdfInputError(`Empty or placeholder filled value: ${item.name}`, `structured.filledFields.${index}.value`);
     const options = original.find(original => original.name === item.name)!.options;
     if (options && (Array.isArray(item.value) ? item.value : [item.value]).some(option => typeof option !== 'string' || !options.includes(option))) throw new PdfInputError(`Invalid option value for field: ${item.name}; allowed options: ${JSON.stringify(options)}`, `structured.filledFields.${index}.value`);
+    if (field.type === 'dropdown') {
+      const evidence = item.evidenceRefs.map(ref => sources.find(source => source.id === baseEvidenceRef(ref, receivedSources, knownSources))!.content).join('\n');
+      const literal = (Array.isArray(item.value) ? item.value : [item.value]).every(option => typeof option === 'string' && evidence.normalize('NFC').includes(option.normalize('NFC')));
+      if (!literal && !value.inferences?.some(inference => inference.field === item.name && same(inference.value, item.value) && receivedRefs(inference.evidenceRefs) && hasProseInference(content, inference.text))) throw new PdfInputError(`Inferred dropdown value requires a "推断：" label in content and a corresponding structured.inferences entry with field, value, text and received source evidence: ${item.name}. Otherwise leave it empty with a reason in unknowns. ${repairField(item.name)}`, `structured.filledFields.${index}.value`);
+    }
     const written = output.writtenFields.find(field => field.name === item.name);
     if (!written || !same(item.value, field.value) || !same(written.value, field.value)) throw new PdfInputError(`Structured value does not match output PDF write: ${item.name}`, `structured.filledFields.${index}.value`);
   }

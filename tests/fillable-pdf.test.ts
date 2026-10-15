@@ -5,7 +5,7 @@ import { coerceStringArtifactItems, normalizeFinishOutput } from '../src/runtime
 import { fillPdf, inspectPdf, pdfFormFields, pdfOutputForModel, validateFillablePdfArtifact, fillablePdfEvidenceRefs } from '../src/runtime/fillable-pdf.js';
 import { decodePdfMaterial, MAX_PDF_BYTES, PDF_BASE64_PREFIX, pdfSha256 } from '../src/runtime/pdf-material.js';
 import { materialForModel, materialFormat, readMaterialPage, presentedMaterials, materialContentHash } from '../src/runtime/materials.js';
-import { formBytes, formContent, formSource, profileSource, profile, pdfArtifact } from './fillable-pdf-fixture.js';
+import { formBytes, formContent, formSource, profileSource, profile, pdfArtifact, source } from './fillable-pdf-fixture.js';
 
 async function fixture() {
   const output = await fillPdf(formSource, profile), artifact = pdfArtifact(output);
@@ -142,6 +142,23 @@ describe('fillable PDF finish validation', () => {
     expect(() => fillablePdfArtifactSchema.parse(artifact)).toThrow();
     await expect(validate()).rejects.toThrow('received source evidence');
   });
+  it.each(['#row2', ':contactMethod', '/rows/2', '[2]', '@row2'])('accepts received CSV field evidence scoped with %s', async scope => {
+    const csv = source('source_csv', 'case.csv', 'contactMethod\nEmail'), output = await fillPdf(formSource, { contactMethod: 'Email' });
+    const artifact = pdfArtifact(output, formSource.id, csv.id);
+    artifact.filledFields[0]!.evidenceRefs = [`source: ${csv.id.toUpperCase()}${scope}`];
+    await expect(validateFillablePdfArtifact(artifact, [formSource, csv], [output], new Set([formSource.id, csv.id, output.ref]))).resolves.toBeUndefined();
+    await expect(validateFillablePdfArtifact(artifact, [formSource, csv], [output], new Set([formSource.id, output.ref]))).rejects.toThrow('received source evidence');
+  });
+  it.each(['valid', 'no-label', 'no-entry', 'wrong-value', 'unreceived', 'run-evidence'] as const)('validates inferred SG dropdown evidence (%s)', async mode => {
+    const caseSource = source('source_case', 'case.json', '{"country":"Singapore"}'), output = await fillPdf(formSource, { country: 'SG' });
+    const artifact = pdfArtifact(output, formSource.id, caseSource.id), text = 'country="SG" follows from Singapore';
+    artifact.inferences = [{ field: 'country', value: mode === 'wrong-value' ? 'US' : 'SG', text, evidenceRefs: [mode === 'unreceived' ? 'unreceived' : caseSource.id] }];
+    if (mode === 'no-entry') delete artifact.inferences;
+    if (mode === 'run-evidence') caseSource.kind = 'run-evidence';
+    const validation = validateFillablePdfArtifact(artifact, [formSource, caseSource], [output], new Set([formSource.id, caseSource.id, output.ref]), `${mode === 'no-label' ? '' : '推断：'}${text}`);
+    if (mode === 'valid') await expect(validation).resolves.toBeUndefined();
+    else await expect(validation).rejects.toThrow(/unknowns/);
+  });
   it.each(['source_form', 'artifact_intermediate', 'receipt_tool', 'source_unreceived'])('rejects filled value evidence %s', async ref => {
     const { artifact, validate } = await fixture();
     artifact.filledFields[0]!.evidenceRefs = [ref];
@@ -178,9 +195,10 @@ describe('fillable PDF finish validation', () => {
     const { output, artifact } = await fixture();
     await expect(validateFillablePdfArtifact(artifact, [formSource, profileSource], [output], new Set([formSource.id, output.ref]))).rejects.toThrow('received source evidence');
   });
-  it('rejects an intermediate artifact presented as inherited Run evidence', async () => {
+  it.each(['', '#row2', ':contactMethod'])('rejects inherited Run evidence even with scope %s', async scope => {
     const { output, artifact, observed } = await fixture();
     const inherited = { ...profileSource, kind: 'run-evidence' as const };
+    artifact.filledFields[0]!.evidenceRefs = [`${inherited.id}${scope}`];
     await expect(validateFillablePdfArtifact(artifact, [formSource, inherited], [output], observed)).rejects.toThrow('received source evidence');
   });
   it.each(['top-level', 'wrapper', 'string', 'data', 'structuredData'] as const)('normalizes %s finish encodings', async shape => {

@@ -10,3 +10,11 @@ export function canonicalEvidenceRef(ref: string, allowed: Set<string>, known = 
   return resolve(trimmed) ?? resolve(trimmed.replace(/^(?:source|artifact|receipt):\s*/i, '')) ?? trimmed;
 }
 
+/** Resolve scoped citations only to identities the task actually received. */
+export function baseEvidenceRef(ref: string, observed: Set<string>, known = observed): string {
+  const canonical = canonicalEvidenceRef(ref, observed, known);
+  if (known.has(canonical)) return canonical;
+  const base = canonicalEvidenceRef(canonical.replace(/^(?:source|artifact|receipt):\s*/i, '').split(/[#:@\s]|\/rows?|\[/)[0]!, observed, known);
+  return observed.has(base) ? base : canonical;
+}
+

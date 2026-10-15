@@ -1,12 +1,14 @@
 import type { AgentRun } from './contracts.js';
 import { event } from './engine.js';
 import type { RunRepository } from './repository.js';
+import { populateRunLimitations } from './run-limitations.js';
 
 /** Close execution while preserving unknown provider receipts for later billing reconciliation.
  * Only model-produced artifacts count. Source dumps are not salvage: a run with zero produced
  * output must end failed (or another clear error status), never succeeded/partial. */
 export async function terminalizeRun(repository: RunRepository, runId: string, reason: string): Promise<AgentRun> {
   return repository.mutate(runId, run => {
+    populateRunLimitations(run);
     if (['succeeded', 'failed', 'cancelled'].includes(run.status)) return;
     // A late timeout must not close a business wait that won the race.
     if (!['queued', 'planning', 'running', 'reviewing', 'unknown'].includes(run.status)) return;
@@ -31,5 +33,6 @@ export async function terminalizeRun(repository: RunRepository, runId: string, r
       event(run, 'run.failed', { reason, terminalized: true, producedArtifacts: 0 });
     }
     delete run.resumeStatus;
+    populateRunLimitations(run);
   });
 }

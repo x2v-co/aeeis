@@ -68,8 +68,11 @@ describe('bound domain task execution', () => {
     const { engine, repository, complete, domain, plan, input } = await setup();
     const run = await engine.create(input, 'alice', 'team-a'); await approve(engine, repository, run.id);
     await engine.advance(run.id); await engine.advance(run.id);
-    complete.mockResolvedValueOnce({ value: { verdict: 'needs_revision', summary: 'Missing rollback steps', issues: ['Missing rollback steps'] } });
-    expect(await engine.advance(run.id)).toBe('failed');
+    complete.mockImplementation(async request => ({ value: request.system.includes('Independently review') ? { verdict: 'needs_revision', summary: 'Missing rollback steps', issues: ['Missing rollback steps'] } : { type: 'finish', title: 'Notes', content: 'Release notes prepared.', evidenceRefs: [] } }));
+    expect(await engine.advance(run.id)).toBe('running');
+    expect((await domain.getPlan(plan.id, 'alice', 'team-a')).nodes.map(node => node.status)).toEqual(['running', 'planned', 'ready']);
+    for (let i = 0; i < 10; i++) if (await engine.advance(run.id) === 'failed') break;
+    expect((await repository.get(run.id)).events.filter(event => event.type === 'review.revision_requested')).toHaveLength(2);
     expect((await domain.getPlan(plan.id, 'alice', 'team-a')).nodes.map(node => node.status)).toEqual(['failed', 'planned', 'ready']);
     await expect(engine.command(run.id, 'replan', {})).rejects.toThrow('immutable');
   });

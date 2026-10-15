@@ -41,7 +41,7 @@ async function runModel(options: { planner?: unknown; plannerResponses?: unknown
   }
   if (proposed === 'needs_approval') {
     await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
-    for (let i = 0; i < 8; i++) if (['succeeded', 'failed'].includes(await engine.advance(run.id))) break;
+    for (let i = 0; i < 12; i++) if (['succeeded', 'failed'].includes(await engine.advance(run.id))) break;
   }
   return { run: await repository.get(run.id), repository, requests };
 }
