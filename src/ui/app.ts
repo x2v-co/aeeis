@@ -61,7 +61,7 @@ interface RunView extends RunSummary {
   externalBudget?: { calls?: number; tokens?: number; moneyUsd?: number };
   externalUsage?: { calls: number; tokens: number; moneyUsd?: number; unreportedTokenCalls: number; unreportedMoneyCalls: number };
   question?: { text: string }; error?: string;
-  toolReceipts?: Array<{ receiptId: string; operation: string; provider: string; status: string; errorCode?: string; authorization?: { decision: 'authorized' | 'isolated'; reason: string } }>;
+  toolReceipts?: Array<{ receiptId: string; operation: string; provider: string; status: string; errorCode?: string; cost?: { credits?: number }; costStatus?: 'reported' | 'unreported' | 'interrupted'; authorization?: { decision: 'authorized' | 'isolated'; reason: string } }>;
   pendingTool?: { taskId: string; toolId: string; receiptId?: string };
   pendingDelegation?: { agentId: string; taskBrief: { taskId: string }; receiptRef?: string };
   agentProgress?: Array<{ idempotencyKey: string; progress: { agentId: string; taskId: string; sequence: number; status: string; message: string; percent?: number; evidenceRefs: string[]; artifactRefs: string[]; at: string } }>;
@@ -2147,7 +2147,10 @@ function render(run: RunView): void {
     ? `RSI traffic：${traffic.map(item => `${item.target}=${item.selected ? item.candidateId : 'base'} (${item.percentage / 100}% · bucket ${item.bucket})`).join('；')}`
     : '';
   const effects = $('external-effects'); effects.replaceChildren();
-  for (const receipt of run.toolReceipts ?? []) effects.append(element('li', `Tool ${receipt.operation} · ${runStatusLabel(receipt.status)} · ${receipt.authorization ? `接纳=${receipt.authorization.decision}(${receipt.authorization.reason}) · ` : ''}${receipt.receiptId}${receipt.errorCode ? ` · ${receipt.errorCode}` : ''}`));
+  const creditTotal = (run.toolReceipts ?? []).reduce((sum, receipt) => sum + (receipt.cost?.credits ?? 0), 0);
+  const unsettled = (run.toolReceipts ?? []).filter(receipt => receipt.costStatus === 'interrupted' || receipt.costStatus === 'unreported').length;
+  if (run.toolReceipts?.length) effects.append(element('li', `工具费用合计 ${creditTotal} credits${unsettled ? ` · ${unsettled} 次未结算` : ''}`));
+  for (const receipt of run.toolReceipts ?? []) effects.append(element('li', `Tool ${receipt.operation} · ${runStatusLabel(receipt.status)} · ${receipt.cost?.credits !== undefined ? `${receipt.cost.credits} credits · ` : receipt.costStatus === 'interrupted' ? '费用未结算(中断) · ' : ''}${receipt.authorization ? `接纳=${receipt.authorization.decision}(${receipt.authorization.reason}) · ` : ''}${receipt.receiptId}${receipt.errorCode ? ` · ${receipt.errorCode}` : ''}`));
   for (const outcome of run.delegationOutcomes ?? []) effects.append(element('li', `Agent ${outcome.agentId ?? 'external'} · ${runStatusLabel(outcome.status)} · ${outcome.receiptRef}`));
   if (run.pendingTool) effects.append(element('li', `等待 Tool reconcile：${run.pendingTool.toolId} · ${run.pendingTool.receiptId ?? '尚未生成 receipt'}`, 'failure'));
   if (run.pendingDelegation) effects.append(element('li', `等待 Agent reconcile：${run.pendingDelegation.agentId} · ${run.pendingDelegation.receiptRef ?? '尚未生成 receipt'}`, 'failure'));
