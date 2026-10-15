@@ -47,7 +47,7 @@ async function run(decide: (input: any) => unknown, limits: Partial<ExecutionLim
   const engine = new AgentEngine(repository, { model: { pin: { model: 'f', endpoint: 'http://localhost', promptVersion: 't' }, complete }, executionLimits: limits });
   const created = await engine.create({ goal, materials: [{ title: 'big.csv', source: 'upload', content: csv }] }, 'owner', 'local');
   await engine.advance(created.id);
-  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
+  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash, planVersion: (await repository.get(created.id)).plans[0]!.version });
   for (let i = 0; i < 16; i++) { const status = await engine.advance(created.id); if (['succeeded', 'failed'].includes(status)) break; }
   return repository.get(created.id);
 }
@@ -86,7 +86,7 @@ describe('limited-evidence final finish', () => {
     const engine = new AgentEngine(repository, { model: { pin: { model: 'f', endpoint: 'http://localhost', promptVersion: 't' }, complete } });
     const created = await engine.create({ goal: 'Project pulse', materials: [{ title: 'notes.md', source: 'upload', content: '# 计划\n发布截止 10-20' }] }, 'owner', 'local');
     await engine.advance(created.id);
-    await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
+    await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash, planVersion: (await repository.get(created.id)).plans[0]!.version });
     for (let i = 0; i < 16; i++) { const status = await engine.advance(created.id); if (['succeeded', 'failed'].includes(status)) break; }
     const completed = await repository.get(created.id);
     expect(completed.status, completed.error).toBe('succeeded');

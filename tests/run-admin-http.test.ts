@@ -186,7 +186,7 @@ describe('Run cancel and Temporal reconcile HTTP boundary', () => {
     const command = vi.spyOn(engine, 'command');
     const response = await post(`/api/runs/${runId}/reconcile`, { reason: 'Provider confirmed safe retry' });
     expect(response.statusCode).toBe(200);
-    expect(command).toHaveBeenCalledWith(runId, 'reconcile', { reason: 'Provider confirmed safe retry' });
+    expect(command).toHaveBeenCalledWith(runId, 'reconcile', { reason: 'Provider confirmed safe retry' }, { owner: response.json().owner, tenantId: response.json().tenantId });
     expect(response.json().status).toBe('queued');
     expect(dispatcher.notify).toHaveBeenCalledWith(runId);
     expect(dispatcher.describe).not.toHaveBeenCalled();

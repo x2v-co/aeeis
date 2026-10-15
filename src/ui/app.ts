@@ -1,4 +1,5 @@
 import type { PlanComparison } from '../runtime/graphs.js';
+import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
 
@@ -44,11 +45,12 @@ interface RunGraphsView {
   planComparisons?: PlanComparison[];
 }
 interface RunView extends RunSummary {
+  canEdit?: boolean;
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
   privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; resourceSnapshot?: { plugin?: { id: string; version: string; interface: string; digest: string; channel?: string }; skill?: { id: string; version: string; interface: string; digest: string; channel?: string }; workflow?: { id: string; version: string; interface: string; digest: string; channel?: string }; tools?: Array<{ id: string; version: string; interface: string; digest: string; channel?: string }>; lockfileDigest: string; policyDigest: string; resolvedAt: string; resolverVersion: string }; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
-  plans: Array<{ hash: string; version: number; summary: string; nodes: Array<{ id: string; title: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
+  plans: Array<{ hash: string; version: number; summary: string; author?: { type: 'user' | 'model' }; nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
   steps: Array<{ taskId: string; status: string; error?: string; failureReason?: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
   model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
@@ -184,7 +186,7 @@ function eventLabel(type: string): string {
     'run.created': '已接收', 'run.updated': '状态更新', 'run.planned': '计划生成', 'run.approved': '计划已批准',
     'run.started': '开始执行', 'task.started': '任务开始', 'task.completed': '任务完成', 'run.reviewed': '审核完成',
     'run.completed': '运行完成', 'run.failed': '运行异常', 'run.cancelled': '运行已取消',
-    'plan.proposed': '计划已生成', 'plan.approved': '计划已批准', 'plan.revised': '计划已更新',
+    'plan.budgets_updated': '预算已更新', 'plan.proposed': '计划已生成', 'plan.approved': '计划已批准', 'plan.revised': '计划已更新',
     'model.selected': '模型已选择', 'model.started': '模型开始调用', 'model.completed': '模型调用完成', 'model.usage.recorded': '模型用量已记录',
     'skill.selected': '工作方式已选择', 'skill.completed': '工作方式已完成',
     'tool.requested': '等待工具回执', 'tool.completed': '工具已返回', 'tool.failed': '工具调用失败', 'tool.unknown': '工具结果待核查', 'tool.reconciled': '工具结果已核查',
@@ -2025,8 +2027,8 @@ function renderRunDecision(run: RunView): void {
     reviewTasks.replaceChildren();
     reviewActions.replaceChildren();
     if (isReview && plan) {
-      const modelBudget = run.modelBudget?.tokens !== undefined ? `${run.modelBudget.tokens.toLocaleString()} tokens` : run.modelBudget?.moneyUsd !== undefined ? `$${run.modelBudget.moneyUsd.toFixed(2)}` : '未设置';
-      const externalBudget = run.externalBudget?.calls !== undefined ? `${run.externalBudget.calls} 次调用` : run.externalBudget?.tokens !== undefined ? `${run.externalBudget.tokens.toLocaleString()} tokens` : '未设置';
+      const modelBudget = [run.modelBudget?.tokens === undefined ? '' : `${run.modelBudget.tokens.toLocaleString()} tokens`, run.modelBudget?.moneyUsd === undefined ? '' : `$${run.modelBudget.moneyUsd.toFixed(2)}`].filter(Boolean).join(' / ') || '未设置';
+      const externalBudget = [run.externalBudget?.calls === undefined ? '' : `${run.externalBudget.calls} 次调用`, run.externalBudget?.tokens === undefined ? '' : `${run.externalBudget.tokens.toLocaleString()} tokens`, run.externalBudget?.moneyUsd === undefined ? '' : `$${run.externalBudget.moneyUsd.toFixed(2)}`].filter(Boolean).join(' / ') || '未设置';
       const reviewValues: Array<[string, string]> = [
         ['计划', `v${plan.version} · ${plan.nodes.length} 个任务`],
         ['资料边界', `${(run.context?.sources ?? []).length} 个来源 · ${privacyLabel(run.privacy)}`],
@@ -2054,9 +2056,14 @@ function renderRunDecision(run: RunView): void {
       });
       viewPlan.className = 'quiet-button';
       reviewActions.append(viewPlan);
-      const approve = button('批准并执行', () => command('approve', { planHash: plan.hash }));
-      approve.className = 'decision-primary';
-      reviewActions.append(approve);
+      const writable = !readOnlyShare && run.canEdit !== false;
+      const editor = planReview(run, command, writable);
+      reviewTasks.append(editor.root);
+      if (writable) {
+        const approve = button('批准并执行', editor.approve);
+        approve.className = 'decision-primary';
+        reviewActions.append(approve);
+      }
     }
   }
   const actions: Record<string, [string, string]> = {
@@ -2093,7 +2100,7 @@ function renderRunDecision(run: RunView): void {
       };
     };
     if (run.status === 'queued' && taskSchedulerConfigured) installAction('恢复调度', () => command('dispatch'));
-    else if (run.status === 'needs_approval' && plan) installAction('批准并执行', () => command('approve', { planHash: plan.hash }));
+    else if (run.status === 'needs_approval' && plan && !readOnlyShare && run.canEdit !== false) installAction('批准并执行', planReview(run, command, true).approve);
     else if (run.status === 'needs_input' || run.status === 'unknown') installAction(run.status === 'unknown' ? '填写核查说明' : '补充信息', async () => {
       openInputPanel(run.status === 'unknown' ? 'reconcile' : 'answer');
     });
@@ -2111,12 +2118,14 @@ function renderRunDecision(run: RunView): void {
       $('external-effects')?.closest('section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }
+  if (nextButton && (readOnlyShare || run.canEdit === false)) { nextButton.hidden = true; nextButton.onclick = null; }
 }
 function render(run: RunView): void {
   document.body.classList.toggle('run-open', currentRunOpen);
   const shareResult = $('run-share-result');
   if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
   if (!readOnlyShare && !linkedThreadId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
+  $('create-run-share').hidden = readOnlyShare || run.canEdit === false;
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;
   if (run.threadId && !readOnlyShare) threadLink.href = `/threads/${run.threadId}`;
@@ -2154,6 +2163,7 @@ function render(run: RunView): void {
   }
   if (!progressList.children.length) progressList.append(element('li', '当前没有外部 Agent 流式进度', 'muted'));
   const controls = $('controls'); controls.replaceChildren();
+  controls.hidden = readOnlyShare || run.canEdit === false;
   if (['queued', 'planning', 'running', 'reviewing'].includes(run.status)) controls.append(button('暂停', () => command('pause')));
   if (run.status === 'paused') controls.append(button('继续', () => command('resume')));
   if (run.status === 'waiting_external') controls.append(button('核查外部 Agent 结果', async () => { openInputPanel('reconcile'); }));
@@ -2578,23 +2588,24 @@ function renderPlanHistory(run: RunView): void {
   const comparisons = run.graphs?.planComparisons ?? [];
   if (comparisons.length === 0) return;
   const heading = element('h3', '计划版本差异');
-  const note = element('p', '对比相邻版本的说明、任务、执行要求和依赖。展开后可查看修改前后的内容。', 'muted');
+  const note = element('p', '对比相邻版本的说明、任务、目标、证据要求、依赖和顺序。展开后可查看修改前后的内容。', 'muted');
   container.append(heading, note);
   for (const comparison of comparisons) {
     const details = element('details');
-    const count = comparison.changes.length + (comparison.summary ? 1 : 0);
+    const count = comparison.changes.length + (comparison.summary ? 1 : 0) + (comparison.order ? 1 : 0);
     details.append(element('summary', `v${comparison.fromVersion} → v${comparison.toVersion} · ${count} 项变化`));
     const pair = (parent: HTMLElement, label: string, before: string, after: string): void => {
       parent.append(element('strong', label), element('small', '修改前'), element('pre', before), element('small', '修改后'), element('pre', after));
     };
     if (comparison.summary) pair(details, '计划说明', comparison.summary.before, comparison.summary.after);
+    if (comparison.order) pair(details, '任务顺序', comparison.order.before.join(' → '), comparison.order.after.join(' → '));
     for (const change of comparison.changes) {
       const item = element('div', '', 'fact-row');
       item.append(element('strong', `${change.kind === 'added' ? '新增' : change.kind === 'removed' ? '移除' : '修改'}任务 · ${change.taskId}`));
       if (change.kind === 'modified' && change.before && change.after) {
         for (const field of change.fields) {
-          const label = { title: '标题', instruction: '执行要求', dependsOn: '依赖' }[field];
-          const display = (value: string | string[]) => Array.isArray(value) ? value.join('、') || '无' : value;
+          const label = { title: '标题', instruction: '执行要求', dependsOn: '依赖', evidenceRequirements: '证据要求' }[field];
+          const display = (value: string | string[] | undefined) => Array.isArray(value) ? value.join('、') || '无' : value ?? '未设置';
           pair(item, label, display(change.before[field]), display(change.after[field]));
         }
       } else {

@@ -49,7 +49,7 @@ describe('threads through HTTP and the shipped CLI', () => {
       expect(await advance(id)).toBe('needs_approval');
       const run = (await call('GET', `/api/runs/${id}`)).data;
       expect(run.approval.approved).toBe(false);
-      expect((await call('POST', `/api/runs/${id}/approve`, { planHash: run.plans.at(-1).hash })).status).toBe(200);
+      expect((await call('POST', `/api/runs/${id}/approve`, { planHash: run.plans.at(-1).hash, planVersion: run.plans.at(-1).version })).status).toBe(200);
     };
     const finish = async (id: string) => {
       for (let tick = 0; tick < 5; tick++) if (await advance(id) === 'succeeded') return;

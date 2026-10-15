@@ -37,7 +37,7 @@ async function setup(reader: ReaderCase, options: { decide?: (input: Input) => u
   } : undefined);
   if (options.legacy) await repository.mutate(run.id, current => { delete current.capabilityCatalogVersion; });
   await engine.advance(run.id);
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   return { repository, run, complete, get engine() { return engine; }, restart() { engine = new AgentEngine(repository, { model }); },
     async drain() {
       for (let i = 0; i < 16; i++) {

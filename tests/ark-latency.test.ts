@@ -32,7 +32,7 @@ it('allows a streaming Run with several three-minute calls to continue beyond 60
   const run = await engine.create({ goal: 'Inspect', materials: [{ title: 'brief.txt', content: 'Release evidence', source: 'upload' }] });
   const started = Date.now();
   const planning = engine.advance(run.id); await vi.advanceTimersByTimeAsync(180_001); expect(await planning).toBe('needs_approval');
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   for (const status of ['running', 'running', 'reviewing', 'succeeded']) {
     const advance = engine.advance(run.id); await vi.advanceTimersByTimeAsync(status === 'reviewing' ? 0 : 180_001); expect(await advance).toBe(status);
   }
@@ -58,7 +58,7 @@ it('freezes thinking, effort and tokens so reconciliation after an env change se
   expect(await restarted.advance(run.id)).toBe('needs_approval');
   expect(fetch.mock.calls[1]![1].body).toBe(fetch.mock.calls[0]![1].body);
   expect(fetch.mock.calls[1]![1].headers['idempotency-key']).toBe(fetch.mock.calls[0]![1].headers['idempotency-key']);
-  await restarted.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await restarted.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   expect(await restarted.advance(run.id)).toBe('running');
   expect(JSON.parse(fetch.mock.calls[2]![1].body)).toMatchObject({ max_tokens: 9000, thinking: { type: 'disabled' }, reasoning_effort: 'high' });
 });

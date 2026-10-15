@@ -1501,9 +1501,10 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id/debug-bundle', async request => debugBundle(await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request))));
   app.get<{ Params: { id: string } }>('/api/runs/:id', async request => {
-    const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
+    const principal = principalOf(request);
+    const run = await getReadableRun(options.repository, options.domain, request.params.id, principal);
     const inputRequest = runInputRequest(run);
-    return { ...run, ...(inputRequest ? { inputRequest } : {}) };
+    return { ...run, canEdit: principal.roles.includes('owner') && run.owner === principal.id && (run.tenantId ?? 'local') === principal.tenantId, ...(inputRequest ? { inputRequest } : {}) };
   });
   app.get<{ Params: { id: string; artifactId: string } }>('/api/runs/:id/artifacts/:artifactId/download', async (request, reply) => {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
@@ -1671,7 +1672,7 @@ export function buildApp(options: Options) {
     const principal = principalOf(request); await getOwnedRun(options.repository, id, principal.id, principal.tenantId);
     if (action === 'model-reconcile') await options.engine.reconcileModelCall(id, request.body);
     else if (action === 'reconcile-cancelled') await options.engine.reconcileCancelledExternal(id, request.body);
-    else if (action !== 'dispatch') await options.engine.command(id, action, request.body);
+    else if (action !== 'dispatch') await options.engine.command(id, action, request.body, { owner: principal.id, tenantId: principal.tenantId });
     await notify(id); return getOwnedRun(options.repository, id, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/terminalize', async request => {

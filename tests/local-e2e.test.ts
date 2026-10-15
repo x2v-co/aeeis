@@ -44,7 +44,7 @@ describe('local HTTP model to AEEIS run', () => {
     }
     expect(run?.status).toBe('needs_approval');
     const plan = (run?.plans.at(-1) as { hash: string });
-    const approved = await app.inject({ method: 'POST', url: '/api/runs/' + id + '/approve', payload: { planHash: plan.hash } });
+    const approved = await app.inject({ method: 'POST', url: '/api/runs/' + id + '/approve', payload: { planHash: plan.hash, planVersion: plan.version } });
     expect(approved.statusCode).toBe(200);
     // The full suite runs many Temporal and persistence tests concurrently;
     // allow the local dispatcher enough wall time to finish the durable

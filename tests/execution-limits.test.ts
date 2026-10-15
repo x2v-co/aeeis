@@ -22,7 +22,7 @@ async function setup(limits: Partial<ExecutionLimits> = {}, decide?: (input: any
   let engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete }, executionLimits: limits });
   const run = await engine.create({ goal: 'Report blocked items', ...(pulse ? { builtinSkill: 'project-pulse/1' } : {}), materials: [{ title: 'large.csv', source: 'upload', content: csv }] });
   await engine.advance(run.id);
-  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: (await repository.get(run.id)).plans[0]!.version });
   const drain = async () => {
     for (let i = 0; i < 40; i++) { const status = await engine.advance(run.id); if (['succeeded', 'failed', 'unknown'].includes(status)) return repository.get(run.id); }
     throw new Error('Run did not terminate within its bounded calls');
@@ -136,7 +136,7 @@ describe('durable execution allowances', () => {
     const proposed = await fixture.repository.get(failed.id);
     expect(proposed.plans[1]!.hash).toBe(proposed.plans[0]!.hash); // Same IDs and exact draft, new revision.
     expect(runSourceReadUsage(proposed)).toEqual(usage);
-    await fixture.engine.command(failed.id, 'approve', { planHash: proposed.plans[1]!.hash });
+    await fixture.engine.command(failed.id, 'approve', { planHash: proposed.plans[1]!.hash, planVersion: proposed.plans[1]!.version });
     if (format === 'legacy events') await fixture.repository.mutate(failed.id, current => {
       for (const plan of current.plans) delete plan.modelCallOffset;
       // Equal timestamps must not confuse the proposal/call ordering boundary.
@@ -162,7 +162,7 @@ describe('durable execution allowances', () => {
     const failed = await fixture.drain();
     expect(failed.status).toBe('failed');
     await fixture.engine.command(failed.id, 'replan', {}); await fixture.engine.advance(failed.id);
-    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash });
+    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash, planVersion: (await fixture.repository.get(failed.id)).plans.at(-1)!.version });
     acceptFinish = true;
     const before = fixture.complete.mock.calls.length;
     const finished = await fixture.drain();
@@ -178,7 +178,7 @@ describe('durable execution allowances', () => {
     const failed = await fixture.drain();
     await fixture.repository.mutate(failed.id, current => { current.maxModelCalls = 7; });
     await fixture.engine.command(failed.id, 'replan', {}); await fixture.engine.advance(failed.id);
-    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash });
+    await fixture.engine.command(failed.id, 'approve', { planHash: (await fixture.repository.get(failed.id)).plans.at(-1)!.hash, planVersion: (await fixture.repository.get(failed.id)).plans.at(-1)!.version });
     const exhausted = await fixture.drain();
     expect(exhausted.status).toBe('failed');
     expect(exhausted.error).toContain('Model call budget exhausted');
@@ -191,7 +191,7 @@ describe('durable execution allowances', () => {
     fixture.complete.mockRejectedValueOnce(new Error('Definite first executor failure'));
     expect(await fixture.engine.advance(fixture.run.id)).toBe('failed');
     await fixture.engine.command(fixture.run.id, 'replan', {}); await fixture.engine.advance(fixture.run.id);
-    await fixture.engine.command(fixture.run.id, 'approve', { planHash: (await fixture.repository.get(fixture.run.id)).plans.at(-1)!.hash });
+    await fixture.engine.command(fixture.run.id, 'approve', { planHash: (await fixture.repository.get(fixture.run.id)).plans.at(-1)!.hash, planVersion: (await fixture.repository.get(fixture.run.id)).plans.at(-1)!.version });
     fixture.complete.mockRejectedValueOnce(new ModelOutcomeUnknown('Unknown after replanning'));
     expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
     const unknown = await fixture.repository.get(fixture.run.id), call = unknown.calls.at(-1)!;

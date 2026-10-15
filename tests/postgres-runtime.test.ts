@@ -27,7 +27,7 @@ describe('Postgres Run recovery', () => {
       const engine = new AgentEngine(first, model);
       const run = await engine.create({ goal: 'Recover a real PostgreSQL Run', maxModelCalls: 3 });
       expect(await engine.advance(run.id), JSON.stringify(await first.get(run.id))).toBe('needs_approval');
-      await engine.command(run.id, 'approve', { planHash: (await first.get(run.id)).plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: (await first.get(run.id)).plans[0]!.hash, planVersion: (await first.get(run.id)).plans[0]!.version });
       expect(await engine.advance(run.id)).toBe('unknown');
       const unknown = (await first.get(run.id)).calls.at(-1)!;
       await first.close();

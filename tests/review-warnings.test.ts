@@ -25,7 +25,7 @@ async function drive(verdict: 'accepted' | 'needs_revision') {
   const engine = new AgentEngine(repo, adapter(verdict));
   const run = await engine.create({ goal: 'Summarize documents' }, 'alice', 'team-a');
   let status = await engine.advance(run.id);
-  if (status === 'needs_approval') { await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash }); }
+  if (status === 'needs_approval') { await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version }); }
   for (let i = 0; i < 10 && !['succeeded', 'failed'].includes(status); i++) status = await engine.advance(run.id);
   return { status, run: await repo.get(run.id) };
 }

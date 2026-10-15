@@ -51,7 +51,7 @@ async function approveRun(runId, options = {}) {
   if (!plan?.hash) throw new Error(`Run ${runId} did not return a plan hash`);
   await request(`/api/runs/${runId}/approve`, {
     method: 'POST',
-    body: JSON.stringify({ planHash: plan.hash }),
+    body: JSON.stringify({ planHash: plan.hash, planVersion: plan.version }),
   });
   return waitForRun(runId, ['succeeded', 'failed', 'cancelled']);
 }

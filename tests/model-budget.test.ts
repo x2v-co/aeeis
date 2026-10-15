@@ -34,7 +34,7 @@ async function setup(complete?: ModelAdapter['complete'], prices = { inputPriceP
 }
 async function approve(engine: AgentEngine, repo: FileRunRepository, id: string) {
   const run = await repo.get(id);
-  await engine.command(id, 'approve', { planHash: run.plans.at(-1)!.hash });
+  await engine.command(id, 'approve', { planHash: run.plans.at(-1)!.hash, planVersion: run.plans.at(-1)!.version });
 }
 
 describe('durable Run model budgets', () => {

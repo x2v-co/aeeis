@@ -81,7 +81,7 @@ const awaiting = await waitFor('run plan approval', async () => {
 });
 const planHash = awaiting.plans?.at(-1)?.hash;
 if (!planHash) throw new Error('Run did not expose a plan hash');
-await request(`/api/runs/${runRef.id}/approve`, { method: 'POST', body: JSON.stringify({ planHash }) });
+await request(`/api/runs/${runRef.id}/approve`, { method: 'POST', body: JSON.stringify({ planHash, planVersion: awaiting.plans.at(-1).version }) });
 const run = await waitFor('run completion', async () => {
   const value = await request(`/api/runs/${runRef.id}`);
   return ['succeeded', 'failed', 'cancelled'].includes(value.status) ? value : undefined;

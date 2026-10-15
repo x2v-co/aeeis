@@ -33,7 +33,7 @@ async function setup() {
 }
 async function approve(engine: AgentEngine, repository: FileRunRepository, id: string) {
   expect(await engine.advance(id)).toBe('needs_approval');
-  await engine.command(id, 'approve', { planHash: (await repository.get(id)).plans[0]!.hash });
+  await engine.command(id, 'approve', { planHash: (await repository.get(id)).plans[0]!.hash, planVersion: (await repository.get(id)).plans[0]!.version });
 }
 
 describe('bound domain task execution', () => {

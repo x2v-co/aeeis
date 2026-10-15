@@ -211,7 +211,7 @@ export function modelRawOutput(value: unknown, credentialSource?: unknown): stri
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 export function sharedRunView(run: AgentRun) {
-  return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true });
+  return redactRunData({ ...run, canEdit: false, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true });
 }
 export function debugRunView(run: AgentRun) {
   return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });

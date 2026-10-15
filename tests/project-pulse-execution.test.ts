@@ -46,7 +46,7 @@ async function setup(output: (ref: string, input: Record<string, unknown>) => un
   expect(run.context.sources.map(source => ({ title: source.title, source: source.source, content: source.content }))).toEqual(materials);
   expect(await engine.advance(run.id)).toBe('needs_approval');
   const proposed = await repository.get(run.id);
-  await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+  await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
   expect(await engine.advance(run.id)).toBe('running'); // read the source
   return { engine, repository, model, complete, run };
 }

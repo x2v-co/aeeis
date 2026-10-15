@@ -18,7 +18,7 @@ async function run(reviews: unknown[]) {
   const engine = new AgentEngine(repository, { model: { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete } });
   const created = await engine.create({ goal: 'Summarize notes', materials: [{ title: 'n.txt', source: 'upload', content: 'notes' }] }, 'owner', 'local');
   await engine.advance(created.id);
-  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash });
+  await engine.command(created.id, 'approve', { planHash: (await repository.get(created.id)).plans[0]!.hash, planVersion: (await repository.get(created.id)).plans[0]!.version });
   for (let i = 0; i < 16; i++) {
     const status = await engine.advance(created.id);
     if (['succeeded', 'failed'].includes(status)) break;

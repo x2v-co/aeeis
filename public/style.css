@@ -820,3 +820,11 @@ body.thread-page .layout { display: block; }
 #thread-timeline .fact-row { margin-bottom: 12px; }
 #thread-timeline .fact-row a, #thread-timeline .fact-row button { margin-right: 8px; }
 #thread-share-result { display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+
+.plan-review-editor { display: grid; gap: 10px; min-width: 0; }
+.plan-review-editor fieldset { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; border: 1px solid #dce4f2; border-radius: 9px; }
+.plan-review-editor label { display: grid; gap: 5px; flex: 1 1 200px; min-width: 0; font-size: 12px; }
+.plan-review-editor input, .plan-review-editor textarea { width: 100%; box-sizing: border-box; }
+.plan-review-editor textarea { min-height: 80px; resize: vertical; }
+.plan-review-editor p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.plan-review-editor [role="alert"] { color: #a33f4b; }

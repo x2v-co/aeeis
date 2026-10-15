@@ -45,7 +45,7 @@ describe('Project Pulse follow-up tasks', () => {
       engine = new AgentEngine(repository, services);
       const proposed = await repository.get(run.id);
       expect(proposed.builtinSkill).toBe(mode === 'materials' ? 'project-pulse/1' : undefined);
-      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash });
+      await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('reviewing');

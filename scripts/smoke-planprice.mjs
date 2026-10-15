@@ -94,7 +94,7 @@ if (process.env.AEEIS_PLANPRICE_SMOKE_RUN === '1') {
     run = await requestJson(`/api/runs/${encodeURIComponent(runId)}/approve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ planHash }),
+      body: JSON.stringify({ planHash, planVersion: run.plans.at(-1).version }),
     });
   }
   while (!terminal.has(run.status)) {
