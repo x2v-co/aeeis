@@ -93,7 +93,8 @@ describe('production source-fidelity regressions', () => {
     expect(artifact.evidenceRefs).toEqual([sourceRef]);
     expect(artifact.partial).toBe(true);
     expect(artifact.limitations).toContain('csvQuery 结果被截断');
-    expect(artifact.limitations?.join(' ')).toContain('artifact_unresolved');
+    expect(artifact.limitations?.join(' ')).toContain('Unavailable evidence refs removed');
+    expect(run.events).toContainEqual(expect.objectContaining({ type: 'artifact.evidence_pruned', data: { taskId: 'analyze_owners_dates', invalidRefs: ['artifact_unresolved'] } }));
     expect(artifact.structured).toMatchObject({ deadlines: [{ date: '10-20 至 10-25', evidenceRefs: [sourceRef] }], unknowns: [{ text: '负责人职责未说明', evidenceRefs: [sourceRef] }], risks: [] });
     expect(run.artifacts[2]!.evidenceRefs).toEqual([sourceRef]);
     expect(logs.find(log => log.protocol === 'aeeis-finish-content-check/1' && log.taskId === 'analyze_owners_dates')).toMatchObject({ movedUnknowns: 1 });

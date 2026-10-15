@@ -36,6 +36,12 @@ describe('artifact Markdown display and downloads', () => {
     expect(link.getAttribute('href')).toBe('/api/runs/run_123/artifacts/artifact%2F1/download');
   });
 
+  it('offers a PDF download for a retained draft without claiming validated field evidence', () => {
+    const link = artifactDownloadLink('run_123', { id: 'artifact_1', title: 'Unverified PDF draft', retainedPdfOutput: { filename: 'draft.pdf' } }, { getToken: () => null, onError: vi.fn() });
+    expect(link.textContent).toBe('下载 PDF');
+    expect(link.download).toBe('draft.pdf');
+  });
+
   it('uses bearer authentication without leaking the token in the download URL and reports failure', async () => {
     const request = vi.fn().mockResolvedValue(new Response('', { status: 403 }));
     vi.stubGlobal('fetch', request);

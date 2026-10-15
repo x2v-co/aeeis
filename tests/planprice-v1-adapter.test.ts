@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlanpriceV1Catalog } from '../src/planprice-v1-adapter.js';
 
 const servers: ReturnType<typeof createServer>[] = [];
-afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -55,6 +55,8 @@ describe('Planprice v1 adapter', () => {
   });
 
   it('never serves a cached catalog after its upstream expiresAt', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     let calls = 0;
     const base = await startServer((_request, response) => {
       calls += 1;
@@ -63,7 +65,7 @@ describe('Planprice v1 adapter', () => {
     });
     const catalog = new PlanpriceV1Catalog(base, { token: 'catalog-token', allowAnonymousDevelopment: true, cacheTtlMs: 60_000, mappings: [{ offeringId: 'off_test_001', providerId: 'provider_test', channelId: 'default', endpointRef: 'https://provider.example/v1', requestModel: 'vendor-model-2026-09' }] });
     await expect(catalog.list({ capability: 'agent' })).resolves.toHaveLength(1);
-    await new Promise(resolve => setTimeout(resolve, 70));
+    now += 70;
     await expect(catalog.list({ capability: 'agent' })).resolves.toHaveLength(1);
     expect(calls).toBe(2);
   });

@@ -28,7 +28,9 @@ function observationMetadata(observation: Step['observations'][number]) {
   }
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
-      matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated };
+      matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated,
+      ...(result.query && typeof result.query === 'object' && (result.query as { aggregates?: unknown[] }).aggregates?.length && size(result.rows) <= 1000
+        ? { query: result.query, columns: result.columns, rows: result.rows } : {}) };
   }
   if ((observation.tool === 'pdf.formFields' || observation.tool === 'pdf.fill') && result && typeof result === 'object') {
     return { id: result.id, ...Object.fromEntries(['page', 'fieldCount', 'form', 'output', 'filledFields', 'unfilledFields'].filter(key => result[key] !== undefined).map(key => [key, result[key]])) };

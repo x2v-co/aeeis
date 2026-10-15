@@ -212,7 +212,10 @@ export interface ResourceSnapshot extends ResourceSelection {
    * old Runs continue to use their immutable release digests after promotion. */
   registryRevision?: string;
 }
-export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; partial?: boolean; limitations?: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1' | 'fillable-pdf/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact; hash: string; createdAt: string }
+export interface Artifact { id: string; taskId: string; title: string; content: string; evidenceRefs: string[]; partial?: boolean; limitations?: string[]; artifactType?: 'project-pulse/1' | 'website-builder/1' | 'fillable-pdf/1'; structured?: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact;
+  /** Runtime-only attachment for a completed PDF whose field evidence is unverified. */
+  retainedPdfOutput?: FillablePdfArtifact['output'] & { sourceRef: string };
+  hash: string; createdAt: string }
 /**
  * The transport fields are retained for compatibility with static providers.
  * Catalog-routed runs additionally carry the complete aeeis-model-pin/1
@@ -264,7 +267,7 @@ export interface Step {
   finalCallId?: string;
   error?: string; failureReason?: string;
   taskId: string; status: 'pending' | 'running' | 'succeeded';
-  attempts: number; observations: Array<{ tool: string; argument: string; result: unknown }>;
+  attempts: number; observations: Array<{ tool: string; argument: string; result: unknown; sourcePageCost?: 0 }>;
   /** One bounded, durable model attempt to repair a candidate finish object. */
   finishRepair?: { reason: string; candidate: unknown; problems?: Array<{ path: string; code: string; message: string }>; discarded?: string };
   /** Bounded corrective turns, independent of the exhausted ordinary allowance. */

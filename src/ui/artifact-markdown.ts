@@ -34,10 +34,10 @@ export function renderArtifactMarkdown(content: string, doc: Document = document
 }
 
 const downloadUrls = new Set<string>();
-export function artifactDownloadLink(runId: string, artifact: { id: string; title: string; structured?: unknown }, options: { getToken: () => string | null; onError: (text: string) => void }): HTMLAnchorElement {
+export function artifactDownloadLink(runId: string, artifact: { id: string; title: string; structured?: unknown; retainedPdfOutput?: { filename: string } }, options: { getToken: () => string | null; onError: (text: string) => void }): HTMLAnchorElement {
   const link = document.createElement('a');
   link.className = 'artifact-download';
-  const pdf = isFillablePdfArtifact(artifact.structured) ? artifact.structured : undefined;
+  const pdf = isFillablePdfArtifact(artifact.structured) ? artifact.structured : artifact.retainedPdfOutput ? { output: artifact.retainedPdfOutput } : undefined;
   const label = pdf ? '下载 PDF' : '下载 Markdown';
   link.textContent = label;
   link.download = pdf?.output.filename ?? artifactFilename(artifact.title);

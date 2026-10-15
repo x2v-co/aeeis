@@ -25,7 +25,7 @@ export function executionLimitsConfig(env: NodeJS.ProcessEnv): ExecutionLimits {
 // includes escaping and metadata so the allowance also bounds retained context.
 export function sourceReadUsage(steps: Step[]): { pages: number; chars: number } {
   const reads = steps.flatMap(step => step.observations.filter(observation => isSourceReadTool(observation.tool)));
-  return { pages: reads.length, chars: reads.reduce((sum, read) => sum + JSON.stringify(read.result).length, 0) };
+  return { pages: reads.reduce((sum, read) => sum + (read.sourcePageCost ?? 1), 0), chars: reads.reduce((sum, read) => sum + JSON.stringify(read.result).length, 0) };
 }
 export function runSourceReadUsage(run: AgentRun): { pages: number; chars: number } {
   return run.sourceReadUsage ?? sourceReadUsage(run.steps);

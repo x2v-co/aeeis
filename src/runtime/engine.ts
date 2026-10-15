@@ -1,5 +1,6 @@
 import { baseEvidenceRef, canonicalEvidenceRef } from './evidence-refs.js';
 import { populateRunLimitations } from './run-limitations.js';
+import { preserveRunOutput } from './run-output.js';
 export { baseEvidenceRef } from './evidence-refs.js';
 import { csvFilterOps } from './csv-query.js';
 import { sourceFidelityGuidance, pulseFidelityProblems, inferenceFidelityProblems, normalizeSourceUnknowns, deriveProseInferences, labelInferences } from './sourceFidelityRules.js';
@@ -30,7 +31,7 @@ import { claimDigest, type BrainAudit, type BrainClaim, type BrainPersistence, t
 import type { AeeisService } from '../application/aeeis-service.js';
 import { parseActivationChange, type ActiveEvolution, type EvolutionSnapshotProvider } from '../evolution-activation.js';
 import { globalBudgetReconciliationSchema, normalizeUsd, type GlobalBudgetLedger, type GlobalBudgetReservation, type GlobalBudgetSelector, type GlobalBudgetSelection, type GlobalBudgetUsage } from '../global-budget.js';
-import { escapeMaterialRef, materialContentHash, materialQueryTerms, materialExcerpt, materialFormat, materialForModel, presentedMaterials, readMaterialPage } from './materials.js';
+import { escapeMaterialRef, materialContentHash, materialQueryTerms, materialExcerpt, materialFormat, materialForModel, presentedMaterials, readMaterialPage, isSmallTabularSource } from './materials.js';
 import { CsvQueryInputError, queryCsvSource } from './csv-query.js';
 import { readStructuredSource } from './source-readers.js';
 import { resolveSourceResource, synthesizePdfArtifact, pdfArtifactContent, pdfOutputMetadata, fillPdf, pdfFormFields, pdfOutputForModel, fillablePdfEvidenceRefs, validateFillablePdfArtifact, PdfInputError, type PdfOutput } from './fillable-pdf.js';
@@ -1226,6 +1227,18 @@ export class AgentEngine {
       const currentIdempotencyKey = currentCall.idempotencyKey ?? `model:${runId}:${currentCall.id}`;
       if (currentIdempotencyKey !== body.idempotencyKey) throw new Conflict('Model reconciliation idempotency key does not match the durable call');
       if (currentCall.inputHash !== body.inputHash) throw new Conflict('Model reconciliation input hash does not match the durable call');
+      // A partial deliverable may already have been returned. Reconcile its
+      // billing receipt without reopening execution or replacing the artifact.
+      if (current.status === 'succeeded') {
+        currentCall.state = body.outcome === 'completed' ? 'discarded' : 'failed';
+        currentCall.endedAt = now();
+        if (body.outcome === 'completed') currentCall.outputHash = digest(body.output);
+        if (validModelUsage(body.usage)) currentCall.usage = body.usage;
+        current.modelUsage = deriveModelUsage(current);
+        delete current.reconcileDisposition;
+        event(current, 'model.reconciled', { callId: currentCall.id, outcome: body.outcome, reason: body.reason, resultDiscarded: true });
+        return;
+      }
       if (body.outcome === 'failed') {
         currentCall.state = 'failed'; currentCall.endedAt = now();
         if (validModelUsage(body.usage)) currentCall.usage = body.usage;
@@ -1483,7 +1496,7 @@ export class AgentEngine {
     }
     catch (error) {
       if (repairing) repairFailure = failureReason(error, 'Artifact repair failed');
-      const failed = await this.repository.mutate(run.id, current => {
+      const failed = await this.repository.mutate(run.id, async current => {
         const call = current.calls.find(c => c.id === callId)!;
         call.state = error instanceof ModelOutcomeUnknown ? 'unknown' : 'failed'; call.endedAt = now();
         const usage = error instanceof ModelResponseRejected ? error.usage : result?.usage;
@@ -1503,9 +1516,15 @@ export class AgentEngine {
         call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
+        if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
+          && (current.status === 'unknown' || repairing && runnable.has(current.status))
+          && await preserveRunOutput(current, `Model ${phase} outcome is unknown: ${error.message} Independent review was not completed; provider billing still requires reconciliation.`)) {
+          event(current, 'run.partial', { reason: 'Model outcome unknown; completed work retained', callId });
+        }
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
+      if (failed.status === 'succeeded') return;
       if (!repairing) throw error;
       result = { value: run.steps.find(step => step.taskId === taskId)!.finishRepair!.candidate };
     }
@@ -1801,6 +1820,7 @@ export class AgentEngine {
         current.question = inputQuestion(current, node.id, decision.question, false, decision.missing); current.status = 'needs_input'; event(current, 'input.requested', { taskId: node.id, kind: current.question.kind, missing: current.question.missing });
       } else if (decision.type === 'tool') {
         let result: unknown;
+        let sourcePageCost: 0 | undefined;
         if (decision.tool !== 'sources.search') {
           const sources = [...current.context.sources, ...historySources];
           const pdfArtifact = isPdfTool(decision.tool) ? current.artifacts.find(artifact => artifact.id === canonicalEvidenceRef(decision.argument, new Set(current.artifacts.map(item => item.id))) && artifact.structured?.schemaVersion === 'fillable-pdf/1') : undefined;
@@ -1860,7 +1880,8 @@ export class AgentEngine {
             event(current, 'execution.source_read_limited', { taskId: node.id, reason: live.limitReason });
             return;
           }
-          current.sourceReadUsage = { pages: totalReads.pages + 1, chars: totalReads.chars + chars };
+          if (isSmallTabularSource(source)) sourcePageCost = 0;
+          current.sourceReadUsage = { pages: totalReads.pages + (sourcePageCost ?? 1), chars: totalReads.chars + chars };
           if (pdfOutput) {
             if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref)) { current.pdfOutputs ??= []; current.pdfOutputs.push(pdfOutput); }
             const modelCall = current.calls.at(-1)!;
@@ -1890,7 +1911,7 @@ export class AgentEngine {
               };
             });
         }
-        live.observations.push({ tool: decision.tool, argument: decision.argument, result });
+        live.observations.push({ tool: decision.tool, argument: decision.argument, result, ...(sourcePageCost === 0 ? { sourcePageCost } : {}) });
         event(current, 'tool.completed', { taskId: node.id, tool: decision.tool, inputHash: digest(isSourceReadTool(decision.tool) && decision.tool !== 'sources.read' ? decision : decision.argument), outputHash: digest(result), contextId: current.context.id });
       } else if (decision.type === 'capability') {
         assertExternalBudget(current);
@@ -1984,12 +2005,17 @@ export class AgentEngine {
             }
             const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
             if (needsEvidence && candidate.evidenceRefs.length === 0) candidate.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
-            let invalidRefs = [...new Set([...candidate.evidenceRefs, ...structuredEvidenceRefs])].filter(ref => !observed.has(ref) || ref.startsWith('artifact_'));
+            const inlineRefs = [...candidate.content.matchAll(inlineIdPattern)].map(match => match[0]);
+            candidate.evidenceRefs = [...new Set([...candidate.evidenceRefs, ...inlineRefs.filter(ref => observed.has(ref) && !ref.startsWith('artifact_'))])];
+            let invalidRefs = [...new Set([...candidate.evidenceRefs, ...structuredEvidenceRefs, ...inlineRefs])].filter(ref => !observed.has(ref) || ref.startsWith('artifact_'));
             if (invalidRefs.length && structured?.schemaVersion !== 'fillable-pdf/1' && (limitReason || [...candidate.evidenceRefs, ...structuredEvidenceRefs].some(ref => observed.has(ref) && !ref.startsWith('artifact_')))) {
               const invalid = new Set(invalidRefs);
               evidenceCheck.removedRefs = invalidRefs.length;
-              limitationNotes.push(`Unavailable evidence refs removed: ${invalidRefs.join(', ')}`);
-              candidate.content = candidate.content.split('\n').filter(line => !invalidRefs.some(ref => line.includes(ref))).join('\n') || 'Partial answer: see the evidence-backed structured entries.';
+              limitationNotes.push(`Unavailable evidence refs removed (${invalidRefs.length}); claims require checking against the retained evidence.`);
+              event(current, 'artifact.evidence_pruned', { taskId: node.id, invalidRefs });
+              // Remove bad citation tokens, not the entire line of useful
+              // results. The reviewer still checks the claims against evidence.
+              for (const ref of invalidRefs) candidate.content = candidate.content.split(`[${ref}]`).join('').split(ref).join('');
               if (structured) evidenceCheck.droppedClaims = pruneStructuredRefs(structured, ref => !invalid.has(ref));
               candidate.evidenceRefs = candidate.evidenceRefs.filter(ref => !invalid.has(ref));
               if (structured) structuredEvidenceRefs = artifactEvidenceRefs(structured);
@@ -2074,6 +2100,16 @@ export class AgentEngine {
             requestFinishRepair(current, live, prepared.decision, prepared.problems); return;
           }
           const finishDecision = prepared.decision;
+          // Preserve computed answers even when the synthesis mentions only
+          // citations. These values come from the full-data query, not a model.
+          for (const observation of live.observations.filter(item => item.tool === 'sources.csvQuery')) {
+            const result = observation.result as ReturnType<typeof queryCsvSource>;
+            if (result.schemaVersion !== 'csv-query/1' || !result.query.aggregates?.length || !result.rows.length || !observed.has(result.id)) continue;
+            const cell = (value: unknown) => String(value ?? '').replace(/\|/g, '\\|').replace(/[\r\n]/g, ' ');
+            const table = [`| ${result.columns.map(cell).join(' | ')} |`, `| ${result.columns.map(() => '---').join(' | ')} |`, ...result.rows.map(row => `| ${row.map(cell).join(' | ')} |`)].join('\n');
+            finishDecision.content += `\n\nCSV query results [${result.id}] (${result.matchedRowCount} matched rows${result.truncated ? '; only returned groups shown' : ''}; filters: ${JSON.stringify(result.query.filters ?? [])}):\n\n${table}`;
+            if (!finishDecision.evidenceRefs.includes(result.id)) finishDecision.evidenceRefs.push(result.id);
+          }
           const { structured, structuredEvidenceRefs, limitationNotes, inferences } = prepared;
           if (repairFallback) limitationNotes.push('Independent review was not completed after repair fallback');
           if (inferences.derived || inferences.warnings.length) event(current, 'artifact.inferences_derived', { taskId: node.id, derived: inferences.derived, warnings: inferences.warnings });
@@ -2098,6 +2134,7 @@ export class AgentEngine {
             finishDecision.content = `Partial answer — limited evidence: ${limitations.join('; ')}.\n\n${finishDecision.content}`;
           }
           const artifact = { id: id('artifact'), taskId: node.id, title: finishDecision.title, content: finishDecision.content, evidenceRefs, ...(limitations.length ? { partial: true, limitations } : {}), ...(structured ? { artifactType: finishDecision.artifactType!, structured } : {}), hash: digest(finishDecision), createdAt: now() };
+          current.artifacts = current.artifacts.filter(previous => previous.taskId !== node.id);
           current.artifacts.push(artifact); live.status = 'succeeded';
           populateRunLimitations(current);
           delete live.outputRecovery;
@@ -2595,7 +2632,8 @@ export class AgentEngine {
           step.outputRecoveryAttempts = 0;
           requestOutputRecovery(current, step, candidate, problems, true, false);
           step.status = 'pending';
-          current.artifacts = current.artifacts.filter(item => item.taskId !== node.id);
+          // Keep the validated deliverable until its replacement is committed.
+          // A failed/unknown revision must not erase already completed work.
         }
         current.status = 'running';
         delete current.error;

@@ -448,7 +448,7 @@ export class HttpModelAdapter implements ModelAdapter {
             if (part.value?.byteLength) {
               firstByteMs ??= Date.now() - attemptStarted;
               responseBytes += part.value.byteLength;
-              if (request.maxResponseBytes !== undefined && responseBytes > request.maxResponseBytes) throw new ModelOutcomeUnknown('Repair response exceeds byte cap; provider outcome is unknown');
+              if (response?.ok && request.maxResponseBytes !== undefined && responseBytes > request.maxResponseBytes) throw new ModelResponseRejected('Repair response exceeds byte cap');
               activity();
             }
             return part;

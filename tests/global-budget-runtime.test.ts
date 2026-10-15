@@ -7,8 +7,51 @@ import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
+import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 
 describe('global budget runtime integration', () => {
+  it.each(['completed', 'failed'] as const)('settles an unknown review as %s after returning partial work without releasing or replaying its reservation', async outcome => {
+    const repository = new InMemoryRunRepository();
+    const ledger = new InMemoryGlobalBudgetLedger(); await ledger.init();
+    let calls = 0;
+    const model: ModelAdapter = {
+      pin: { model: 'fixture', provider: 'test', endpoint: 'http://localhost', promptVersion: 'test' },
+      complete: async request => {
+        calls++;
+        if (request.system.includes('Independently review')) throw new ModelOutcomeUnknown('Review connection interrupted');
+        const value = request.system.includes('Plan a real deliverable') ? { summary: 'Report', nodes: [{ id: 'report', title: 'Report', instruction: 'Report progress', dependsOn: [] }] }
+          : { type: 'finish', title: 'Report', content: 'Work complete.', evidenceRefs: (request.input as any).availableEvidenceRefs };
+        return { value, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const globalBudget = { ledger, select: createGlobalBudgetSelector([{ window: 'none' as const, budget: { calls: 10, tokens: 100 } }]) };
+    const engine = new AgentEngine(repository, { model, globalBudget });
+    try {
+      const run = await engine.create({ goal: 'Progress report', materials: [{ title: 'Status', source: 'upload', content: 'Work complete.' }] });
+      await engine.advance(run.id);
+      await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash, planVersion: 1 });
+      await engine.advance(run.id); await engine.advance(run.id);
+      expect(await engine.advance(run.id)).toBe('succeeded');
+      const partial = await repository.get(run.id), call = partial.calls.at(-1)!;
+      expect(partial.partial).toBe(true);
+      const key = `aeeis:model:${run.id}:${call.id}`, accountKey = call.globalBudgetAccountKey!;
+      expect((await ledger.get(accountKey))?.entries[key]?.state).toBe('unknown');
+      expect(await engine.advance(run.id)).toBe('succeeded');
+      expect(calls).toBe(3);
+      const audit = { callId: call.id, idempotencyKey: call.idempotencyKey, inputHash: call.inputHash, outcome, reason: 'Billing audit',
+        output: outcome === 'completed' ? { verdict: 'accepted', summary: 'Confirmed' } : undefined, usage: { inputTokens: 2, outputTokens: 1 } };
+      await expect(engine.reconcileModelCall(run.id, audit)).rejects.toThrow('audit metadata');
+      await engine.reconcileModelCall(run.id, { ...audit, reconciliation: { source: 'provider', provider: 'fixture', reference: 'review-call', reason: 'Provider record matched' } });
+      const settled = await repository.get(run.id);
+      expect(settled.status).toBe('succeeded');
+      expect(settled.artifacts).toEqual(partial.artifacts);
+      expect(settled.modelUsage).toMatchObject({ tokens: 7, unreportedCalls: 0 });
+      expect(await ledger.get(accountKey)).toMatchObject({ usedCalls: 3, usedTokens: 7, unreportedTokenCalls: 0 });
+      expect((await ledger.get(accountKey))?.entries[key]?.state).toBe('settled');
+      expect(calls).toBe(3);
+    } finally { await ledger.close(); }
+  });
+
   it('limits model calls across independent Runs in one tenant', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-global-runtime-'));
     const repository = new FileRunRepository(directory); await repository.init();

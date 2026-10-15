@@ -69,7 +69,7 @@ describe('HttpModelAdapter', () => {
     const fetch = vi.fn(async () => response);
     vi.stubGlobal('fetch', fetch);
     const adapter = new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, { stream, retryBaseMs: 0 });
-    await expect(adapter.complete({ system: 'repair', input: {}, idempotencyKey: 'repair-cap', maxResponseBytes: 65536, disableRetries: true })).rejects.toThrow('byte cap');
+    await expect(adapter.complete({ system: 'repair', input: {}, idempotencyKey: 'repair-cap', maxResponseBytes: 65536, disableRetries: true })).rejects.toBeInstanceOf(ModelResponseRejected);
     expect(fetch).toHaveBeenCalledTimes(1); expect(cancel).toHaveBeenCalledOnce();
   });
   it.each([429, 500, 502, 503])('does not replay HTTP %s after any body bytes, retaining structured diagnostics', async status => {

@@ -52,7 +52,7 @@ describe('runtime material boundaries', () => {
     const summary = csvSummary(['timestamp', ...dates, ''].join('\n'));
     expect(summary.columns[0]).toEqual({ name: 'timestamp', type: 'date', distinct: 2, nullCount: 0,
       min: '2026-01-01T00:30:00+02:00', max: '2025-12-31T23:30:00Z' });
-    const source = { ...csvSource, content: ['timestamp', ...Array.from({ length: 100 }, (_, i) => dates[i % 2])].join('\n') };
+    const source = { ...csvSource, content: ['timestamp', ...Array.from({ length: 200 }, (_, i) => dates[i % 2])].join('\n') };
     const presented = JSON.parse(presentedMaterialExcerpts([source], [])[0]!.content);
     expect(presented.columns[0]).toEqual(summary.columns[0]);
   });
@@ -64,7 +64,7 @@ describe('runtime material boundaries', () => {
 
   it('preserves Unicode when shortening hybrid CSV summary cells', () => {
     const value = 'x'.repeat(98) + '🙂' + 'tail'.repeat(10);
-    const source = { ...csvSource, content: ['note', ...Array.from({ length: 30 }, () => value)].join('\n') };
+    const source = { ...csvSource, content: ['note', ...Array.from({ length: 130 }, () => value)].join('\n') };
     const summary = JSON.parse(presentedMaterialExcerpts([source], [])[0]!.content);
     expect(summary).toMatchObject({ sampled: true, sampleCellsTruncated: true });
     expect(summary.sampleRows.every((row: string[]) => row[0] === 'x'.repeat(98) + '…')).toBe(true);
