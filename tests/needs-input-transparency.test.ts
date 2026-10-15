@@ -46,6 +46,7 @@ describe('input requests and unavailable live data', () => {
     const run = await repository.get(id);
     expect(run.status, run.error).toBe('succeeded');
     expect(run.partial).toBe(true);
+    expect(run.limitations).toEqual([`No data source or capability available: ${question}`]);
     expect(run.question).toBeUndefined();
     expect(run.artifacts[0]).toMatchObject({ partial: true, limitations: [`No data source or capability available: ${question}`] });
     expect(run.artifacts[0]?.content).toContain('数据来源');
@@ -59,6 +60,13 @@ describe('input requests and unavailable live data', () => {
     expect(requests.filter(request => request.system.includes('Execute the current task'))).toHaveLength(1);
     expect(requests.find(request => request.system.includes('Independently review'))?.input).toMatchObject({ partial: true });
     if (pulse) expect(run.artifacts[0]?.structured).toMatchObject({ schemaVersion: 'project-pulse/1', unknowns: [] });
+    const app = buildApp({ repository, engine, dispatcher: { notify: async () => {}, close: async () => {} } });
+    try {
+      expect((await app.inject({ url: `/api/runs/${id}` })).json().limitations).toEqual(run.limitations);
+      const cloned = await app.inject({ method: 'POST', url: '/api/runs', payload: { goal: run.goal, materials: run.context.sources.map(({ title, source, content }) => ({ title, source, content })), ...(run.builtinSkill ? { builtinSkill: run.builtinSkill } : {}) } });
+      expect(cloned.statusCode, cloned.body).toBe(202);
+      expect((await repository.get(cloned.json().id)).context.sources).toEqual([]);
+    } finally { await app.close(); }
   });
 
   it.each(['fallback', 'repository'] as const)('lists a durable source-backed question in both summary APIs (%s paging)', async paging => {

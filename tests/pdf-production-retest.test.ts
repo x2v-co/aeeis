@@ -15,7 +15,7 @@ function finish(input: any, result = lastFill(input)) {
   const structured = pdfArtifact({ ...result.output, writtenFields: result.filledFields }, input.sourceCatalog[0].id, input.sourceCatalog[1].id);
   return { type: 'finish', title: 'Registration form', content: pdfArtifactContent(structured), artifactType: 'fillable-pdf/1', structured, evidenceRefs: [input.sourceCatalog[0].id, input.sourceCatalog[1].id, result.output.ref] };
 }
-async function setup(decide: (input: any, request: ModelRequest) => unknown, options: { nodes?: any[]; limits?: any; review?: (input: any) => unknown; maxModelCalls?: number; caseContent?: string } = {}) {
+async function setup(decide: (input: any, request: ModelRequest) => unknown, options: { nodes?: any[]; limits?: any; review?: (input: any) => unknown; maxModelCalls?: number; caseContent?: string; caseTitle?: string } = {}) {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'info').mockImplementation(() => {});
   const repository = new InMemoryRunRepository();
@@ -28,7 +28,7 @@ async function setup(decide: (input: any, request: ModelRequest) => unknown, opt
   const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
   let engine = new AgentEngine(repository, { model, executionLimits: options.limits });
   const run = await engine.create({ goal: 'Fill registration from case JSON, explaining every unresolved field', builtinSkill: 'fillable-pdf/1', maxModelCalls: options.maxModelCalls ?? 20,
-    materials: [{ title: 'registration.pdf', source: 'upload', content: formContent }, { title: 'case.json', source: 'upload', content: options.caseContent ?? profileContent }] });
+    materials: [{ title: 'registration.pdf', source: 'upload', content: formContent }, { title: options.caseTitle ?? 'case.json', source: 'upload', content: options.caseContent ?? profileContent }] });
   await engine.advance(run.id);
   await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
   return { repository, id: run.id, complete, get engine() { return engine; }, restart() { engine = new AgentEngine(repository, { model }); }, async drain() {
@@ -38,6 +38,72 @@ async function setup(decide: (input: any, request: ModelRequest) => unknown, opt
 }
 
 describe('production PDF retest regressions', () => {
+  it('PDF3: accepts CSV row and column citations on map_csv_to_fields', async () => {
+    const fixture = await setup(input => {
+      if (!lastFill(input)) return fill(input, { contactMethod: 'Email' });
+      const decision = finish(input);
+      decision.structured.filledFields[0]!.evidenceRefs = [`source: ${input.sourceCatalog[1].id.toUpperCase()}#row2:contactMethod`];
+      return decision;
+    }, { caseTitle: 'case.csv', caseContent: 'contactMethod\nEmail', nodes: [{ id: 'map_csv_to_fields', title: 'Map CSV', instruction: 'Fill from CSV', dependsOn: [] }] });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.artifacts[0]!.structured).toMatchObject({ filledFields: [{ name: 'contactMethod', value: 'Email', evidenceRefs: [run.context.sources[1]!.id] }] });
+    expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+  });
+
+  it.each(['cite', 'clear'] as const)('PDF3: repairs repeated identical field evidence rejection by choosing to %s', async mode => {
+    let rejected = 0;
+    const fixture = await setup((input, request) => {
+      if (!lastFill(input)) return fill(input, { contactMethod: 'Email' });
+      if (input.outputRecovery) {
+        expect(request.system).toContain('cite the received non-PDF source id or re-run pdf.fill without that field');
+        expect(input.outputRecovery.reason).toContain('list it in unknowns with a reason');
+        if (rejected === 2 && mode === 'clear' && lastFill(input).filledFields.length) return fill(input, {});
+      }
+      const decision = finish(input);
+      if (rejected++ < 2) decision.structured.filledFields[0]!.evidenceRefs = [lastFill(input).output.ref];
+      return decision;
+    }, { caseTitle: 'case.csv', caseContent: 'contactMethod\nEmail' });
+    await fixture.engine.advance(fixture.id);
+    await fixture.engine.advance(fixture.id);
+    await fixture.engine.advance(fixture.id);
+    expect(await fixture.repository.get(fixture.id)).toMatchObject({ status: 'running', steps: [{ outputRecoveryAttempts: 2 }] });
+    fixture.restart();
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.filter(event => event.type === 'artifact.repair_requested')).toHaveLength(2);
+    expect(run.pdfOutputs!.at(-1)!.writtenFields).toEqual(mode === 'cite' ? [{ name: 'contactMethod', value: 'Email' }] : []);
+    if (mode === 'clear') expect(run.artifacts[0]!.structured!.unknowns).toContainEqual(expect.objectContaining({ field: 'contactMethod', text: expect.any(String) }));
+  });
+
+  it.each(['structured', 'clear'] as const)('PDF2: repairs inferred country by choosing %s evidence', async mode => {
+    const text = 'country="SG" follows from Singapore';
+    const fixture = await setup((input, request) => {
+      if (!lastFill(input)) return fill(input, { country: 'SG' });
+      if (input.outputRecovery) {
+        expect(input.outputRecovery.reason).toContain('Otherwise leave it empty with a reason in unknowns');
+        expect(request.system).toContain('structured.inferences');
+        if (mode === 'clear' && lastFill(input).filledFields.length) return fill(input, {});
+      }
+      const decision = finish(input);
+      if (mode === 'structured' || !input.outputRecovery) decision.content += `\n建议${text}`;
+      if (mode === 'structured' && input.outputRecovery) decision.structured.inferences = [{ field: 'country', value: 'SG', text: `建议${text}`, evidenceRefs: [input.sourceCatalog[1].id] }];
+      return decision;
+    }, { caseContent: '{"country":"Singapore"}', limits: { maxNodeSourcePages: 1 } });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.steps[0]!.outputRecoveryAttempts).toBe(1);
+    const artifact = run.artifacts[0]!;
+    if (mode === 'structured') {
+      expect(artifact.content).toContain(`推断：建议${text}`);
+      expect(artifact.structured).toMatchObject({ filledFields: [{ name: 'country', value: 'SG' }], inferences: [{ field: 'country', value: 'SG' }] });
+      expect(run.steps[0]!.observations.some(observation => observation.tool === 'output.warning')).toBe(false);
+    } else {
+      expect((await PDFDocument.load(decodePdfMaterial(run.pdfOutputs!.at(-1)!.content))).getForm().getDropdown('country').getSelected()).toEqual([]);
+      expect(artifact.structured!.unknowns).toContainEqual(expect.objectContaining({ field: 'country', text: expect.any(String) }));
+    }
+  });
+
   it('PDF3: records inspection-task writes and repairs an omitted manifest on the final limited call', async () => {
     let stored: any;
     const fixture = await setup(input => {

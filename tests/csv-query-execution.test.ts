@@ -5,6 +5,7 @@ import { decisionSchema } from '../src/runtime/contracts.js';
 import { materialContentHash } from '../src/runtime/materials.js';
 import { sourceReadUsage, runSourceReadUsage, type ExecutionLimits } from '../src/runtime/execution-limits.js';
 import type { ModelRequest } from '../src/runtime/model.js';
+import { HttpModelAdapter } from '../src/runtime/model.js';
 import type { ThreadHistory } from '../src/runtime/thread-history.js';
 
 type Input = {
@@ -48,6 +49,51 @@ async function setup(decide: (input: Input) => unknown = input => input.observat
 }
 
 describe('executor CSV query tool', () => {
+  it('revises a rejected CSV synthesis with tools after connection retries and exhausted node allowance', async () => {
+    const repository = new InMemoryRunRepository();
+    let reviews = 0, connectFailures = 0;
+    const fetch = vi.fn(async (_url: unknown, options: any) => {
+      const body = JSON.parse(options.body), system = body.messages[0].content, input = JSON.parse(body.messages[1].content);
+      let value: unknown;
+      if (system.includes('Plan a real deliverable')) value = { summary: 'Totals', nodes: [{ id: 'synthesize', title: 'Totals', instruction: 'Calculate team totals', dependsOn: [] }] };
+      else if (system.includes('Independently review')) value = ++reviews === 1 ? { verdict: 'needs_revision', summary: 'Missing total', issues: ['Include the numeric total'] } : { verdict: 'accepted', summary: 'Total verified', issues: [] };
+      else if (!input.observations.length) value = query(input);
+      else if (input.outputRecovery && input.observations.filter((item: any) => item.tool === 'sources.csvQuery').length === 1) {
+        expect(input.executionBudget.finalOnly).toBe(false);
+        expect(input.executionBudget.remainingModelCalls).toBeGreaterThan(1);
+        expect(system).toContain('Tools are allowed');
+        expect(input.outputRecovery.reason).toContain('Include the numeric total');
+        value = query(input);
+      } else {
+        if (!input.outputRecovery && connectFailures++ < 2) throw new TypeError('fetch failed', { cause: Object.assign(new Error('Connection timed out'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) });
+        value = { ...finish(input), content: input.outputRecovery ? 'Total: 200,000.' : 'Calculated totals.' };
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) }, finish_reason: 'stop' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetch);
+    const logs = vi.spyOn(console, 'error').mockImplementation(() => {}), warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const model = new HttpModelAdapter('http://localhost/v1', 'fixture', '', undefined, 5000, undefined, false, undefined, { maxAttempts: 2, retryBaseMs: 0, retryMaxMs: 0 });
+      let engine = new AgentEngine(repository, { model, executionLimits: { maxNodeIterations: 2, maxNodeSourcePages: 1 } });
+      const run = await engine.create({ goal: 'Calculate team totals', materials: [{ title: 'totals.csv', source: 'upload', content }] });
+      await engine.advance(run.id);
+      await engine.command(run.id, 'approve', { planHash: (await repository.get(run.id)).plans[0]!.hash });
+      for (let i = 0; i < 12; i++) {
+        const status = await engine.advance(run.id);
+        if ((await repository.get(run.id)).events.some(event => event.type === 'review.revision_requested')) engine = new AgentEngine(repository, { model });
+        if (['succeeded', 'failed'].includes(status)) break;
+      }
+      const completed = await repository.get(run.id);
+      expect(completed.status, completed.error).toBe('succeeded');
+      expect(completed.artifacts[0]!.content).toContain('200,000');
+      expect(completed.events.filter(event => event.type === 'review.revision_requested')).toHaveLength(1);
+      expect(completed.steps[0]!.observations.filter(observation => observation.tool === 'sources.csvQuery')).toHaveLength(2);
+      expect(completed.calls).toHaveLength(7);
+      expect(fetch).toHaveBeenCalledTimes(9);
+      expect(logs.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual(expect.arrayContaining([expect.objectContaining({ errorCode: 'UND_ERR_CONNECT_TIMEOUT', willRetry: true }), expect.objectContaining({ retryDecision: 'connect-retry' })]));
+    } finally { vi.unstubAllGlobals(); logs.mockRestore(); warnings.mockRestore(); }
+  });
+
   it.each(['<', 'less_than', 'BEFORE', ' LT ', '<=', 'LTE', 'less-than-or-equal'])('run_313c8bce: normalizes %s and retains date comparisons', async op => {
     const fixture = await setup(input => input.observations.length ? finish(input) : {
       type: 'tool', tool: 'sources.csvQuery', argument: input.sourceCatalog[0]!.id,

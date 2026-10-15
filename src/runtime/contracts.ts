@@ -165,6 +165,7 @@ export const fillablePdfArtifactSchema = z.object({
   schemaVersion: z.literal('fillable-pdf/1'),
   form: z.object({ sourceRef: z.string().trim().min(1).max(200), fieldCount: z.number().int().min(1).max(200) }).strip(),
   filledFields: z.array(z.object({ name: z.string().min(1).max(200), value: pdfValueSchema, evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50) }).strip()).max(200),
+  inferences: z.array(z.object({ field: z.string().min(1).max(200), value: pdfValueSchema, text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50) }).strip()).max(200).optional(),
   unknowns: z.array(z.object({ field: z.string().min(1).max(200).optional(), text: z.string().trim().min(1).max(2000), evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(50) }).strip()).max(250),
   output: z.object({ filename: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,190}\.pdf$/), sha256: resourceDigestSchema, sizeBytes: z.number().int().positive(), ref: z.string().min(1).max(200) }).strip(),
   blockers: z.array(projectPulseItemSchema).max(50),
@@ -261,6 +262,7 @@ export interface AgentRun {
   executionLimits?: import('./execution-limits.js').ExecutionLimits;
   sourceReadUsage?: { pages: number; chars: number };
   partial?: boolean;
+  limitations?: string[];
   schemaVersion: 1; id: string; revision: number; owner: string; tenantId?: string;
   /** Optional cross-run conversation membership, assigned by the repository. */
   threadId?: string; parentRunId?: string; threadSequence?: number;
