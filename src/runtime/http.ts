@@ -1510,8 +1510,10 @@ export function buildApp(options: Options) {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
     const artifact = run.artifacts.find(item => item.id === request.params.artifactId);
     if (!artifact) throw new NotFound('Unknown artifact');
-    if (artifact.structured?.schemaVersion === 'fillable-pdf/1') {
-      const metadata = artifact.structured.output, sourceRef = artifact.structured.form.sourceRef;
+    const pdfMetadata = artifact.structured?.schemaVersion === 'fillable-pdf/1'
+      ? { ...artifact.structured.output, sourceRef: artifact.structured.form.sourceRef } : artifact.retainedPdfOutput;
+    if (pdfMetadata) {
+      const metadata = pdfMetadata, sourceRef = pdfMetadata.sourceRef;
       const output = run.pdfOutputs?.find(output => output.ref === metadata.ref && output.sourceRef === sourceRef);
       if (!output) throw new NotFound('Unknown PDF output');
       const bytes = decodePdfMaterial(output.content, MAX_PDF_OUTPUT_BYTES);

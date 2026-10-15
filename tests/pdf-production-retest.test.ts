@@ -3,6 +3,9 @@ import { PDFDocument } from 'pdf-lib';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import type { ModelRequest } from '../src/runtime/model.js';
+import { ModelOutcomeUnknown } from '../src/runtime/model.js';
+import { terminalizeRun } from '../src/runtime/terminalize-run.js';
+import { buildApp } from '../src/runtime/http.js';
 import { pdfArtifactContent, pdfOutputMetadata } from '../src/runtime/fillable-pdf.js';
 import { decodePdfMaterial } from '../src/runtime/pdf-material.js';
 import { pdfArtifact, formContent, profileContent, profile } from './fillable-pdf-fixture.js';
@@ -38,6 +41,97 @@ async function setup(decide: (input: any, request: ModelRequest) => unknown, opt
 }
 
 describe('production PDF retest regressions', () => {
+  it.each(['finish', 'repair', 'review', 'review-repair', 'revision', 'revised-fill'] as const)('preserves the PDF and unknown billing receipt when %s is interrupted', async phase => {
+    let reviews = 0;
+    const interrupted = () => { throw new ModelOutcomeUnknown('Model request connection was interrupted; reconcile before retrying'); };
+    const fixture = await setup(input => {
+      if (!lastFill(input)) return fill(input);
+      if (phase === 'finish' || phase === 'repair' && input.outputRecovery) return interrupted();
+      if (input.outputRecovery?.problems[0].code === 'review_revision') {
+        if (phase === 'revised-fill' && input.observations.filter((item: any) => item.tool === 'pdf.fill').length === 1) return fill(input, { name: profile.name });
+        return interrupted();
+      }
+      const decision = finish(input);
+      if (phase === 'repair') decision.structured.filledFields = [];
+      return decision;
+    }, { review: () => {
+      reviews++;
+      if (phase === 'review' || phase === 'review-repair' && reviews > 1) return interrupted();
+      if (phase === 'review-repair') return { verdict: 'invalid' };
+      return { verdict: 'needs_revision', summary: 'Explain fields', issues: ['Explain unresolved fields'] };
+    } });
+    const run = await fixture.drain();
+    expect(run).toMatchObject({ status: 'succeeded', partial: true });
+    expect(run.error).toBeUndefined();
+    expect(run.artifacts).toHaveLength(1);
+    const artifact = run.artifacts[0]!;
+    expect(artifact.structured).toMatchObject({ schemaVersion: 'fillable-pdf/1', output: pdfOutputMetadata(run.pdfOutputs!.at(-1)!) });
+    expect(artifact.content).toContain(profile.name);
+    expect(run.limitations!.join(' ')).toContain('Independent review was not completed');
+    const unknown = run.calls.at(-1)!;
+    expect(unknown.state).toBe('unknown');
+    const count = fixture.complete.mock.calls.length;
+    fixture.restart();
+    expect(await fixture.engine.advance(run.id)).toBe('succeeded');
+    expect((await terminalizeRun(fixture.repository, run.id, 'Activity timeout')).artifacts).toEqual(run.artifacts);
+    expect(fixture.complete).toHaveBeenCalledTimes(count);
+    // Later provider confirmation settles the receipt; it must not run review again.
+    await fixture.engine.reconcileModelCall(run.id, { callId: unknown.id, inputHash: unknown.inputHash, idempotencyKey: unknown.idempotencyKey,
+      outcome: 'completed', output: { verdict: 'accepted', summary: 'Late result' }, usage: { inputTokens: 12, outputTokens: 3 }, reason: 'Provider audit' });
+    const settled = await fixture.repository.get(run.id);
+    expect(settled.status).toBe('succeeded');
+    expect(settled.calls.at(-1)).toMatchObject({ state: 'discarded', usage: { inputTokens: 12, outputTokens: 3 } });
+    expect(settled.artifacts).toEqual(run.artifacts);
+  });
+
+  it('keeps a genuine first executor unknown without a produced PDF reconcilable', async () => {
+    const fixture = await setup(() => { throw new ModelOutcomeUnknown('First request outcome unknown'); });
+    expect(await fixture.engine.advance(fixture.id)).toBe('unknown');
+    expect(await fixture.engine.advance(fixture.id)).toBe('unknown');
+    const run = await fixture.repository.get(fixture.id);
+    expect(run.artifacts).toEqual([]);
+    expect(run.pdfOutputs).toBeUndefined();
+    expect(run.calls.at(-1)!.state).toBe('unknown');
+    expect(fixture.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('terminalizes an activity timeout after pdf.fill with a verified artifact', async () => {
+    const fixture = await setup(input => fill(input));
+    await fixture.engine.advance(fixture.id);
+    const filled = await fixture.repository.get(fixture.id);
+    expect(filled.artifacts).toEqual([]);
+    const run = await terminalizeRun(fixture.repository, fixture.id, 'Activity timeout during finish');
+    expect(run).toMatchObject({ status: 'succeeded', partial: true });
+    expect(run.artifacts[0]!.structured).toMatchObject({ output: pdfOutputMetadata(filled.pdfOutputs![0]!) });
+  });
+
+  it('returns a downloadable unverified PDF draft when field evidence cannot be reconstructed after an unknown finish', async () => {
+    const fixture = await setup(input => {
+      if (!lastFill(input)) return fill(input, { country: 'SG' });
+      throw new ModelOutcomeUnknown('Finish connection interrupted');
+    }, { caseContent: '{"country":"Singapore"}' });
+    const run = await fixture.drain();
+    expect(run).toMatchObject({ status: 'succeeded', partial: true });
+    const artifact = run.artifacts[0]!;
+    expect(artifact.structured).toBeUndefined();
+    expect(artifact.retainedPdfOutput).toMatchObject(pdfOutputMetadata(run.pdfOutputs![0]!));
+    expect(artifact.content).toContain('Unverified PDF draft');
+    expect(artifact.limitations!.join(' ')).toContain('field evidence could not be validated');
+    const app = buildApp({ repository: fixture.repository, engine: fixture.engine });
+    try {
+      const url = `/api/runs/${run.id}/artifacts/${artifact.id}/download`;
+      const response = await app.inject({ url });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toBe('application/pdf');
+      expect(response.rawPayload).toEqual(decodePdfMaterial(run.pdfOutputs![0]!.content));
+      await fixture.repository.mutate(run.id, current => { current.pdfOutputs![0]!.sizeBytes++; });
+      // Download metadata is pinned to the retained artifact and checked against actual bytes.
+      expect((await app.inject({ url })).statusCode).toBe(200);
+      await fixture.repository.mutate(run.id, current => { current.pdfOutputs![0]!.content = current.context.sources[0]!.content; });
+      expect((await app.inject({ url })).statusCode).toBe(409);
+    } finally { await app.close(); }
+  });
+
   it('PDF3: accepts CSV row and column citations on map_csv_to_fields', async () => {
     const fixture = await setup(input => {
       if (!lastFill(input)) return fill(input, { contactMethod: 'Email' });

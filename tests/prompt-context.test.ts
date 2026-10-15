@@ -6,6 +6,15 @@ import { queryCsvSource } from '../src/runtime/csv-query.js';
 import { jsonRead, markdownSection, sampleSource } from '../src/runtime/source-readers.js';
 
 describe('executor context budget', () => {
+  it('preserves small aggregate rows when older query results are compacted', () => {
+    const result = queryCsvSource({ id: 'source.csv', title: 'data.csv', source: 'upload', hash: 'h', content: 'due\n2026-10-13\n2026-10-14\n2026-10-13' }, { groupBy: ['due'], aggregates: [{ op: 'count', as: 'count' }] });
+    const observation = { tool: 'sources.csvQuery', argument: 'source.csv', result };
+    const observations = [observation, { tool: 'sources.read', argument: 'other', result: { content: 'x'.repeat(5000) } }];
+    const projected = boundedObservations(observations, () => ['source.csv']);
+    expect(projected[0]!.result).toMatchObject({ columns: ['due', 'count'], rows: [['2026-10-13', 2], ['2026-10-14', 1]] });
+    const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(90_000), observations });
+    expect((overall.observations as typeof observations)[0]!.result).toMatchObject({ columns: result.columns, rows: result.rows });
+  });
   it('PDF3: preserves exact writes and output metadata when compacting an older pdf.fill result', () => {
     const result = { id: 'pdf_output', form: { sourceRef: 'source_pdf', fieldCount: 8 },
       output: { ref: 'pdf_output', filename: 'filled.pdf', sha256: 'a'.repeat(64), sizeBytes: 100 },

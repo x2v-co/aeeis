@@ -49,6 +49,40 @@ async function setup(decide: (input: Input) => unknown = input => input.observat
 }
 
 describe('executor CSV query tool', () => {
+  it('reads all 60 detail rows across five pages and delivers three due-date counts instead of citations alone', async () => {
+    const dates = ['2026-10-13', '2026-10-14', '2026-10-15'];
+    const detail = ['id,status,due,notes', ...Array.from({ length: 60 }, (_, i) => `${i + 1},${i < 28 ? 'open' : 'done'},${dates[i % 3]},${'detail '.repeat(8)}`)].join('\n');
+    const fixture = await setup(input => {
+      const reads = input.observations.filter(item => item.tool === 'sources.read');
+      const last = reads.at(-1)?.result;
+      const presented = (input as any).presentedSources[0];
+      expect(presented.truncated).toBe(false);
+      expect(presented.content).toContain('60,done');
+      expect(presented.representation).toBeUndefined();
+      if (!reads.length || last.page.nextRead) return { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0]!.id, offset: 0, limit: 12, ...last?.page.nextRead };
+      if (!input.observations.some(item => item.tool === 'sources.csvQuery')) return {
+        type: 'tool', tool: 'sources.csvQuery', argument: input.sourceCatalog[0]!.id, filters: [{ column: 'status', op: 'eq', value: 'open' }],
+        groupBy: ['due'], aggregates: [{ op: 'count', as: 'count' }], orderBy: [{ column: 'due', direction: 'asc' }],
+      };
+      return { type: 'finish', title: 'Due-date counts', content: `Results: [${input.sourceCatalog[0]!.id}]`, evidenceRefs: [input.sourceCatalog[0]!.id] };
+    }, { materials: [{ title: 'detail.csv', source: 'upload', content: detail }] });
+    await fixture.engine.advance(fixture.run.id);
+    fixture.restart();
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.partial).not.toBe(true);
+    const reads = run.steps[0]!.observations.filter(item => item.tool === 'sources.read');
+    expect(reads).toHaveLength(5);
+    expect(reads.reduce((sum, item) => sum + (item.result as any).page.returnedRows, 0)).toBe(60);
+    expect(sourceReadUsage(run.steps).pages).toBe(0);
+    expect(runSourceReadUsage(run)).toEqual(sourceReadUsage(run.steps));
+    expect(run.events.some(event => event.type === 'execution.limited')).toBe(false);
+    expect(run.artifacts[0]!.content).toContain('| 2026-10-13 | 10 |');
+    expect(run.artifacts[0]!.content).toContain('| 2026-10-14 | 9 |');
+    expect(run.artifacts[0]!.content).toContain('| 2026-10-15 | 9 |');
+    expect(run.artifacts[0]!.content).toContain('28 matched rows');
+  });
+
   it('revises a rejected CSV synthesis with tools after connection retries and exhausted node allowance', async () => {
     const repository = new InMemoryRunRepository();
     let reviews = 0, connectFailures = 0;

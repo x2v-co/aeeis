@@ -111,7 +111,8 @@ describe('task evidence visibility', () => {
     expect(completed.status, completed.error).toBe('succeeded');
     expect(completed.partial).toBe(true);
     expect((completed.artifacts[0]!.structured as ProjectPulseArtifact).progress).toEqual([]);
-    expect(completed.artifacts[0]!.limitations?.join(' ')).toContain('invented-source');
+    expect(completed.artifacts[0]!.limitations?.join(' ')).toContain('Unavailable evidence refs removed');
+    expect(completed.events.some(event => event.type === 'artifact.evidence_pruned' && (event.data.invalidRefs as string[]).includes('invented-source'))).toBe(true);
   });
 
   it.each(['isolated-output', 'case-collision'] as const)('never treats isolated tool receipts as received evidence (%s)', async mode => {

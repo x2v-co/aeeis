@@ -65,6 +65,11 @@ export const LARGE_CSV_BYTES = 2048;
 export const CSV_SUMMARY_CHARS = 3000;
 export const SOURCE_PAGE_CHARS = 4000;
 
+/** Small tables are detail evidence, even when they exceed the summary threshold. */
+export function isSmallTabularSource(source: Pick<Source, 'title' | 'source' | 'content'>): boolean {
+  return materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') <= 12_000 && csvRecords(source.content).length <= 101;
+}
+
 export interface CsvColumnStats {
   name: string; type: string; distinct: number; nullCount: number; min?: string | number; max?: string | number;
 }
@@ -320,7 +325,7 @@ export function materialExcerpt(source: Pick<Source, 'title' | 'source' | 'conte
 export function presentedMaterialExcerpts(sources: Source[], terms: string[], budget = PRESENTED_SOURCE_TEXT_BUDGET, legacyHeadSamples = false): MaterialExcerpt[] {
   const allocations = new Array<number>(sources.length).fill(0);
   let remaining = budget;
-  const pending = sources.map((source, index) => ({ index, length: isBinaryPdf(source.content) ? pdfMaterialDescription(source.content).length : materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES ? Math.min(source.content.length, CSV_SUMMARY_CHARS) : source.content.length })).sort((a, b) => a.length - b.length);
+  const pending = sources.map((source, index) => ({ index, length: isBinaryPdf(source.content) ? pdfMaterialDescription(source.content).length : materialFormat(source) === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES && (legacyHeadSamples || !isSmallTabularSource(source)) ? Math.min(source.content.length, CSV_SUMMARY_CHARS) : source.content.length })).sort((a, b) => a.length - b.length);
   for (let index = 0; index < pending.length; index++) {
     const source = pending[index]!;
     const share = Math.min(source.length, Math.floor(remaining / (pending.length - index)));
@@ -328,7 +333,7 @@ export function presentedMaterialExcerpts(sources: Source[], terms: string[], bu
   }
   return sources.map((source, index) => {
     const format = materialFormat(source), maxLength = allocations[index]!;
-    if (format === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES) return (legacyHeadSamples ? legacyCsvSummaryExcerpt : csvSummaryExcerpt)(source, maxLength);
+    if (format === 'csv' && Buffer.byteLength(source.content, 'utf8') > LARGE_CSV_BYTES && (legacyHeadSamples || !isSmallTabularSource(source))) return (legacyHeadSamples ? legacyCsvSummaryExcerpt : csvSummaryExcerpt)(source, maxLength);
     if (!legacyHeadSamples && format === 'text' && source.content.length > maxLength) {
       let content: string;
       try { content = JSON.stringify(hybridMaterialSample(source, maxLength)); }

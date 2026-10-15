@@ -146,13 +146,26 @@ describe('thread history model context', () => {
       status = await f.engine.advance(run.id);
       if (phase === 'reviewer') { expect(status).toBe('running'); await f.engine.advance(run.id); status = await f.engine.advance(run.id); }
     }
-    expect(status).toBe('unknown');
+    expect(status).toBe(phase === 'reviewer' ? 'succeeded' : 'unknown');
     const interrupted = (await f.repository.get(run.id)).calls.at(-1)!;
     const original = f.model.requests.at(-1)!;
     await f.repository.mutate(f.parent.id, parent => { parent.goal = 'New parent state'; parent.artifacts[0]!.content = 'New artifact state'; });
     const sibling = threadRun(); sibling.goal = 'Later branch must stay absent';
     await f.repository.createRunInThread(sibling, f.thread.id, f.parent.id, threadScope);
     await f.restart();
+    if (phase === 'reviewer') {
+      const count = f.model.requests.length;
+      await f.engine.reconcileModelCall(run.id, { callId: interrupted.id, inputHash: interrupted.inputHash, idempotencyKey: interrupted.idempotencyKey,
+        outcome: 'completed', output: { verdict: 'accepted', summary: 'Provider confirmed review' }, reason: 'Provider audit' });
+      expect(await f.engine.advance(run.id)).toBe('succeeded');
+      const completed = await f.repository.get(run.id);
+      expect(completed.partial).toBe(true);
+      expect(completed.calls.at(-1)).toMatchObject({ id: interrupted.id, inputHash: interrupted.inputHash, state: 'discarded', modelRequest: interrupted.modelRequest });
+      expect(f.model.requests).toHaveLength(count);
+      expect(snapshotFrom(original)).toEqual(run.context.threadHistory);
+      expect(JSON.stringify(original)).not.toContain('Later branch');
+      return;
+    }
     await f.engine.command(run.id, 'reconcile', { reason: 'Provider state checked; retry authorized' });
     await f.engine.advance(run.id);
     const repeated = f.model.requests.at(-1)!;
