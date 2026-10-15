@@ -225,7 +225,8 @@ export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOpti
     retryMaxMs: Number(env.AEEIS_MODEL_RETRY_MAX_MS ?? 10_000),
     ...(env.AEEIS_MODEL_STREAM === undefined ? {} : { stream: env.AEEIS_MODEL_STREAM === '1' }),
     idleTimeoutMs: Number(env.AEEIS_MODEL_IDLE_TIMEOUT_MS ?? 180_000),
-    firstByteTimeoutMs: Number(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS ?? 120_000),
+    // Leave provider defaults to the adapter; an explicit env value always wins.
+    ...(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS === undefined ? {} : { firstByteTimeoutMs: Number(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS) }),
     streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 900_000),
     callBudgetMs: Number(env.AEEIS_MODEL_CALL_BUDGET_MS ?? 600_000),
     retryEmptyIdle: env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== '0',
@@ -255,7 +256,7 @@ export class HttpModelAdapter implements ModelAdapter {
     this.arkProvider = ark;
     const defaultThinkingDisabled = /(^|\.)(?:volces\.com|volcengineapi\.com)$/.test(url.hostname) || provider?.toLowerCase() === 'ark';
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
-      stream: transport.stream ?? ark, firstByteTimeoutMs: transport.firstByteTimeoutMs ?? 120_000,
+      stream: transport.stream ?? ark, firstByteTimeoutMs: transport.firstByteTimeoutMs ?? (ark ? 240_000 : 120_000),
       idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 180_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 900_000,
       callBudgetMs: transport.callBudgetMs ?? 600_000,
       retryEmptyIdle: transport.retryEmptyIdle ?? true, midstreamRetries: transport.midstreamRetries ?? 1, maxTokens: transport.maxTokens ?? defaultMaxTokens,

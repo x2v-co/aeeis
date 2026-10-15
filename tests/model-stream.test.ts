@@ -492,12 +492,40 @@ describe('OpenAI-compatible SSE transport', () => {
     await expect(result).resolves.toMatchObject({ value: {}, usage: { inputTokens: 12, outputTokens: 30 } });
   });
 
+  it.each([': keepalive\n\n', event({ choices: [{ index: 0, delta: { reasoning_content: 'thinking' }, finish_reason: null }] })])('counts SSE activity before content and uses the Ark 240s default', async heartbeat => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(async (_url, options) => {
+      expect(JSON.parse(options.body)).toMatchObject({ stream: true, stream_options: { include_usage: true } });
+      return new Response(new ReadableStream({ start(controller) {
+        const send = (text: string) => controller.enqueue(new TextEncoder().encode(text));
+        setTimeout(() => send(heartbeat), 217_000);
+        setTimeout(() => send(heartbeat), 350_000);
+        setTimeout(() => { send(event(chunk('{}', 'stop')) + 'data: [DONE]\n\n'); controller.close(); }, 480_000);
+      } }), { headers: { 'content-type': 'text/event-stream' } });
+    });
+    vi.stubGlobal('fetch', fetch);
+    const completion = adapter(modelTransportConfig({})).complete({ system: 's', input: {} });
+    await vi.advanceTimersByTimeAsync(480_001);
+    await expect(completion).resolves.toMatchObject({ value: {} });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves an explicit Ark first-byte environment override', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => stalledResponse('')));
+    const completion = expect(adapter({ ...modelTransportConfig({ AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS: '120000' }), maxAttempts: 1 })
+      .complete({ system: 's', input: {} })).rejects.toThrow('120000ms (first-byte timeout)');
+    await vi.advanceTimersByTimeAsync(120_001);
+    await completion;
+  });
+
   it('allows disabling streaming for ARK and enabling it for other providers, with JSON response fallback', async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }))); vi.stubGlobal('fetch', fetch);
     await adapter({ stream: false }).complete({ system: 's', input: {} });
     await new HttpModelAdapter('https://example.com', 'fixture', '', undefined, 1000, undefined, false, undefined, modelTransportConfig({ AEEIS_MODEL_STREAM: '1' })).complete({ system: 's', input: {} });
     expect(JSON.parse(fetch.mock.calls[0]![1].body as string).stream).toBeUndefined();
     expect(JSON.parse(fetch.mock.calls[1]![1].body as string).stream).toBe(true);
-    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ firstByteTimeoutMs: 120000, idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, callBudgetMs: 600000, retryEmptyIdle: true, midstreamRetries: 1, maxTokens: 16384 });
+    expect(modelTransportConfig({ AEEIS_MODEL_TIMEOUT_MS: '200000' })).toMatchObject({ idleTimeoutMs: 180000, streamOverallTimeoutMs: 900000, callBudgetMs: 600000, retryEmptyIdle: true, midstreamRetries: 1, maxTokens: 16384 });
   });
 });
