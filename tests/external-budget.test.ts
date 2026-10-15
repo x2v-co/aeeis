@@ -233,7 +233,9 @@ describe('Run external capability budgets', () => {
     await restart().recover();
     const run = await repo.get(id);
     expect(run.status).toBe('cancelled');
-    expect(run.externalUsage).toMatchObject({ calls: 1, unreportedTokenCalls: 1 });
+    // A queued tool that was never claimed never crossed the provider boundary,
+    // so it is not an unknown cost; a delegation is reserved before dispatch.
+    expect(run.externalUsage).toMatchObject(type === 'tool' ? { calls: 0, unreportedTokenCalls: 0 } : { calls: 1, unreportedTokenCalls: 1 });
     expect(counts()).toMatchObject({ toolCalls: 0, agentCalls: 0 });
   });
 

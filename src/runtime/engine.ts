@@ -71,6 +71,32 @@ export function taskRunIdFor(owner: string, tenantId: string, task: { domainPlan
 }
 const runnable = new Set<RunStatus>(['queued', 'planning', 'running', 'reviewing']);
 const terminalRunStatuses = new Set<RunStatus>(['succeeded', 'failed', 'cancelled']);
+/**
+ * Read-only, idempotent tools whose interrupted invocation can be re-issued
+ * without provider reconciliation: repeating them has no side effect beyond a
+ * second bounded network read. Side-effecting tools still stop for an owner.
+ * AEEIS_AUTO_RETRY_TOOLS (comma separated) extends the list.
+ */
+export const AUTO_RETRY_TOOL_IDS: ReadonlySet<string> = new Set(['web-fetch', 'web-search', ...(process.env.AEEIS_AUTO_RETRY_TOOLS ?? '').split(',').map(item => item.trim()).filter(Boolean)]);
+/**
+ * Re-queue a run whose only unsettled work is an interrupted read-only tool.
+ * executePendingTool then re-issues the same idempotency key instead of
+ * asking a provider reconciliation endpoint about a request it may never
+ * have received.
+ */
+function scheduleAutoRetry(run: AgentRun): void {
+  if (run.status !== 'unknown' || !isAutoRetryableInterruption(run) || run.pendingDelegation || run.calls.some(call => call.state === 'unknown')) return;
+  run.status = run.resumeStatus && runnable.has(run.resumeStatus) ? run.resumeStatus : 'running';
+  delete run.resumeStatus; delete run.error;
+  event(run, 'tool.auto_retry_scheduled', { taskId: run.pendingTool!.taskId, toolId: run.pendingTool!.toolId, receiptId: run.pendingTool!.receiptId! });
+}
+/** True when the pending tool was interrupted by an AEEIS restart (not a provider answer) and is safe to re-issue. */
+export function isAutoRetryableInterruption(run: Pick<AgentRun, 'pendingTool' | 'toolReceipts'>): boolean {
+  const pending = run.pendingTool;
+  if (!pending?.receiptId || !AUTO_RETRY_TOOL_IDS.has(pending.toolId)) return false;
+  const receipt = run.toolReceipts?.find(item => item.receiptId === pending.receiptId);
+  return receipt?.status === 'unknown' && receipt.provider === 'aeeis-recovery' && receipt.errorCode === 'worker_interrupted';
+}
 function assertReviewVersion(run: AgentRun, version: number): void {
   if (run.status !== 'needs_approval' || run.plans.at(-1)?.version !== version) throw new Conflict('计划已更新或不在等待批准，请刷新后重试');
 }
@@ -614,6 +640,22 @@ function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
 export class AgentEngine {
   private executionLimits: ExecutionLimits;
   private active = new Set<string>();
+  private draining = false;
+  /**
+   * Graceful shutdown: stop starting new ticks (each tick is one model call or
+   * one tool call) and wait for in-flight ticks to persist their results, so a
+   * deploy does not strand a run in `unknown`. Returns false on timeout.
+   */
+  async drain(timeoutMs = 60_000): Promise<boolean> {
+    this.draining = true;
+    const deadline = Date.now() + timeoutMs;
+    while (this.active.size > 0) {
+      if (Date.now() >= deadline) return false;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return true;
+  }
+  get isDraining(): boolean { return this.draining; }
   private adapters = new Map<string, ModelAdapter>();
   private defaultModel: ModelAdapter | undefined;
   private resolver: ModelResolver | undefined;
@@ -895,14 +937,18 @@ export class AgentEngine {
     for (const run of await this.repository.list()) await this.recoverRun(run);
   }
   private async recoverRun(run: AgentRun): Promise<void> {
-      const interrupted = run.calls.some(c => c.state === 'started') || (run.pendingTool && (!run.pendingTool.receiptId || run.pendingTool.executionToken || run.pendingTool.reconcileInFlight === true)) || (run.pendingDelegation && (!run.pendingDelegation.receiptRef || run.pendingDelegation.executionToken || run.pendingDelegation.reconcileInFlight === true));
+      // A pendingTool without receipt and without executionToken was queued but
+      // never claimed: no provider request crossed the boundary, so it is not
+      // interrupted and the next tick simply runs it (run_95ec9b8c).
+      const toolClaimed = Boolean(run.pendingTool?.executionToken);
+      const interrupted = run.calls.some(c => c.state === 'started') || (run.pendingTool && ((!run.pendingTool.receiptId && toolClaimed) || run.pendingTool.executionToken || run.pendingTool.reconcileInFlight === true)) || (run.pendingDelegation && (!run.pendingDelegation.receiptRef || run.pendingDelegation.executionToken || run.pendingDelegation.reconcileInFlight === true));
       if (interrupted) {
         if (this.globalBudget) {
           for (const call of run.calls.filter(item => item.state === 'started')) {
             const selection = call.globalBudgetAccountKey ? await this.globalBudget.ledger.get(call.globalBudgetAccountKey) : this.modelGlobalSelection(run, call.startedAt);
             if (selection) await this.globalBudget.ledger.ensureUnknown(selection, this.modelGlobalKey(run.id, call.id));
           }
-          if (run.pendingTool && !run.pendingTool.receiptId) {
+          if (run.pendingTool && !run.pendingTool.receiptId && toolClaimed) {
             const selection = run.pendingTool.globalBudgetAccountKey ? await this.globalBudget.ledger.get(run.pendingTool.globalBudgetAccountKey) : this.externalGlobalSelection(run, run.pendingTool.requestedAt);
             if (selection) await this.globalBudget.ledger.ensureUnknown(selection, this.externalGlobalKey(run, run.pendingTool.idempotencyKey));
           }
@@ -924,7 +970,7 @@ export class AgentEngine {
             current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
             current.status = 'unknown'; current.error = 'Execution interrupted during a model request. Explicit reconciliation is required before another billable call.';
           }
-          if (current.pendingTool && !current.pendingTool.receiptId) {
+          if (current.pendingTool && !current.pendingTool.receiptId && current.pendingTool.executionToken) {
             const pending = current.pendingTool;
             if (this.globalBudget && !pending.globalBudgetAccountKey) {
               const selection = this.externalGlobalSelection(current, pending.requestedAt);
@@ -974,7 +1020,11 @@ export class AgentEngine {
           current.externalUsage = deriveExternalUsage(current);
           if (interruptedStatus === 'paused' && !interruptedCalls) { current.resumeStatus = current.status; current.status = 'paused'; }
           event(current, 'run.interrupted');
+          scheduleAutoRetry(current);
         });
+      } else if (run.status === 'unknown' && isAutoRetryableInterruption(run)) {
+        // Runs stranded by an earlier restart (before automatic retry existed).
+        await this.repository.mutate(run.id, current => { scheduleAutoRetry(current); });
       }
       const recovered = await this.repository.get(run.id);
       if (this.globalBudget) {
@@ -1059,7 +1109,7 @@ export class AgentEngine {
           if (run.status !== 'unknown' && run.status !== 'waiting_external') throw new Conflict('Run is not waiting for external reconciliation');
           const { reason } = z.object({ reason: z.string().trim().min(1).max(2000) }).strict().parse(body);
           const unknownTool = run.toolReceipts?.find(receipt => receipt.status === 'unknown');
-          if (unknownTool && !this.tools?.reconcile) throw new Conflict('External tool outcome is unknown; configure a provider reconciliation operation before retrying');
+          if (unknownTool && !this.tools?.reconcile && !isAutoRetryableInterruption(run)) throw new Conflict('External tool outcome is unknown; configure a provider reconciliation operation before retrying');
           if (run.pendingDelegation && !this.agents) throw new Conflict('External Agent outcome is unknown; configure the Agent gateway before retrying');
           if (run.pendingDelegation) run.pendingDelegation.reconcileRequested = true;
           const unknownCalls = run.calls.filter(call => call.state === 'unknown');
@@ -1115,7 +1165,7 @@ export class AgentEngine {
   }
   // One bounded operation per tick. The caller (Temporal or local driver) schedules subsequent ticks.
   async advance(runId: string): Promise<RunStatus> {
-    if (this.active.has(runId)) return (await this.repository.get(runId)).status;
+    if (this.draining || this.active.has(runId)) return (await this.repository.get(runId)).status;
     this.active.add(runId);
     try {
       const run = await this.repository.get(runId);
@@ -2296,8 +2346,9 @@ export class AgentEngine {
     const providerRequest = toolProviderRequest(pending);
     let result: ToolResult;
     try {
-      if (previous && !this.tools.reconcile) throw new Error('Tool reconciliation is not configured');
-      result = previous
+      const reissue = Boolean(previous) && isAutoRetryableInterruption(run);
+      if (previous && !reissue && !this.tools.reconcile) throw new Error('Tool reconciliation is not configured');
+      result = previous && !reissue
         ? await this.tools.reconcile!(providerRequest, previous)
         : await this.tools.invoke(providerRequest);
       const approvedTool = run.approvedTools?.find(tool => tool.id === providerRequest.toolId && tool.version === providerRequest.toolVersion);

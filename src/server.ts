@@ -816,6 +816,10 @@ try {
   }
   const close = async () => {
     if (closing) return; closing = true;
+    // Drain first: no new step starts, in-flight model/tool calls finish and
+    // persist before the process exits (compose stop_grace_period covers it).
+    const drainMs = Number(process.env.AEEIS_SHUTDOWN_DRAIN_MS ?? 240_000);
+    if (engine && !(await engine.drain(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 240_000))) console.error('AEEIS: shutdown drain timed out; in-flight runs will be recovered on boot');
     clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another

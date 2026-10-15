@@ -1233,7 +1233,8 @@ describe('AEEIS runtime', () => {
     const run = await first.create({ goal: 'Recover tool call', allowedTools: ['fixture.lookup'] });
     await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id);
-    await repo.mutate(run.id, saved => { saved.status = 'running'; delete saved.pendingTool!.receiptId; });
+    // A claimed (executionToken persisted) but unfinished call is what a crash leaves behind.
+    await repo.mutate(run.id, saved => { saved.status = 'running'; delete saved.pendingTool!.receiptId; saved.pendingTool!.executionToken = 'stale-attempt'; });
     const recovered = new AgentEngine(repo, { model: new CapabilityFixture(), tools });
     await recovered.recover();
     current = await repo.get(run.id);
