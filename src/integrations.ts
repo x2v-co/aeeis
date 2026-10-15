@@ -1,3 +1,5 @@
+import { SkillChangeAudit } from './skill-change-audit.js';
+import type { ChangeAuditStore, ChangeContext, ChangeAuditApi } from './change-audit.js';
 import { createHash, createPublicKey, randomUUID, verify as verifySignature } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -103,13 +105,14 @@ export class ToolkitMcpGateway implements ToolGateway {
 }
 
 export interface SkillGovernance {
+  readonly changeAudit?: ChangeAuditApi;
   /** Checks the adapter protocol, not the quality of governed methods. */
   health?(): Promise<{ ready: boolean; detail: string; checkedAt: string }>;
   resolve(task: string, options?: { runtime?: string; cached?: boolean }): Promise<{ methodId?: string; version?: string; plan: unknown; receiptRef?: string }>;
   record(input: { task: string; outcome: 'success' | 'failure'; correction?: string; summary: string; evidence: string[]; runtime?: string; confidence?: 'low' | 'medium' | 'high' | 'unknown'; verifiedBy?: 'user' | 'agent' | 'automated' | 'unknown' }): Promise<{ receiptRef: string }>;
   propose(): Promise<Array<{ id: string; task: string; status: string; sourceReceiptId: string }>>;
-  apply(proposalId: string): Promise<{ methodId: string; version: string }>;
-  rollback(methodId: string, version: string): Promise<{ methodId: string; version: string }>;
+  apply(proposalId: string, context?: ChangeContext): Promise<{ methodId: string; version: string }>;
+  rollback(methodId: string, version: string, context?: ChangeContext): Promise<{ methodId: string; version: string }>;
 }
 
 export interface ModelCatalogRow {
@@ -511,7 +514,10 @@ function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: strin
 }
 
 export class OwnHowCliGovernance implements SkillGovernance {
-  constructor(private readonly executable = 'ownhow', private readonly stateDirectory?: string, private readonly defaultRuntime?: string, private readonly healthTimeoutMs = 3_000) {
+  private readonly skillAudit: SkillChangeAudit;
+  get changeAudit() { return this.skillAudit.service; }
+  constructor(private readonly executable = 'ownhow', private readonly stateDirectory?: string, private readonly defaultRuntime?: string, private readonly healthTimeoutMs = 3_000, auditStore?: ChangeAuditStore<unknown>) {
+    this.skillAudit = new SkillChangeAudit(stateDirectory, auditStore);
     if (defaultRuntime !== undefined && !/^[a-z][a-z0-9-]{0,63}$/.test(defaultRuntime)) throw new Error('OwnHow runtime must be a simple runtime identifier');
     if (!Number.isFinite(healthTimeoutMs) || healthTimeoutMs <= 0) throw new Error('OwnHow health timeout must be positive and finite');
   }
@@ -574,15 +580,21 @@ export class OwnHowCliGovernance implements SkillGovernance {
     const proposals = Array.isArray(value) ? value : (value as { proposals?: unknown[] }).proposals ?? [];
     return z.array(z.object({ id: z.string(), task: z.string(), status: z.string(), sourceReceiptId: z.string() }).strict()).parse(proposals);
   }
-  async apply(proposalId: string) {
-    const value = await this.run(['apply', proposalId]) as { id?: string; methodId?: string; version?: string };
-    if (!value.methodId || !value.version) throw new Error('OwnHow apply response did not contain a method version');
-    return { methodId: value.methodId, version: value.version };
+  async apply(proposalId: string, context?: ChangeContext) {
+    return this.skillAudit.mutate('skill.apply', proposalId, async () => {
+      const value = await this.run(['apply', proposalId]) as { id?: string; methodId?: string; version?: string };
+      const methodId = value.methodId ?? value.id;
+      if (!methodId || !value.version) throw new Error('OwnHow apply response did not contain a method version');
+      return { methodId, version: value.version };
+    }, context);
   }
-  async rollback(methodId: string, version: string) {
-    const value = await this.run(['rollback', methodId, '--version', version]) as { methodId?: string; version?: string };
-    if (!value.methodId || !value.version) throw new Error('OwnHow rollback response did not contain a method version');
-    return { methodId: value.methodId, version: value.version };
+  async rollback(methodId: string, version: string, context?: ChangeContext) {
+    return this.skillAudit.mutate('skill.rollbackVersion', methodId, async () => {
+      const value = await this.run(['rollback', methodId, '--version', version]) as { id?: string; methodId?: string; version?: string };
+      const restoredId = value.methodId ?? value.id;
+      if (!restoredId || !value.version) throw new Error('OwnHow rollback response did not contain a method version');
+      return { methodId: restoredId, version: value.version };
+    }, context, 'rollback');
   }
 }
 

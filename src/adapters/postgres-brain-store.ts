@@ -1,3 +1,4 @@
+import { PostgresChangeAuditStore, persistChangeAuditChain } from './postgres-change-audit.js';
 import pg from 'pg';
 import { postgresAdvisoryXactLock } from './postgres-lock.js';
 import { BrainConflict, GovernedBrain, brainStateSchema, type BrainPersistence, type BrainSemanticIndexMaintenance, type BrainClaim } from '../brain.js';
@@ -23,6 +24,7 @@ export class PostgresBrainStore implements BrainPersistence {
   }
 
   async init(): Promise<void> {
+    await new PostgresChangeAuditStore(this.pool, 'brain').init();
     await withPostgresMigrationLock(this.pool, 'brain-state', async client => {
       await client.query(`
         CREATE TABLE IF NOT EXISTS aeeis_brain_state (
@@ -78,6 +80,7 @@ export class PostgresBrainStore implements BrainPersistence {
          ON CONFLICT(id) DO UPDATE SET revision=EXCLUDED.revision,state=EXCLUDED.state,updated_at=EXCLUDED.updated_at`,
         [next, state, new Date().toISOString()],
       );
+      await persistChangeAuditChain(client, 'brain', state.changes ?? []);
       await client.query('COMMIT');
       this.revisions.set(brain, next);
       // A successful canonical write must not become ambiguous just because a

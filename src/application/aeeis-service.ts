@@ -1,3 +1,4 @@
+import type { ChangeContext } from '../change-audit.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, recentFirst, validateCollectionLimit } from '../adapters/collection-query.js';
 import { randomUUID } from "node:crypto";
 import type {
@@ -44,6 +45,10 @@ export interface ProjectionIntentSink {
 }
 
 export class AeeisService {
+  get changeAudit() {
+    if (!this.store.changeAudit) throw new Error('Memory change audit is not configured');
+    return this.store.changeAudit;
+  }
   public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory) {}
 
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
@@ -309,7 +314,7 @@ export class AeeisService {
     throw new AeeisConflict('Plan is busy; retry the task transition');
   }
 
-  async addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString(), owner = "owner", tenantId = "local"): Promise<MemoryEntry> {
+  async addMemory(goalId: Id, input: CreateMemoryInput, now = new Date().toISOString(), owner = "owner", tenantId = "local", context?: ChangeContext): Promise<MemoryEntry> {
     this.assertOwnedGoal(await this.store.getGoal(goalId), goalId, owner, tenantId);
     if (!input.content.trim()) throw new Error("Memory content is required");
     const evidenceRefs = [...new Set((input.evidenceRefs ?? []).map(ref => ref.trim()).filter(Boolean))];
@@ -333,12 +338,12 @@ export class AeeisService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.store.saveMemory(memory);
+    await this.store.saveMemory(memory, context);
     return memory;
   }
 
   /** Create an append-only correction and retain the superseded version for audit. */
-  async correctMemory(goalId: Id, memoryId: Id, input: CreateMemoryInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<MemoryEntry> {
+  async correctMemory(goalId: Id, memoryId: Id, input: CreateMemoryInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local', context?: ChangeContext): Promise<MemoryEntry> {
     this.assertOwnedGoal(await this.store.getGoal(goalId), goalId, owner, tenantId);
     const stored = (await this.store.getMemories(goalId)).find(memory => memory.id === memoryId);
     const previous = normalizeMemory(stored);
@@ -364,7 +369,7 @@ export class AeeisService {
       updatedAt: now,
     };
     try {
-      await this.store.commitMemoryRevision(stored!, next);
+      await this.store.commitMemoryRevision(stored!, next, context);
       return next;
     } catch (error) {
       if (error instanceof MemoryWriteConflict) throw new AeeisConflict('Memory changed during correction; reload and retry');
@@ -373,7 +378,7 @@ export class AeeisService {
   }
 
   /** Retraction is durable and auditable; the content remains for evidence history. */
-  async retractMemory(goalId: Id, memoryId: Id, reason: string, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<MemoryEntry> {
+  async retractMemory(goalId: Id, memoryId: Id, reason: string, now = new Date().toISOString(), owner = 'owner', tenantId = 'local', context?: ChangeContext): Promise<MemoryEntry> {
     this.assertOwnedGoal(await this.store.getGoal(goalId), goalId, owner, tenantId);
     if (!reason.trim()) throw new Error('Memory retraction reason is required');
     const stored = (await this.store.getMemories(goalId)).find(memory => memory.id === memoryId);
@@ -382,7 +387,7 @@ export class AeeisService {
     if (current.state !== 'active') throw new AeeisConflict('Only an active memory can be retracted');
     const next: MemoryEntry = { ...current, state: 'retracted', updatedAt: now, retractedAt: now, retractionReason: reason.trim() };
     try {
-      await this.store.commitMemoryUpdate(stored!, next);
+      await this.store.commitMemoryUpdate(stored!, next, context ?? { actor: { kind: 'user', id: owner }, reason: { ...(next.evidenceRunId ? { runId: next.evidenceRunId } : { taskId: goalId }), trigger: reason.trim() } });
       return next;
     } catch (error) {
       if (error instanceof MemoryWriteConflict) throw new AeeisConflict('Memory changed during retraction; reload and retry');

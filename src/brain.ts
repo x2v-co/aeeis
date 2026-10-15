@@ -1,3 +1,4 @@
+import { ChangeAuditConflict, ChangeAuditLog, canonicalJson, changeAuditEntrySchema, type ChangeAuditEntry, type ChangeContext, type ChangeReason } from './change-audit.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,9 +20,9 @@ export const brainGrantInputSchema = z.object({ subject: z.string().min(1).max(2
 export const brainGrantSchema = brainGrantInputSchema.extend({ owner: z.string().min(1).max(200).optional(), tenantId: z.string().min(1).max(200).optional(), id: z.string().regex(/^grant_[a-f0-9-]{36}$/), revokedAt: z.string().datetime({ offset: true }).optional() }).strict();
 export type BrainGrant = z.infer<typeof brainGrantSchema>;
 export interface BrainAudit { tenantId?: string | undefined; owner?: string | undefined; id: string; at: string; actor: string; action: 'write' | 'read' | 'grant' | 'revoke' | 'retract' | 'export' | 'import' | 'delete'; scopeRef?: string | undefined; ref?: string | undefined; contentHash?: string | undefined }
-export interface BrainState { schemaVersion: 1; claims: BrainClaim[]; grants: BrainGrant[]; audit: BrainAudit[] }
+export interface BrainState { schemaVersion: 1; claims: BrainClaim[]; grants: BrainGrant[]; audit: BrainAudit[]; changes?: ChangeAuditEntry[] }
 const brainAuditSchema = z.object({ tenantId: z.string().max(200).optional(), owner: z.string().max(200).optional(), id: z.string().min(1).max(200), at: z.string().datetime({ offset: true }), actor: z.string().min(1).max(200), action: z.enum(['write', 'read', 'grant', 'revoke', 'retract', 'export', 'import', 'delete']), scopeRef: z.string().max(200).optional(), ref: z.string().max(200).optional(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
-export const brainStateSchema = z.object({ schemaVersion: z.literal(1), claims: z.array(claimSchema).max(100000), grants: z.array(brainGrantSchema).max(10000), audit: z.array(brainAuditSchema).max(200000) }).strict();
+export const brainStateSchema = z.object({ schemaVersion: z.literal(1), claims: z.array(claimSchema).max(100000), grants: z.array(brainGrantSchema).max(10000), audit: z.array(brainAuditSchema).max(200000), changes: z.array(changeAuditEntrySchema).optional() }).strict();
 
 /** A portable, permission-scoped Brain transfer. Grants and audit history are
  * deliberately excluded: importing a bundle must never mint authority or
@@ -40,12 +41,13 @@ export type BrainBundle = z.infer<typeof brainBundleSchema>;
 export class BrainAccessDenied extends Error {}
 export class BrainConflict extends Error {}
 export class GovernedBrain {
+  changeAudit = new ChangeAuditLog();
   private claims = new Map<string, BrainClaim[]>();
   private grants = new Map<string, BrainGrant>();
   private audit: BrainAudit[] = [];
   private key(owner: string, tenantId: string, scopeRef: string): string { return JSON.stringify([tenantId, owner, scopeRef]); }
 
-  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string): BrainClaim {
+  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext): BrainClaim {
     const principal = brainActor(actor);
     const parsed = brainClaimInputSchema.parse(input);
     const tenantId = parsed.tenantId ?? principal.tenantId;
@@ -54,6 +56,7 @@ export class GovernedBrain {
     const key = this.key(parsed.owner, tenantId, parsed.scopeRef);
     const history = this.claims.get(key) ?? [];
     const claim = claimSchema.parse({ ...parsed, tenantId, schemaVersion: 1, id: 'brain_' + randomUUID(), version: history.length + 1, state: 'active', createdAt: at, updatedAt: at });
+    this.recordChange(null, claim, principal, 'brain.addClaim', context);
     this.claims.set(key, [...history, claim]);
     this.record('write', principal, parsed.owner, parsed.scopeRef, claim.id, claim);
     return structuredClone(claim);
@@ -133,13 +136,15 @@ export class GovernedBrain {
     }
     this.record('read', principal, owner, scopeRef); return structuredClone(result);
   }
-  retract(scopeRef: string, claimId: string, actor: Principal | string, resourceOwner?: string): void {
+  retract(scopeRef: string, claimId: string, actor: Principal | string, resourceOwner?: string, context?: ChangeContext): void {
     const principal = brainActor(actor);
     const owner = resourceOwner ?? (typeof actor === 'string' ? 'owner' : principal.id);
     const claim = (this.claims.get(this.key(owner, principal.tenantId, scopeRef)) ?? []).find(item => item.id === claimId);
     this.assertGrant(principal, owner, principal.tenantId, scopeRef, claim?.classification ?? 'private', 'retract');
     if (!claim) throw new Error('Claim not found');
-    claim.state = 'retracted'; claim.updatedAt = new Date().toISOString(); this.record('retract', principal, owner, scopeRef, claim.id, claim);
+    const after = { ...claim, state: 'retracted' as const, updatedAt: new Date().toISOString() };
+    this.recordChange(claim, after, principal, 'brain.retract', context);
+    Object.assign(claim, after); this.record('retract', principal, owner, scopeRef, claim.id, claim);
   }
   export(scopeRef: string, actor: Principal | string, resourceOwner?: string): BrainClaim[] {
     const result = this.read(scopeRef, actor, 'private', resourceOwner);
@@ -162,7 +167,7 @@ export class GovernedBrain {
    * operation is idempotent by claim id, rejects conflicting replays, and
    * appends imported history without allowing the bundle to overwrite local
    * claims, grants, or audit entries. */
-  importBundle(input: unknown, actor: Principal | string): { imported: number; skipped: number; contentHash: string } {
+  importBundle(input: unknown, actor: Principal | string, context?: ChangeContext): { imported: number; skipped: number; contentHash: string } {
     const bundle = brainBundleSchema.parse(input);
     const principal = brainActor(actor);
     if (!principal.roles.includes('owner') || principal.id !== bundle.owner || principal.tenantId !== bundle.tenantId) throw new BrainAccessDenied('Only the bundle owner can import this Brain bundle');
@@ -174,6 +179,7 @@ export class GovernedBrain {
     const history = [...(this.claims.get(destinationKey) ?? [])];
     const byId = new Map<string, BrainClaim>();
     for (const claims of this.claims.values()) for (const claim of claims) byId.set(claim.id, claim);
+    const newClaims: BrainClaim[] = [];
     let imported = 0;
     let skipped = 0;
     let nextVersion = history.length + 1;
@@ -188,21 +194,24 @@ export class GovernedBrain {
       this.assertGrant(principal, incoming.owner, incoming.tenantId, incoming.scopeRef, incoming.classification, 'write');
       const claim = claimSchema.parse({ ...incoming, version: nextVersion++, updatedAt: new Date().toISOString() });
       history.push(claim);
+      newClaims.push(claim);
       byId.set(claim.id, claim);
       imported += 1;
     }
+    for (const claim of newClaims) this.recordChange(null, claim, principal, 'brain.importBundle', context);
     if (imported > 0) this.claims.set(destinationKey, history);
     this.record('import', principal, principal.id, bundle.scopeRef, bundle.contentHash);
     return { imported, skipped, contentHash: bundle.contentHash };
   }
-  deleteScope(scopeRef: string, actor: Principal | string): void {
+  deleteScope(scopeRef: string, actor: Principal | string, context?: ChangeContext): void {
     const principal = brainActor(actor);
     if (!principal.roles.includes('owner')) throw new BrainAccessDenied('Only the owner can delete a Brain scope');
+    for (const claim of this.claims.get(this.key(principal.id, principal.tenantId, scopeRef)) ?? []) this.recordChange(claim, null, principal, 'brain.deleteScope', context);
     this.claims.delete(this.key(principal.id, principal.tenantId, scopeRef));
     for (const [grantId, grant] of this.grants) if (grant.scopeRef === scopeRef && isOwnedBy(grant, { owner: principal.id, tenantId: principal.tenantId })) this.grants.delete(grantId);
     this.record('delete', principal, principal.id, scopeRef);
   }
-  state(): BrainState { return structuredClone({ schemaVersion: 1 as const, claims: [...this.claims.values()].flat(), grants: [...this.grants.values()], audit: this.audit }); }
+  state(): BrainState { return structuredClone({ schemaVersion: 1 as const, claims: [...this.claims.values()].flat(), grants: [...this.grants.values()], audit: this.audit, changes: this.changeAudit.list() }); }
   auditLog(): BrainAudit[] { return structuredClone(this.audit); }
   /** Restore checkpointed audit entries without replacing live claims or grants. */
   restoreAudit(entries: BrainAudit[]): void {
@@ -221,7 +230,32 @@ export class GovernedBrain {
     }
     for (const grant of state.grants) brain.grants.set(grant.id, grant);
     brain.audit = state.audit;
+    brain.changeAudit = new ChangeAuditLog(state.changes ?? []);
     return brain;
+  }
+  rollbackChange(entryId: string, actor: Principal | string, reason: ChangeReason): ChangeAuditEntry {
+    const principal = brainActor(actor);
+    const entry = this.changeAudit.get(entryId);
+    const priorSnapshot = this.changeAudit.list().find(item => item.subjectId === entry.subjectId && (item.before !== null || item.after !== null));
+    const subject = claimSchema.parse(entry.before ?? entry.after ?? priorSnapshot?.before ?? priorSnapshot?.after);
+    // Rollback can resurrect private/retracted claims, so require ownership or installation authority.
+    if (!principal.roles.includes('operator') && (!principal.roles.includes('owner') || subject.owner !== principal.id || (subject.tenantId ?? 'local') !== principal.tenantId)) throw new BrainAccessDenied('Only the claim owner or installation operator can roll back a Brain change');
+    return this.changeAudit.rollback(entryId, { kind: principal.roles.includes('agent') ? 'agent' : 'user', id: principal.id }, reason,
+      original => [...this.claims.values()].flat().find(claim => claim.id === original.subjectId) ?? null,
+      (original, snapshot) => {
+        const restored = snapshot === null ? null : claimSchema.parse(snapshot);
+        for (const [key, claims] of this.claims) this.claims.set(key, claims.filter(claim => claim.id !== original.subjectId));
+        if (restored) {
+          const key = this.key(restored.owner, restored.tenantId ?? 'local', restored.scopeRef);
+          this.claims.set(key, [...(this.claims.get(key) ?? []), restored].sort((a, b) => a.version - b.version));
+        }
+      });
+  }
+  private recordChange(before: BrainClaim | null, after: BrainClaim | null, actor: Principal, trigger: string, context?: ChangeContext): void {
+    const claim = (after ?? before)!;
+    this.changeAudit.append({ subjectKind: 'memory', subjectId: claim.id, op: before === null ? 'create' : after === null ? 'delete' : 'update',
+      actor: context?.actor ?? { kind: actor.roles.includes('agent') ? 'agent' : 'user', id: actor.id },
+      reason: context?.reason ?? { taskId: claim.scopeRef, trigger }, before, after });
   }
   private record(action: BrainAudit['action'], actor: Principal, owner: string, scopeRef?: string, ref?: string, content?: { content: string }): void {
     this.audit.push({ id: 'brain_event_' + randomUUID(), at: new Date().toISOString(), actor: actor.id, tenantId: actor.tenantId, owner, action, ...(scopeRef ? { scopeRef } : {}), ...(ref ? { ref } : {}), ...(content ? { contentHash: digestContent(content.content) } : {}) });
@@ -309,6 +343,7 @@ export interface BrainSemanticIndexMaintenance extends BrainSemanticSearcher {
 
 export class FileBrainStore implements BrainPersistence {
   private lockPath: string;
+  private saveQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly directory: string) { this.lockPath = join(directory, '.writer.lock'); }
   private statePath(): string { return join(this.directory, 'brain.json'); }
   async init(): Promise<void> {
@@ -325,9 +360,22 @@ export class FileBrainStore implements BrainPersistence {
     try { return GovernedBrain.fromState(JSON.parse(await readFile(this.statePath(), 'utf8')) as BrainState); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new GovernedBrain(); throw error; }
   }
-  async save(brain: GovernedBrain): Promise<void> {
+  save(brain: GovernedBrain): Promise<void> {
+    const state = brain.state();
+    const next = this.saveQueue.then(() => this.saveState(state));
+    this.saveQueue = next.catch(() => undefined);
+    return next;
+  }
+  private async saveState(state: BrainState): Promise<void> {
+    const changes = state.changes ?? [];
+    new ChangeAuditLog(changes);
+    try {
+      const previous = brainStateSchema.parse(JSON.parse(await readFile(this.statePath(), 'utf8')));
+      const history = previous.changes ?? [];
+      if (history.length > changes.length || history.some((entry, index) => canonicalJson(entry) !== canonicalJson(changes[index]))) throw new ChangeAuditConflict('Cannot replace change audit history');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     const path = this.statePath(), temporary = path + '.' + randomUUID() + '.tmp';
-    const file = await open(temporary, 'wx', 0o600); try { await file.writeFile(JSON.stringify(brain.state())); await file.sync(); } finally { await file.close(); }
+    const file = await open(temporary, 'wx', 0o600); try { await file.writeFile(JSON.stringify(state)); await file.sync(); } finally { await file.close(); }
     await rename(temporary, path);
     const directory = await open(this.directory, 'r'); try { await directory.sync(); } finally { await directory.close(); }
   }

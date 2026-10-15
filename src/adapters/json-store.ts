@@ -1,3 +1,5 @@
+import { ChangeAuditLog, verifyChain, type ChangeAuditEntry, type ChangeContext, type ChangeAuditInput, type ChangeActor, type ChangeReason } from '../change-audit.js';
+import { memoryAuditInput, memorySnapshot, memorySnapshotIds, type MemoryChanges } from '../memory-change-audit.js';
 import { afterCollectionCursor, afterVersionCursor, decodeCollectionCursor, decodeVersionCursor, encodeCollectionCursor, encodeVersionCursor, recentFirst, scopedRecent, validateCollectionLimit, visibleRooms } from './collection-query.js';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { closeSync, existsSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
@@ -8,6 +10,7 @@ import type { AeeisStore, RoomPage } from './in-memory-store.js';
 import { assertMemoryCommit, assertRoomCommit, assertTaskCommit } from './task-commit.js';
 
 interface StoreState {
+  changeAudit?: ChangeAuditEntry[];
   rooms: Room[];
   goals: Goal[];
   plans: Plan[];
@@ -32,6 +35,7 @@ interface DomainHistoryFiles {
  * avoiding a full rewrite of unrelated historical receipts and memories.
  */
 type JournalOperation =
+  | { kind: 'memory.audited'; changes: MemoryChanges; entries: ChangeAuditEntry[] }
   | { kind: 'room.upsert'; room: Room; intents: ProjectionIntent[] }
   | { kind: 'goal.upsert'; goal: Goal; intents: ProjectionIntent[] }
   | { kind: 'plan.upsert'; plan: Plan; reopenedGoal?: Goal; intents: ProjectionIntent[] }
@@ -62,6 +66,19 @@ const emptyState = (): StoreState => ({
 
 export class JsonFileStore implements AeeisStore {
   private state: StoreState = emptyState();
+  readonly changeAudit = {
+    list: async (): Promise<ChangeAuditEntry[]> => structuredClone(this.state.changeAudit ?? []),
+    verifyChain: async (expectedHead?: string | null): Promise<boolean> => verifyChain(this.state.changeAudit ?? [], expectedHead),
+    rollback: async (entryId: string, actor: ChangeActor, reason: ChangeReason): Promise<ChangeAuditEntry> => {
+      this.loadMemoriesHistory();
+      const log = new ChangeAuditLog(this.state.changeAudit ?? []), changes: MemoryChanges = {};
+      const entry = log.rollback(entryId, actor, reason,
+        original => ({ records: Object.fromEntries(memorySnapshotIds(original).map(id => [id, this.state.memories.find(memory => memory.id === id) ?? null])) }),
+        (original, snapshot) => { Object.assign(changes, memorySnapshot(original, snapshot)); });
+      this.commit({ kind: 'memory.audited', changes, entries: [entry] });
+      return entry;
+    },
+  };
   private loaded = false;
   private lockOwned = false;
   private journalSeq = 0;
@@ -154,7 +171,7 @@ export class JsonFileStore implements AeeisStore {
       this.state = emptyState();
     }
     this.journalSeq = Number.isInteger(this.state.journalSeq) && this.state.journalSeq! >= 0 ? this.state.journalSeq! : 0;
-    try { this.replayJournal(); }
+    try { new ChangeAuditLog(this.state.changeAudit ?? []); this.replayJournal(); }
     catch (error) { await this.close(); throw error; }
     this.state = { ...this.state, journalSeq: this.journalSeq };
     this.loaded = true;
@@ -229,22 +246,28 @@ export class JsonFileStore implements AeeisStore {
     return structuredClone(this.state.receipts.filter((receipt) => receipt.planId === planId));
   }
 
-  async saveMemory(memory: MemoryEntry): Promise<void> {
-    this.loadMemoriesHistory();
-    this.commit({ kind: 'memory.upsert', memory: structuredClone(memory) });
+  private commitAuditedMemory(input: ChangeAuditInput, changes: MemoryChanges): void {
+    const log = new ChangeAuditLog(this.state.changeAudit ?? []);
+    const entry = log.append(input);
+    this.commit({ kind: 'memory.audited', changes: structuredClone(changes), entries: [entry] });
   }
-
-  async commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry): Promise<void> {
+  async saveMemory(memory: MemoryEntry, context?: ChangeContext): Promise<void> {
+    this.loadMemoriesHistory();
+    const previous = this.state.memories.find(item => item.id === memory.id), changes = { [memory.id]: memory };
+    this.commitAuditedMemory(memoryAuditInput(memory, previous ? { [memory.id]: previous } : null, changes, 'memory.save', context), changes);
+  }
+  async commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
     this.loadMemoriesHistory();
     assertMemoryCommit(this.state.memories.find(memory => memory.id === expected.id), expected, next);
-    this.commit({ kind: 'memory.upsert', memory: structuredClone(next) });
+    const changes = { [next.id]: next };
+    this.commitAuditedMemory(memoryAuditInput(next, { [expected.id]: expected }, changes, 'memory.update', context), changes);
   }
-
-  async commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry): Promise<void> {
+  async commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
     this.loadMemoriesHistory();
     assertMemoryCommit(this.state.memories.find(memory => memory.id === previous.id), previous, previous);
     if (this.state.memories.some(memory => memory.id === next.id)) throw new Error('Memory revision already exists');
-    this.commit({ kind: 'memory.revision', previous: structuredClone(previous), next: structuredClone(next) });
+    const changes = { [previous.id]: { ...previous, state: 'superseded' as const, updatedAt: next.updatedAt }, [next.id]: next };
+    this.commitAuditedMemory(memoryAuditInput(previous, { [previous.id]: previous, [next.id]: null }, changes, 'memory.correct', context), changes);
   }
 
   async getMemories(goalId?: Id, limit?: number): Promise<MemoryEntry[]> {
@@ -343,6 +366,9 @@ export class JsonFileStore implements AeeisStore {
       lastValidOffset = offset;
       if (record.seq <= this.journalSeq) continue;
       firstAppliedSeq ??= record.seq;
+      // A rollback can delete archived records. Materialize them before applying
+      // the deletion so a later lazy history read cannot resurrect them.
+      if (record.operation.kind === 'memory.audited') this.loadMemoriesHistory();
       this.state = applyOperation(this.state, record.operation);
       this.journalSeq = record.seq;
       entries += 1;
@@ -368,8 +394,9 @@ export class JsonFileStore implements AeeisStore {
     this.loadReceiptsHistory();
     this.loadMemoriesHistory();
     const historyFiles = this.writeHistorySidecars();
+    const { historyFiles: _previousHistory, ...currentState } = this.state;
     const snapshot: StoreState = {
-      ...this.state,
+      ...currentState,
       receipts: [],
       memories: [],
       journalSeq: this.journalSeq,
@@ -522,6 +549,14 @@ function applyOperation(state: StoreState, operation: JournalOperation): StoreSt
       };
     case 'receipt.append':
       return { ...state, receipts: [...state.receipts, structuredClone(operation.receipt)] };
+    case 'memory.audited': {
+      const log = new ChangeAuditLog([...(state.changeAudit ?? []), ...operation.entries]);
+      const memories = new Map(state.memories.map(memory => [memory.id, memory]));
+      for (const [id, memory] of Object.entries(operation.changes)) {
+        if (memory === null) memories.delete(id); else memories.set(id, structuredClone(memory));
+      }
+      return { ...state, memories: [...memories.values()], changeAudit: log.list() };
+    }
     case 'memory.upsert':
       return { ...state, memories: replace(state.memories, operation.memory) };
     case 'memory.revision': {
