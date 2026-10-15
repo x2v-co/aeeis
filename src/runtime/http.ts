@@ -1,3 +1,4 @@
+import { ChangeAuditConflict, changeReasonSchema, verifyChain, type ChangeAuditApi } from '../change-audit.js';
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
@@ -386,7 +387,7 @@ export function buildApp(options: Options) {
       }
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
-      const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile';
+      const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
@@ -406,6 +407,7 @@ export function buildApp(options: Options) {
   });
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'Invalid request', issues: error.issues.map(i => ({ path: i.path, message: i.message })) });
+    if (error instanceof ChangeAuditConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof BrainAccessDenied) return reply.code(403).send({ error: 'Brain access denied' });
     if (error instanceof AgentCallbackAuthenticationError) return reply.code(401).send({ error: 'Agent callback authentication failed' });
     if (error instanceof AgentResponseRejected) return reply.code(400).send({ error: 'Agent response rejected', kind: error.kind, detail: error.message });
@@ -1084,19 +1086,48 @@ export function buildApp(options: Options) {
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason, scope);
     throw new Conflict('Unsupported evolution action');
   });
+  const auditSourceSchema = z.enum(['memory', 'brain', 'knowledge', 'skill']);
+  const auditFor = (source: z.infer<typeof auditSourceSchema>, principal: Principal): ChangeAuditApi => {
+    if (source === 'memory' && options.domain) return options.domain.changeAudit;
+    if (source === 'brain' && options.brain && options.brainStore) return {
+      list: async () => options.brain!.changeAudit.list(),
+      verifyChain: async expectedHead => options.brain!.changeAudit.verifyChain(expectedHead),
+      rollback: async (entryId, actor, reason) => {
+        // The route has already checked installation operator authority.
+        const entry = options.brain!.rollbackChange(entryId, principal, reason);
+        await options.brainStore!.save(options.brain!);
+        return entry;
+      },
+    };
+    if (source === 'skill' && options.skills?.changeAudit) return options.skills.changeAudit;
+    if (source === 'knowledge' && options.knowledgeProvider?.changeAudit) return options.knowledgeProvider.changeAudit;
+    throw new Conflict('Change audit source is not configured');
+  };
+  app.get<{ Params: { source: string } }>('/api/admin/change-audit/:source', async request => {
+    const source = auditSourceSchema.parse(request.params.source);
+    const query = z.object({ subjectKind: z.enum(['memory', 'skill']).optional(), subjectId: z.string().min(1).max(200).optional(), limit: z.coerce.number().int().min(1).max(1000).default(100) }).strict().parse(request.query);
+    const entries = await auditFor(source, principalOf(request)).list();
+    return { entries: entries.filter(entry => (!query.subjectKind || entry.subjectKind === query.subjectKind) && (!query.subjectId || entry.subjectId === query.subjectId)).slice(-query.limit), valid: verifyChain(entries), headHash: entries.at(-1)?.hash ?? null };
+  });
+  app.post<{ Params: { source: string; entryId: string } }>('/api/admin/change-audit/:source/:entryId/rollback', async request => {
+    const source = auditSourceSchema.parse(request.params.source);
+    const body = z.object({ reason: changeReasonSchema }).strict().parse(request.body);
+    const principal = principalOf(request);
+    return auditFor(source, principal).rollback(request.params.entryId, { kind: principal.roles.includes('agent') ? 'agent' : 'user', id: principal.id }, body.reason);
+  });
   app.get('/api/skills/proposals', async () => {
     if (!options.skills) throw new Conflict('Skill governance is not configured');
     return options.skills.propose();
   });
   app.post<{ Params: { id: string } }>('/api/skills/proposals/:id/apply', async request => {
     if (!options.skills) throw new Conflict('Skill governance is not configured');
-    z.object({ approvalRef: z.string().trim().min(1).max(200) }).strict().parse(request.body ?? {});
-    return options.skills.apply(request.params.id);
+    const body = z.object({ approvalRef: z.string().trim().min(1).max(200) }).strict().parse(request.body ?? {});
+    return options.skills.apply(request.params.id, { actor: { kind: 'user', id: principalOf(request).id }, reason: { taskId: request.params.id, trigger: `skill.apply approval=${body.approvalRef}` } });
   });
   app.post<{ Params: { methodId: string; version: string } }>('/api/skills/:methodId/:version/rollback', async request => {
     if (!options.skills) throw new Conflict('Skill governance is not configured');
     const body = z.object({ reason: z.string().trim().min(1).max(4000) }).strict().parse(request.body ?? {});
-    return options.skills.rollback(request.params.methodId, request.params.version);
+    return options.skills.rollback(request.params.methodId, request.params.version, { actor: { kind: 'user', id: principalOf(request).id }, reason: { taskId: request.params.methodId, trigger: body.reason } });
   });
   app.get<{ Querystring: { limit?: string } }>('/api/collaborations/triggers/policies', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');

@@ -1,3 +1,5 @@
+import { ChangeAuditService, InMemoryChangeAuditStore, type ChangeContext, type ChangeAuditApi } from '../change-audit.js';
+import { memoryAuditInput, memorySnapshot, memorySnapshotIds } from '../memory-change-audit.js';
 import { afterCollectionCursor, afterVersionCursor, decodeCollectionCursor, decodeVersionCursor, encodeCollectionCursor, encodeVersionCursor, recentFirst, scopedRecent, validateCollectionLimit, visibleRooms } from './collection-query.js';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, ProjectionIntent, RunReceipt, Room } from "../contracts.js";
@@ -23,9 +25,10 @@ export interface AeeisStore {
   getPlansPage?(goalId: Id, limit: number, cursor?: string): Promise<PlanPage>;
   appendReceipt(receipt: RunReceipt): Promise<void>;
   getReceipts(planId: Id): Promise<RunReceipt[]>;
-  saveMemory(memory: MemoryEntry): Promise<void>;
-  commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry): Promise<void>;
-  commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry): Promise<void>;
+  readonly changeAudit?: ChangeAuditApi;
+  saveMemory(memory: MemoryEntry, context?: ChangeContext): Promise<void>;
+  commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void>;
+  commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void>;
   getMemories(goalId?: Id, limit?: number): Promise<MemoryEntry[]>;
   saveContextManifest(manifest: ContextManifest): Promise<void>;
   getContextManifest(id: Id): Promise<ContextManifest | undefined>;
@@ -44,6 +47,15 @@ export class InMemoryStore implements AeeisStore {
   private readonly receipts = new Map<Id, RunReceipt[]>();
   private readonly memories = new Map<Id, MemoryEntry>();
   private readonly manifests = new Map<Id, ContextManifest>();
+  private readonly auditStore = new InMemoryChangeAuditStore();
+  readonly changeAudit = new ChangeAuditService(this.auditStore, {
+    read: entry => ({ records: Object.fromEntries(memorySnapshotIds(entry).map(id => [id, this.memories.get(id) ?? null])) }),
+    restore: (entry, snapshot) => {
+      for (const [id, memory] of Object.entries(memorySnapshot(entry, snapshot))) {
+        if (memory === null) this.memories.delete(id); else this.memories.set(id, structuredClone(memory));
+      }
+    },
+  });
   private readonly projectionIntents = new Map<Id, ProjectionIntent>();
 
   async commitRoomCreation(room: Room, intents: ProjectionIntent[] = []): Promise<void> {
@@ -150,20 +162,31 @@ export class InMemoryStore implements AeeisStore {
     return structuredClone(this.receipts.get(planId) ?? []);
   }
 
-  async saveMemory(memory: MemoryEntry): Promise<void> {
-    this.memories.set(memory.id, structuredClone(memory));
+  async saveMemory(memory: MemoryEntry, context?: ChangeContext): Promise<void> {
+    await this.auditStore.transaction(log => {
+      const previous = this.memories.get(memory.id);
+      log.append(memoryAuditInput(memory, previous ? { [memory.id]: previous } : null, { [memory.id]: memory }, 'memory.save', context));
+      this.memories.set(memory.id, structuredClone(memory));
+    });
   }
 
-  async commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry): Promise<void> {
-    assertMemoryCommit(this.memories.get(expected.id), expected, next);
-    this.memories.set(next.id, structuredClone(next));
+  async commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
+    await this.auditStore.transaction(log => {
+      assertMemoryCommit(this.memories.get(expected.id), expected, next);
+      log.append(memoryAuditInput(next, { [expected.id]: expected }, { [next.id]: next }, 'memory.update', context));
+      this.memories.set(next.id, structuredClone(next));
+    });
   }
 
-  async commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry): Promise<void> {
-    assertMemoryCommit(this.memories.get(previous.id), previous, previous);
-    if (this.memories.has(next.id)) throw new Error('Memory revision already exists');
-    this.memories.set(previous.id, structuredClone({ ...previous, state: 'superseded', updatedAt: next.updatedAt }));
-    this.memories.set(next.id, structuredClone(next));
+  async commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
+    await this.auditStore.transaction(log => {
+      assertMemoryCommit(this.memories.get(previous.id), previous, previous);
+      if (this.memories.has(next.id)) throw new Error('Memory revision already exists');
+      const superseded = { ...previous, state: 'superseded' as const, updatedAt: next.updatedAt };
+      log.append(memoryAuditInput(previous, { [previous.id]: previous, [next.id]: null }, { [previous.id]: superseded, [next.id]: next }, 'memory.correct', context));
+      this.memories.set(previous.id, structuredClone(superseded));
+      this.memories.set(next.id, structuredClone(next));
+    });
   }
 
   async getMemories(goalId?: Id, limit?: number): Promise<MemoryEntry[]> {

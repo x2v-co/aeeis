@@ -1,3 +1,5 @@
+import { ChangeAuditService, InMemoryChangeAuditStore, type ChangeContext, type ChangeAuditInput, type ChangeAuditApi } from './change-audit.js';
+import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
 import { HttpDependencyProbe, readableFileHealth } from './dependency-health.js';
 import { createHash } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
@@ -35,6 +37,7 @@ export interface KnowledgeHit { record: KnowledgeRecord; score: number; matchedT
 export interface KnowledgeSearchResult { hits: KnowledgeHit[]; usage?: GlobalBudgetUsage }
 export interface KnowledgeProviderHealth { ready: boolean; detail: string; checkedAt?: string }
 export interface KnowledgeProvider {
+  readonly changeAudit?: ChangeAuditApi;
   /** Arrays remain supported for non-metered/local providers. Remote
    * providers may return an envelope carrying verified usage. */
   search(request: KnowledgeSearchRequest): Promise<KnowledgeHit[] | KnowledgeSearchResult>;
@@ -102,7 +105,38 @@ const knowledgeHitSchema = z.object({ record: knowledgeRecordSchema, score: z.nu
 
 /** Deterministic local adapter used for development and as a contract fixture. */
 export class InMemoryKnowledgeProvider implements KnowledgeProvider {
-  constructor(private readonly records: KnowledgeRecord[]) {}
+  private readonly records: KnowledgeRecord[];
+  private readonly auditStore = new InMemoryChangeAuditStore();
+  readonly changeAudit = new ChangeAuditService(this.auditStore, {
+    read: entry => this.records.find(record => record.id === entry.subjectId) ?? null,
+    restore: (entry, snapshot) => {
+      const parsed = snapshot === null ? null : knowledgeRecordSchema.parse(snapshot);
+      if (parsed) assertKnowledgeRecordHash(parsed);
+      const index = this.records.findIndex(record => record.id === entry.subjectId);
+      if (index >= 0) this.records.splice(index, 1);
+      if (parsed) this.records.push(parsed);
+    },
+  });
+  constructor(records: KnowledgeRecord[]) { this.records = structuredClone(records); }
+  async upsert(record: KnowledgeRecord, context?: ChangeContext): Promise<void> { await this.upsertMany([record], context); }
+  async upsertMany(records: KnowledgeRecord[], context?: ChangeContext): Promise<void> {
+    const parsed = records.map(record => { const value = knowledgeRecordSchema.parse(record); assertKnowledgeRecordHash(value); return value; });
+    await this.auditStore.transaction(log => {
+      for (const record of parsed) {
+        const index = this.records.findIndex(item => item.id === record.id), before = this.records[index] ?? null;
+        log.append(knowledgeChange(before, record, context));
+        if (index >= 0) this.records[index] = record; else this.records.push(record);
+      }
+    });
+  }
+  async remove(id: string, context?: ChangeContext): Promise<void> {
+    await this.auditStore.transaction(log => {
+      const index = this.records.findIndex(record => record.id === id);
+      if (index < 0) return;
+      log.append(knowledgeChange(this.records[index]!, null, context));
+      this.records.splice(index, 1);
+    });
+  }
 
   async health(): Promise<KnowledgeProviderHealth> { return { ready: true, detail: 'in-memory knowledge provider' }; }
 
@@ -209,13 +243,29 @@ export class FileKnowledgeProvider implements KnowledgeProvider {
 export class PostgresKnowledgeProvider implements KnowledgeProvider, KnowledgeEmbeddingMaintenance {
   private readonly pool: pg.Pool;
   private readonly embedding: KnowledgeEmbeddingProvider | undefined;
+  private readonly auditStore: PostgresChangeAuditStore;
+  readonly changeAudit: ChangeAuditService<pg.PoolClient>;
 
   constructor(connectionString: string, options: PostgresKnowledgeProviderOptions = {}) {
     this.pool = new pg.Pool({ connectionString });
     this.embedding = options.embedding;
+    this.auditStore = new PostgresChangeAuditStore(this.pool, 'knowledge');
+    this.changeAudit = new ChangeAuditService(this.auditStore, {
+      read: async (entry, client) => (await client.query<{ record: KnowledgeRecord }>('SELECT record FROM aeeis_knowledge_records WHERE id=$1 FOR UPDATE', [entry.subjectId])).rows[0]?.record ?? null,
+      restore: async (entry, snapshot, client) => {
+        if (snapshot === null) await client.query('DELETE FROM aeeis_knowledge_records WHERE id=$1', [entry.subjectId]);
+        else {
+          const record = knowledgeRecordSchema.parse(snapshot);
+          assertKnowledgeRecordHash(record);
+          await this.writeRecord(client, record);
+          if (this.embedding) await this.writeEmbedding(client, record.id, await this.embedding.embed(searchableText(record)));
+        }
+      },
+    });
   }
 
   async init(): Promise<void> {
+    await this.auditStore.init();
     await withPostgresMigrationLock(this.pool, 'knowledge', async client => { await client.query(`
       CREATE TABLE IF NOT EXISTS aeeis_knowledge_records (
         id text PRIMARY KEY,
@@ -278,45 +328,36 @@ export class PostgresKnowledgeProvider implements KnowledgeProvider, KnowledgeEm
     return { ready: true, detail: 'knowledge PostgreSQL reachable' };
   }
 
-  async upsert(recordInput: KnowledgeRecord): Promise<void> {
-    const record = knowledgeRecordSchema.parse(recordInput);
-    assertKnowledgeRecordHash(record);
-    await this.pool.query(
+  private async writeRecord(client: pg.PoolClient, record: KnowledgeRecord): Promise<void> {
+    await client.query(
       `INSERT INTO aeeis_knowledge_records(id,record,tenant_id,classification,audiences,updated_at,content_hash,search_text)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT(id) DO UPDATE SET record=EXCLUDED.record,tenant_id=EXCLUDED.tenant_id,classification=EXCLUDED.classification,audiences=EXCLUDED.audiences,updated_at=EXCLUDED.updated_at,content_hash=EXCLUDED.content_hash,search_text=EXCLUDED.search_text`,
       [record.id, record, record.tenantId ?? null, record.classification, record.audiences ?? null, record.updatedAt, record.contentHash, searchableText(record)],
     );
-    await this.upsertEmbedding(record);
   }
-
-  async upsertMany(records: KnowledgeRecord[]): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const parsedRecords = records.map(record => {
-        const parsed = knowledgeRecordSchema.parse(record);
-        assertKnowledgeRecordHash(parsed);
-        return parsed;
-      });
-      const embeddings = this.embedding
-        ? await Promise.all(parsedRecords.map(async record => ({ record, vector: await this.embedding!.embed(searchableText(record)) })))
-        : [];
-      for (const parsed of parsedRecords) {
-        await client.query(
-          `INSERT INTO aeeis_knowledge_records(id,record,tenant_id,classification,audiences,updated_at,content_hash,search_text)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT(id) DO UPDATE SET record=EXCLUDED.record,tenant_id=EXCLUDED.tenant_id,classification=EXCLUDED.classification,audiences=EXCLUDED.audiences,updated_at=EXCLUDED.updated_at,content_hash=EXCLUDED.content_hash,search_text=EXCLUDED.search_text`,
-          [parsed.id, parsed, parsed.tenantId ?? null, parsed.classification, parsed.audiences ?? null, parsed.updatedAt, parsed.contentHash, searchableText(parsed)],
-        );
+  async upsert(recordInput: KnowledgeRecord, context?: ChangeContext): Promise<void> { await this.upsertMany([recordInput], context); }
+  async upsertMany(records: KnowledgeRecord[], context?: ChangeContext): Promise<void> {
+    const parsedRecords = records.map(record => { const parsed = knowledgeRecordSchema.parse(record); assertKnowledgeRecordHash(parsed); return parsed; });
+    const embeddings = this.embedding
+      ? await Promise.all(parsedRecords.map(async record => ({ record, vector: await this.embedding!.embed(searchableText(record)) }))) : [];
+    await this.auditStore.transaction(async (log, client) => {
+      for (const record of parsedRecords) {
+        const before = (await client.query<{ record: KnowledgeRecord }>('SELECT record FROM aeeis_knowledge_records WHERE id=$1 FOR UPDATE', [record.id])).rows[0]?.record ?? null;
+        log.append(knowledgeChange(before, record, context));
+        await this.writeRecord(client, record);
       }
       for (const item of embeddings) await this.writeEmbedding(client, item.record.id, item.vector);
-      await client.query('COMMIT');
-    } catch (error) { await client.query('ROLLBACK'); throw error; }
-    finally { client.release(); }
+    });
   }
-
-  async remove(id: string): Promise<void> { await this.pool.query('DELETE FROM aeeis_knowledge_records WHERE id=$1', [id]); }
+  async remove(id: string, context?: ChangeContext): Promise<void> {
+    await this.auditStore.transaction(async (log, client) => {
+      const before = (await client.query<{ record: KnowledgeRecord }>('SELECT record FROM aeeis_knowledge_records WHERE id=$1 FOR UPDATE', [id])).rows[0]?.record;
+      if (!before) return;
+      log.append(knowledgeChange(before, null, context));
+      await client.query('DELETE FROM aeeis_knowledge_records WHERE id=$1', [id]);
+    });
+  }
 
   /** Backfills the derived vector index in bounded, durable batches. The
    * canonical record table is never replaced. A completed cursor is reused
@@ -530,4 +571,10 @@ export function isAudienceAllowed(record: KnowledgeRecord, audience: string): bo
 
 function isTenantAllowed(record: KnowledgeRecord, tenantId: string | undefined): boolean {
   return record.tenantId === undefined || record.tenantId === tenantId;
+}
+
+function knowledgeChange(before: KnowledgeRecord | null, after: KnowledgeRecord | null, context?: ChangeContext): ChangeAuditInput {
+  const record = (after ?? before)!;
+  return { subjectKind: 'memory', subjectId: record.id, op: before === null ? 'create' : after === null ? 'delete' : 'update', before, after,
+    actor: context?.actor ?? { kind: 'system', id: 'knowledge' }, reason: context?.reason ?? { taskId: record.id, trigger: after === null ? 'knowledge.remove' : 'knowledge.upsert' } };
 }
