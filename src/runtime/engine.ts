@@ -674,6 +674,7 @@ export class AgentEngine {
   private resourceRegistry: ResourceRegistry | undefined;
   private readonly maxRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RECOVERABLE_TOOL_FAILURES ?? 3);
   private readonly maxRunRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RUN_RECOVERABLE_TOOL_FAILURES ?? 8);
+  private readonly finalCallTimeoutMs = z.coerce.number().int().positive().parse(process.env.AEEIS_FINAL_CALL_TIMEOUT_MS ?? 180_000);
   constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry }) {
     this.executionLimits = executionLimitsSchema.parse('complete' in modelOrServices ? {} : modelOrServices.executionLimits ?? {});
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
@@ -1279,7 +1280,7 @@ export class AgentEngine {
       if (currentCall.inputHash !== body.inputHash) throw new Conflict('Model reconciliation input hash does not match the durable call');
       // A partial deliverable may already have been returned. Reconcile its
       // billing receipt without reopening execution or replacing the artifact.
-      if (current.status === 'succeeded') {
+      if (current.status === 'succeeded' || current.steps.some(step => step.status === 'succeeded' && step.finalCallId === currentCall.id)) {
         currentCall.state = body.outcome === 'completed' ? 'discarded' : 'failed';
         currentCall.endedAt = now();
         if (body.outcome === 'completed') currentCall.outputHash = digest(body.output);
@@ -1419,6 +1420,7 @@ export class AgentEngine {
       legacyRequests = [{ ...request, input: withoutClock }, ...legacyRequests];
     }
     request = this.requestForCall(run, phase, request, taskId, legacyRequests);
+    const finalOnly = phase === 'executor' && Boolean((request.input as { executionBudget?: { finalOnly?: boolean } } | null)?.executionBudget?.finalOnly);
     if (JSON.stringify(request).length > 120000) throw new Error('Context exceeds this runtime limit; reduce supplied materials or split the goal');
     const existingCallId = run.resumeModelCallId;
     const callId = existingCallId ?? id('model');
@@ -1531,12 +1533,13 @@ export class AgentEngine {
     try {
       const reconciled = existingCallId && run.reconciledModelCall?.callId === existingCallId ? run.reconciledModelCall : undefined;
       result = reconciled ? { value: reconciled.value, ...(reconciled.usage ? { usage: reconciled.usage } : {}) } : await (async () => {
-        if (!repairing) return model.complete(requestWithKey);
+        if (!repairing && !finalOnly) return model.complete(requestWithKey);
         const controller = new AbortController();
+        const timeoutMs = repairing ? repairTimeoutMs : request.timeoutMs ?? this.finalCallTimeoutMs;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const response = await Promise.race([model.complete({ ...requestWithKey, signal: controller.signal }), new Promise<never>((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new ModelOutcomeUnknown('Artifact repair timed out')); }, repairTimeoutMs);
+            timer = setTimeout(() => { controller.abort(); reject(new ModelOutcomeUnknown(repairing ? 'Artifact repair timed out' : 'Final-only model call timed out')); }, timeoutMs);
           })]);
           return response;
         } finally { clearTimeout(timer); controller.abort(); }
@@ -1555,7 +1558,7 @@ export class AgentEngine {
           const step = current.steps.find(step => step.taskId === taskId);
           if (step?.finishRepair) step.finishRepair.discarded = repairFailure!;
         }
-        if (!repairing && error instanceof ModelOutcomeUnknown && !terminalRunStatuses.has(current.status)) {
+        if (!repairing && !finalOnly && error instanceof ModelOutcomeUnknown && !terminalRunStatuses.has(current.status)) {
           current.reconcileDisposition = current.status === 'paused' ? 'paused' : 'running';
           current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
           current.status = 'unknown'; current.error = error.message;
@@ -1566,7 +1569,9 @@ export class AgentEngine {
         call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
-        if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
+        if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
+          createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
+        } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
           && await preserveRunOutput(current, `Model ${phase} outcome is unknown: ${error.message} Independent review was not completed; provider billing still requires reconciliation.`)) {
           event(current, 'run.partial', { reason: 'Model outcome unknown; completed work retained', callId });
@@ -1574,6 +1579,7 @@ export class AgentEngine {
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
+      if (finalOnly && failed.steps.some(step => step.taskId === taskId && step.status === 'succeeded')) return;
       if (failed.status === 'succeeded') return;
       if (!repairing) throw error;
       result = { value: run.steps.find(step => step.taskId === taskId)!.finishRepair!.candidate };
@@ -1765,7 +1771,8 @@ export class AgentEngine {
         + (run.events.some(event => event.type === 'tool.failed_recoverable' && event.data.taskId === node.id) ? '\nTool observations with error.recoverable=true report a failed attempt, not successful evidence. Use the error message and HTTP status to choose another source or approach, or finish with a useful partial answer and explicit limitations. Avoid repeating the same failing call.' : '')
         + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns only for source gaps and limitations for runtime limits. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
     const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance + sourceFidelityGuidance
-      + '\nFor questions, include missing as an array of concrete facts requested from the user, such as model, quantity and delivery city; capability means a requested tool or API, not missing case data.';
+      + '\nFor questions, include missing as an array of concrete facts requested from the user, such as model, quantity and delivery city; capability means a requested tool or API, not missing case data.'
+      + '\nWhen executionBudget.remainingModelCalls <= 2, finish now and synthesize the evidence already received, stating any remaining gaps.';
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), task: node, sourceCatalog: [...run.context.sources, ...historySources].map(({ id, title }) => ({ id, title })),
         dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(step.observations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
         // Later tasks must receive the write manifest too, even when the task
@@ -1797,7 +1804,7 @@ export class AgentEngine {
       const previousSources = presentedMaterials(run.context.sources, materialQueryTerms(`${run.goal} ${node.instruction}`), 12_000);
       legacyRequests.push(...legacyRequests.flatMap(request => [previousSources, historicalSources].map(sources => ({ ...request, input: { ...(request.input as Record<string, unknown>), presentedSources: sources } }))));
     }
-    const executorRequest = this.requestForCall(run, 'executor', { system: executorSystem, input: executorInput, ...(step.finishRepair ? { maxTokens: repairMaxTokens, maxResponseBytes: repairMaxBytes, timeoutMs: repairTimeoutMs, disableRetries: true } : {}) }, node.id, legacyRequests);
+    const executorRequest = this.requestForCall(run, 'executor', { system: executorSystem, input: executorInput, ...(proposedLimitReason || recovery?.toolsAllowed === false ? { timeoutMs: this.finalCallTimeoutMs } : {}), ...(step.finishRepair ? { maxTokens: repairMaxTokens, maxResponseBytes: repairMaxBytes, timeoutMs: repairTimeoutMs, disableRetries: true } : {}) }, node.id, legacyRequests);
     const originalBudget = (executorRequest.input as { executionBudget?: { finalOnly?: boolean; reason?: string } }).executionBudget;
     const limitReason = originalBudget?.finalOnly ? originalBudget.reason ?? 'Execution allowance exhausted' : undefined;
     await this.call(run, model, 'executor', executorRequest, async (current, value) => {
@@ -1865,6 +1872,25 @@ export class AgentEngine {
       if (limitReason && decision.type !== 'finish') {
         requestOutputRecovery(current, live, decision, [{ path: 'type', code: 'finish_required', message: 'Final limited-evidence call must return a finish decision; tools are disallowed. Use the received evidence and state remaining gaps in limitations.' }], false);
         return;
+      }
+      if (decision.type === 'tool' || decision.type === 'capability') {
+        const duplicate = live.observations.find(observation => {
+          if (decision.type === 'tool') return observation.tool === decision.tool && observation.requestHash === digest(decision);
+          if (observation.tool !== decision.toolId) return false;
+          const receiptId = (observation.result as { receiptId?: string } | null)?.receiptId;
+          const receipt = current.toolReceipts.find(receipt => receipt.receiptId === receiptId);
+          if (receipt?.status !== 'completed' || receipt.authorization?.decision !== 'authorized' || receipt.authorization.toolVersion !== decision.toolVersion
+            || receipt.authorization.taskId !== node.id || receipt.authorization.toolId !== decision.toolId) return false;
+          try { return digest(JSON.parse(observation.argument)) === digest(decision.input); } catch { return false; }
+        });
+        if (duplicate) {
+          const receiptId = (duplicate.result as { receiptId?: string } | null)?.receiptId;
+          const reference = receiptId ?? `observations/${live.observations.indexOf(duplicate)}`;
+          live.observations.push({ tool: `${duplicate.tool}.duplicate`, argument: duplicate.argument,
+            result: { duplicateOf: reference, note: `Duplicate of ${reference}; reuse the prior result. No tool was executed.`, evidenceRefs: evidenceRefsFromObservation(duplicate.result) } });
+          event(current, 'tool.duplicate', { taskId: node.id, tool: duplicate.tool, reference });
+          return;
+        }
       }
       if (decision.type === 'question') {
         current.question = inputQuestion(current, node.id, decision.question, false, decision.missing); current.status = 'needs_input'; event(current, 'input.requested', { taskId: node.id, kind: current.question.kind, missing: current.question.missing });
@@ -1961,7 +1987,7 @@ export class AgentEngine {
               };
             });
         }
-        live.observations.push({ tool: decision.tool, argument: decision.argument, result, ...(sourcePageCost === 0 ? { sourcePageCost } : {}) });
+        live.observations.push({ tool: decision.tool, argument: decision.argument, result, requestHash: digest(decision), ...(sourcePageCost === 0 ? { sourcePageCost } : {}) });
         event(current, 'tool.completed', { taskId: node.id, tool: decision.tool, inputHash: digest(isSourceReadTool(decision.tool) && decision.tool !== 'sources.read' ? decision : decision.argument), outputHash: digest(result), contextId: current.context.id });
       } else if (decision.type === 'capability') {
         assertExternalBudget(current);
@@ -2826,6 +2852,40 @@ export class AgentEngine {
 
 function currentDelegationReceipt(run: AgentRun, receiptRef: string): import('../agent-gateway.js').DelegationReceipt | undefined {
   return run.delegationOutcomes?.find(item => item.receiptRef === receiptRef)?.receipt;
+}
+
+/** A failed synthesis must not discard research or replay the uncertain call. */
+function createLimitedNodeArtifact(run: AgentRun, taskId: string, callId: string, failure: string): void {
+  const step = run.steps.find(step => step.taskId === taskId)!;
+  const node = run.plans.at(-1)!.nodes.find(node => node.id === taskId)!;
+  const receipts = run.toolReceipts.filter(receipt => receipt.status === 'completed'
+    && receipt.authorization?.decision === 'authorized' && receipt.authorization.taskId === taskId);
+  const evidenceRefs = [...new Set([
+    ...step.observations.flatMap(observation => evidenceRefsFromObservation(observation.result)),
+    ...step.observations.filter(observation => isSourceTool(observation.tool) && run.context.sources.some(source => source.id === observation.argument)).map(observation => observation.argument),
+    ...receipts.flatMap(receipt => [receipt.receiptId, ...receipt.outputRefs]),
+  ])];
+  const limitations = [step.limitReason ?? 'Execution allowance exhausted', `Final synthesis failed: ${failure}`];
+  let remaining = 24_000;
+  const excerpts = step.observations.flatMap(observation => {
+    if (observation.tool.endsWith('.duplicate') || remaining <= 0) return [];
+    // Keep titles, URLs and excerpts verbatim as received, with explicit bounds.
+    const text = JSON.stringify(canonicalize(observation.result));
+    const excerpt = text.slice(0, Math.min(remaining, 6000));
+    remaining -= excerpt.length;
+    return [`${observation.tool} (${observation.argument}):\n${excerpt}${excerpt.length < text.length ? '\n[Observation excerpt truncated; full result retained in the Run.]' : ''}`];
+  });
+  const content = `Partial answer — limited evidence: ${limitations.join('; ')}.\n\nFinal synthesis was unavailable. The following are untrusted observations retained for follow-up; their claims have not been independently verified.\n\n${excerpts.join('\n\n') || 'No tool observations were completed.'}\n\nEvidence references: ${evidenceRefs.join(', ') || 'none'}`;
+  const finish = { type: 'finish', title: node.title, content, evidenceRefs };
+  const artifact = { id: id('artifact'), taskId, title: node.title, content, evidenceRefs, partial: true, limitations, hash: digest(finish), createdAt: now() };
+  run.artifacts = run.artifacts.filter(artifact => artifact.taskId !== taskId);
+  run.artifacts.push(artifact);
+  step.status = 'succeeded';
+  delete step.finishRepair; delete step.outputRecovery; delete step.error; delete step.failureReason;
+  run.partial = true;
+  populateRunLimitations(run);
+  event(run, 'artifact.created', { artifactId: artifact.id, taskId, evidenceRefs, modelCallId: callId, contextId: run.context.id, partial: true });
+  event(run, 'execution.partial', { taskId, callId, reason: limitations[0], failure });
 }
 
 /** Extract only protocol-defined evidence references from a tool/Agent result.

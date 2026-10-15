@@ -4,7 +4,7 @@ import { isSourceReadTool } from './source-tools.js';
 
 export const executionLimitsSchema = z.object({
   // Includes the reserved final finish call and any artifact repair calls.
-  maxNodeIterations: z.number().int().min(2).max(100).default(8),
+  maxNodeIterations: z.number().int().min(2).max(100).default(12),
   maxNodeSourcePages: z.number().int().min(1).max(1000).default(4),
   maxRunSourcePages: z.number().int().min(1).max(10000).default(12),
   maxNodeSourceChars: z.number().int().min(1).max(1000000).default(12000),

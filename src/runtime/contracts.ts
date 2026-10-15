@@ -267,7 +267,7 @@ export interface Step {
   finalCallId?: string;
   error?: string; failureReason?: string;
   taskId: string; status: 'pending' | 'running' | 'succeeded';
-  attempts: number; observations: Array<{ tool: string; argument: string; result: unknown; sourcePageCost?: 0 }>;
+  attempts: number; observations: Array<{ tool: string; argument: string; result: unknown; sourcePageCost?: 0; requestHash?: string }>;
   /** One bounded, durable model attempt to repair a candidate finish object. */
   finishRepair?: { reason: string; candidate: unknown; problems?: Array<{ path: string; code: string; message: string }>; discarded?: string };
   /** Bounded corrective turns, independent of the exhausted ordinary allowance. */

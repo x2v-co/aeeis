@@ -29,7 +29,7 @@ async function setup(options: { external?: boolean; goalLinked?: boolean } = {})
     return { value: request.system.includes('Plan a real deliverable')
       ? (input.userFeedback ? { summary: '修订后的计划', nodes: [{ ...original.nodes[0]!, title: '核查并总结', evidenceRequirements: '引用原始资料' }] } : original)
       : request.system.includes('Independently review') ? { verdict: 'accepted', summary: '通过', issues: [] }
-      : options.external ? { type: 'capability', toolId: 'lookup', toolVersion: '1', input: {}, purpose: '读取资料' }
+      : options.external ? { type: 'capability', toolId: 'lookup', toolVersion: '1', input: { query: input.observations.length }, purpose: '读取资料' }
       : { type: 'finish', title: '报告', content: '整理完成。', evidenceRefs: [] }, usage: { inputTokens: 2, outputTokens: 1 } };
   });
   const invoke = vi.fn<ToolGateway['invoke']>(async request => ({ status: 'completed', output: '资料', receipt: {
