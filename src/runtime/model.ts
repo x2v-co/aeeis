@@ -136,7 +136,7 @@ interface StreamDiagnostics {
   usage?: z.infer<typeof envelope>['usage'];
 }
 interface TransportHistory {
-  midstreamRetries: number; usageUnknown: boolean; thinkingUnsupported: boolean;
+  midstreamRetries: number; usageUnknown: boolean; thinkingUnsupported: boolean; startedAt?: number;
 }
 
 /** otherBytes = SSE framing + per-frame JSON envelope (id/model/created/choices/usage). */
@@ -216,6 +216,8 @@ export interface ModelTransportOptions {
   /** HTTP 429 has its own attempt counter/backoff so rate limits do not consume transport-failure attempts. */
   rateLimitMaxAttempts?: number; rateLimitBaseMs?: number; rateLimitMaxMs?: number;
   stream?: boolean; firstByteTimeoutMs?: number; idleTimeoutMs?: number; streamOverallTimeoutMs?: number;
+  /** r74: abort a streaming attempt when no new content/reasoning/tool delta arrives for this long (headers and keep-alive frames do not count). 0 disables. */
+  stallTimeoutMs?: number;
   /** Wall-clock budget for one complete()/requestCompletion including midstream and transport retries. */
   callBudgetMs?: number;
   retryEmptyIdle?: boolean;
@@ -254,6 +256,7 @@ export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOpti
     ...(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS === undefined ? {} : { firstByteTimeoutMs: Number(env.AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS) }),
     streamOverallTimeoutMs: Number(env.AEEIS_MODEL_STREAM_OVERALL_TIMEOUT_MS ?? 900_000),
     callBudgetMs: Number(env.AEEIS_MODEL_CALL_BUDGET_MS ?? 600_000),
+    stallTimeoutMs: Number(env.AEEIS_MODEL_STALL_TIMEOUT_MS ?? 90_000),
     retryEmptyIdle: env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== '0',
     midstreamRetries: z.string().trim().min(1).transform(Number).pipe(z.number().int().min(0).max(3)).parse(env.AEEIS_MODEL_MIDSTREAM_RETRIES ?? '1'),
     maxTokens: Number(env.AEEIS_MODEL_MAX_TOKENS ?? defaultMaxTokens),
@@ -284,7 +287,7 @@ export class HttpModelAdapter implements ModelAdapter {
       rateLimitMaxAttempts: transport.rateLimitMaxAttempts ?? 5, rateLimitBaseMs: transport.rateLimitBaseMs ?? 2_000, rateLimitMaxMs: transport.rateLimitMaxMs ?? 60_000,
       stream: transport.stream ?? ark, firstByteTimeoutMs: transport.firstByteTimeoutMs ?? (ark ? 240_000 : 120_000),
       idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 180_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 900_000,
-      callBudgetMs: transport.callBudgetMs ?? 600_000,
+      callBudgetMs: transport.callBudgetMs ?? 600_000, stallTimeoutMs: transport.stallTimeoutMs ?? 90_000,
       retryEmptyIdle: transport.retryEmptyIdle ?? true, midstreamRetries: transport.midstreamRetries ?? 1, maxTokens: transport.maxTokens ?? defaultMaxTokens,
       thinking: transport.thinking === undefined ? (defaultThinkingDisabled ? 'disabled' : null)
         : transport.thinking === 'provider-default' ? null : z.enum(['enabled', 'disabled', 'auto']).parse(transport.thinking),
@@ -304,6 +307,7 @@ export class HttpModelAdapter implements ModelAdapter {
     z.number().int().min(1).max(600_000).parse(this.transport.idleTimeoutMs);
     z.number().int().min(1).max(1_800_000).parse(this.transport.streamOverallTimeoutMs);
     z.number().int().min(1).max(1_800_000).parse(this.transport.callBudgetMs);
+    z.number().int().min(0).max(600_000).parse(this.transport.stallTimeoutMs);
     this.pin = { model, endpoint: `${url.href.replace(/\/$/, '')}/chat/completions`, promptVersion: 'aeeis-project-agent/1', ...(provider ? { provider } : {}), ...pinOverrides };
     if (this.pin.maxTokens !== undefined) tokenLimit.parse(this.pin.maxTokens);
     if (this.pin.maxOutputTokens !== undefined) tokenLimit.parse(this.pin.maxOutputTokens);
@@ -379,7 +383,8 @@ export class HttpModelAdapter implements ModelAdapter {
     throw new ModelResponseRejected('Model response is incomplete', usage);
   }
   private async requestCompletion(request: ModelRequest, maxTokens: number, lengthAttempt: number, history: TransportHistory): Promise<z.infer<typeof envelope>> {
-    const started = Date.now();
+    // r74: one call budget across length, midstream and transport retries (complete() starts the clock).
+    const started = history.startedAt ??= Date.now();
     const thinking = request.thinking === undefined ? this.transport.thinking : request.thinking;
     const reasoningEffort = request.reasoningEffort === undefined ? this.transport.reasoningEffort : request.reasoningEffort;
     const baseBody = { model: this.pin.requestModel ?? this.pin.model, max_tokens: maxTokens, response_format: { type: 'json_object' },
@@ -401,7 +406,9 @@ export class HttpModelAdapter implements ModelAdapter {
       // A fresh deadline bounds fetch AND response-body consumption on each try.
       const controller = new AbortController(), signal = controller.signal;
       const streaming = this.transport.stream;
-      const callBudgetMs = this.transport.callBudgetMs ?? this.transport.streamOverallTimeoutMs;
+      // r74 pdf1/txt: the per-call timeoutMs (e.g. 420 s) is the TOTAL budget across retries, not a per-attempt cap
+      // on top of the 600 s transport budget.
+      const callBudgetMs = Math.min(this.transport.callBudgetMs ?? this.transport.streamOverallTimeoutMs, request.timeoutMs ?? Number.MAX_SAFE_INTEGER);
       const elapsedBeforeAttempt = Date.now() - started;
       const remainingBudgetMs = callBudgetMs - elapsedBeforeAttempt;
       // Refuse to open another provider attempt once the call wall-clock budget is gone
@@ -416,7 +423,7 @@ export class HttpModelAdapter implements ModelAdapter {
           ...(history.usageUnknown ? { usageUnknown: true, billingRisk: 'duplicate-possible' } : {}),
           maxTokens, retryable: false, willRetry: false, retryDecision: 'call-budget-exhausted',
         }));
-        throw new ModelTimeout(`Model call timed out after ${elapsedBeforeAttempt}ms (wall-clock budget ${callBudgetMs}ms). Provider billing requires reconciliation.`);
+        throw new ModelTimeout(`Model response timed out after ${elapsedBeforeAttempt}ms (call budget ${callBudgetMs}ms). Provider billing requires reconciliation.`);
       }
       const configuredOverallMs = Math.min(request.timeoutMs ?? Number.MAX_SAFE_INTEGER, streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs);
       const overallMs = Math.min(configuredOverallMs, remainingBudgetMs);
@@ -440,6 +447,20 @@ export class HttpModelAdapter implements ModelAdapter {
         idleTimer = setTimeout(() => { timeoutMs = this.transport.idleTimeoutMs; timeoutKind = 'idle'; controller.abort(); }, this.transport.idleTimeoutMs);
       };
       let streamReceived = false;
+      // r74: stall = after content has started, no new content/reasoning/tool bytes for stallTimeoutMs on an SSE stream.
+      // Headers, heartbeats and empty frames never reset it.
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastProgress = -1;
+      const stallMs = Math.min(this.transport.stallTimeoutMs ?? 0, remainingBudgetMs);
+      const progressed = () => {
+        if (!streamReceived || !stallMs) return;
+        const progress = diagnostics.contentBytes + diagnostics.reasoningBytes + (diagnostics.toolCallBytes ?? 0);
+        // Before the first content/reasoning delta the first-byte/idle timers govern (Ark may think silently).
+        if (progress === 0 || progress === lastProgress) return;
+        lastProgress = progress;
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => { timeoutMs = stallMs; timeoutKind = 'stall'; controller.abort(); }, stallMs);
+      };
       let response: Response | undefined;
       let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let stage: 'request' | 'response' = 'request';
@@ -471,8 +492,10 @@ export class HttpModelAdapter implements ModelAdapter {
         const reader = response.body?.getReader();
         if (!reader) throw streamReceived ? new ModelOutcomeUnknown('Empty model stream; the provider outcome requires reconciliation') : new Error('Empty model response');
         bodyReader = reader;
+        progressed();
         const read = async () => {
           signal.throwIfAborted();
+          progressed();
           let abort: () => void = () => {};
           const aborted = new Promise<never>((_resolve, reject) => { abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true }); });
           try {
@@ -536,7 +559,7 @@ export class HttpModelAdapter implements ModelAdapter {
         return completed(envelope.parse(parsed));
       } catch (error) {
         // The HTTP attempt has ended. Storage callbacks/backoff must not change its timeout classification.
-        clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer);
+        clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); clearTimeout(stallTimer);
         void bodyReader?.cancel().catch(() => undefined);
         const network = stage === 'request' || signal.aborted || error instanceof TypeError || (
           error instanceof Error && /ECONN|ENOTFOUND|EAI_AGAIN|UND_ERR/.test(String((error as NodeJS.ErrnoException).code ?? (error.cause as NodeJS.ErrnoException | undefined)?.code ?? ''))
@@ -556,8 +579,8 @@ export class HttpModelAdapter implements ModelAdapter {
         else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
-        else if (signal.aborted && timeoutKind === 'idle' && streamReceived && responseBytes > 0) {
-          const budgetLeft = (this.transport.callBudgetMs ?? this.transport.streamOverallTimeoutMs) - (Date.now() - started);
+        else if (signal.aborted && (timeoutKind === 'idle' || timeoutKind === 'stall') && streamReceived && responseBytes > 0) {
+          const budgetLeft = callBudgetMs - (Date.now() - started);
           retryDecision = !request.idempotencyKey ? 'no-idempotency-key'
             : history.midstreamRetries >= this.transport.midstreamRetries ? 'attempts-exhausted'
             : budgetLeft < this.transport.firstByteTimeoutMs ? 'call-budget-exhausted'
@@ -566,10 +589,10 @@ export class HttpModelAdapter implements ModelAdapter {
           : transportAttempt >= this.transport.maxAttempts ? 'attempts-exhausted'
           : diagnostics.contentBytes || diagnostics.reasoningBytes || diagnostics.toolCallBytes ? 'body-bytes-received' : 'provider-error-retry';
         else if (responseBytes > 0) retryDecision = 'body-bytes-received';
-        else if (signal.aborted && timeoutKind === 'first-byte' && !request.idempotencyKey) retryDecision = 'no-idempotency-key';
-        else if (signal.aborted && timeoutKind === 'first-byte' && !this.transport.retryEmptyIdle) retryDecision = 'retry-disabled';
+        else if (signal.aborted && (timeoutKind === 'first-byte' || timeoutKind === 'stall') && !request.idempotencyKey) retryDecision = 'no-idempotency-key';
+        else if (signal.aborted && (timeoutKind === 'first-byte' || timeoutKind === 'stall') && !this.transport.retryEmptyIdle) retryDecision = 'retry-disabled';
         else if (transportAttempt >= this.transport.maxAttempts) retryDecision = 'attempts-exhausted';
-        else if (signal.aborted && timeoutKind !== 'first-byte') retryDecision = 'not-retryable';
+        else if (signal.aborted && timeoutKind !== 'first-byte' && timeoutKind !== 'stall') retryDecision = 'not-retryable';
         else if (streamReceived && !signal.aborted) retryDecision = 'stream-started';
         else retryDecision = 'retry';
         const errorCodeRaw = String((error as NodeJS.ErrnoException)?.code ?? ((error as Error)?.cause as NodeJS.ErrnoException | undefined)?.code ?? '');
@@ -641,11 +664,11 @@ export class HttpModelAdapter implements ModelAdapter {
           else { if (providerBodyError) history.usageUnknown = true; transportAttempt++; }
         } else if (httpError) throw httpError;
         else if (network) {
-          if (signal.aborted) throw new ModelTimeout(`Model ${stage} timed out after ${timeoutMs}ms (${timeoutKind} timeout). Provider billing requires reconciliation.`);
+          if (signal.aborted) throw new ModelTimeout(`Model response timed out after ${timeoutMs}ms (${timeoutKind} timeout${stage === 'request' ? ', before headers' : ''}). Provider billing requires reconciliation.`);
           throw new ModelOutcomeUnknown('Model response connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.');
         }
         else throw error;
-      } finally { request.signal?.removeEventListener('abort', abortRequested); clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); void bodyReader?.cancel().catch(() => undefined); }
+      } finally { request.signal?.removeEventListener('abort', abortRequested); clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); clearTimeout(stallTimer); void bodyReader?.cancel().catch(() => undefined); }
       if (retryDelayMs > 0) await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }

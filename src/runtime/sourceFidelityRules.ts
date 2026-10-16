@@ -101,16 +101,54 @@ export function labelInferences(content: string | { content: string }, structure
 
 const sourceGapPattern = /(?:资料|来源|原文|材料)[^。；]{0,12}?(?:未|没有|并未)(?:说明|给出|提及|注明|明确|提供)|not (?:stated|specified|given|mentioned) in the source/i;
 function isSourceGap(text: string): boolean { return sourceGapPattern.test(text) && !/风险|可能|延期|risk|may|might/i.test(text.replace(sourceGapPattern, '').replace(/资料表述为可能性/g, '')); }
-/** Near-duplicate list text: one contains the other, or character-bigram overlap ≥ 0.6. */
-export function similarListText(a: string, b: string): boolean {
-  const key = (text: string) => text.normalize('NFKC').replace(/^\s*推断\s*[:：]/u, '').replace(/[（(][^）)]*[）)]/gu, '').replace(/[\s\p{P}\p{S}]+/gu, '').toLocaleLowerCase();
-  const x = key(a), y = key(b);
+const listKey = (text: string) => text.normalize('NFKC').replace(/^\s*推断\s*[:：]/u, '').replace(/^\s*(?:风险|risk)\s*[:：]/iu, '').replace(/[（(][^）)]*[）)]/gu, '').replace(/\[[^\]]*\]/gu, '').replace(/[\s\p{P}\p{S}]+/gu, '').toLocaleLowerCase();
+function similarKeys(x: string, y: string): boolean {
   if (!x || !y) return false;
   if (x.includes(y) || y.includes(x)) return true;
   const grams = (text: string) => new Set(Array.from({ length: Math.max(0, text.length - 1) }, (_, i) => text.slice(i, i + 2)));
   const gx = grams(x), gy = grams(y);
   const shared = [...gx].filter(gram => gy.has(gram)).length;
   return shared / Math.min(gx.size || 1, gy.size || 1) >= 0.6;
+}
+/** Sentences of a list item, each without its "推断："/"风险：" label. r74 txt: one item can join two inferences. */
+function listClauses(text: string): string[] {
+  return text.split(/(?<=[。；;！!？?])\s*|\s*(?=推断\s*[:：])/u).map(part => part.trim()).filter(part => listKey(part).length >= 4);
+}
+/** Near-duplicate list text: whole text or any sentence pair contains the other, or character-bigram overlap ≥ 0.6. */
+export function similarListText(a: string, b: string): boolean {
+  if (similarKeys(listKey(a), listKey(b))) return true;
+  const ca = listClauses(a).map(listKey), cb = listClauses(b).map(listKey);
+  return ca.some(x => cb.some(y => similarKeys(x, y)));
+}
+/** r74 txt: drop near-duplicate sentences across derived risks; keep the fuller sentence (a fragment like "的发布可能延期" lost its subject). */
+export function dedupeDerivedRisks(risks: Array<{ text: string; derived?: boolean | undefined }>): number {
+  const kept: Array<{ risk: { text: string; derived?: boolean | undefined }; clauses: string[] }> = [];
+  let removed = 0;
+  for (let index = 0; index < risks.length; index++) {
+    const risk = risks[index]!;
+    const clauses = listClauses(risk.text);
+    if (!risk.derived || clauses.length === 0) { kept.push({ risk, clauses }); continue; }
+    const remaining: string[] = [];
+    for (const clause of clauses) {
+      const key = listKey(clause);
+      let duplicate = false;
+      for (const other of kept) {
+        const at = other.clauses.findIndex(item => similarKeys(listKey(item), key));
+        if (at < 0) continue;
+        duplicate = true;
+        if (other.risk.derived && listKey(other.clauses[at]!).length < key.length) {
+          other.clauses[at] = clause;
+          other.risk.text = other.clauses.map(item => /^推断\s*[:：]/u.test(item) ? item : `推断：${item}`).join('');
+        }
+        break;
+      }
+      if (!duplicate) remaining.push(clause);
+    }
+    if (!remaining.length) { risks.splice(index--, 1); removed++; continue; }
+    if (remaining.length !== clauses.length) risk.text = remaining.map(item => /^推断\s*[:：]/u.test(item) ? item : `推断：${item}`).join('');
+    kept.push({ risk, clauses: remaining });
+  }
+  return removed;
 }
 /** Missing prose counterparts are bookkeeping, never a model repair condition. */
 export function deriveProseInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, refs: string[]): { derived: number; warnings: string[] } {
@@ -145,6 +183,7 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
       entries.push(inferenceText(text)); derived++;
     } else warnings.push(`Prose inference has no structured counterpart: ${text.slice(0, 200)}`);
   }
+  if (structured?.schemaVersion === 'project-pulse/1') dedupeDerivedRisks(structured.risks);
   return { derived, warnings };
 }
 
