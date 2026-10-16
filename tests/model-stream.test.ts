@@ -115,10 +115,10 @@ describe('OpenAI-compatible SSE transport', () => {
     vi.stubGlobal('fetch', fetch);
     const done = expect(adapter({ idleTimeoutMs: 100, streamOverallTimeoutMs: kind === 'overall' ? 50 : 1000 })
       .complete({ system: 's', input: {}, ...(kind === 'no-key' ? {} : { idempotencyKey: 'stable' }) })).rejects.toThrow();
-    await vi.advanceTimersByTimeAsync(105); await done;
+    await vi.advanceTimersByTimeAsync(kind === 'json' || kind === 'http-error' ? 1005 : 105); await done;
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(logs.mock.calls[0]![0])).toMatchObject({ willRetry: false,
-      retryDecision: kind === 'no-key' ? 'no-idempotency-key' : kind === 'overall' ? 'overall-timeout' : 'body-bytes-received' });
+      retryDecision: kind === 'no-key' ? 'no-idempotency-key' : ['overall', 'json', 'http-error'].includes(kind) ? 'overall-timeout' : 'body-bytes-received' });
   });
 
   it('uses the current replay key for subsequent zero-byte retries and keeps the replay bound across length retries', async () => {
@@ -217,9 +217,9 @@ describe('OpenAI-compatible SSE transport', () => {
     const model = kind === 'non-ark' ? new HttpModelAdapter('https://other.example', 'model', '', undefined, 180000, undefined, false, undefined, { reasoningEffort: 'high' })
       : adapter({ idleTimeoutMs: 50, ...(kind === 'provider-default' ? { thinking: 'provider-default' } : {}) });
     const done = expect(model.complete({ system: 's', input: {}, ...(kind === 'frozen-omission' ? { thinking: null, reasoningEffort: null } : {}), ...(kind === 'downgraded' ? { thinkingUnsupported: true } : {}) })).rejects.toThrow('HTTP 400');
-    await vi.advanceTimersByTimeAsync(55); await done;
+    await vi.advanceTimersByTimeAsync(kind === 'error-body-timeout' ? 180005 : 55); await done;
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ willRetry: false, retryDecision: 'not-retryable' });
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ willRetry: false, retryDecision: kind === 'error-body-timeout' ? 'overall-timeout' : 'not-retryable' });
   });
 
   it('never downgrades a rejected request more than once', async () => {

@@ -16,7 +16,7 @@ import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSch
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
-import { ModelOutcomeUnknown, ModelResponseRejected } from './model.js';
+import { ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected } from './model.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
@@ -1284,7 +1284,7 @@ export class AgentEngine {
       if (currentCall.inputHash !== body.inputHash) throw new Conflict('Model reconciliation input hash does not match the durable call');
       // A partial deliverable may already have been returned. Reconcile its
       // billing receipt without reopening execution or replacing the artifact.
-      if (current.status === 'succeeded' || current.steps.some(step => step.status === 'succeeded' && step.finalCallId === currentCall.id)) {
+      if (current.status === 'succeeded' || current.status === 'failed' || current.steps.some(step => step.status === 'succeeded' && step.finalCallId === currentCall.id)) {
         currentCall.state = body.outcome === 'completed' ? 'discarded' : 'failed';
         currentCall.endedAt = now();
         if (body.outcome === 'completed') currentCall.outputHash = digest(body.output);
@@ -1543,7 +1543,7 @@ export class AgentEngine {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const response = await Promise.race([model.complete({ ...requestWithKey, signal: controller.signal }), new Promise<never>((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new ModelOutcomeUnknown(repairing ? 'Artifact repair timed out' : 'Final-only model call timed out')); }, timeoutMs);
+            timer = setTimeout(() => { controller.abort(); reject(new ModelTimeout(repairing ? 'Artifact repair timed out' : 'Final-only model call timed out')); }, timeoutMs);
           })]);
           return response;
         } finally { clearTimeout(timer); controller.abort(); }
@@ -1573,7 +1573,17 @@ export class AgentEngine {
         call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
-        if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
+        if (error instanceof ModelTimeout && !repairing && !(finalOnly && current.steps.find(step => step.taskId === taskId)?.observations.length) && !['cancelled', 'paused'].includes(current.status) && current.reconcileDisposition !== 'paused') {
+          const reason = `${error.message} Independent review was not completed.`;
+          if (await preserveRunOutput(current, reason)) event(current, 'run.partial', { reason, callId });
+          else {
+            current.status = 'failed'; current.error = reason;
+            recordTaskFailure(current, taskId);
+            event(current, 'run.failed', { reason, callId });
+          }
+          delete current.resumeStatus;
+          delete current.reconcileDisposition;
+        } else if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
           createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
@@ -1583,6 +1593,7 @@ export class AgentEngine {
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
+      if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
       if (finalOnly && failed.steps.some(step => step.taskId === taskId && step.status === 'succeeded')) return;
       if (failed.status === 'succeeded') return;
       if (!repairing) throw error;

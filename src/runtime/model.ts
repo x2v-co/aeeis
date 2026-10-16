@@ -44,6 +44,8 @@ export interface ModelAdapter {
   health?(): Promise<ModelHealth>;
 }
 export class ModelOutcomeUnknown extends Error {}
+/** Execution has stopped definitively; only the provider's billing remains unresolved. */
+export class ModelTimeout extends ModelOutcomeUnknown {}
 /** A completed provider response may be billable even if its output is unusable. */
 export class ModelResponseRejected extends Error {
   constructor(message: string, readonly usage?: ModelResponse['usage'], readonly rawOutput?: string) { super(message); }
@@ -385,7 +387,7 @@ export class HttpModelAdapter implements ModelAdapter {
           ...(history.usageUnknown ? { usageUnknown: true, billingRisk: 'duplicate-possible' } : {}),
           maxTokens, retryable: false, willRetry: false, retryDecision: 'call-budget-exhausted',
         }));
-        throw new ModelOutcomeUnknown(`Model call budget exhausted after ${elapsedBeforeAttempt}ms (budget ${callBudgetMs}ms). The provider outcome is unknown; reconcile before retrying because the request may have been billed.`);
+        throw new ModelTimeout(`Model call timed out after ${elapsedBeforeAttempt}ms (wall-clock budget ${callBudgetMs}ms). Provider billing requires reconciliation.`);
       }
       const configuredOverallMs = Math.min(request.timeoutMs ?? Number.MAX_SAFE_INTEGER, streaming ? this.transport.streamOverallTimeoutMs : this.requestTimeoutMs);
       const overallMs = Math.min(configuredOverallMs, remainingBudgetMs);
@@ -404,7 +406,7 @@ export class HttpModelAdapter implements ModelAdapter {
       const activity = () => {
         if (responseBytes === 0) return;
         clearTimeout(firstByteTimer);
-        if (!streaming) return;
+        if (!streamReceived) return;
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => { timeoutMs = this.transport.idleTimeoutMs; timeoutKind = 'idle'; controller.abort(); }, this.transport.idleTimeoutMs);
       };
@@ -573,9 +575,10 @@ export class HttpModelAdapter implements ModelAdapter {
           else if (retryDecision === 'connect-retry') connectRetries++;
           else { if (providerBodyError) history.usageUnknown = true; transportAttempt++; }
         } else if (httpError) throw httpError;
-        else if (network) throw new ModelOutcomeUnknown(signal.aborted
-          ? `Model ${stage} timed out after ${timeoutMs}ms${streaming || timeoutKind === 'first-byte' ? ` (${timeoutKind} timeout)` : ''}. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`
-          : `Model ${stage} connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.`);
+        else if (network) {
+          if (signal.aborted) throw new ModelTimeout(`Model ${stage} timed out after ${timeoutMs}ms (${timeoutKind} timeout). Provider billing requires reconciliation.`);
+          throw new ModelOutcomeUnknown('Model response connection was interrupted. The provider outcome is unknown; reconcile before retrying because the request may have been billed.');
+        }
         else throw error;
       } finally { request.signal?.removeEventListener('abort', abortRequested); clearTimeout(overallTimer); clearTimeout(firstByteTimer); clearTimeout(idleTimer); void bodyReader?.cancel().catch(() => undefined); }
       if (retryDelayMs > 0) await new Promise(resolve => setTimeout(resolve, retryDelayMs));

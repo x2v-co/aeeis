@@ -13,7 +13,11 @@ export async function terminalizeRun(repository: RunRepository, runId: string, r
     if (['succeeded', 'failed', 'cancelled'].includes(run.status)) return;
     // A late timeout must not close a business wait that won the race.
     if (!['queued', 'planning', 'running', 'reviewing', 'unknown'].includes(run.status)) return;
-    const limitation = `Execution stopped: ${reason}. Independent review was not completed.`;
+    // Prefer the durable call diagnostic over a workflow's generic unknown status.
+    const callReason = [...run.calls].reverse().find(call => call.state === 'unknown' || call.state === 'started')?.validationErrors?.map(issue => issue.message).join('; ');
+    const diagnostic = callReason || run.error;
+    const specificReason = /outcome is unknown/i.test(reason) ? diagnostic || reason : [...new Set([reason, diagnostic].filter(Boolean))].join(': ');
+    const limitation = `Execution stopped: ${specificReason}. Independent review was not completed.`;
     for (const call of run.calls) if (call.state === 'started') { call.state = 'unknown'; call.endedAt = new Date().toISOString(); }
     // Retain completed deliverables, including a PDF whose finish call was interrupted.
     if (await preserveRunOutput(run, limitation)) {
