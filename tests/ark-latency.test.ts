@@ -43,7 +43,7 @@ it('freezes thinking, effort and tokens so reconciliation after an env change se
   vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {}); vi.spyOn(console, 'info').mockImplementation(() => {});
   const repository = new InMemoryRunRepository();
   const original = httpModel({ AEEIS_MODEL_FIRST_BYTE_TIMEOUT_MS: '100', AEEIS_MODEL_MAX_ATTEMPTS: '1', AEEIS_MODEL_MAX_TOKENS: '6000', AEEIS_MODEL_THINKING: 'enabled', AEEIS_MODEL_REASONING_EFFORT: 'low' });
-  const fetch = vi.fn().mockImplementationOnce((_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })))
+  const fetch = vi.fn().mockRejectedValueOnce(new TypeError('connection interrupted'))
     .mockResolvedValueOnce(jsonReply(plan)).mockResolvedValueOnce(jsonReply({ type: 'finish', title: 'Done', content: 'Done', evidenceRefs: [] }));
   vi.stubGlobal('fetch', fetch);
   const engine = new AgentEngine(repository, original), run = await engine.create({ goal: 'Inspect' });
