@@ -2730,6 +2730,25 @@ export class AgentEngine {
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.verifyResources(run);
+    const weatherLimit = unsupportedWeatherNotice(run);
+    if (weatherLimit) {
+      // A reviewer cannot repair an absent capability. Close with the actual
+      // unmet requirement, retaining any supported work as explicitly partial.
+      // Do not fabricate an accepted independent review of a refusal.
+      await this.repository.mutate(run.id, current => {
+        if (current.status !== 'reviewing') return;
+        current.status = 'failed';
+        current.partial = true;
+        current.error = `Capability limit (live_weather): ${weatherLimit}`;
+        for (const artifact of current.artifacts) {
+          artifact.partial = true;
+          artifact.limitations = [...new Set([...(artifact.limitations ?? []), weatherLimit, 'Independent review was not completed: no weather source or retrieval capability is available.'])];
+        }
+        populateRunLimitations(current);
+        event(current, 'run.capability_limited', { kind: 'live_weather', reason: weatherLimit, producedArtifacts: current.artifacts.length });
+      });
+      return;
+    }
     if (run.taskExecution && run.review?.verdict === 'accepted') { await this.finishBoundReview(run); return; }
     const planRequirements = run.plans.at(-1)?.nodes.filter(node => node.evidenceRequirements);
     const legacyRequest = { system: this.governedPrompt(reviewerPrompt, run), input: { goal: run.goal, ...(planRequirements?.length ? { planRequirements } : {}), privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), ...(run.capabilityCatalogVersion ? { externalEvidence: { toolReceipts: (run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated'), delegations: (run.delegationOutcomes ?? []).filter(outcome => outcome.disposition !== 'isolated'), observations: boundedObservations(run.steps.flatMap(step => step.observations.filter(observation => !observation.tool.startsWith('sources.') && !observation.tool.startsWith('pdf.'))), evidenceRefsFromObservation) } } : {}), evolution: run.evolution ?? [], sources: presentedMaterials(run.context.sources, [], 12_000), sourceObservations: boundedObservations(run.steps.flatMap(step => step.observations.filter(observation => observation.tool.startsWith('sources.') || observation.tool.startsWith('pdf.'))), evidenceRefsFromObservation), artifacts: run.artifacts, answers: run.answers } };

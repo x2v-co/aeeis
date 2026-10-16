@@ -44,7 +44,8 @@ describe('input requests and unavailable live data', () => {
     const { engine, id, requests, question } = await questionRun(repository, { pulse });
     for (let attempt = 0; attempt < 4; attempt++) if (['succeeded', 'failed'].includes(await engine.advance(id))) break;
     const run = await repository.get(id);
-    expect(run.status, run.error).toBe('succeeded');
+    expect(run.status, run.error).toBe('failed');
+    expect(run.error).toContain('Capability limit (live_weather)');
     expect(run.partial).toBe(true);
     expect(run.limitations).toEqual(expect.arrayContaining([`No data source or capability available: ${question}`, expect.stringContaining('Real-time weather and forecasts are not supported')]));
     expect(run.question).toBeUndefined();
@@ -58,7 +59,7 @@ describe('input requests and unavailable live data', () => {
     const executor = requests.find(request => request.system.includes('Execute the current task'))!;
     expect(executor.input).toMatchObject({ capabilityCatalog: { tools: [], agents: [] }, presentedSources: [] });
     expect(requests.filter(request => request.system.includes('Execute the current task'))).toHaveLength(1);
-    expect(requests.find(request => request.system.includes('Independently review'))?.input).toMatchObject({ partial: true });
+    expect(requests.find(request => request.system.includes('Independently review'))).toBeUndefined();
     if (pulse) expect(run.artifacts[0]?.structured).toMatchObject({ schemaVersion: 'project-pulse/1', unknowns: [] });
     const app = buildApp({ repository, engine, dispatcher: { notify: async () => {}, close: async () => {} } });
     try {
@@ -115,7 +116,7 @@ describe('input requests and unavailable live data', () => {
     const { engine, id, requests } = await questionRun(repository, { finalOnly: true });
     expect((requests.find(request => request.system.includes('Execute the current task'))!.input as any).executionBudget.finalOnly).toBe(true);
     for (let attempt = 0; attempt < 4; attempt++) if (['succeeded', 'failed'].includes(await engine.advance(id))) break;
-    expect(await repository.get(id)).toMatchObject({ status: 'succeeded', partial: true, artifacts: [{ limitations: expect.arrayContaining([expect.stringContaining('No data source or capability available')]) }] });
+    expect(await repository.get(id)).toMatchObject({ status: 'failed', error: expect.stringContaining('Capability limit (live_weather)'), partial: true, artifacts: [{ limitations: expect.arrayContaining([expect.stringContaining('No data source or capability available')]) }] });
   });
 
   it('keeps ordinary intent clarifications pending with or without sources', async () => {

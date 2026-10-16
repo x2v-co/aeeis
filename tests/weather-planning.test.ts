@@ -28,7 +28,9 @@ it.each(['What is the Singapore weather forecast tomorrow?', '查询北京明天
   await engine.command(created.id, 'approve', { planHash: planned.plans[0]!.hash, planVersion: 1 });
   for (let i = 0; i < 5; i++) if (await engine.advance(created.id) === 'succeeded') break;
   const run = await repository.get(created.id);
-  expect(run.status, run.error).toBe('succeeded');
+  expect(run.status, run.error).toBe('failed');
+  expect(run.error).toContain('Capability limit (live_weather)');
+  expect(run.calls.some(call => call.phase === 'reviewer')).toBe(false);
   expect(run.artifacts[0]).toMatchObject({ partial: true });
   expect(run.artifacts[0]!.content).toContain('official meteorological forecast');
   expect(run.pendingTool).toBeUndefined();
