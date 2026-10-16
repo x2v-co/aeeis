@@ -24,8 +24,14 @@ export interface ModelRequest {
   midstreamRetries?: number;
   onThinkingUnsupported?: (details: { reason: 'http-400' | 'adapter-cache' }) => void | Promise<void>;
   onMidstreamRetry?: (details: { midstreamRetries: number; responseBytes: number }) => void | Promise<void>;
+  /** Durable record of every HTTP 429, before backoff (willRetry) or when the call gives up. */
+  onRateLimited?: (details: RateLimitDetails) => void | Promise<void>;
   /** Check cumulative billable usage before an internal length retry. */
   beforeRetry?: (usage: ModelResponse['usage']) => void | Promise<void>;
+}
+export interface RateLimitDetails {
+  status: 429; attempt: number; maxAttempts: number; delayMs: number; retryAfterMs: number | null; willRetry: boolean;
+  decision: 'rate-limit-retry' | 'rate-limit-exhausted' | 'retry-after-exceeds-budget' | 'retry-disabled';
 }
 export interface ModelResponse { value: unknown; rawOutput?: string; usage?: { inputTokens: number; outputTokens: number } }
 export interface ModelHealth {
@@ -49,6 +55,10 @@ export class ModelTimeout extends ModelOutcomeUnknown {}
 /** A completed provider response may be billable even if its output is unusable. */
 export class ModelResponseRejected extends Error {
   constructor(message: string, readonly usage?: ModelResponse['usage'], readonly rawOutput?: string) { super(message); }
+}
+/** The provider kept rejecting with HTTP 429; nothing was generated or billed for the rejected attempts. */
+export class ModelRateLimited extends ModelResponseRejected {
+  constructor(message: string, readonly attempts: number) { super(message, { inputTokens: 0, outputTokens: 0 }); }
 }
 
 /** Model transport backed by Toolkit's Agentpay credit MCP tool. */
@@ -203,6 +213,8 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
 
 export interface ModelTransportOptions {
   maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number;
+  /** HTTP 429 has its own attempt counter/backoff so rate limits do not consume transport-failure attempts. */
+  rateLimitMaxAttempts?: number; rateLimitBaseMs?: number; rateLimitMaxMs?: number;
   stream?: boolean; firstByteTimeoutMs?: number; idleTimeoutMs?: number; streamOverallTimeoutMs?: number;
   /** Wall-clock budget for one complete()/requestCompletion including midstream and transport retries. */
   callBudgetMs?: number;
@@ -231,6 +243,9 @@ function retryAfterMs(value: string | null): number {
 export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOptions {
   return {
     maxAttempts: Number(env.AEEIS_MODEL_MAX_ATTEMPTS ?? 3),
+    rateLimitMaxAttempts: Number(env.AEEIS_MODEL_RATE_LIMIT_MAX_ATTEMPTS ?? 5),
+    rateLimitBaseMs: Number(env.AEEIS_MODEL_RATE_LIMIT_BASE_MS ?? 2_000),
+    rateLimitMaxMs: Number(env.AEEIS_MODEL_RATE_LIMIT_MAX_MS ?? 60_000),
     retryBaseMs: Number(env.AEEIS_MODEL_RETRY_BASE_MS ?? 500),
     retryMaxMs: Number(env.AEEIS_MODEL_RETRY_MAX_MS ?? 10_000),
     ...(env.AEEIS_MODEL_STREAM === undefined ? {} : { stream: env.AEEIS_MODEL_STREAM === '1' }),
@@ -266,6 +281,7 @@ export class HttpModelAdapter implements ModelAdapter {
     this.arkProvider = ark;
     const defaultThinkingDisabled = /(^|\.)(?:volces\.com|volcengineapi\.com)$/.test(url.hostname) || provider?.toLowerCase() === 'ark';
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
+      rateLimitMaxAttempts: transport.rateLimitMaxAttempts ?? 5, rateLimitBaseMs: transport.rateLimitBaseMs ?? 2_000, rateLimitMaxMs: transport.rateLimitMaxMs ?? 60_000,
       stream: transport.stream ?? ark, firstByteTimeoutMs: transport.firstByteTimeoutMs ?? (ark ? 240_000 : 120_000),
       idleTimeoutMs: transport.idleTimeoutMs ?? Math.min(requestTimeoutMs, 180_000), streamOverallTimeoutMs: transport.streamOverallTimeoutMs ?? 900_000,
       callBudgetMs: transport.callBudgetMs ?? 600_000,
@@ -276,6 +292,9 @@ export class HttpModelAdapter implements ModelAdapter {
     z.number().int().min(1).max(10).parse(this.transport.maxAttempts);
     z.number().int().min(0).max(60_000).parse(this.transport.retryBaseMs);
     z.number().int().min(this.transport.retryBaseMs).max(60_000).parse(this.transport.retryMaxMs);
+    z.number().int().min(1).max(10).parse(this.transport.rateLimitMaxAttempts);
+    z.number().int().min(0).max(60_000).parse(this.transport.rateLimitBaseMs);
+    z.number().int().min(this.transport.rateLimitBaseMs).max(300_000).parse(this.transport.rateLimitMaxMs);
     z.number().int().min(1).max(600_000).parse(this.requestTimeoutMs);
     z.boolean().parse(this.transport.stream);
     z.boolean().parse(this.transport.retryEmptyIdle);
@@ -371,6 +390,8 @@ export class HttpModelAdapter implements ModelAdapter {
     let transportAttempt = 1;
     // Pre-connection failures never reach the provider, so they get one extra backoff retry beyond maxAttempts.
     let connectRetries = 0;
+    // HTTP 429 attempts are counted separately (attempt N of rateLimitMaxAttempts).
+    let rateLimitAttempt = 1;
     for (let attempt = 1; ; attempt++) {
       const body = history.thinkingUnsupported ? bodyWithoutControls : bodyWithControls;
       const requestBodyHash = createHash('sha256').update(body).digest('hex');
@@ -531,7 +552,7 @@ export class HttpModelAdapter implements ModelAdapter {
         if (request.disableRetries || request.signal?.aborted) retryDecision = 'retry-disabled';
         // 429 body bytes describe a rejected request, not partial generation.
         // The general body-byte replay fence must not suppress rate-limit retries.
-        else if (httpError && response?.status === 429) retryDecision = transportAttempt >= this.transport.maxAttempts ? 'attempts-exhausted' : 'rate-limit-retry';
+        else if (httpError && response?.status === 429) retryDecision = rateLimitAttempt >= this.transport.rateLimitMaxAttempts ? 'rate-limit-exhausted' : 'rate-limit-retry';
         else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
@@ -568,11 +589,28 @@ export class HttpModelAdapter implements ModelAdapter {
         let delayMs = willRetry && retryDecision !== 'thinking-unsupported'
           ? Math.max(retryDecision === 'connect-retry' || connectPhase ? Math.min(2_000, this.transport.retryMaxMs) : 0,
             Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (transportAttempt - 1)) * (0.5 + Math.random() * 0.5))) : 0;
+        const rateLimited = Boolean(httpError) && response?.status === 429;
+        const retryAfterHeader = rateLimited ? response!.headers.get('retry-after') : null;
+        const retryAfter = retryAfterHeader?.trim() ? retryAfterMs(retryAfterHeader) : null;
         if (retryDecision === 'rate-limit-retry') {
-          delayMs = Math.max(delayMs, retryAfterMs(response!.headers.get('retry-after')));
+          // Rate limits get a longer exponential backoff than transport faults; Retry-After is a floor.
+          const backoff = Math.floor(Math.min(this.transport.rateLimitMaxMs, this.transport.rateLimitBaseMs * 2 ** (rateLimitAttempt - 1)) * (0.5 + Math.random() * 0.5));
+          delayMs = Math.max(backoff, retryAfter ?? 0);
           if (delayMs >= callBudgetMs - (Date.now() - started)) {
             willRetry = false; retryDecision = 'retry-after-exceeds-budget'; delayMs = 0;
-            httpError = new ModelResponseRejected('Model provider returned HTTP 429; retry delay exceeds remaining call budget', { inputTokens: 0, outputTokens: 0 });
+            httpError = new ModelRateLimited(`Model provider rate limit (HTTP 429): retry delay exceeds the remaining call budget after ${rateLimitAttempt} attempt(s)`, rateLimitAttempt);
+          }
+        } else if (rateLimited && retryDecision === 'rate-limit-exhausted') {
+          httpError = new ModelRateLimited(`Model provider rate limit (HTTP 429) persisted after ${rateLimitAttempt} attempt(s) with backoff`, rateLimitAttempt);
+        }
+        if (rateLimited) {
+          try {
+            await request.onRateLimited?.({ status: 429, attempt: rateLimitAttempt, maxAttempts: this.transport.rateLimitMaxAttempts, delayMs, retryAfterMs: retryAfter, willRetry,
+              decision: (['rate-limit-retry', 'rate-limit-exhausted', 'retry-after-exceeds-budget'].includes(retryDecision) ? retryDecision : 'retry-disabled') as RateLimitDetails['decision'] });
+          } catch {
+            // 429 is a definite rejection: never retry unrecorded, but do not escalate it to an unknown outcome.
+            if (willRetry) { willRetry = false; retryDecision = 'retry-recording-failed'; delayMs = 0;
+              httpError = new ModelRateLimited(`Model provider rate limit (HTTP 429); the retry could not be recorded after ${rateLimitAttempt} attempt(s)`, rateLimitAttempt); }
           }
         }
         const redact = (text: string): string => {
@@ -599,6 +637,7 @@ export class HttpModelAdapter implements ModelAdapter {
           if (retryDecision === 'midstream-retry') { history.midstreamRetries = nextMidstreamRetry; history.usageUnknown = true; }
           else if (retryDecision === 'thinking-unsupported') history.thinkingUnsupported = true;
           else if (retryDecision === 'connect-retry') connectRetries++;
+          else if (retryDecision === 'rate-limit-retry') rateLimitAttempt++;
           else { if (providerBodyError) history.usageUnknown = true; transportAttempt++; }
         } else if (httpError) throw httpError;
         else if (network) {

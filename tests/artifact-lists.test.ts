@@ -49,7 +49,7 @@ it('normalizes structured risk items before validation and hashing in the artifa
   expect(run.status, run.error).toBe('succeeded');
   expect((artifact.structured as any).risks).toEqual([{ text: 'Vendor delay is reported.', evidenceRefs: [run.context.sources[0]!.id] }]);
   expect(artifact.partial).toBe(true);
-  expect(artifact.limitations!.join(' ')).toContain('truncated list item');
+  expect(artifact.limitations!.join(' ')).toContain('incomplete model-written list item');
   expect(artifact.hash).toBe(digest({ type: 'finish', title: artifact.title, content: artifact.content, evidenceRefs: artifact.evidenceRefs, artifactType: artifact.artifactType, structured: artifact.structured, limitations: artifact.limitations }));
   expect(run.events).toContainEqual(expect.objectContaining({ type: 'artifact.lists_normalized', data: expect.objectContaining({ duplicates: 1, truncated: 1 }) }));
   expect(complete).toHaveBeenCalledTimes(3);

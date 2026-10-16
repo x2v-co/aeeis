@@ -118,7 +118,7 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
     const text = clean(line);
     if (!inferencePrefix.test(text) || entries.includes(inferenceText(text)) || structured?.schemaVersion === 'fillable-pdf/1' && structured.inferences?.some(inference => hasProseInference(line, inference.text))) continue;
     if (structured?.schemaVersion === 'project-pulse/1' && refs.length && structured.risks.length < 30 && text.length <= 2000) {
-      structured.risks.push({ text: text.replace(inferencePrefix, '推断：'), evidenceRefs: [...refs].slice(0, 50), derived: true });
+      structured.risks.push({ text: text.replace(inferencePrefix, '推断：').replace(/[；;]+$/u, '。'), evidenceRefs: [...refs].slice(0, 50), derived: true });
       entries.push(inferenceText(text)); derived++;
     } else warnings.push(`Prose inference has no structured counterpart: ${text.slice(0, 200)}`);
   }

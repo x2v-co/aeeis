@@ -197,6 +197,29 @@ function freezeResourceSnapshot(request: TaskRequest, skillSelection: AgentRun['
     lockfileDigest, policyDigest, resolvedAt: timestamp, resolverVersion: 'aeeis-resource-resolver/1', ...(registryResolution?.registryRevision ? { registryRevision: registryResolution.registryRevision } : {}),
   };
 }
+/** Wall-clock time already spent inside model calls (excludes approval waits and tool time). */
+export function modelTimeUsedMs(run: Pick<AgentRun, 'calls'>, nowMs = Date.now()): number {
+  return run.calls.reduce((total, call) => {
+    const start = Date.parse(call.startedAt), end = call.endedAt ? Date.parse(call.endedAt) : nowMs;
+    return Number.isFinite(start) && Number.isFinite(end) && end > start ? total + (end - start) : total;
+  }, 0);
+}
+/**
+ * Split the Run's model time budget. Planner/executor calls may use what is left after the
+ * independent-review reserve; the reviewer may always use its reserve. No single call may
+ * exceed callMaxMs, so one stalled call cannot consume the whole Run budget.
+ */
+export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined }): number {
+  const remaining = Math.max(0, options.runBudgetMs - options.usedMs);
+  const share = options.phase === 'reviewer' ? Math.max(remaining, options.reviewReserveMs) : Math.max(options.minCallMs, remaining - options.reviewReserveMs);
+  const allocated = Math.min(options.callMaxMs, share);
+  return Math.max(1, Math.floor(options.requestedMs === undefined ? allocated : Math.min(options.requestedMs, allocated)));
+}
+/** A timeout is a definite stop (only billing is unresolved); never describe it as an unknown outcome. */
+export function modelStopLimitation(phase: string, error: Error): string {
+  if (error instanceof ModelTimeout) return `Model ${phase} call timed out: ${error.message.replace(/\s*Provider billing requires reconciliation\.?\s*$/, '')}. Independent review was not completed; provider billing still requires reconciliation.`.replace(/\.\./g, '.');
+  return `Model ${phase} outcome is unknown: ${error.message} Independent review was not completed; provider billing still requires reconciliation.`;
+}
 export function event(run: AgentRun, type: string, data: Record<string, unknown> = {}): void {
   run.events.push({ id: id('evt'), seq: run.events.length + 1, type, at: now(), data });
 }
@@ -688,6 +711,13 @@ export class AgentEngine {
   private readonly maxRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RECOVERABLE_TOOL_FAILURES ?? 3);
   private readonly maxRunRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RUN_RECOVERABLE_TOOL_FAILURES ?? 8);
   private readonly finalCallTimeoutMs = z.coerce.number().int().positive().parse(process.env.AEEIS_FINAL_CALL_TIMEOUT_MS ?? 180_000);
+  /** Run-level model time: planner/executor calls leave reviewReserveMs for independent review; no call exceeds callMaxMs. */
+  private readonly modelTimeBudget = {
+    runBudgetMs: z.coerce.number().int().min(60_000).parse(process.env.AEEIS_RUN_MODEL_BUDGET_MS ?? 1_800_000),
+    reviewReserveMs: z.coerce.number().int().min(0).parse(process.env.AEEIS_REVIEW_RESERVE_MS ?? 240_000),
+    callMaxMs: z.coerce.number().int().min(10_000).parse(process.env.AEEIS_MODEL_CALL_MAX_MS ?? 420_000),
+    minCallMs: z.coerce.number().int().min(1_000).parse(process.env.AEEIS_MODEL_CALL_MIN_MS ?? 60_000),
+  };
   constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry }) {
     this.executionLimits = executionLimitsSchema.parse('complete' in modelOrServices ? {} : modelOrServices.executionLimits ?? {});
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
@@ -1465,7 +1495,11 @@ export class AgentEngine {
     }
     // Transport options stay outside the durable request hash so historical
     // unknown planner calls can still be reconciled against their original input.
-    const requestWithKey: ModelRequest = { ...request,
+    // New calls get a slice of the Run's model wall-clock budget. It is a transport
+    // option (like signal), kept out of the durable request hash.
+    const allocatedTimeoutMs = existingCallId || repairing ? undefined : allocateModelCallTimeout({ phase, usedMs: modelTimeUsedMs(run), ...this.modelTimeBudget,
+      requestedMs: request.timeoutMs ?? (finalOnly ? this.finalCallTimeoutMs : undefined) });
+    const requestWithKey: ModelRequest = { ...request, ...(allocatedTimeoutMs === undefined ? {} : { timeoutMs: allocatedTimeoutMs }),
       // Legacy saved requests predate wire controls: preserve omitted fields
       // on reconciliation even if deployment defaults have since changed.
       ...(existingCallId ? { thinking: request.thinking ?? null, reasoningEffort: request.reasoningEffort ?? null, maxTokens: request.maxTokens ?? model.pin.maxTokens ?? 16_384 } : {}),
@@ -1485,6 +1519,11 @@ export class AgentEngine {
           delete call.usage; // A final-attempt meter cannot account for the abandoned stream.
           current.modelUsage = deriveModelUsage(current);
           event(current, 'model.midstream_retry', { callId, ...details, billingRisk: 'duplicate-possible', usageUnknown: true });
+        });
+      },
+      onRateLimited: async details => {
+        await this.repository.mutate(run.id, current => {
+          event(current, details.willRetry ? 'model.rate_limit_retry' : 'model.rate_limit_exhausted', { callId, phase, taskId: taskId ?? null, ...details });
         });
       },
       ...(repairing ? { maxTokens: Math.min(request.maxTokens ?? repairMaxTokens, repairMaxTokens), maxResponseBytes: repairMaxBytes, timeoutMs: repairTimeoutMs, disableRetries: true } : {}),
@@ -1561,7 +1600,7 @@ export class AgentEngine {
       result = reconciled ? { value: reconciled.value, ...(reconciled.usage ? { usage: reconciled.usage } : {}) } : await (async () => {
         if (!repairing && !finalOnly) return model.complete(requestWithKey);
         const controller = new AbortController();
-        const timeoutMs = repairing ? repairTimeoutMs : request.timeoutMs ?? this.finalCallTimeoutMs;
+        const timeoutMs = repairing ? repairTimeoutMs : allocatedTimeoutMs ?? request.timeoutMs ?? this.finalCallTimeoutMs;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const response = await Promise.race([model.complete({ ...requestWithKey, signal: controller.signal }), new Promise<never>((_, reject) => {
@@ -1612,8 +1651,8 @@ export class AgentEngine {
           createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
-          && await preserveRunOutput(current, `Model ${phase} outcome is unknown: ${error.message} Independent review was not completed; provider billing still requires reconciliation.`)) {
-          event(current, 'run.partial', { reason: 'Model outcome unknown; completed work retained', callId });
+          && await preserveRunOutput(current, modelStopLimitation(phase, error))) {
+          event(current, 'run.partial', { reason: error instanceof ModelTimeout ? `Model ${phase} call timed out; completed work retained` : 'Model outcome unknown; completed work retained', callId });
         }
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
@@ -2138,7 +2177,7 @@ export class AgentEngine {
             if (candidate.structured && typeof candidate.structured === 'object' && !Array.isArray(candidate.structured)) {
               const lists = normalizeArtifactLists(candidate.structured as Record<string, unknown>);
               if (lists.duplicates || lists.truncated) event(current, 'artifact.lists_normalized', { taskId: node.id, ...lists });
-              if (lists.truncated) limitationNotes.push(`${lists.truncated} truncated list item(s) omitted; incomplete claims require checking against the source.`);
+              if (lists.truncated) limitationNotes.push(`${lists.truncated} incomplete model-written list item(s) dropped from the structured output; this is not a source truncation.`);
               const normalized = normalizeSourceUnknowns(candidate.structured as Record<string, unknown>);
               limitationNotes.push(...normalized.limitations);
               contentCheck.movedUnknowns = normalized.moved; contentCheck.cappedUnknowns = normalized.capped;

@@ -17,13 +17,16 @@ export function normalizeArtifactLists(structured: Record<string, unknown>): { d
       // Per-field PDF unknowns are part of a completeness contract, rather than
       // ordinary report lists: identical reasons for different fields are valid.
       if (typeof item.field === 'string') return true;
+      // Runtime-derived entries are split from prose at sentence/clause marks
+      // (e.g. a trailing "；"); they are not model-truncated items.
+      const derived = (item as { derived?: unknown }).derived === true;
       const text = item.text.trim(), key = keyFor(text);
       // Also detect a cut-off word when an intact version is present. A shorter
       // complete bullet at a word boundary remains valid.
       const cutWord = !/[.!?。！？]$/u.test(text) && key.length >= 16
         && /[a-z]{4,}$/i.test(key)
         && texts.some(other => { const full = keyFor(other); return full.startsWith(key) && /^[a-z]{3,}\b/i.test(full.slice(key.length)); });
-      if (text && (incomplete(text) || cutWord)) { truncated++; return false; }
+      if (text && !derived && (incomplete(text) || cutWord)) { truncated++; return false; }
       const previous = seen.get(key);
       if (previous) {
         if (Array.isArray(previous.evidenceRefs) && Array.isArray(item.evidenceRefs)) previous.evidenceRefs = [...new Set([...previous.evidenceRefs, ...item.evidenceRefs])];
