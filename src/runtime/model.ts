@@ -139,7 +139,7 @@ function logDiagnostics(d: StreamDiagnostics, responseBytes: number) {
 }
 
 /** Decode SSE frames across arbitrary UTF-8/chunk boundaries, retaining the final usage-only chunk. */
-async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult<Uint8Array>>, diagnostics: StreamDiagnostics): Promise<z.infer<typeof envelope>> {
+async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult<Uint8Array>>, diagnostics: StreamDiagnostics, maxCompletionBytes?: number): Promise<z.infer<typeof envelope>> {
   const decoder = new TextDecoder();
   let buffer = '', content = '', finishReason: string | null = null, contentBytes = 0, seenChoice = false;
   let skipLF = false, searchFrom = 0;
@@ -191,6 +191,7 @@ async function readStreamCompletion(read: () => Promise<ReadableStreamReadResult
           if (choice.finish_reason != null) diagnostics.finishReason = finishReason = choice.finish_reason;
           const delta = choice.delta.content ?? '';
           contentBytes += Buffer.byteLength(delta, 'utf8');
+          if (maxCompletionBytes !== undefined && contentBytes > maxCompletionBytes) throw new ModelResponseRejected('Model completion exceeds byte cap');
           if (contentBytes > responseSizeLimit) throw new ModelOutcomeUnknown('Model stream content exceeds size limit; the provider outcome requires reconciliation');
           content += delta;
         }
@@ -451,7 +452,11 @@ export class HttpModelAdapter implements ModelAdapter {
             if (part.value?.byteLength) {
               firstByteMs ??= Date.now() - attemptStarted;
               responseBytes += part.value.byteLength;
-              if (response?.ok && request.maxResponseBytes !== undefined && responseBytes > request.maxResponseBytes) throw new ModelResponseRejected('Repair response exceeds byte cap');
+              // Wire framing and JSON escaping are not completion content. Keep a
+              // separate hard transport bound, including reasoning and SSE metadata.
+              const wireLimit = request.maxResponseBytes === undefined ? undefined
+                : streamReceived ? request.maxResponseBytes * 64 + responseSizeLimit : request.maxResponseBytes * 6 + 4096;
+              if (response?.ok && wireLimit !== undefined && responseBytes > wireLimit) throw new ModelResponseRejected('Model response transport exceeds byte cap');
               activity();
             }
             return part;
@@ -459,6 +464,10 @@ export class HttpModelAdapter implements ModelAdapter {
           finally { signal.removeEventListener('abort', abort); }
         };
         const completed = (raw: z.infer<typeof envelope>) => {
+          if (request.maxResponseBytes !== undefined && Buffer.byteLength(raw.choices[0]!.message.content, 'utf8') > request.maxResponseBytes) {
+            const usage = raw.usage && { inputTokens: raw.usage.prompt_tokens, outputTokens: raw.usage.completion_tokens };
+            throw new ModelResponseRejected('Model completion exceeds byte cap', usage);
+          }
           if (!streamReceived) {
             diagnostics.contentBytes = Buffer.byteLength(raw.choices[0]!.message.content, 'utf8');
             if (raw.choices[0]!.finish_reason != null) diagnostics.finishReason = raw.choices[0]!.finish_reason;
@@ -473,7 +482,7 @@ export class HttpModelAdapter implements ModelAdapter {
             promptChars: request.system.length + JSON.stringify(request.input).length, maxTokens, usage: raw.usage }));
           return raw;
         };
-        if (streamReceived) return completed(await readStreamCompletion(read, diagnostics));
+        if (streamReceived) return completed(await readStreamCompletion(read, diagnostics, request.maxResponseBytes));
         const chunks: Uint8Array[] = []; let size = 0;
         const limit = response.ok ? responseSizeLimit : 2048;
         for (;;) {
