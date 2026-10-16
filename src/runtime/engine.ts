@@ -218,9 +218,17 @@ export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor
   const allocated = Math.min(options.callMaxMs, share);
   return Math.max(1, Math.floor(options.requestedMs === undefined ? allocated : Math.min(options.requestedMs, allocated)));
 }
-/** r62 chifeng/pdf2: one wording for every model timeout ("Model <phase> call timed out: ..."), without the billing suffix. */
+/** One wording for every model timeout, without the billing suffix (r62, simplified in r74). */
 export function modelTimeoutReason(phase: string, error: Error): string {
-  return `Model ${phase} call timed out: ${error.message.replace(/\s*Provider billing requires reconciliation\.?\s*$/, '').replace(/\.\s*$/, '')}`;
+  return timeoutText(phase, error.message);
+}
+/** r74: one phrase only — "Model response timed out after Xms (<phase> call)"; never "call timed out: Model response timed out". */
+function timeoutText(phase: string, message: string): string {
+  const text = message.replace(/\s*Provider billing requires reconciliation\.?\s*$/, '').replace(/\.\s*$/, '').trim();
+  const ms = /timed out after (\d+)\s*ms/i.exec(text)?.[1];
+  const kind = /\(([a-z-]+ timeout)/i.exec(text)?.[1];
+  if (ms) return `Model response timed out after ${ms}ms (${phase} call${kind ? `, ${kind}` : ''})`;
+  return `Model response timed out (${phase} call${text ? `: ${text.replace(/^Model\s+/i, '')}` : ''})`;
 }
 /**
  * r62 pdf2/csv: a Run stopped early (timeout / unknown outcome) with retained work still gets one
@@ -245,10 +253,20 @@ function settleReviewAfterStop(run: AgentRun, outcome: { accepted: boolean; note
 }
 /** A timeout is a definite stop (only billing is unresolved); never describe it as an unknown outcome. */
 export function modelStopLimitation(phase: string, error: Error): string {
-  if (error instanceof ModelTimeout) return `Model ${phase} call timed out: ${error.message.replace(/\s*Provider billing requires reconciliation\.?\s*$/, '')}. Independent review was not completed; provider billing still requires reconciliation.`.replace(/\.\./g, '.');
+  if (error instanceof ModelTimeout) return `${timeoutText(phase, error.message)}. Independent review was not completed; provider billing still requires reconciliation.`;
   return `Model ${phase} outcome is unknown: ${error.message} Independent review was not completed; provider billing still requires reconciliation.`;
 }
+const reviewTerminalEvents = new Set(['review.completed', 'review.skipped', 'review.cancelled']);
+/** r74 csv: a review.requested must never be left without a terminal review event. */
+function closeDanglingReview(run: AgentRun, reason: string): void {
+  for (let i = run.events.length - 1; i >= 0; i--) {
+    const type = run.events[i]!.type;
+    if (reviewTerminalEvents.has(type)) return;
+    if (type === 'review.requested') { run.events.push({ id: id('evt'), seq: run.events.length + 1, type: 'review.skipped', at: now(), data: { reason } }); return; }
+  }
+}
 export function event(run: AgentRun, type: string, data: Record<string, unknown> = {}): void {
+  if (type === 'run.partial' || type === 'run.failed' || type === 'run.cancelled') closeDanglingReview(run, typeof data.reason === 'string' ? data.reason : type);
   run.events.push({ id: id('evt'), seq: run.events.length + 1, type, at: now(), data });
 }
 export class Conflict extends Error {}
@@ -1639,7 +1657,7 @@ export class AgentEngine {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const response = await Promise.race([model.complete({ ...requestWithKey, signal: controller.signal }), new Promise<never>((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new ModelTimeout(repairing ? 'Artifact repair timed out' : 'Final-only model call timed out')); }, timeoutMs);
+            timer = setTimeout(() => { controller.abort(); reject(new ModelTimeout(`Model response timed out after ${timeoutMs}ms`)); }, timeoutMs);
           })]);
           return response;
         } finally { clearTimeout(timer); controller.abort(); }
@@ -1674,8 +1692,22 @@ export class AgentEngine {
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
         if (error instanceof ModelTimeout && !repairing && !(finalOnly && current.steps.find(step => step.taskId === taskId)?.observations.length) && !['cancelled', 'paused'].includes(current.status) && current.reconcileDisposition !== 'paused') {
           const reason = `${modelTimeoutReason(phase, error)}. Independent review was not completed.`;
+          const timedOutStep = taskId ? current.steps.find(step => step.taskId === taskId) : undefined;
+          const budgetLeftMs = this.modelTimeBudget.runBudgetMs - modelTimeUsedMs(current) - this.modelTimeBudget.reviewReserveMs;
           if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
-          else {
+          else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded' && !timedOutStep.timeoutRetried
+            && current.calls.length < current.maxModelCalls && budgetLeftMs >= this.modelTimeBudget.minCallMs) {
+            // r74 chifeng/json: the first executor call timed out with nothing retained. Retry the task once
+            // within the remaining Run budget instead of failing on a single slow provider response.
+            timedOutStep.timeoutRetried = true;
+            current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'running';
+            delete current.error;
+            event(current, 'model.timeout_retry', { callId, taskId, reason, remainingBudgetMs: budgetLeftMs });
+          } else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded') {
+            // Retry also timed out (or no budget left): end succeeded(partial) with an explicit unknowns note, not run.failed.
+            createTimeoutUnknownArtifact(current, taskId!, callId, reason);
+            event(current, 'run.partial', { reason, callId, noOutput: true });
+          } else {
             current.status = 'failed'; current.error = reason;
             recordTaskFailure(current, taskId);
             event(current, 'run.failed', { reason, callId });
@@ -1687,7 +1719,7 @@ export class AgentEngine {
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
           && await preserveRunOutput(current, modelStopLimitation(phase, error))) {
-          const reason = error instanceof ModelTimeout ? `Model ${phase} call timed out; completed work retained` : 'Model outcome unknown; completed work retained';
+          const reason = error instanceof ModelTimeout ? `${timeoutText(phase, error.message)}; completed work retained` : 'Model outcome unknown; completed work retained';
           event(current, 'run.partial', { reason, callId });
           // Only a definite timeout is reviewed; an unknown outcome waits for billing reconciliation first.
           if (error instanceof ModelTimeout && !repairing && phase !== 'reviewer' && queueReviewAfterStop(current, reason)) delete current.reconcileDisposition;
@@ -1697,6 +1729,7 @@ export class AgentEngine {
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
       if (failed.status === 'reviewing' && failed.stopReview === 'pending') return;
       if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
+      if (error instanceof ModelTimeout && failed.events.at(-1)?.type === 'model.timeout_retry') return;
       if (finalOnly && failed.steps.some(step => step.taskId === taskId && step.status === 'succeeded')) return;
       if (failed.status === 'succeeded') return;
       if (!repairing) throw error;
@@ -1844,8 +1877,14 @@ export class AgentEngine {
     const done = new Set(run.steps.filter(s => s.status === 'succeeded').map(s => s.taskId));
     const node = plan.nodes.find(n => !done.has(n.id) && n.dependsOn.every(d => done.has(d)));
     if (!node) {
-      await this.repository.mutate(run.id, current => {
+      await this.repository.mutate(run.id, async current => {
         if (current.status !== 'running') return;
+        if (current.calls.length >= current.maxModelCalls) {
+          // r74 csv: no call left for the reviewer. Do not open a review that can never complete.
+          const reason = 'Model call budget exhausted';
+          event(current, 'review.skipped', { reason });
+          if (await preserveRunOutput(current, `${reason}. Independent review was not completed.`)) { event(current, 'run.partial', { reason }); return; }
+        }
         current.status = 'reviewing'; event(current, 'review.requested');
       }); return;
     }
@@ -3074,6 +3113,25 @@ function currentDelegationReceipt(run: AgentRun, receiptRef: string): import('..
 }
 
 /** A failed synthesis must not discard research or replay the uncertain call. */
+/** r74: no model output at all after a timeout + one retry. The Run ends partial and says plainly what is unknown. */
+function createTimeoutUnknownArtifact(run: AgentRun, taskId: string, callId: string, reason: string): void {
+  const step = run.steps.find(step => step.taskId === taskId)!;
+  const node = run.plans.at(-1)?.nodes.find(node => node.id === taskId);
+  const title = node?.title ?? taskId;
+  const unknown = `Unknown: task "${title}" produced no model output; the executor call timed out after one retry, so nothing from this task has been generated or verified.`;
+  const pending = (run.plans.at(-1)?.nodes ?? []).filter(item => item.id !== taskId && !run.steps.some(s => s.taskId === item.id && s.status === 'succeeded')).map(item => item.title);
+  const content = `Partial answer — no output.\n\n${unknown}${pending.length ? `\nNot started: ${pending.join('; ')}.` : ''}\n\nRe-run the request later; the model provider was too slow to respond within the Run budget.`;
+  const artifact = { id: id('artifact'), taskId, title, content, evidenceRefs: [] as string[], partial: true, limitations: [reason, unknown], hash: digest({ taskId, content }), createdAt: now() };
+  run.artifacts = run.artifacts.filter(item => item.taskId !== taskId);
+  run.artifacts.push(artifact);
+  step.status = 'succeeded';
+  delete step.finishRepair; delete step.outputRecovery; delete step.error; delete step.failureReason;
+  run.status = 'succeeded'; run.partial = true; delete run.error; delete run.resumeStatus;
+  for (const item of run.artifacts) item.partial = true;
+  populateRunLimitations(run);
+  event(run, 'artifact.created', { artifactId: artifact.id, taskId, evidenceRefs: [], modelCallId: callId, contextId: run.context.id, partial: true, noOutput: true });
+}
+
 function createLimitedNodeArtifact(run: AgentRun, taskId: string, callId: string, failure: string): void {
   const step = run.steps.find(step => step.taskId === taskId)!;
   const node = run.plans.at(-1)!.nodes.find(node => node.id === taskId)!;

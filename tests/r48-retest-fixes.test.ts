@@ -75,7 +75,7 @@ it('r48: the engine writes rate-limit retry and exhaustion events into the Run',
 // Issue 2 (chifeng): a timed-out repair call is a definite timeout, not an unknown outcome.
 it('r48 chifeng: describes a model timeout as a timeout, never as an unknown outcome', () => {
   const timeout = modelStopLimitation('executor', new ModelTimeout('Model response timed out after 180000ms (overall timeout). Provider billing requires reconciliation.'));
-  expect(timeout).toBe('Model executor call timed out: Model response timed out after 180000ms (overall timeout). Independent review was not completed; provider billing still requires reconciliation.');
+  expect(timeout).toBe('Model response timed out after 180000ms (executor call, overall timeout). Independent review was not completed; provider billing still requires reconciliation.');
   expect(timeout).not.toMatch(/outcome is unknown/i);
   expect(modelStopLimitation('executor', new ModelOutcomeUnknown('Connection interrupted.'))).toContain('outcome is unknown');
 });

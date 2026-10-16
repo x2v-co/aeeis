@@ -504,7 +504,8 @@ describe('OpenAI-compatible SSE transport', () => {
       } }), { headers: { 'content-type': 'text/event-stream' } });
     });
     vi.stubGlobal('fetch', fetch);
-    const completion = adapter(modelTransportConfig({})).complete({ system: 's', input: {} });
+    // r74 stall detection (default 90 s) would cut the 133 s gap between reasoning deltas; this case tests idle/first-byte only.
+    const completion = adapter(modelTransportConfig({ AEEIS_MODEL_STALL_TIMEOUT_MS: '0' })).complete({ system: 's', input: {} });
     await vi.advanceTimersByTimeAsync(480_001);
     await expect(completion).resolves.toMatchObject({ value: {} });
     expect(fetch).toHaveBeenCalledTimes(1);

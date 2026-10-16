@@ -273,6 +273,8 @@ export interface Step {
   /** Bounded corrective turns, independent of the exhausted ordinary allowance. */
   outputRecovery?: { reason: string; candidate: unknown; problems: Array<{ path: string; code: string; message: string }>; toolsAllowed: boolean; callOffset: number; exhausted?: boolean };
   outputRecoveryAttempts?: number;
+  /** r74: the task's executor call already timed out once with nothing retained and was retried. */
+  timeoutRetried?: boolean;
 }
 export interface AgentRun {
   executionLimits?: import('./execution-limits.js').ExecutionLimits;

@@ -24,13 +24,14 @@ it.each(['planner', 'executor', 'reviewer'] as const)('closes a %s timeout while
     for (let i = 0; i < 4; i++) await engine.advance(run.id);
   }
   const finished = await repository.get(run.id);
-  expect(finished.status).toBe(phase === 'reviewer' ? 'succeeded' : 'failed');
+  // r74: an executor timeout with nothing retained is retried once, then ends succeeded(partial) with an unknowns note.
+  expect(finished.status).toBe(phase === 'planner' ? 'failed' : 'succeeded');
   expect(finished.calls.at(-1)?.state).toBe('unknown');
   expect(finished.resumeStatus).toBeUndefined();
-  if (phase === 'reviewer') {
+  if (phase !== 'planner') {
     expect(finished.partial).toBe(true);
     expect(finished.artifacts[0]?.limitations?.join(' ')).toContain('idle timeout');
-  } else expect(finished.error).toContain(phase === 'planner' ? 'first-byte timeout' : 'idle timeout');
+  } else expect(finished.error).toContain('first-byte timeout');
   const call = finished.calls.at(-1)!;
   const reconciled = await engine.reconcileModelCall(run.id, { callId: call.id, idempotencyKey: call.idempotencyKey, inputHash: call.inputHash, outcome: 'completed', reason: 'Billing checked', output: {}, usage: { inputTokens: 1, outputTokens: 1 } });
   expect(reconciled.status).toBe(finished.status);

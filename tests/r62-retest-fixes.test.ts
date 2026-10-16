@@ -24,9 +24,9 @@ async function drive(engine: AgentEngine, repository: InMemoryRunRepository, goa
 }
 
 // 1) chifeng: repair timeout wording and partial result for a no-source Run.
-it('r62 chifeng: words every model timeout as "Model <phase> call timed out"', () => {
+it('r62 chifeng: words every model timeout once ("Model response timed out after Xms")', () => {
   const reason = modelTimeoutReason('executor', new ModelTimeout('Model response timed out after 180000ms (overall timeout). Provider billing requires reconciliation.'));
-  expect(reason).toBe('Model executor call timed out: Model response timed out after 180000ms (overall timeout)');
+  expect(reason).toBe('Model response timed out after 180000ms (executor call, overall timeout)');
 });
 
 it('r62 chifeng: repair fallback drops only the general-assumption sentences', () => {
@@ -50,7 +50,7 @@ it('r62 chifeng: a timed-out repair on a no-source Run finishes succeeded(partia
   expect(run.status, run.error).toBe('succeeded');
   expect(run.partial).toBe(true);
   const limitations = run.artifacts.flatMap(artifact => artifact.limitations ?? []).join('\n');
-  expect(limitations).toContain('Model executor call timed out');
+  expect(limitations).toContain('Model response timed out after');
   expect(run.artifacts[0]!.content).toContain('第二天看草原');
   expect(run.artifacts[0]!.content).not.toContain('通常');
 });
@@ -75,9 +75,9 @@ it('r62 pdf2: an executor timeout after earlier work runs one review of the part
   expect(run.partial).toBe(true);
   expect(run.stopReview).toBe('done');
   const limitations = run.artifacts.flatMap(artifact => artifact.limitations ?? []).join('\n');
-  expect(limitations).toContain('Model executor call timed out');
+  expect(limitations).toContain('Model response timed out after');
   expect(limitations).not.toContain('Independent review was not completed');
-  expect(run.events.find(item => item.type === 'run.partial')!.data.reason).not.toMatch(/^Model response timed out/);
+  expect(run.events.find(item => item.type === 'run.partial')!.data.reason).not.toMatch(/call timed out: Model/);
 });
 
 it('r62 pdf2: a needs_revision verdict on stopped output stays succeeded(partial) and records the issues', async () => {
