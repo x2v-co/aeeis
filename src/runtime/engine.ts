@@ -1584,7 +1584,10 @@ export class AgentEngine {
           const step = current.steps.find(step => step.taskId === taskId);
           if (step?.finishRepair) step.finishRepair.discarded = repairFailure!;
         }
-        if (!repairing && !finalOnly && error instanceof ModelOutcomeUnknown && !terminalRunStatuses.has(current.status)) {
+        // #68 state model: an unknown outcome is only absorbed by a final-only limit artifact when the
+        // node has observations to deliver; otherwise it stays 'unknown' for reconciliation.
+        const hasObservations = Boolean(current.steps.find(step => step.taskId === taskId)?.observations.length);
+        if (!repairing && (!finalOnly || !hasObservations) && error instanceof ModelOutcomeUnknown && !terminalRunStatuses.has(current.status)) {
           current.reconcileDisposition = current.status === 'paused' ? 'paused' : 'running';
           current.resumeStatus = current.status === 'paused' ? current.resumeStatus ?? 'running' : current.status;
           current.status = 'unknown'; current.error = error.message;
