@@ -1,3 +1,4 @@
+import { generalAssumption } from './sourceFidelityRules.js';
 import type { Step } from './contracts.js';
 import { projectPulseArtifactSchema } from './contracts.js';
 
@@ -45,7 +46,14 @@ export function pruneFailedFields(candidate: unknown, problems: FinishProblem[])
   const removals = new Map<unknown[], Set<number>>();
   for (const problem of problems) {
     const path = parts(problem.path);
-    if (path[0] === 'content') { result.content = 'Partial answer: see the retained evidence-backed structured entries.'; continue; }
+    if (path[0] === 'content') {
+      // r62 chifeng: drop only the sentences carrying the forbidden general assumption, not the whole answer.
+      if (problem.code === 'general_assumption' && typeof result.content === 'string') {
+        const kept = result.content.split(/(?<=[。！？!?\n])/u).filter(sentence => !generalAssumption.test(sentence)).join('').trim();
+        if (kept) { result.content = kept; continue; }
+      }
+      result.content = 'Partial answer: see the retained evidence-backed structured entries.'; continue;
+    }
     let target: unknown = result;
     for (const key of path) {
       if (Array.isArray(target) && /^\d+$/.test(key)) {

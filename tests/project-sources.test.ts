@@ -144,8 +144,12 @@ describe('Project Pulse source provider', () => {
       await engine.command(run.id, 'approve', { planHash: proposed.plans[0]!.hash, planVersion: proposed.plans[0]!.version });
       expect(await engine.advance(run.id)).toBe('running');
       expect(await engine.advance(run.id)).toBe('running'); // one bounded finish repair
-      expect(await engine.advance(run.id)).toBe('succeeded');
+      // r62 lt: a repair that answered but did not fix its problems keeps the pruned artifact and goes to review.
+      expect(await engine.advance(run.id)).toBe('running');
+      expect(await engine.advance(run.id)).toBe('reviewing');
+      await engine.advance(run.id).catch(() => undefined);
       const partial = await repository.get(run.id);
+      expect(partial.events.map(item => item.type)).toEqual(expect.arrayContaining(['artifact.repair_fallback', 'review.requested']));
       expect(partial.partial).toBe(true);
       expect(partial.artifacts[0]).toMatchObject({ artifactType: 'project-pulse/1', partial: true, limitations: expect.arrayContaining([expect.stringContaining('Artifact repair discarded')]) });
     } finally { await repository.close(); }

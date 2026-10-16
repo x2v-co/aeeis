@@ -333,6 +333,8 @@ export interface AgentRun {
   /** One durable schema repair per proposed plan, also used after restart. */
   plannerRepair?: { rawOutput: string; validationError: string };
   /** One corrective reviewer retry: redacted zod issues from the rejected review. */
+  /** r62: one independent review of output retained after an early stop (timeout/unknown outcome). */
+  stopReview?: 'pending' | 'done';
   reviewRepair?: { issues: Array<{ path: string; code: string; message: string }> };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
