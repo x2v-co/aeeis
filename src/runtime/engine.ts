@@ -306,6 +306,15 @@ export function normalizeFinishOutput(value: unknown): unknown {
   const structured = candidate.structured;
   if (candidate.artifactType === undefined && structured && typeof structured === 'object' && 'schemaVersion' in structured
     && ['project-pulse/1', 'website-builder/1', 'fillable-pdf/1'].includes(String(structured.schemaVersion))) candidate.artifactType = structured.schemaVersion;
+  // Older guidance asked plain-text answers for structured inference notes,
+  // even though no generic structured artifact contract exists. Retain these
+  // notes as prose, where the normal citation and fidelity checks still apply.
+  const notes = z.object({ inferences: z.array(z.object({ text: z.string().min(1), evidenceRefs: z.array(z.string()) }).passthrough()).max(50) }).strict().safeParse(structured);
+  if (candidate.artifactType === undefined && notes.success && typeof candidate.content === 'string') {
+    candidate.content += notes.data.inferences.map(note => `\n\n推断：${note.text} ${note.evidenceRefs.map(ref => `[${ref}]`).join(' ')}`).join('');
+    candidate.evidenceRefs = [...new Set([...(Array.isArray(candidate.evidenceRefs) ? candidate.evidenceRefs : []), ...notes.data.inferences.flatMap(note => note.evidenceRefs)])];
+    delete candidate.structured;
+  }
   if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
     const coerced = coerceStringArtifactItems(structured as Record<string, unknown>, Array.isArray(candidate.evidenceRefs) ? candidate.evidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []);
     if (coerced.length) {
@@ -416,7 +425,7 @@ export function sourceLevelRefs(refs: string[], dependencies: Array<{ id: string
   const expand = (ref: string, seen: Set<string>): string[] => {
     if (seen.has(ref)) return [ref];
     const dependency = dependencies.find(artifact => artifact.id === ref);
-    if (!dependency?.evidenceRefs.length) return [ref];
+    if (!dependency) return [ref];
     return dependency.evidenceRefs.flatMap(source => expand(source, new Set([...seen, ref])));
   };
   return [...new Set(refs.flatMap(ref => expand(ref, new Set())))];
@@ -2092,6 +2101,13 @@ export class AgentEngine {
             if (candidate.artifactType && candidate.structured && typeof candidate.structured === 'object' && !Array.isArray(candidate.structured)) (candidate.structured as Record<string, unknown>).schemaVersion = candidate.artifactType;
             candidate.evidenceRefs = refineRefs(candidate.evidenceRefs);
             const limitationNotes = [...(candidate.limitations ?? []), ...(weatherNotice ? [weatherNotice] : [])];
+            // A received dependency is context, not a primary source. Expand
+            // inline citations too, including dependencies with no source refs.
+            for (const dependency of dependencies) if (candidate.content.includes(dependency.id)) {
+              const refs = refineRefs([dependency.id]);
+              candidate.content = candidate.content.split(dependency.id).join(refs.join(', ')).replace(/\[\]/g, '');
+              if (!refs.length) limitationNotes.push('Dependency citation omitted: the dependency has no source evidence; its claims remain unverified.');
+            }
             if (candidate.structured && typeof candidate.structured === 'object' && !Array.isArray(candidate.structured)) {
               const lists = normalizeArtifactLists(candidate.structured as Record<string, unknown>);
               if (lists.duplicates || lists.truncated) event(current, 'artifact.lists_normalized', { taskId: node.id, ...lists });
@@ -2138,7 +2154,7 @@ export class AgentEngine {
             const missingEvidence = needsEvidence && candidate.evidenceRefs.length === 0;
             evidenceCheck.invalidRefs = invalidRefs; evidenceCheck.missingEvidence = missingEvidence;
             evidenceCheck.result = invalidRefs.length || missingEvidence ? 'rejected' : evidenceCheck.mappedRefs || limitationNotes.some(note => note.startsWith('Unavailable evidence')) ? 'fixed' : 'ok';
-            if (invalidRefs.length || missingEvidence) add('evidenceRefs', 'evidence', `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only allowed evidence IDs: ${JSON.stringify([...observed])}`);
+            if (invalidRefs.length || missingEvidence) add('evidenceRefs', 'evidence', `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only source evidence IDs: ${JSON.stringify([...observed].filter(ref => !ref.startsWith('artifact_')))}`);
             const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
             const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
             const autoLabels = labelInferences(candidate, structured, sourceText, candidate.evidenceRefs);
