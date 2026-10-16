@@ -209,11 +209,39 @@ export function modelTimeUsedMs(run: Pick<AgentRun, 'calls'>, nowMs = Date.now()
  * independent-review reserve; the reviewer may always use its reserve. No single call may
  * exceed callMaxMs, so one stalled call cannot consume the whole Run budget.
  */
-export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined }): number {
+export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined; pendingTasks?: number | undefined }): number {
   const remaining = Math.max(0, options.runBudgetMs - options.usedMs);
-  const share = options.phase === 'reviewer' ? Math.max(remaining, options.reviewReserveMs) : Math.max(options.minCallMs, remaining - options.reviewReserveMs);
+  // r62 pdf2: spread what is left before the review reserve over the plan tasks still to run,
+  // so the current task cannot take the whole remainder with a single 420 s call.
+  const pending = Math.max(1, Math.floor(options.pendingTasks ?? 1));
+  const share = options.phase === 'reviewer' ? Math.max(remaining, options.reviewReserveMs) : Math.max(options.minCallMs, Math.floor((remaining - options.reviewReserveMs) / pending));
   const allocated = Math.min(options.callMaxMs, share);
   return Math.max(1, Math.floor(options.requestedMs === undefined ? allocated : Math.min(options.requestedMs, allocated)));
+}
+/** r62 chifeng/pdf2: one wording for every model timeout ("Model <phase> call timed out: ..."), without the billing suffix. */
+export function modelTimeoutReason(phase: string, error: Error): string {
+  return `Model ${phase} call timed out: ${error.message.replace(/\s*Provider billing requires reconciliation\.?\s*$/, '').replace(/\.\s*$/, '')}`;
+}
+/**
+ * r62 pdf2/csv: a Run stopped early (timeout / unknown outcome) with retained work still gets one
+ * independent review of that partial output. The verdict cannot fail the Run or trigger rework;
+ * it only replaces "Independent review was not completed" with the actual review result.
+ */
+export function queueReviewAfterStop(run: AgentRun, reason: string): boolean {
+  if (process.env.AEEIS_REVIEW_AFTER_STOP === '0' || run.stopReview || run.taskExecution || run.status !== 'succeeded' || !run.artifacts.length) return false;
+  run.stopReview = 'pending'; run.status = 'reviewing';
+  event(run, 'review.requested', { partial: true, afterStop: reason });
+  return true;
+}
+const reviewNotCompleted = /\s*Independent review was not completed[^.;]*[.;]?/g;
+function settleReviewAfterStop(run: AgentRun, outcome: { accepted: boolean; note?: string }): void {
+  run.stopReview = 'done'; run.status = 'succeeded'; run.partial = true; delete run.error;
+  for (const artifact of run.artifacts) {
+    artifact.partial = true;
+    const kept = (artifact.limitations ?? []).map(item => item.replace(reviewNotCompleted, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    artifact.limitations = [...new Set([...kept, ...(outcome.note ? [outcome.note] : [])])];
+  }
+  populateRunLimitations(run);
 }
 /** A timeout is a definite stop (only billing is unresolved); never describe it as an unknown outcome. */
 export function modelStopLimitation(phase: string, error: Error): string {
@@ -1227,6 +1255,12 @@ export class AgentEngine {
     } catch (error) {
       await this.repository.mutate(runId, async run => {
         if (terminalRunStatuses.has(run.status) || run.status === 'unknown') return;
+        if (run.status === 'reviewing' && run.stopReview === 'pending') {
+          // The extra review of stopped output must never turn retained work into a failure.
+          settleReviewAfterStop(run, { accepted: false, note: `Independent review was not completed: ${failureReason(error, 'Review failed')}` });
+          event(run, 'review.skipped', { reason: failureReason(error, 'Review failed') });
+          return;
+        }
         const reason = failureReason(error, 'Execution failed');
         if (/^Model (?:call|token|money) budget exhausted$/.test(reason) && run.status !== 'paused') {
           const step = run.steps.find(step => step.status !== 'succeeded' && step.observations.some(observation => isSourceTool(observation.tool)))
@@ -1498,6 +1532,7 @@ export class AgentEngine {
     // New calls get a slice of the Run's model wall-clock budget. It is a transport
     // option (like signal), kept out of the durable request hash.
     const allocatedTimeoutMs = existingCallId || repairing ? undefined : allocateModelCallTimeout({ phase, usedMs: modelTimeUsedMs(run), ...this.modelTimeBudget,
+      pendingTasks: phase === 'executor' ? (run.plans.at(-1)?.nodes.filter(node => !run.steps.some(step => step.taskId === node.id && step.status === 'succeeded')).length ?? 1) : 1,
       requestedMs: request.timeoutMs ?? (finalOnly ? this.finalCallTimeoutMs : undefined) });
     const requestWithKey: ModelRequest = { ...request, ...(allocatedTimeoutMs === undefined ? {} : { timeoutMs: allocatedTimeoutMs }),
       // Legacy saved requests predate wire controls: preserve omitted fields
@@ -1585,7 +1620,7 @@ export class AgentEngine {
         if (!existingCallId) event(current, 'execution.limited', { taskId, reason: step.limitReason, callId });
       }
       if (phase === 'planner') current.status = 'planning';
-      event(current, 'model.started', { callId, phase, taskId: taskId ?? null }); reserved = true;
+      event(current, 'model.started', { callId, phase, taskId: taskId ?? null, ...(allocatedTimeoutMs === undefined ? {} : { timeoutMs: allocatedTimeoutMs }) }); reserved = true;
     });
     if (!reserved) {
       // A competing tick won the durable fence after budget admission. No
@@ -1613,7 +1648,7 @@ export class AgentEngine {
       await this.settleModelGlobal(await this.repository.get(run.id), callId, result.usage);
     }
     catch (error) {
-      if (repairing) repairFailure = failureReason(error, 'Artifact repair failed');
+      if (repairing) repairFailure = error instanceof ModelTimeout ? `${modelTimeoutReason('executor', error)}; provider billing still requires reconciliation` : failureReason(error, 'Artifact repair failed');
       const failed = await this.repository.mutate(run.id, async current => {
         const call = current.calls.find(c => c.id === callId)!;
         call.state = error instanceof ModelOutcomeUnknown ? 'unknown' : 'failed'; call.endedAt = now();
@@ -1638,8 +1673,8 @@ export class AgentEngine {
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
         if (error instanceof ModelTimeout && !repairing && !(finalOnly && current.steps.find(step => step.taskId === taskId)?.observations.length) && !['cancelled', 'paused'].includes(current.status) && current.reconcileDisposition !== 'paused') {
-          const reason = `${error.message} Independent review was not completed.`;
-          if (await preserveRunOutput(current, reason)) event(current, 'run.partial', { reason, callId });
+          const reason = `${modelTimeoutReason(phase, error)}. Independent review was not completed.`;
+          if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
           else {
             current.status = 'failed'; current.error = reason;
             recordTaskFailure(current, taskId);
@@ -1652,11 +1687,15 @@ export class AgentEngine {
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
           && await preserveRunOutput(current, modelStopLimitation(phase, error))) {
-          event(current, 'run.partial', { reason: error instanceof ModelTimeout ? `Model ${phase} call timed out; completed work retained` : 'Model outcome unknown; completed work retained', callId });
+          const reason = error instanceof ModelTimeout ? `Model ${phase} call timed out; completed work retained` : 'Model outcome unknown; completed work retained';
+          event(current, 'run.partial', { reason, callId });
+          // Only a definite timeout is reviewed; an unknown outcome waits for billing reconciliation first.
+          if (error instanceof ModelTimeout && !repairing && phase !== 'reviewer' && queueReviewAfterStop(current, reason)) delete current.reconcileDisposition;
         }
       });
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
+      if (failed.status === 'reviewing' && failed.stopReview === 'pending') return;
       if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
       if (finalOnly && failed.steps.some(step => step.taskId === taskId && step.status === 'succeeded')) return;
       if (failed.status === 'succeeded') return;
@@ -2273,7 +2312,7 @@ export class AgentEngine {
             pendingRepair.candidate = structuredClone(prepared.decision);
             pendingRepair.discarded ??= 'Legacy unscoped repair was discarded';
           }
-          let repairFallback = false;
+          let repairFallback: false | 'stop' | 'review' = false;
           if (pendingRepair && settlementError(current)) pendingRepair.discarded ??= settlementError(current)!;
           if (pendingRepair && prepared.problems.length && decision.artifactType === 'fillable-pdf/1' && !pendingRepair.discarded && !repairIsWorse(pendingRepair.problems ?? [], prepared.problems)) throw new Error(`Model artifact repair failed: ${prepared.problems.map(problem => problem.message).join('; ')}`);
           if (pendingRepair && (pendingRepair.discarded || prepared.problems.length)) {
@@ -2284,12 +2323,18 @@ export class AgentEngine {
             if (fallback.type !== 'finish') throw new Error('Invalid pre-repair artifact');
             prepared = await prepareFinish(fallback);
             prepared.limitationNotes.push(`Artifact repair discarded: ${reason}. Invalid claims were omitted from the pre-repair artifact.`);
-            if (![...prepared.decision.evidenceRefs, ...prepared.structuredEvidenceRefs].some(ref => observed.has(ref) && !ref.startsWith('artifact_'))) {
+            // r62 chifeng: a Run with no source material never had evidence to keep; only require
+            // retained evidence when the task actually observed some.
+            const hadEvidence = [...observed].some(ref => !ref.startsWith('artifact_'));
+            const assumptionOnly = original.length > 0 && original.every(problem => problem.code === 'general_assumption');
+            if ((hadEvidence || !assumptionOnly) && ![...prepared.decision.evidenceRefs, ...prepared.structuredEvidenceRefs].some(ref => observed.has(ref) && !ref.startsWith('artifact_'))) {
               contentCheck.result = 'rejected'; evidenceCheck.result = 'rejected'; evidenceCheck.missingEvidence = true;
               contentCheck.problems.push('No valid evidence remains after repair fallback');
               throw new Error(`Model artifact repair failed: ${reason}: ${original.map(problem => problem.message).join('; ')}; no valid evidence remains`);
             }
-            repairFallback = true;
+            // r62 lt: a repair that answered but did not fix its problems continues to review; a repair
+            // that timed out / was rejected stops here without another model call.
+            repairFallback = pendingRepair.discarded ? 'stop' : 'review';
           }
           if (prepared.problems.length) {
             if (pendingRepair || limitReason) throw new Error(`Final finish is invalid: ${prepared.problems.map(problem => problem.message).join('; ')}`);
@@ -2307,7 +2352,7 @@ export class AgentEngine {
             if (!finishDecision.evidenceRefs.includes(result.id)) finishDecision.evidenceRefs.push(result.id);
           }
           const { structured, structuredEvidenceRefs, limitationNotes, inferences } = prepared;
-          if (repairFallback) limitationNotes.push('Independent review was not completed after repair fallback');
+          if (repairFallback === 'stop') limitationNotes.push('Independent review was not completed after repair fallback');
           if (inferences.derived || inferences.warnings.length) event(current, 'artifact.inferences_derived', { taskId: node.id, derived: inferences.derived, warnings: inferences.warnings });
           // Reviewer sees warnings without confusing them with source unknowns.
           if (inferences.warnings.length) live.observations.push({ tool: 'output.warning', argument: 'prose inference correspondence', result: { warnings: inferences.warnings } });
@@ -2334,7 +2379,9 @@ export class AgentEngine {
           current.artifacts.push(artifact); live.status = 'succeeded';
           populateRunLimitations(current);
           delete live.outputRecovery;
-          if (repairFallback) { current.status = 'succeeded'; current.partial = true; delete current.error; event(current, 'run.partial', { reason: 'Artifact repair fallback; independent review was not completed' }); }
+          if (repairFallback === 'stop') { current.status = 'succeeded'; current.partial = true; delete current.error; event(current, 'run.partial', { reason: 'Artifact repair fallback; independent review was not completed' }); }
+          // r62 lt: the pruned pre-repair artifact (partial) continues to independent review.
+          else if (repairFallback === 'review') { current.partial = true; event(current, 'artifact.repair_fallback', { taskId: node.id, reason: 'Pre-repair artifact retained with invalid claims omitted; continuing to independent review' }); }
           event(current, 'artifact.created', { artifactId: artifact.id, taskId: node.id, evidenceRefs: artifact.evidenceRefs, modelCallId: current.calls.at(-1)!.id, contextId: current.context.id });
         } finally {
           // Existing protocol convention: one-line JSON on stderr in the API process.
@@ -2865,6 +2912,10 @@ export class AgentEngine {
       const accepted = current.review.verdict === 'accepted';
       const warnings = accepted ? current.review.issues : [];
       event(current, 'review.completed', { verdict: current.review.verdict, issues: current.review.issues, ...(warnings.length ? { warnings } : {}), ...(current.review.confidence === undefined ? {} : { reviewConfidence: current.review.confidence }), ...(current.review.improvement === undefined ? {} : { proposal: current.review.improvement }) });
+      if (current.stopReview === 'pending') {
+        settleReviewAfterStop(current, accepted ? { accepted } : { accepted, note: `Independent review of the partial output requested revision: ${current.review.summary}; ${current.review.issues.join('; ')}` });
+        return;
+      }
       if (!accepted && current.events.filter(item => item.type === 'review.revision_requested').length < 2) {
         const plan = current.plans.at(-1)!;
         const nodes = plan.nodes.filter(node => !plan.nodes.some(other => other.dependsOn.includes(node.id)));

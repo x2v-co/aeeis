@@ -47,7 +47,7 @@ export function pulseFidelityProblems(structured: ProjectPulseArtifact, sourceTe
 }
 
 const inferenceCue = /可能|预计|建议|应当|应该|推测|推断|通常|一般(?:会|在|需要)|probably|likely|recommend|infer(?:ence|red)?|usually|typically/i;
-const generalAssumption = /通常|一般(?:会|在|需要)|usually|typically/i;
+export const generalAssumption = /通常|一般(?:会|在|需要)|usually|typically/i;
 const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^[\s#*>\-\d.]+/, '').trim();
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
 const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：').replace(/[。；.!;]+$/, '').trim();
@@ -99,6 +99,19 @@ export function labelInferences(content: string | { content: string }, structure
   return { ...(typeof content === 'string' ? { content: labelledContent } : {}), labeled: paths.length, paths };
 }
 
+const sourceGapPattern = /(?:资料|来源|原文|材料)[^。；]{0,12}?(?:未|没有|并未)(?:说明|给出|提及|注明|明确|提供)|not (?:stated|specified|given|mentioned) in the source/i;
+function isSourceGap(text: string): boolean { return sourceGapPattern.test(text) && !/风险|可能|延期|risk|may|might/i.test(text.replace(sourceGapPattern, '').replace(/资料表述为可能性/g, '')); }
+/** Near-duplicate list text: one contains the other, or character-bigram overlap ≥ 0.6. */
+export function similarListText(a: string, b: string): boolean {
+  const key = (text: string) => text.normalize('NFKC').replace(/^\s*推断\s*[:：]/u, '').replace(/[（(][^）)]*[）)]/gu, '').replace(/[\s\p{P}\p{S}]+/gu, '').toLocaleLowerCase();
+  const x = key(a), y = key(b);
+  if (!x || !y) return false;
+  if (x.includes(y) || y.includes(x)) return true;
+  const grams = (text: string) => new Set(Array.from({ length: Math.max(0, text.length - 1) }, (_, i) => text.slice(i, i + 2)));
+  const gx = grams(x), gy = grams(y);
+  const shared = [...gx].filter(gram => gy.has(gram)).length;
+  return shared / Math.min(gx.size || 1, gy.size || 1) >= 0.6;
+}
 /** Missing prose counterparts are bookkeeping, never a model repair condition. */
 export function deriveProseInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, refs: string[]): { derived: number; warnings: string[] } {
   const entries: string[] = [];
@@ -117,6 +130,16 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   for (const line of content.split(/\n|(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i)) {
     const text = clean(line);
     if (!inferencePrefix.test(text) || entries.includes(inferenceText(text)) || structured?.schemaVersion === 'fillable-pdf/1' && structured.inferences?.some(inference => hasProseInference(line, inference.text))) continue;
+    if (structured?.schemaVersion === 'project-pulse/1' && isSourceGap(text)) {
+      // r62 txt: "资料未说明/未给出 ..." is a source gap, not a risk; reviewers reject it as a risk.
+      const gap = text.replace(inferencePrefix, '').replace(/[；;]+$/u, '。').trim();
+      if (!structured.unknowns.some(item => similarListText(String((item as { text?: unknown }).text ?? item), gap))) (structured.unknowns as unknown[]).push({ text: gap, evidenceRefs: [...refs].slice(0, 50) });
+      entries.push(inferenceText(text)); continue;
+    }
+    if (structured?.schemaVersion === 'project-pulse/1' && structured.risks.some(item => similarListText(item.text, text))) {
+      // r62 txt: the same inference restated in several prose clauses must not become several risks.
+      entries.push(inferenceText(text)); continue;
+    }
     if (structured?.schemaVersion === 'project-pulse/1' && refs.length && structured.risks.length < 30 && text.length <= 2000) {
       structured.risks.push({ text: text.replace(inferencePrefix, '推断：').replace(/[；;]+$/u, '。'), evidenceRefs: [...refs].slice(0, 50), derived: true });
       entries.push(inferenceText(text)); derived++;
