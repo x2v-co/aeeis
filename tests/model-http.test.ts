@@ -72,7 +72,7 @@ describe('HttpModelAdapter', () => {
     await expect(adapter.complete({ system: 'repair', input: {}, idempotencyKey: 'repair-cap', maxResponseBytes: 65536, disableRetries: true })).rejects.toBeInstanceOf(ModelResponseRejected);
     expect(fetch).toHaveBeenCalledTimes(1); expect(cancel).toHaveBeenCalledOnce();
   });
-  it.each([429, 500, 502, 503])('does not replay HTTP %s after any body bytes, retaining structured diagnostics', async status => {
+  it.each([500, 502, 503])('does not replay HTTP %s after any body bytes, retaining structured diagnostics', async status => {
     const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const fetch = vi.fn()

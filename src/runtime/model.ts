@@ -221,6 +221,13 @@ function checkProviderBody(value: unknown): void {
   const nestedCode = body.error && typeof body.error === 'object' && 'code' in body.error ? body.error.code : undefined;
   if (body.errorCode || body.error) throw new ProviderBodyError(String(body.errorCode ?? nestedCode ?? body.code ?? 'PROVIDER_ERROR'), JSON.stringify(body).slice(0, 1024));
 }
+/** Retry-After is either delay seconds or an HTTP date. Never retry before it. */
+function retryAfterMs(value: string | null): number {
+  if (!value?.trim()) return 0;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : 0;
+}
 export function modelTransportConfig(env: NodeJS.ProcessEnv): ModelTransportOptions {
   return {
     maxAttempts: Number(env.AEEIS_MODEL_MAX_ATTEMPTS ?? 3),
@@ -522,6 +529,9 @@ export class HttpModelAdapter implements ModelAdapter {
         // Retryability classifies the error. The decision explains the actual replay fence/budget.
         let retryDecision: string;
         if (request.disableRetries || request.signal?.aborted) retryDecision = 'retry-disabled';
+        // 429 body bytes describe a rejected request, not partial generation.
+        // The general body-byte replay fence must not suppress rate-limit retries.
+        else if (httpError && response?.status === 429) retryDecision = transportAttempt >= this.transport.maxAttempts ? 'attempts-exhausted' : 'rate-limit-retry';
         else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
@@ -554,10 +564,17 @@ export class HttpModelAdapter implements ModelAdapter {
           }
           if (retryDecision === 'midstream-retry') await request.onMidstreamRetry?.({ midstreamRetries: nextMidstreamRetry, responseBytes });
         } catch { recordingFailed = true; retryDecision = 'retry-recording-failed'; }
-        const willRetry = ['retry', 'midstream-retry', 'thinking-unsupported', 'connect-retry', 'provider-error-retry'].includes(retryDecision);
-        const delayMs = willRetry && retryDecision !== 'thinking-unsupported'
+        let willRetry = ['retry', 'midstream-retry', 'thinking-unsupported', 'connect-retry', 'provider-error-retry', 'rate-limit-retry'].includes(retryDecision);
+        let delayMs = willRetry && retryDecision !== 'thinking-unsupported'
           ? Math.max(retryDecision === 'connect-retry' || connectPhase ? Math.min(2_000, this.transport.retryMaxMs) : 0,
             Math.floor(Math.min(this.transport.retryMaxMs, this.transport.retryBaseMs * 2 ** (transportAttempt - 1)) * (0.5 + Math.random() * 0.5))) : 0;
+        if (retryDecision === 'rate-limit-retry') {
+          delayMs = Math.max(delayMs, retryAfterMs(response!.headers.get('retry-after')));
+          if (delayMs >= callBudgetMs - (Date.now() - started)) {
+            willRetry = false; retryDecision = 'retry-after-exceeds-budget'; delayMs = 0;
+            httpError = new ModelResponseRejected('Model provider returned HTTP 429; retry delay exceeds remaining call budget', { inputTokens: 0, outputTokens: 0 });
+          }
+        }
         const redact = (text: string): string => {
           if (this.apiKey) text = text.split(this.apiKey).join('[REDACTED]');
           return text.replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]').replace(/[\r\n]/g, ' ').slice(0, 1024);
