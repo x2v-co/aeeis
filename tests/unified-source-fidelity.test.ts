@@ -60,15 +60,15 @@ describe('production source-fidelity regressions', () => {
     expect(systems.reviewer[0]).toContain('Do not require revision solely for inference label wording or format');
     expect(systems.reviewer[0]).toContain('Reject unsupported assertions presented as fact');
   });
-  it('run_597734ec: iteration 8 forced weather finish accepts missing inference label', async () => {
+  it('run_597734ec: repeated weather searches finish early and accept missing inference label', async () => {
     const { run, logs } = await fixture({ title: 'weather.txt', content: '北京天气资料有限，明天天气未确认' }, input => {
       const ref = input.sourceCatalog[0].id;
       if (!input.executionBudget.finalOnly) return { type: 'tool', tool: 'sources.search', argument: '天气' };
       return { type: 'finish', title: '北京明天天气', content: '可能有降雨，天气未确认', evidenceRefs: [ref], artifactType: 'project-pulse/1', structured: pulse() };
     }, false, false, true);
     expect(run.status, run.error).toBe('succeeded');
-    expect(run.calls.filter(call => call.phase === 'executor')).toHaveLength(8);
-    expect(run.artifacts[0]?.limitations).toContain('Node model iteration limit reached');
+    expect(run.calls.filter(call => call.phase === 'executor')).toHaveLength(4);
+    expect(run.artifacts[0]?.limitations).toContain('Repeated tool calls made no progress');
     expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
     expect(run.artifacts[0]?.content).toContain('推断：可能有降雨');
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, paths: ['content[0][0]'] }));

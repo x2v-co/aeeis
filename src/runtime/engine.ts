@@ -1195,8 +1195,21 @@ export class AgentEngine {
         else await this.execute(run, model);
       }
     } catch (error) {
-      await this.repository.mutate(runId, run => {
+      await this.repository.mutate(runId, async run => {
         if (terminalRunStatuses.has(run.status) || run.status === 'unknown') return;
+        const reason = failureReason(error, 'Execution failed');
+        if (/^Model (?:call|token|money) budget exhausted$/.test(reason) && run.status !== 'paused') {
+          const step = run.steps.find(step => step.status !== 'succeeded' && step.observations.some(observation => isSourceTool(observation.tool)))
+            ?? run.steps.find(step => step.observations.some(observation => isSourceTool(observation.tool)));
+          if (step && !run.artifacts.some(artifact => artifact.taskId === step.taskId)) {
+            step.limitReason = reason;
+            createLimitedNodeArtifact(run, step.taskId, run.calls.at(-1)?.id ?? 'budget', reason);
+          }
+          if (await preserveRunOutput(run, `${reason}. Independent review was not completed.`)) {
+            event(run, 'run.partial', { reason });
+            return;
+          }
+        }
         if (run.status === 'paused') run.resumeStatus = 'failed';
         else run.status = 'failed';
         run.error = failureReason(error, 'Execution failed');
@@ -1761,7 +1774,7 @@ export class AgentEngine {
     const recovery = step.outputRecovery;
     const recoveryCalls = run.calls.slice(recovery?.callOffset ?? run.calls.length).filter(call => call.phase === 'executor' && call.taskId === node.id && call.id !== run.resumeModelCallId).length;
     const recoveryAllowance = recovery?.toolsAllowed ? recoveryToolCalls : 1;
-    const proposedLimitReason = recovery?.toolsAllowed ? undefined : executionLimitReason(run, step, limits);
+    const proposedLimitReason = recovery?.toolsAllowed ? (run.maxModelCalls - run.calls.length <= 2 ? 'Run model call budget nearly exhausted' : undefined) : executionLimitReason(run, step, limits);
     const nodeCalls = nodeModelCalls(run, node.id);
     const recoveryExhausted = Boolean(recovery && !run.resumeModelCallId && (recovery.exhausted || recoveryCalls >= recoveryAllowance));
     if (!run.resumeModelCallId && !recovery && (step.finalCallId || nodeCalls.length >= limits.maxNodeIterations)) throw new Error('Node final finish call exhausted; retry requires replanning');
@@ -1814,7 +1827,7 @@ export class AgentEngine {
         // that filled the PDF produced only a plain-text dependency artifact.
         ...(run.pdfOutputs?.length ? { pdfOutputs: run.pdfOutputs.filter(output => observed.has(output.ref)).map(pdfOutputForModel) } : {}),
         ...(expectedArtifactType ? { expectedArtifactType } : {}), ...(step.finishRepair ? { finishRepair: step.finishRepair } : {}), ...(recovery ? { outputRecovery: redactRunData(recovery) } : {}) };
-    const budgetForLimit = (reason: string | undefined, iterations: number) => ({ limits, nodeReads: sourceReadUsage([step]), runReads: runSourceReadUsage(run), remainingModelCalls: recovery ? recoveryAllowance - recoveryCalls : Math.max(0, limits.maxNodeIterations - iterations), finalOnly: Boolean(reason) || recovery?.toolsAllowed === false, ...(reason ? { reason } : {}) });
+    const budgetForLimit = (reason: string | undefined, iterations: number) => ({ limits, nodeReads: sourceReadUsage([step]), runReads: runSourceReadUsage(run), remainingModelCalls: Math.min(run.maxModelCalls - run.calls.length, recovery ? recoveryAllowance - recoveryCalls : Math.max(0, limits.maxNodeIterations - iterations)), finalOnly: Boolean(reason) || recovery?.toolsAllowed === false, ...(reason ? { reason } : {}) });
     const executorInput = boundedExecutorInput(executorSystem, { clock: runClock(run), ...input,
       executionBudget: budgetForLimit(proposedLimitReason, nodeCalls.length),
     });
@@ -1925,7 +1938,7 @@ export class AgentEngine {
           const receiptId = (duplicate.result as { receiptId?: string } | null)?.receiptId;
           const reference = receiptId ?? `observations/${live.observations.indexOf(duplicate)}`;
           live.observations.push({ tool: `${duplicate.tool}.duplicate`, argument: duplicate.argument,
-            result: { duplicateOf: reference, note: `Duplicate of ${reference}; reuse the prior result. No tool was executed.`, evidenceRefs: evidenceRefsFromObservation(duplicate.result) } });
+            result: { originalResult: duplicate.result, duplicateOf: reference, note: `Duplicate of ${reference}; reuse originalResult below. No tool was executed.`, evidenceRefs: evidenceRefsFromObservation(duplicate.result) } });
           event(current, 'tool.duplicate', { taskId: node.id, tool: duplicate.tool, reference });
           return;
         }

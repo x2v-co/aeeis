@@ -55,6 +55,8 @@ export function nodeModelCalls(run: AgentRun, taskId: string): ModelCall[] {
 export function executionLimitReason(run: AgentRun, step: Step, limits: ExecutionLimits, calls = nodeModelCalls(run, step.taskId)): string | undefined {
   if (step.limitReason) return step.limitReason;
   if (calls.length >= limits.maxNodeIterations - 1) return 'Node model iteration limit reached';
+  if (run.maxModelCalls - run.calls.length <= 2) return 'Run model call budget nearly exhausted';
+  if (step.observations.slice(-2).length === 2 && step.observations.slice(-2).every(observation => observation.tool.endsWith('.duplicate'))) return 'Repeated tool calls made no progress';
   const node = sourceReadUsage([step]), total = runSourceReadUsage(run);
   if (node.pages >= limits.maxNodeSourcePages) return 'Node source page limit reached';
   if (total.pages >= limits.maxRunSourcePages) return 'Run source page limit reached';
