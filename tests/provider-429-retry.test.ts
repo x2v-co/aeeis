@@ -5,7 +5,7 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(
 const success = () => new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
 const limited = (retryAfter?: string) => new Response('{"error":{"code":"RateLimitExceeded"}}', { status: 429, headers: retryAfter ? { 'Retry-After': retryAfter } : {} });
 const model = (options = {}) => new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-code-latest', '', undefined, 1000, undefined, false, undefined,
-  { maxAttempts: 3, retryBaseMs: 1000, retryMaxMs: 10000, ...options });
+  { maxAttempts: 3, retryBaseMs: 1000, retryMaxMs: 10000, rateLimitBaseMs: 1000, rateLimitMaxMs: 10000, rateLimitMaxAttempts: 3, ...options });
 
 it('run_ee478491: retries JSON 429 errors with exponential jitter and the same body/key', async () => {
   vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
