@@ -144,7 +144,7 @@ describe('executor CSV query tool', () => {
       if (input.observations.some(item => item.tool === 'sources.csvQuery')) return finish(input);
       const retry = input.observations.find(item => item.tool === 'output.schema');
       if (retry) {
-        expect(retry.result.error.message).toContain('eq, ne, gt, gte, lt, lte, contains, in, isEmpty');
+        expect(retry.result.error.message).toContain('eq, ne, gt, gte, lt, lte, contains, in, nin, isEmpty');
         expect(retry.result.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'filters.1.op', message: expect.stringContaining('Valid ops:') })]));
       }
       return { ...query(input), filters: [{ column: 'team', op: 'eq', value: 'A' }, { column: 'amount', op: retry ? 'less_than' : 'unsupported', value: 2000 }] };
@@ -152,6 +152,41 @@ describe('executor CSV query tool', () => {
     const run = await fixture.drain();
     expect(run.status, run.error).toBe('succeeded');
     expect(run.events.filter(event => event.type === 'model.schema_retry')).toHaveLength(1);
+  });
+
+  it('offers a new schema hint after an earlier retry, including unsupported operators across restart', async () => {
+    const fixture = await setup(input => {
+      const errors = input.observations.filter(item => item.tool === 'output.schema');
+      if (input.observations.some(item => item.tool === 'sources.csvQuery')) return finish(input);
+      if (errors.length) expect(errors.at(-1)!.result.error).toMatchObject({ recoverable: true, message: expect.stringContaining('nin') });
+      if (!errors.length) return { ...query(input), filters: 'bad-shape' };
+      if (errors.length === 1) return { ...query(input), filters: { column: 'team', op: 'regex', value: 'A' } };
+      if (errors.length === 2) {
+        expect(errors.at(-1)!.result.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'filters.0.op', message: expect.stringContaining('Valid ops:') })]));
+        return { ...query(input), filters: { column: 'team', op: 'another_unsupported_op', value: 'A' } };
+      }
+      return { ...query(input), filters: { column: 'team', op: 'notIn', value: ['B'] } };
+    });
+    await fixture.engine.advance(fixture.run.id);
+    fixture.restart();
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.filter(event => event.type === 'model.schema_retry')).toHaveLength(3);
+    expect(run.events.some(event => event.type === 'run.failed')).toBe(false);
+    expect((run.steps[0]!.observations.find(item => item.tool === 'sources.csvQuery')!.result as any).rows).toEqual([['A', 100000]]);
+  });
+
+  it('returns a different non-CSV schema error after the first corrective retry', async () => {
+    const fixture = await setup(input => {
+      const errors = input.observations.filter(item => item.tool === 'output.schema');
+      if (!errors.length) return { ...query(input), limit: 201 };
+      if (errors.length === 1) return { ...query(input), select: 'team' };
+      expect(errors.at(-1)!.result.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'select' })]));
+      return finish(input);
+    });
+    const run = await fixture.drain();
+    expect(run.status, run.error).toBe('succeeded');
+    expect(run.events.filter(event => event.type === 'model.schema_retry')).toHaveLength(2);
   });
 
   it.each([false, true])('executes a built-in query without an external tool allowlist (legacy=%s)', async legacy => {
@@ -211,7 +246,7 @@ describe('executor CSV query tool', () => {
     expect(completed.events.filter(item => item.type === 'tool.failed_recoverable')).toHaveLength(1);
   });
 
-  it.each([{ limit: 201 }, { unexpected: 'field' }, { filters: [{ column: 'team', op: 'regex', value: '.*' }] }, { type: 'invalid' }])('rejects malformed query decisions without external capability fallback: %j', async fields => {
+  it.each([{ limit: 201 }, { unexpected: 'field' }, { type: 'invalid' }])('rejects malformed query decisions without external capability fallback: %j', async fields => {
     const fixture = await setup(input => ({ ...query(input), ...fields }));
     const completed = await fixture.drain();
     expect(completed.status).toBe('failed');

@@ -80,14 +80,14 @@ it('r74 stall: a stalled attempt is retried once within the call budget and can 
   expect(calls).toBe(2);
 });
 
-// 2) chifeng/json: a first executor timeout with nothing retained is retried once, then ends partial (never run.failed).
-it('r74 json: a first executor timeout with no output retries once and can still succeed', async () => {
+// 2) chifeng/json: stall timeouts may retry; an overall timeout stops immediately with explicit Unknowns.
+it('r74 json: a first executor stall timeout with no output retries once and can still succeed', async () => {
   const repository = new InMemoryRunRepository();
   let executor = 0;
   const engine = new AgentEngine(repository, { model: { pin, complete: async (request: ModelRequest) => {
     if (isPlanner(request)) return { value: onePlan };
     if (isReviewer(request)) return { value: { verdict: 'accepted', summary: 'ok', issues: [] } };
-    if (++executor === 1) throw new ModelTimeout('Model response timed out after 420000ms (overall timeout). Provider billing requires reconciliation.');
+    if (++executor === 1) throw new ModelTimeout('Model response timed out after 420000ms (stall timeout). Provider billing requires reconciliation.');
     return { value: { type: 'finish', title: 'Report', content: 'The source says complete.', evidenceRefs: [(request.input as any).sourceCatalog[0].id] } };
   } } satisfies ModelAdapter });
   const run = await drive(engine, repository, { goal: 'Summarize', materials: [{ title: 'Notes', content: 'complete', source: 'upload' }] });
@@ -98,7 +98,7 @@ it('r74 json: a first executor timeout with no output retries once and can still
   expect(run.status, run.error).toBe('succeeded');
 });
 
-it('r74 chifeng: two executor timeouts with no output end succeeded(partial) with an explicit unknowns note', async () => {
+it('r74 chifeng: an overall executor timeout with no output ends succeeded(partial) with an explicit unknowns note', async () => {
   const repository = new InMemoryRunRepository();
   let executor = 0;
   const engine = new AgentEngine(repository, { model: { pin, complete: async (request: ModelRequest) => {
@@ -109,7 +109,8 @@ it('r74 chifeng: two executor timeouts with no output end succeeded(partial) wit
   } } satisfies ModelAdapter });
   const run = await drive(engine, repository, { goal: '规划赤峰 3 天行程' });
   const types = run.events.map(item => item.type);
-  expect(executor).toBe(2);
+  expect(executor).toBe(1);
+  expect(types).not.toContain('model.timeout_retry');
   expect(types).not.toContain('run.failed');
   expect(run.status, run.error).toBe('succeeded');
   expect(run.partial).toBe(true);
@@ -138,7 +139,7 @@ it('r74 csv: when the call budget is exhausted the review is skipped, not left d
 });
 
 it('r74 csv: a terminal run event closes any open review.requested with review.skipped', () => {
-  const run = { events: [] as Array<{ type: string; data: Record<string, unknown> }> } as never as Parameters<typeof event>[0];
+  const run = { artifacts: [], plans: [], steps: [], events: [] as Array<{ type: string; data: Record<string, unknown> }> } as never as Parameters<typeof event>[0];
   event(run, 'review.requested');
   event(run, 'run.partial', { reason: 'Model call budget exhausted' });
   expect(run.events.map(item => item.type)).toEqual(['review.requested', 'review.skipped', 'run.partial']);

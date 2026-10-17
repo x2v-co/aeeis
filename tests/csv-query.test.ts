@@ -52,6 +52,28 @@ describe('CSV query filters and sorting', () => {
     expect(queryCsvSource(csv, { select: ['id'], filters: [filter] }).rows).toEqual(ids.map(id => [id]));
   });
 
+  it.each([
+    [{ status: 'open', team: 'A' }, [['1']]],
+    [{ column: 'status', op: 'eq', value: 'closed' }, [['2'], ['5']]],
+    [{ column: 'owner', op: 'isEmpty' }, [['4']]],
+    [{}, [['1'], ['2'], ['3'], ['4'], ['5'], ['6']]],
+  ])('normalizes object filters %j to an AND array', (filters, rows) => {
+    const result = queryCsvSource(csv, { select: ['id'], filters });
+    expect(result.rows).toEqual(rows);
+    expect(Array.isArray(result.query.filters)).toBe(true);
+  });
+
+  it.each(['nin', 'notIn', 'not_in', 'NOT IN'])('excludes mixed numeric/string members with %s', op => {
+    const result = queryCsvSource(csv, { select: ['id'], filters: { column: 'id', op, value: [1, '6'] } });
+    expect(result.rows).toEqual([['2'], ['3'], ['4'], ['5']]);
+    expect(result.query.filters[0]!.op).toBe('nin');
+  });
+
+  it('includes string, numeric and boolean members with a single in filter', () => {
+    const result = queryCsvSource(source('value\ntrue\n1\nyes\nother'), { filters: { column: 'value', op: 'in', value: [true, 1, 'yes'] } });
+    expect(result.rows).toEqual([['true'], ['1'], ['yes']]);
+  });
+
   it('combines filters with AND and sorts on unselected columns before limiting', () => {
     const result = queryCsvSource(csv, { select: ['id', 'owner'], filters: [{ column: 'team', op: 'eq', value: 'A' }, { column: 'amount', op: 'gte', value: 0 }], orderBy: [{ column: 'amount', direction: 'desc' }], limit: 1 });
     expect(result).toMatchObject({ columns: ['id', 'owner'], rows: [['1', 'Alice']], matchedRowCount: 2, totalResultRows: 2, returnedRows: 1, truncated: true });

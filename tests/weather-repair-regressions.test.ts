@@ -38,7 +38,9 @@ describe('production weather repair regressions', () => {
     expect(run.partial).toBe(true);
     expect(run.calls.at(-1)!.state).toBe('unknown');
     expect(run.artifacts).toHaveLength(1);
-    expect(run.artifacts[0]).toMatchObject({ id: originalId, content: 'Singapore: temperature 29 C.' });
+    expect(run.artifacts[0]).toMatchObject({ id: originalId, content: expect.stringContaining('Singapore: temperature 29 C.') });
+    expect(run.artifacts[0]!.content).toContain('Unknown:');
+    expect(run.artifacts[0]!.content).toContain('Include the humidity observation');
     expect(run.limitations!.join(' ')).toContain('Include the humidity observation');
     expect(run.limitations!.join(' ')).toContain('Independent review was not completed');
     expect(complete).toHaveBeenCalledTimes(5);
