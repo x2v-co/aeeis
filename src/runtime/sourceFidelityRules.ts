@@ -1,7 +1,7 @@
 import type { FillablePdfArtifact, ProjectPulseArtifact, WebsiteBuilderArtifact } from './contracts.js';
 
 export const maxSourceUnknowns = 5;
-export const sourceFidelityGuidance = `\nSource fidelity rules: Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. Reviewers must not demand a full date or an empty date. A date range is allowed verbatim when the source itself states a range. Label inferences in narrative fields and body/prose with "推断：". Missing inference labels alone are runtime warnings only and must never cause repair, rejection or revision. Never change literal PDF values or source dates to label an inference. PDF dropdown choices without literal source values require a labelled explanation in content and a matching structured.inferences entry {field, value, text, evidenceRefs} citing received non-PDF evidence; otherwise re-run pdf.fill without the field and report the reason in unknowns. Unsourced general assumptions (e.g. "负载测试通常在核心集成之后") are forbidden, even if labelled. For artifacts with a recognized artifactType, include corresponding structured entries with evidenceRefs for prose inferences; the runtime derives missing Project Pulse entries and records reviewer warnings for other artifacts. Plain-text answers must keep inference explanations in content and omit structured. Missing correspondence alone must never require revision. unknowns list only gaps in source documents, never runtime/run limitations: truncation, row limits, tool limits and timeouts belong in finish.limitations (an array of strings). Keep at most ${maxSourceUnknowns} unknowns, except fillable-pdf/1 must report every unfilled field with its exact field name and reason. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id. These rules take precedence over any conflicting date or inference instructions in prompt supplements.`;
+export const sourceFidelityGuidance = `\nSource fidelity rules: Copy dates exactly as written in the source: if the source says "10-20", write "10-20"; never add a year, weekday or time the source does not state. Reviewers must not demand a full date or an empty date. A date range is allowed verbatim when the source itself states a range. Label inferences in narrative fields and body/prose with "推断：". Missing inference labels alone are runtime warnings only and must never cause repair, rejection or revision. Never change literal PDF values or source dates to label an inference. PDF dropdown choices without literal source values require a labelled explanation in content and a matching structured.inferences entry {field, value, text, evidenceRefs} citing received non-PDF evidence; otherwise re-run pdf.fill without the field and report the reason in unknowns. Unsourced general assumptions (e.g. "负载测试通常在核心集成之后") are forbidden, even if labelled, whenever source material was supplied. When the Run has no source material at all, a general assumption is allowed only as an explicit assumption labelled "推断：". For artifacts with a recognized artifactType, include corresponding structured entries with evidenceRefs for prose inferences; the runtime derives missing Project Pulse entries and records reviewer warnings for other artifacts. Plain-text answers must keep inference explanations in content and omit structured. Missing correspondence alone must never require revision. unknowns list only gaps in source documents, never runtime/run limitations: truncation, row limits, tool limits and timeouts belong in finish.limitations (an array of strings). Keep at most ${maxSourceUnknowns} unknowns, except fillable-pdf/1 must report every unfilled field with its exact field name and reason. evidenceRefs must point to source evidence (source excerpts, csvQuery/sources.read observations of a source, tool receipts); do not cite intermediate artifacts or tool names. A truncated csvQuery result is still valid evidence for the rows and aggregates it returned; cite its source id. These rules take precedence over any conflicting date or inference instructions in prompt supplements.`;
 
 /** Normalize before schema validation, including models returning string items. */
 export function normalizeSourceUnknowns(structured: Record<string, unknown>): { limitations: string[]; moved: number; capped: number } {
@@ -48,7 +48,12 @@ export function pulseFidelityProblems(structured: ProjectPulseArtifact, sourceTe
 
 const inferenceCue = /可能|预计|建议|应当|应该|推测|推断|通常|一般(?:会|在|需要)|probably|likely|recommend|infer(?:ence|red)?|usually|typically/i;
 export const generalAssumption = /通常|一般(?:会|在|需要)|usually|typically/i;
-const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^[\s#*>\-\d.]+/, '').trim();
+// Strip citations and list/heading markers only. r75 csv: the old /^[\s#*>\-\d.]+/ also ate a leading quantity,
+// so "48/60（80%）…" was relabelled "推断：/60（80%）…" and "11 条 blocked…" became "推断：条 blocked…".
+// A numbered-list marker is digits followed by "." / "、" / ")" that is not itself followed by a digit ("1.5" stays).
+const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^(?:\s+|#+|[*>\-]+|\d+[.、)](?!\d))+/u, '').trim();
+/** r75 txt: a meta statement about the absence of inferences is not a risk ("除上述明确表述外未作额外推断"). */
+export const vacuousInference = /^(?:推断\s*[:：]\s*)?(?:除(?:上述|以上|此)?[^，,。]{0,12}外)?[，,\s]*(?:未|没有|并未|不)(?:作|做|进行)?(?:任何|额外|其他|其它|进一步)*(?:的)?推断[。.；;]?$|^(?:推断\s*[:：]\s*)?no (?:further|additional|other) inferences?(?: (?:were|was) made)?[.;]?$/iu;
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
 const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：').replace(/[。；.!;]+$/, '').trim();
 const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);
@@ -167,6 +172,7 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   const warnings: string[] = [];
   for (const line of content.split(/\n|(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i)) {
     const text = clean(line);
+    if (inferencePrefix.test(text) && vacuousInference.test(text)) continue;
     if (!inferencePrefix.test(text) || entries.includes(inferenceText(text)) || structured?.schemaVersion === 'fillable-pdf/1' && structured.inferences?.some(inference => hasProseInference(line, inference.text))) continue;
     if (structured?.schemaVersion === 'project-pulse/1' && isSourceGap(text)) {
       // r62 txt: "资料未说明/未给出 ..." is a source gap, not a risk; reviewers reject it as a risk.
@@ -183,15 +189,20 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
       entries.push(inferenceText(text)); derived++;
     } else warnings.push(`Prose inference has no structured counterpart: ${text.slice(0, 200)}`);
   }
-  if (structured?.schemaVersion === 'project-pulse/1') dedupeDerivedRisks(structured.risks);
+  if (structured?.schemaVersion === 'project-pulse/1') {
+    for (let index = structured.risks.length - 1; index >= 0; index--) if (vacuousInference.test(clean(structured.risks[index]!.text))) structured.risks.splice(index, 1);
+    dedupeDerivedRisks(structured.risks);
+  }
   return { derived, warnings };
 }
 
 /** Label problems are presentation warnings; substantive unsupported assumptions remain errors. */
-export function inferenceFidelityProblems(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): string[] {
+/** r75 chifeng: with no source material at all, a general assumption explicitly labelled "推断：" is an allowed
+ * assumption, not an unsourced fact. Unlabelled ones still require repair (or are pruned by the fallback). */
+export function inferenceFidelityProblems(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[], options: { sourceless?: boolean } = {}): string[] {
   const problems: string[] = [];
   const check = (text: string, evidence: string, location: string) => {
-    if (generalAssumption.test(text) && !evidence.includes(text.replace(inferencePrefix, '').trim())) problems.push(`${location}: unsourced general assumption is forbidden`);
+    if (generalAssumption.test(text) && !evidence.includes(text.replace(inferencePrefix, '').trim()) && !(options.sourceless && inferencePrefix.test(text))) problems.push(`${location}: unsourced general assumption is forbidden`);
     if (inferenceCue.test(text) && !evidence.includes(text) && !inferencePrefix.test(text)) problems.push(`${location}: inference must start with "推断："`);
   };
   const visit = (value: unknown, evidenceRefs = refs, path = 'structured') => {
