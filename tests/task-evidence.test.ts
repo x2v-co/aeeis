@@ -143,8 +143,15 @@ describe('task evidence visibility', () => {
     await engine.advance(run.id);
     siblingId = (await repository.get(run.id)).artifacts[0]!.id;
     const completed = await completeRun(engine, repository, run.id);
-    expect(completed.status).toBe('failed');
-    expect(completed.artifacts).toHaveLength(1);
+    // r75: repair exhausted after earlier valid work degrades to succeeded(partial); the rejected
+    // sibling citation is never retained — the failing task becomes an explicit Unknown artifact.
+    expect(completed.status).toBe('succeeded');
+    expect(completed.partial).toBe(true);
     expect(completed.artifacts[0]?.taskId).toBe('sibling');
+    const report = completed.artifacts.find(artifact => artifact.taskId !== 'sibling')!;
+    expect(report.content).toContain('Unknown:');
+    expect(report.evidenceRefs).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain(siblingId);
+    expect(completed.events.map(item => item.type)).not.toContain('run.failed');
   });
 });
