@@ -76,7 +76,7 @@ describe('production weather repair regressions', () => {
       const body = JSON.parse(options.body), input = JSON.parse(body.messages[1].content);
       let value: unknown;
       if (body.messages[0].content.includes('Plan a real deliverable')) value = plan;
-      else if (input.finishRepair) value = { content: 'x'.repeat(70_000) };
+      else if (input.finishRepair) value = { content: 'x'.repeat(140_000) };
       else {
         const evidenceRefs = [input.availableEvidenceRefs[0]];
         value = { type: 'finish', title: 'Weather', content: 'Temperature 29 C [evidence]', evidenceRefs, artifactType: 'project-pulse/1',

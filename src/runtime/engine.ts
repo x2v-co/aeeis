@@ -1761,6 +1761,12 @@ export class AgentEngine {
       if (paused) current.status = current.resumeStatus ?? 'running';
       try { await apply(current, completed.value); }
       catch (error) {
+        const exhausted = failureReason(error, 'Invalid model output');
+        if (taskId && repairExhaustedPattern.test(exhausted) && degradeExhaustedRepair(current, taskId, callId, exhausted)) {
+          call.validationErrors = redactRunData([...(call.validationErrors ?? []), ...(validationDetails(error)?.issues ?? [{ path: '$', code: 'invalid_output', message: exhausted }])]);
+          if (paused) { current.resumeStatus = current.status; current.status = 'paused'; }
+          return;
+        }
         current.status = 'failed';
         current.error = failureReason(error, 'Invalid model output');
         call.validationErrors = redactRunData([...(call.validationErrors ?? []), ...(validationDetails(error)?.issues ?? [{ path: '$', code: 'invalid_output', message: current.error }])]);
@@ -2270,7 +2276,13 @@ export class AgentEngine {
                 if (structured.schemaVersion === 'fillable-pdf/1') { structured.form.sourceRef = resolveSourceResource(structured.form.sourceRef, current.context.sources, current.pdfOutputs ?? [])?.id ?? resolveRef(structured.form.sourceRef); structured.output.ref = resolveRef(structured.output.ref); }
                 candidate.structured = structured;
                 structuredEvidenceRefs = artifactEvidenceRefs(structured);
-              } else if (candidate.structured !== undefined) throw new Error('finish.structured requires a recognized artifactType');
+              } else if (candidate.structured !== undefined) {
+                if (expectedArtifactType) throw new Error('finish.structured requires a recognized artifactType');
+                // r75 chifeng: a plain-text task must omit structured. Drop it deterministically instead of
+                // spending the only repair call on a contract the content does not need.
+                delete candidate.structured;
+                event(current, 'artifact.structured_dropped', { taskId: node.id, reason: 'finish.structured without a recognized artifactType on a plain-text task' });
+              }
               if (expectedArtifactType && (!structured || candidate.artifactType !== expectedArtifactType)) throw new Error(`The final artifact must include artifactType "${expectedArtifactType}" and a complete finish.structured object`);
             } catch (error) {
               if (error instanceof z.ZodError) for (const issue of error.issues) add(`structured.${issue.path.map(String).join('.')}`, `schema:${issue.code}`, issue.path[0] === 'output' && (candidate.structured as { output?: unknown })?.output == null ? 'finish.structured.output must copy filename, sha256, sizeBytes and ref from a successful pdf.fill result. No matching stored PDF exists; call pdf.fill with sourced fields (or {} for an empty form) before finishing.' : issue.message);
@@ -2331,7 +2343,7 @@ export class AgentEngine {
               const fullDate = /deadline date "([^"\n]+)"/.exec(message)?.[1];
               if (fullDate && candidate.content.includes(fullDate)) add('content', 'date_verbatim', 'content adds a year the source does not state');
             }
-            for (const message of inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs).filter(message => !message.includes('inference must start'))) add(message.split(':')[0]!, 'general_assumption', message);
+            for (const message of inferenceFidelityProblems(candidate.content, structured, sourceText, candidate.evidenceRefs, { sourceless: !needsEvidence }).filter(message => !message.includes('inference must start'))) add(message.split(':')[0]!, 'general_assumption', message);
             if (problems.some(problem => problem.code.startsWith('schema:') || problem.code === 'artifact_contract')) evidenceCheck.result = 'rejected';
             contentCheck.problems = problems.map(problem => problem.message);
             contentCheck.result = problems.length ? 'rejected' : contentCheck.movedUnknowns || contentCheck.cappedUnknowns || autoLabels.labeled || inferences.derived || inferences.warnings.length ? 'fixed' : 'ok';
@@ -2455,6 +2467,9 @@ export class AgentEngine {
             return;
           } catch (error) { failures.push(failureReason(error, 'Invalid candidate')); }
         }
+        const exhausted = `${reason}; no valid artifact candidate remains. ${[...new Set(failures)].join('; ')}`;
+        // r75 pdf2: recovery exhausted after a PDF was written; keep it as an unverified partial with Unknown fields.
+        if (degradeExhaustedRepair(current, node.id, current.calls.at(-1)?.id ?? 'output-recovery', exhausted, recovery!.problems)) return;
         throw new Error(`${reason}; no valid artifact candidate remains. ${[...new Set(failures)].join('; ')}. Inspect the validation notes and replan with the missing evidence or a corrected PDF.`);
       });
     } else await this.call(run, model, 'executor', executorRequest, applyDecision, node.id);
@@ -3130,6 +3145,54 @@ function createTimeoutUnknownArtifact(run: AgentRun, taskId: string, callId: str
   for (const item of run.artifacts) item.partial = true;
   populateRunLimitations(run);
   event(run, 'artifact.created', { artifactId: artifact.id, taskId, evidenceRefs: [], modelCallId: callId, contextId: run.context.id, partial: true, noOutput: true });
+}
+
+const repairExhaustedPattern = /^(?:Model artifact repair failed|Final finish is invalid|Output recovery (?:retries|call allowance) exhausted)/;
+
+/** Field names a validation problem refers to; these become explicit "Unknown:" entries. */
+function unknownFieldsFromProblems(problems: Array<{ path: string; message: string }>, reason: string): string[] {
+  const fields = new Set<string>();
+  const text = [reason, ...problems.map(problem => problem.message)].join('; ');
+  for (const match of text.matchAll(/(?:source evidence|requires a "推断：" label[^:]*evidence|Filled field[^:]*):\s*([\w.\-\[\] ]{1,80}?)(?=[;.]|$)/g)) fields.add(match[1]!.trim());
+  for (const problem of problems) if (problem.path && !['$', 'content', 'structured', 'evidenceRefs'].includes(problem.path)) fields.add(problem.path);
+  return [...fields].filter(Boolean).slice(0, 20);
+}
+
+/** r75 chifeng/pdf2: repair or output recovery exhausted. When earlier work exists, end succeeded(partial) like the
+ * timeout path: the failing task becomes an explicit Unknown artifact listing the remaining problems, never run.failed. */
+export function degradeExhaustedRepair(run: AgentRun, taskId: string, callId: string, reason: string, knownProblems?: Array<{ path: string; code: string; message: string }>): boolean {
+  const step = run.steps.find(item => item.taskId === taskId);
+  if (!step || ['cancelled'].includes(run.status)) return false;
+  const priorWork = run.artifacts.some(artifact => artifact.taskId !== taskId && artifact.content.trim());
+  const pdf = run.pdfOutputs?.at(-1);
+  const receipt = pdf && run.toolReceipts.find(item => item.operation === 'pdf.fill' && item.status === 'completed'
+    && item.authorization?.decision === 'authorized' && item.outputRefs.includes(pdf.ref) && item.authorization.taskId === taskId);
+  if (!priorWork && !receipt) return false;
+  const problems = knownProblems?.length ? knownProblems : step.finishRepair?.problems?.length ? step.finishRepair.problems : step.outputRecovery?.problems ?? [];
+  const remaining = [...new Set((problems.length ? problems.map(problem => problem.message) : reason.split(/;\s*/)).map(item => item.trim()).filter(Boolean))].slice(0, 20);
+  const fields = unknownFieldsFromProblems(problems, reason);
+  const node = run.plans.at(-1)?.nodes.find(item => item.id === taskId);
+  const title = node?.title ?? taskId;
+  const unknowns = fields.length
+    ? fields.map(field => `Unknown: ${field} — the generated value failed validation after repair/recovery and is not verified.`)
+    : [`Unknown: task "${title}" did not produce a valid output after repair/recovery; nothing from this task is verified.`];
+  const pending = (run.plans.at(-1)?.nodes ?? []).filter(item => item.id !== taskId && !run.steps.some(s => s.taskId === item.id && s.status === 'succeeded')).map(item => item.title);
+  const content = [`Partial answer — repair exhausted for "${title}".`, unknowns.join('\n'), `Remaining problems:\n${remaining.map(item => `- ${item}`).join('\n')}`,
+    ...(pdf && receipt ? [`Unverified PDF draft retained: ${pdf.filename} [${pdf.ref}]. Check or clear the Unknown fields above before using it.`] : []),
+    ...(pending.length ? [`Not started: ${pending.join('; ')}.`] : [])].join('\n\n');
+  const limitation = `Repair/recovery exhausted for task "${title}"; invalid fields marked Unknown. Independent review was not completed.`;
+  const artifact = { id: id('artifact'), taskId, title, content, evidenceRefs: pdf && receipt ? [receipt.receiptId, pdf.ref] : [] as string[], partial: true as const,
+    limitations: [limitation, ...unknowns], ...(pdf && receipt ? { retainedPdfOutput: { ...pdfOutputMetadata(pdf), sourceRef: pdf.sourceRef } } : {}), hash: digest({ taskId, content }), createdAt: now() };
+  run.artifacts = run.artifacts.filter(item => item.taskId !== taskId);
+  run.artifacts.push(artifact);
+  step.status = 'succeeded';
+  delete step.finishRepair; delete step.outputRecovery; delete step.error; delete step.failureReason;
+  run.status = 'succeeded'; run.partial = true; delete run.error; delete run.resumeStatus;
+  for (const item of run.artifacts) item.partial = true;
+  populateRunLimitations(run);
+  event(run, 'artifact.created', { artifactId: artifact.id, taskId, evidenceRefs: artifact.evidenceRefs, modelCallId: callId, contextId: run.context.id, partial: true, repairExhausted: true });
+  event(run, 'run.partial', { taskId, callId, reason: limitation, repairExhausted: true, remainingProblems: remaining, unknownFields: fields });
+  return true;
 }
 
 function createLimitedNodeArtifact(run: AgentRun, taskId: string, callId: string, failure: string): void {

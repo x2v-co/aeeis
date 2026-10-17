@@ -2,8 +2,9 @@ import { generalAssumption } from './sourceFidelityRules.js';
 import type { Step } from './contracts.js';
 import { projectPulseArtifactSchema } from './contracts.js';
 
-export const repairMaxTokens = 4096;
-export const repairMaxBytes = 64 * 1024;
+// r75 chifeng: a 4096-token cap truncated a repair of a ~6k-token answer ("Model response is incomplete").
+export const repairMaxTokens = 8192;
+export const repairMaxBytes = 128 * 1024;
 export const repairTimeoutMs = 180_000;
 export interface FinishProblem { path: string; code: string; message: string }
 export type FinishRepair = NonNullable<Step['finishRepair']>;
@@ -46,6 +47,8 @@ export function pruneFailedFields(candidate: unknown, problems: FinishProblem[])
   const removals = new Map<unknown[], Set<number>>();
   for (const problem of problems) {
     const path = parts(problem.path);
+    // r75 chifeng: structured without a recognized artifactType is not part of a plain-text answer; drop it.
+    if (problem.code === 'artifact_contract' && path.length === 1 && path[0] === 'structured' && result.artifactType === undefined) { delete result.structured; continue; }
     if (path[0] === 'content') {
       // r62 chifeng: drop only the sentences carrying the forbidden general assumption, not the whole answer.
       if (problem.code === 'general_assumption' && typeof result.content === 'string') {
