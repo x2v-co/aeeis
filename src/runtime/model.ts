@@ -573,10 +573,11 @@ export class HttpModelAdapter implements ModelAdapter {
         // Retryability classifies the error. The decision explains the actual replay fence/budget.
         let retryDecision: string;
         if (request.disableRetries || request.signal?.aborted) retryDecision = 'retry-disabled';
+        // The overall deadline closes the call even if an HTTP error body stalled.
+        else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         // 429 body bytes describe a rejected request, not partial generation.
         // The general body-byte replay fence must not suppress rate-limit retries.
         else if (httpError && response?.status === 429) retryDecision = rateLimitAttempt >= this.transport.rateLimitMaxAttempts ? 'rate-limit-exhausted' : 'rate-limit-retry';
-        else if (signal.aborted && timeoutKind === 'overall') retryDecision = 'overall-timeout';
         else if (thinkingDowngrade) retryDecision = 'thinking-unsupported';
         else if (!retryable) retryDecision = 'not-retryable';
         else if (signal.aborted && (timeoutKind === 'idle' || timeoutKind === 'stall') && streamReceived && responseBytes > 0) {

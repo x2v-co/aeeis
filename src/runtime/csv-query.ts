@@ -5,11 +5,12 @@ import { LATEST_OBSERVATION_RESULT_CHARS } from './prompt-context.js';
 
 const column = z.string().min(1).max(1000).refine(value => value.trim().length > 0, 'Column names must not be blank');
 const scalar = z.union([z.string().max(2000), z.number().finite(), z.boolean()]);
-export const csvFilterOps = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in', 'isEmpty'] as const;
+export const csvFilterOps = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'in', 'nin', 'isEmpty'] as const;
 const opAliases: Record<string, string> = {
   '=': 'eq', '==': 'eq', equals: 'eq', equal: 'eq', '!=': 'ne', '<>': 'ne', not_equal: 'ne',
   '>': 'gt', greater_than: 'gt', after: 'gt', '>=': 'gte', ge: 'gte', greater_than_or_equal: 'gte',
   '<': 'lt', less_than: 'lt', before: 'lt', '<=': 'lte', le: 'lte', less_than_or_equal: 'lte',
+  notin: 'nin', not_in: 'nin',
   isempty: 'isEmpty', is_empty: 'isEmpty', empty: 'isEmpty',
 };
 const filterSchema = z.preprocess((value, ctx) => {
@@ -25,7 +26,7 @@ const filterSchema = z.preprocess((value, ctx) => {
   z.object({ column, op: z.enum(['eq', 'ne']), value: scalar }).strict(),
   z.object({ column, op: z.enum(['gt', 'gte', 'lt', 'lte']), value: z.union([z.string().min(1).max(2000), z.number().finite()]) }).strict(),
   z.object({ column, op: z.literal('contains'), value: z.string().max(2000) }).strict(),
-  z.object({ column, op: z.literal('in'), value: z.array(scalar).min(1).max(200) }).strict(),
+  z.object({ column, op: z.enum(['in', 'nin']), value: z.array(scalar).min(1).max(200) }).strict(),
   z.object({ column, op: z.literal('isEmpty') }).strict(),
 ]));
 const aggregateSchema = z.discriminatedUnion('op', [
@@ -37,7 +38,14 @@ const aggregateSchema = z.discriminatedUnion('op', [
 const omitEmpty = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => Array.isArray(value) && value.length === 0 ? undefined : value, schema);
 export const csvQueryOptionsSchema = z.object({
   select: omitEmpty(z.array(column).min(1).max(100).optional()),
-  filters: z.preprocess(value => value === null ? undefined : value, z.array(filterSchema).max(50).default([])),
+  filters: z.preprocess(value => {
+    if (value === null) return undefined;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      if ('column' in value && ('op' in value || 'value' in value)) return [value];
+      return Object.entries(value).map(([column, value]) => ({ column, op: 'eq', value }));
+    }
+    return value;
+  }, z.array(filterSchema).max(50).default([])),
   groupBy: omitEmpty(z.array(column).min(1).max(20).optional()),
   aggregates: omitEmpty(z.array(aggregateSchema).min(1).max(50).optional()),
   orderBy: omitEmpty(z.array(z.object({ column, direction: z.enum(['asc', 'desc']).default('asc') }).strict()).min(1).max(20).optional()),
@@ -86,7 +94,7 @@ function predicate(filter: CsvQueryOptions['filters'][number], index: number): (
     ? csvNumber(cell) === value : cell === String(value).trim();
   if (filter.op === 'isEmpty') return row => (row[index] ?? '').trim() === '';
   if (filter.op === 'contains') return row => (row[index] ?? '').trim().includes(filter.value);
-  if (filter.op === 'in') return row => filter.value.some(value => equal((row[index] ?? '').trim(), value));
+  if (filter.op === 'in' || filter.op === 'nin') return row => filter.value.some(value => equal((row[index] ?? '').trim(), value)) === (filter.op === 'in');
   if (filter.op === 'eq' || filter.op === 'ne') return row => equal((row[index] ?? '').trim(), filter.value) === (filter.op === 'eq');
   const dateOperand = typeof filter.value === 'string' ? isoDate(filter.value) : undefined;
   const operand = typeof filter.value === 'number' ? filter.value : typeof filter.value === 'string' ? (csvNumber(filter.value) ?? dateOperand) : undefined;

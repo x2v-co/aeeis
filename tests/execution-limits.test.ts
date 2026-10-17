@@ -62,7 +62,7 @@ describe('durable execution allowances', () => {
     expect((artifact.structured as any).unknowns).toEqual([]);
     expect(finished.partial).toBe(true);
     expect(finished.steps[0]!.finalCallId).toBe(finished.calls.filter(call => call.phase === 'executor').at(-1)!.id);
-    expect(artifact.hash).toBe(digest({ type: 'finish', title: artifact.title, content: artifact.content, evidenceRefs: artifact.evidenceRefs, artifactType: artifact.artifactType, structured: artifact.structured }));
+    expect(artifact.hash).toBe(digest({ type: 'finish', title: artifact.title, content: artifact.content, evidenceRefs: artifact.evidenceRefs, artifactType: artifact.artifactType, structured: artifact.structured, limitations: artifact.limitations }));
   });
 
   it('reserves the last node iteration for finish even when search repeats forever', async () => {

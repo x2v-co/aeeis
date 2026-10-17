@@ -53,14 +53,19 @@ it('keeps the specific timeout reason when terminalizing a historical unknown ru
   expect(finished.error).not.toContain('outcome is unknown');
 });
 
-it('uses the overall deadline for JSON fallback instead of the SSE idle deadline', async () => {
+it.each([200, 429])('uses the overall deadline for JSON fallback (HTTP %s) without retrying', async status => {
   vi.useFakeTimers();
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({ start(controller) {
+  const logs = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const fetch = vi.fn(async () => new Response(new ReadableStream({ start(controller) {
     controller.enqueue(new TextEncoder().encode('{"choices":'));
-  } }), { headers: { 'content-type': 'application/json' } })));
+  } }), { status, headers: { 'content-type': 'application/json' } }));
+  vi.stubGlobal('fetch', fetch);
   const adapter = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'fixture', '', undefined, 1000, undefined, false, undefined,
-    { stream: true, idleTimeoutMs: 100, firstByteTimeoutMs: 500, streamOverallTimeoutMs: 1000, maxAttempts: 1 });
-  const done = expect(adapter.complete({ system: 's', input: {} })).rejects.toThrow('1000ms (overall timeout)');
+    { stream: true, idleTimeoutMs: 100, firstByteTimeoutMs: 500, streamOverallTimeoutMs: 1000, callBudgetMs: 10000, maxAttempts: 3, retryBaseMs: 0, retryMaxMs: 0 });
+  const done = expect(adapter.complete({ system: 's', input: {}, idempotencyKey: 'overall-deadline' })).rejects.toThrow(status === 200 ? '1000ms (overall timeout)' : 'HTTP 429');
   await vi.advanceTimersByTimeAsync(1001);
   await done;
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(logs.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({ timeoutKind: 'overall', willRetry: false, retryDecision: 'overall-timeout' }));
+  logs.mockRestore();
 });
