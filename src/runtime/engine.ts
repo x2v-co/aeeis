@@ -1693,16 +1693,19 @@ export class AgentEngine {
           const reason = `${modelTimeoutReason(phase, error)}. Independent review was not completed.`;
           const timedOutStep = taskId ? current.steps.find(step => step.taskId === taskId) : undefined;
           const budgetLeftMs = this.modelTimeBudget.runBudgetMs - modelTimeUsedMs(current) - this.modelTimeBudget.reviewReserveMs;
-          if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
-          else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded' && !timedOutStep.timeoutRetried && !/\boverall timeout\b/i.test(error.message)
+          // r77: a stall/idle/first-byte timeout gets one bounded task retry even when earlier tasks already
+          // retained output (r77 md/pdf3/txt/pdf6 were cut to partial by a single stalled call). Only the
+          // overall deadline stops immediately. Retry is checked before preserveRunOutput, which mutates artifacts.
+          if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded' && !timedOutStep.timeoutRetried && !/\boverall timeout\b/i.test(error.message)
             && current.calls.length < current.maxModelCalls && budgetLeftMs >= this.modelTimeBudget.minCallMs) {
-            // r74 chifeng/json: the first executor call timed out with nothing retained. Retry the task once
-            // within the remaining Run budget instead of failing on a single slow provider response.
+            // r74 chifeng/json: retry the task once within the remaining Run budget instead of
+            // stopping on a single slow provider response.
             timedOutStep.timeoutRetried = true;
             current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'running';
             delete current.error;
             event(current, 'model.timeout_retry', { callId, taskId, reason, remainingBudgetMs: budgetLeftMs });
-          } else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded') {
+          } else if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
+          else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded') {
             // Retry also timed out (or no budget left): end succeeded(partial) with an explicit unknowns note, not run.failed.
             createTimeoutUnknownArtifact(current, taskId!, callId, reason);
             event(current, 'run.partial', { reason, callId, noOutput: true });
