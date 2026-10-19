@@ -51,7 +51,8 @@ export const generalAssumption = /通常|一般(?:会|在|需要)|usually|typica
 // Strip citations and list/heading markers only. r75 csv: the old /^[\s#*>\-\d.]+/ also ate a leading quantity,
 // so "48/60（80%）…" was relabelled "推断：/60（80%）…" and "11 条 blocked…" became "推断：条 blocked…".
 // A numbered-list marker is digits followed by "." / "、" / ")" that is not itself followed by a digit ("1.5" stays).
-const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^(?:\s+|#+|[*>\-]+|\d+[.、)](?!\d))+/u, '').trim();
+// r78 chifeng: a markdown table cell marker ("| ") is a list marker too.
+const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^(?:\s+|#+|[*>\-|]+|\d+[.、)](?!\d))+/u, '').trim();
 /** r75 txt: a meta statement about the absence of inferences is not a risk ("除上述明确表述外未作额外推断"). */
 export const vacuousInference = /^(?:推断\s*[:：]\s*)?(?:除(?:上述|以上|此)?[^，,。]{0,12}外)?[，,\s]*(?:未|没有|并未|不)(?:作|做|进行)?(?:任何|额外|其他|其它|进一步)*(?:的)?推断[。.；;]?$|^(?:推断\s*[:：]\s*)?no (?:further|additional|other) inferences?(?: (?:were|was) made)?[.;]?$/iu;
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
@@ -66,11 +67,13 @@ export function hasProseInference(content: string, text: string): boolean {
 
 /** Mutate structured narrative fields and a content holder. For a string input,
  * return the labelled content as well, since JavaScript strings are immutable. */
-export function labelInferences(content: { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { labeled: number; paths: string[] };
-export function labelInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { content: string; labeled: number; paths: string[] };
-export function labelInferences(content: string | { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[]): { content?: string; labeled: number; paths: string[] } {
+export function labelInferences(content: { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[], options?: { sourceless?: boolean }): { labeled: number; paths: string[] };
+export function labelInferences(content: string, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[], options?: { sourceless?: boolean }): { content: string; labeled: number; paths: string[] };
+export function labelInferences(content: string | { content: string }, structured: ProjectPulseArtifact | WebsiteBuilderArtifact | FillablePdfArtifact | undefined, sourceText: (refs: string[]) => string, refs: string[], options: { sourceless?: boolean } = {}): { content?: string; labeled: number; paths: string[] } {
   const paths: string[] = [];
-  const needsLabel = (text: string, evidence: string) => inferenceCue.test(text) && !generalAssumption.test(text) && !evidence.includes(text) && !inferencePrefix.test(text);
+  // r78 chifeng: with no source material at all, a general assumption ("通常…") is allowed once labelled (r75), so
+  // label it deterministically instead of spending repair calls on long sourceless guides. With sources it stays an error.
+  const needsLabel = (text: string, evidence: string) => inferenceCue.test(text) && (options.sourceless || !generalAssumption.test(text)) && !evidence.includes(text) && !inferencePrefix.test(text);
   const visit = (value: unknown, evidenceRefs = refs, path = 'structured'): void => {
     if (Array.isArray(value)) { value.forEach((item, index) => visit(item, evidenceRefs, `${path}[${index}]`)); return; }
     if (!value || typeof value !== 'object') return;
@@ -97,7 +100,7 @@ export function labelInferences(content: string | { content: string }, structure
       const sentencePath = `content[${index}][${sentenceIndex++}]`;
       if (!needsLabel(clean(sentence), sourceText(refs))) return sentence;
       paths.push(sentencePath);
-      return sentence.replace(/^(\s*(?:(?:#{1,6}|[-*+>]+|\d+\.)[ \t]*)*)/, '$1推断：');
+      return sentence.replace(/^(\s*(?:(?:#{1,6}|[-*+>|]+|\d+\.)[ \t]*)*)/, '$1推断：');
     });
   }).join('\n');
   if (typeof content !== 'string') content.content = labelledContent;

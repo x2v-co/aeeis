@@ -79,7 +79,7 @@ describe('fillable PDF execution and downloads', () => {
     vi.spyOn(console, 'warn').mockImplementation(line => logs.push(JSON.parse(String(line))));
     try {
       const fixture = await setup({ resourceAlias: mode === 'alias' ? 'upload:registration.pdf' : undefined, fields: mode === 'alias' ? {} : undefined,
-        limits: mode === 'final-tool' ? { maxNodeSourcePages: 2 } : undefined,
+        limits: mode === 'final-tool' ? { maxNodeIterations: 3 } : undefined,
         alter: finish => {
           if (mode === 'null-output') finish.structured.output = null;
           if (mode === 'final-tool' || mode === 'redundant-capability') return { type: 'capability', toolId: 'pdf.fill', toolVersion: '1', input: {}, purpose: 'Repeat PDF fill' };
@@ -110,7 +110,8 @@ describe('fillable PDF execution and downloads', () => {
     await fixture.engine.advance(fixture.id); await fixture.engine.advance(fixture.id);
     const filled = await fixture.repository.get(fixture.id);
     expect(filled.pdfOutputs).toHaveLength(1);
-    expect(sourceReadUsage(filled.steps).pages).toBe(2);
+    // r78: pdf.fill is a bounded write manifest, not a source page read.
+    expect(sourceReadUsage(filled.steps).pages).toBe(1);
     await fixture.restart();
     const run = await fixture.drain();
     expect(run.status, run.error).toBe('succeeded');
@@ -184,7 +185,7 @@ describe('fillable PDF execution and downloads', () => {
     expect(run.steps[0]!.observations[0]!.tool).toBe('pdf.formFields.limit');
   });
   it('accepts a complete PDF finish on the limited final call, with explicit limitations', async () => {
-    const fixture = await setup({ limits: { maxNodeSourcePages: 2 } });
+    const fixture = await setup({ limits: { maxNodeIterations: 3 } });
     const run = await fixture.drain();
     expect(run.status, run.error).toBe('succeeded');
     expect(run.artifacts[0]?.partial).toBe(true);

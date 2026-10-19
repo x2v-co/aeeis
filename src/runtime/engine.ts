@@ -1,4 +1,4 @@
-import { baseEvidenceRef, canonicalEvidenceRef } from './evidence-refs.js';
+import { baseEvidenceRef, canonicalEvidenceRef, evidenceIdShape } from './evidence-refs.js';
 import { partialUnknownSection, populateRunLimitations } from './run-limitations.js';
 import { normalizeArtifactLists } from './artifact-lists.js';
 import { preserveRunOutput } from './run-output.js';
@@ -203,12 +203,16 @@ export function modelTimeUsedMs(run: Pick<AgentRun, 'calls'>, nowMs = Date.now()
  * independent-review reserve; the reviewer may always use its reserve. No single call may
  * exceed callMaxMs, so one stalled call cannot consume the whole Run budget.
  */
-export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined; pendingTasks?: number | undefined }): number {
+export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined; pendingTasks?: number | undefined; boost?: boolean | undefined }): number {
   const remaining = Math.max(0, options.runBudgetMs - options.usedMs);
   // r62 pdf2: spread what is left before the review reserve over the plan tasks still to run,
   // so the current task cannot take the whole remainder with a single 420 s call.
   const pending = Math.max(1, Math.floor(options.pendingTasks ?? 1));
-  const share = options.phase === 'reviewer' ? Math.max(remaining, options.reviewReserveMs) : Math.max(options.minCallMs, Math.floor((remaining - options.reviewReserveMs) / pending));
+  // r78 chifeng/pdf2: the one retry after a share-limited timeout may borrow from later tasks, leaving each of
+  // them at least minCallMs, so a slow but healthy long generation is not cut at the same even share again.
+  const share = options.phase === 'reviewer' ? Math.max(remaining, options.reviewReserveMs)
+    : options.boost ? Math.max(options.minCallMs, remaining - options.reviewReserveMs - (pending - 1) * options.minCallMs)
+    : Math.max(options.minCallMs, Math.floor((remaining - options.reviewReserveMs) / pending));
   const allocated = Math.min(options.callMaxMs, share);
   return Math.max(1, Math.floor(options.requestedMs === undefined ? allocated : Math.min(options.requestedMs, allocated)));
 }
@@ -1548,8 +1552,10 @@ export class AgentEngine {
     // unknown planner calls can still be reconciled against their original input.
     // New calls get a slice of the Run's model wall-clock budget. It is a transport
     // option (like signal), kept out of the durable request hash.
+    const boostedStep = phase === 'executor' && taskId ? run.steps.find(step => step.taskId === taskId) : undefined;
     const allocatedTimeoutMs = existingCallId || repairing ? undefined : allocateModelCallTimeout({ phase, usedMs: modelTimeUsedMs(run), ...this.modelTimeBudget,
       pendingTasks: phase === 'executor' ? (run.plans.at(-1)?.nodes.filter(node => !run.steps.some(step => step.taskId === node.id && step.status === 'succeeded')).length ?? 1) : 1,
+      boost: boostedStep?.timeoutBoostCallIndex !== undefined && boostedStep.timeoutBoostCallIndex === run.calls.length,
       requestedMs: request.timeoutMs ?? (finalOnly ? this.finalCallTimeoutMs : undefined) });
     const requestWithKey: ModelRequest = { ...request, ...(allocatedTimeoutMs === undefined ? {} : { timeoutMs: allocatedTimeoutMs }),
       // Legacy saved requests predate wire controls: preserve omitted fields
@@ -1696,14 +1702,22 @@ export class AgentEngine {
           // r77: a stall/idle/first-byte timeout gets one bounded task retry even when earlier tasks already
           // retained output (r77 md/pdf3/txt/pdf6 were cut to partial by a single stalled call). Only the
           // overall deadline stops immediately. Retry is checked before preserveRunOutput, which mutates artifacts.
-          if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded' && !timedOutStep.timeoutRetried && !/\boverall timeout\b/i.test(error.message)
+          // r78 chifeng/pdf2: an "overall timeout" at the task's even share of the Run budget (below callMaxMs) is
+          // not the Run deadline. When the Run can still afford materially more time for this task while leaving
+          // later tasks minCallMs each, retry it once with that larger allocation. A real deadline still stops.
+          const overallTimeout = /\boverall timeout\b/i.test(error.message);
+          const otherPending = (current.plans.at(-1)?.nodes ?? []).filter(node => node.id !== taskId && !current.steps.some(step => step.taskId === node.id && step.status === 'succeeded')).length;
+          const boostedMs = Math.min(this.modelTimeBudget.callMaxMs, budgetLeftMs - otherPending * this.modelTimeBudget.minCallMs);
+          const shareRetry = overallTimeout && allocatedTimeoutMs !== undefined && allocatedTimeoutMs < this.modelTimeBudget.callMaxMs && boostedMs >= Math.max(this.modelTimeBudget.minCallMs, Math.ceil(allocatedTimeoutMs * 1.25));
+          if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded' && !timedOutStep.timeoutRetried && (!overallTimeout || shareRetry)
             && current.calls.length < current.maxModelCalls && budgetLeftMs >= this.modelTimeBudget.minCallMs) {
             // r74 chifeng/json: retry the task once within the remaining Run budget instead of
             // stopping on a single slow provider response.
             timedOutStep.timeoutRetried = true;
+            if (shareRetry) timedOutStep.timeoutBoostCallIndex = current.calls.length;
             current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'running';
             delete current.error;
-            event(current, 'model.timeout_retry', { callId, taskId, reason, remainingBudgetMs: budgetLeftMs });
+            event(current, 'model.timeout_retry', { callId, taskId, reason, remainingBudgetMs: budgetLeftMs, ...(shareRetry ? { shareLimited: true, allocatedTimeoutMs, boostedTimeoutMs: boostedMs } : {}) });
           } else if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
           else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded') {
             // Retry also timed out (or no budget left): end succeeded(partial) with an explicit unknowns note, not run.failed.
@@ -2092,6 +2106,10 @@ export class AgentEngine {
           const source = resolveSourceResource(resourceRef, sources, current.pdfOutputs ?? []);
           if (source && source.id !== decision.argument) finishProtocolLog('aeeis-source-resource-resolved/1', { runId: current.id, taskId: node.id, sourceRef: source.id });
           if (!source) throw new Error('Source tool denied an unknown resource');
+          // r78 pdf2: verifying a fill with pdf.formFields on its output ref must read the written values, not
+          // the empty template (which made the model repeat the same call until "no progress").
+          const inspectedOutput = decision.tool === 'pdf.formFields' ? (current.pdfOutputs ?? []).find(output => output.ref === decision.argument && observed.has(output.ref)) : undefined;
+          const pdfSource: Source = inspectedOutput ? { ...source, id: inspectedOutput.ref, content: inspectedOutput.content } : source;
           let pdfOutput: PdfOutput | undefined;
           if (isPdfTool(decision.tool)) {
             try {
@@ -2103,12 +2121,13 @@ export class AgentEngine {
                 if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref) && (current.pdfOutputs ?? []).reduce((total, output) => total + output.sizeBytes, pdfOutput.sizeBytes) > MAX_RUN_PDF_OUTPUT_BYTES) throw new PdfInputError('Run PDF output storage limit reached (4 MiB total)');
                 result = pdfOutputForModel(pdfOutput);
                 if (JSON.stringify(result).length > 6000) throw new PdfInputError('PDF fill result exceeds the result budget; use fewer/shorter values');
-              } else if (decision.tool === 'pdf.formFields') result = await pdfFormFields(source, decision.offset, decision.limit);
+              } else if (decision.tool === 'pdf.formFields') result = await pdfFormFields(pdfSource, decision.offset, decision.limit);
             } catch (error) {
               if (!(error instanceof PdfInputError)) throw error;
               const failures = current.events.filter(event => event.type === 'tool.failed_recoverable');
               if (failures.filter(event => event.data.taskId === node.id).length >= this.maxRecoverableToolFailures || failures.length >= this.maxRunRecoverableToolFailures) throw error;
-              live.observations.push({ tool: decision.tool, argument: decision.argument, result: { error: { recoverable: true, errorCode: 'pdf_input', message: error.message.slice(0, 2000) } } });
+              // r78 pdf5: a rejected PDF call read nothing; it must not consume the node's source-page allowance.
+              live.observations.push({ tool: decision.tool, argument: decision.argument, result: { error: { recoverable: true, errorCode: 'pdf_input', message: error.message.slice(0, 2000) } }, sourcePageCost: 0 });
               event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: decision.tool, errorCode: 'pdf_input', message: error.message.slice(0, 2000) });
               return;
             }
@@ -2124,7 +2143,7 @@ export class AgentEngine {
               const recoverableFailures = current.events.filter(event => event.type === 'tool.failed_recoverable');
               if (recoverableFailures.filter(event => event.data.taskId === node.id).length >= this.maxRecoverableToolFailures
                 || recoverableFailures.length >= this.maxRunRecoverableToolFailures) throw error;
-              live.observations.push({ tool: decision.tool, argument: decision.argument, result: { error: { recoverable: true, ...failure } } });
+              live.observations.push({ tool: decision.tool, argument: decision.argument, result: { error: { recoverable: true, ...failure } }, sourcePageCost: 0 });
               event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: decision.tool, ...failure });
               return;
             }
@@ -2143,7 +2162,7 @@ export class AgentEngine {
           // the entire read when the remaining node/run allowance is smaller.
           if (JSON.stringify(result).length > remainingChars) {
             try {
-              if (decision.tool === 'pdf.formFields') result = await pdfFormFields(source, decision.offset, decision.limit, remainingChars);
+              if (decision.tool === 'pdf.formFields') result = await pdfFormFields(pdfSource, decision.offset, decision.limit, remainingChars);
               else if (decision.tool === 'sources.read') {
                 const safeSource = historySources.includes(source) ? { ...source, content: escapeMaterialRef(source.content), contentHash: materialContentHash(escapeMaterialRef(source.content)) } : source;
                 result = readMaterialPage(safeSource, decision, remainingChars);
@@ -2160,7 +2179,8 @@ export class AgentEngine {
             event(current, 'execution.source_read_limited', { taskId: node.id, reason: live.limitReason });
             return;
           }
-          if (isSmallTabularSource(source)) sourcePageCost = 0;
+          // r78 pdf5: pdf.fill writes a bounded manifest; it is not a source page read.
+          if (isSmallTabularSource(source) || decision.tool === 'pdf.fill') sourcePageCost = 0;
           current.sourceReadUsage = { pages: totalReads.pages + (sourcePageCost ?? 1), chars: totalReads.chars + chars };
           if (pdfOutput) {
             if (!(current.pdfOutputs ?? []).some(output => output.ref === pdfOutput!.ref)) { current.pdfOutputs ??= []; current.pdfOutputs.push(pdfOutput); }
@@ -2245,9 +2265,25 @@ export class AgentEngine {
               const based = refs.map(ref => baseEvidenceRef(ref, observed, known));
               const mapped = sourceLevelRefs(based, dependencies).map(ref => baseEvidenceRef(ref, observed, known));
               evidenceCheck.mappedRefs += based.filter(ref => dependencies.some(artifact => artifact.id === ref)).length;
-              return [...new Set(mapped)];
+              const unique = [...new Set(mapped)];
+              // r78 lt: fragments of malformed JSON ("owners':[],") are not citations. Drop them when the list still
+              // holds a real reference, instead of reporting "Unavailable evidence refs removed" and a removed claim.
+              const noise = unique.filter(ref => !known.has(ref) && !evidenceIdShape.test(ref));
+              if (noise.length && noise.length < unique.length) {
+                event(current, 'artifact.evidence_noise_dropped', { taskId: node.id, refs: noise.map(ref => ref.slice(0, 80)) });
+                return unique.filter(ref => !noise.includes(ref));
+              }
+              return unique;
             };
             if (expectedArtifactType) candidate.artifactType = expectedArtifactType;
+            // r78 pdf2/pdf5: an intermediate task (e.g. "inspect fields") may echo the fillable-pdf/1 shape before any
+            // pdf.fill exists. The contract applies to the final task; demanding output metadata here forced the
+            // inspection task to fill the PDF itself. Keep its content as a plain dependency artifact.
+            if (!expectedArtifactType && candidate.artifactType === 'fillable-pdf/1' && !current.pdfOutputs?.length
+              && (!candidate.structured || typeof candidate.structured !== 'object' || (candidate.structured as { output?: unknown }).output == null)) {
+              delete candidate.artifactType; delete candidate.structured;
+              event(current, 'artifact.structured_dropped', { taskId: node.id, reason: 'fillable-pdf/1 structured output on an intermediate task before any pdf.fill' });
+            }
             if (candidate.artifactType === 'fillable-pdf/1' && candidate.structured && typeof candidate.structured === 'object') {
               const pdf = candidate.structured as Record<string, unknown>;
               if (pdf.output == null && current.pdfOutputs?.length) {
@@ -2324,7 +2360,7 @@ export class AgentEngine {
             if (invalidRefs.length || missingEvidence) add('evidenceRefs', 'evidence', `Artifact cited evidence the task did not receive or omitted required evidence. Invalid IDs: ${JSON.stringify(invalidRefs)}. Cite only source evidence IDs: ${JSON.stringify([...observed].filter(ref => !ref.startsWith('artifact_')))}`);
             const byId = new Map([...current.context.sources, ...historySources].map(source => [source.id, source.content]));
             const sourceText = (refs: string[]) => refs.map(ref => byId.get(ref) ?? '').join('\n');
-            const autoLabels = labelInferences(candidate, structured, sourceText, candidate.evidenceRefs);
+            const autoLabels = labelInferences(candidate, structured, sourceText, candidate.evidenceRefs, { sourceless: !needsEvidence });
             if (structured?.schemaVersion === 'fillable-pdf/1') {
               try {
                 const placeholders = finishContentProblems(JSON.stringify(structured), observed);
@@ -2459,7 +2495,8 @@ export class AgentEngine {
         const candidates: unknown[] = [];
         // Prefer a manifest rebuilt from the latest verified bytes over stale
         // model metadata, then try the last candidate and retained artifact.
-        if (expectedArtifactType === 'fillable-pdf/1') for (const output of [...(current.pdfOutputs ?? [])].reverse()) {
+        // r78 pdf5: also for an intermediate task that already wrote the PDF itself.
+        if (current.builtinSkill === 'fillable-pdf/1') for (const output of [...(current.pdfOutputs ?? [])].reverse()) {
           const structured = await synthesizePdfArtifact(output, current.context.sources, observed);
           if (structured) candidates.push({ type: 'finish', title: 'Filled PDF', content: pdfArtifactContent(structured), artifactType: 'fillable-pdf/1', structured, evidenceRefs: fillablePdfEvidenceRefs(structured) });
         }

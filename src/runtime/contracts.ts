@@ -275,6 +275,8 @@ export interface Step {
   outputRecoveryAttempts?: number;
   /** r74: the task's executor call already timed out once with nothing retained and was retried. */
   timeoutRetried?: boolean;
+  /** r78: index of the retry call that may borrow time after a share-limited overall timeout. */
+  timeoutBoostCallIndex?: number;
 }
 export interface AgentRun {
   executionLimits?: import('./execution-limits.js').ExecutionLimits;

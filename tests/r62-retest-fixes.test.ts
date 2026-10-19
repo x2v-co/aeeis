@@ -35,7 +35,7 @@ it('r62 chifeng: repair fallback drops only the general-assumption sentences', (
   expect(pruned.content).toBe('第一天前往赤峰。第二天看草原。');
 });
 
-it('r62 chifeng: a timed-out repair on a no-source Run finishes succeeded(partial), not failed', async () => {
+it('r62 chifeng (r78 update): a no-source general assumption is labelled "推断：" instead of starting a repair that can time out', async () => {
   const repository = new InMemoryRunRepository();
   let executorCalls = 0;
   const engine = new AgentEngine(repository, { model: { pin, complete: async (request: ModelRequest) => {
@@ -46,13 +46,12 @@ it('r62 chifeng: a timed-out repair on a no-source Run finishes succeeded(partia
   } } satisfies ModelAdapter });
   const run = await drive(engine, repository, '规划赤峰 3 天行程');
   const types = run.events.map(item => item.type);
-  expect(types).toContain('artifact.repair_discarded');
+  expect(types).not.toContain('artifact.repair_requested');
+  expect(executorCalls).toBe(1);
   expect(run.status, run.error).toBe('succeeded');
-  expect(run.partial).toBe(true);
-  const limitations = run.artifacts.flatMap(artifact => artifact.limitations ?? []).join('\n');
-  expect(limitations).toContain('Model response timed out after');
+  expect(run.partial ?? false).toBe(false);
+  expect(run.artifacts[0]!.content).toContain('推断：8月草原通常凉爽');
   expect(run.artifacts[0]!.content).toContain('第二天看草原');
-  expect(run.artifacts[0]!.content).not.toContain('通常');
 });
 
 // 2) pdf2/csv/lt: a definite executor timeout with retained work still gets an independent review.
