@@ -1728,6 +1728,15 @@ export class AgentEngine {
             current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'running';
             delete current.error;
             event(current, 'model.timeout_retry', { callId, taskId, reason, remainingBudgetMs: budgetLeftMs, ...(shareRetry ? { shareLimited: true, allocatedTimeoutMs, boostedTimeoutMs: boostedMs } : {}) });
+          } else if (phase === 'planner' && !overallTimeout && current.plannerTimeoutRetryRound !== current.plans.length
+            && current.calls.length < current.maxModelCalls && budgetLeftMs >= this.modelTimeBudget.minCallMs) {
+            // r80 pdf2/pdf3: a planner stall/idle/first-byte timeout used to end the Run as failed after one call,
+            // while executor calls already got one bounded retry. Planning produced nothing yet, so retry the planner
+            // once per planning round (keyed by the plan count) within the Run budget. An overall timeout still stops.
+            current.plannerTimeoutRetryRound = current.plans.length;
+            current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'planning';
+            delete current.error;
+            event(current, 'model.timeout_retry', { callId, phase, taskId: null, reason, remainingBudgetMs: budgetLeftMs });
           } else if (await preserveRunOutput(current, reason)) { event(current, 'run.partial', { reason, callId }); if (phase !== 'reviewer') queueReviewAfterStop(current, reason); }
           else if (phase === 'executor' && timedOutStep && timedOutStep.status !== 'succeeded') {
             // Retry also timed out (or no budget left): end succeeded(partial) with an explicit unknowns note, not run.failed.

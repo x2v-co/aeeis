@@ -279,6 +279,8 @@ export interface Step {
   timeoutBoostCallIndex?: number;
 }
 export interface AgentRun {
+  /** r81: plans.length at the planning round whose planner call already got its one stall/idle timeout retry. */
+  plannerTimeoutRetryRound?: number;
   executionLimits?: import('./execution-limits.js').ExecutionLimits;
   sourceReadUsage?: { pages: number; chars: number };
   partial?: boolean;
