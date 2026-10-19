@@ -18,7 +18,14 @@ it.each(['planner', 'executor', 'reviewer'] as const)('closes a %s timeout while
   } } });
   const run = await engine.create({ goal: 'Summarize', materials: [{ title: 'Notes', content: 'complete', source: 'upload' }] });
   await engine.advance(run.id);
-  if (phase !== 'planner') {
+  if (phase === 'planner') {
+    // r81 pdf2/pdf3: the first planner stall/idle/first-byte timeout is retried once; the repeated timeout then fails.
+    const retried = await repository.get(run.id);
+    expect(retried.status).toBe('planning');
+    expect(retried.events.at(-1)).toMatchObject({ type: 'model.timeout_retry', data: { phase: 'planner' } });
+    await engine.advance(run.id);
+    expect((await repository.get(run.id)).events.filter(item => item.type === 'model.timeout_retry')).toHaveLength(1);
+  } else {
     const plan = (await repository.get(run.id)).plans[0]!;
     await engine.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version });
     for (let i = 0; i < 4; i++) await engine.advance(run.id);
