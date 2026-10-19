@@ -32,7 +32,7 @@ export interface FormField {
   options?: string[]; required: boolean; readOnly: boolean; page?: number; multiselect?: boolean;
 }
 export function pdfPlaceholder(value: PdfValue): boolean {
-  return (Array.isArray(value) ? value : [value]).some(item => typeof item === 'string' && (/^(?:tbd|todo|unknown|xx|new|n\s*[/.]?\s*a\.?|none|null|nil|not\s+(?:provided|available|known)|placeholder|待定|未知|未提供|[-?…]+)$/i.test(item.trim()) || /\[(?:evidence|source|citation|id|证据|来源)\]/i.test(item) || /\{\{.*?\}\}|<[^>]+>/.test(item)));
+  return (Array.isArray(value) ? value : [value]).some(item => typeof item === 'string' && (/^(?:template|sample|dummy|placeholder)(?:[\s_:-]|$)/i.test(item.trim()) || /^(?:tbd|todo|unknown|xx|new|n\s*[/.]?\s*a\.?|none|null|nil|not\s+(?:provided|available|known)|placeholder|待定|未知|未提供|[-?…]+)$/i.test(item.trim()) || /\[(?:evidence|source|citation|id|证据|来源)\]/i.test(item) || /\{\{.*?\}\}|<[^>]+>/.test(item)));
 }
 function supported(field: PDFField): SupportedField {
   if (field instanceof PDFTextField || field instanceof PDFCheckBox || field instanceof PDFRadioGroup || field instanceof PDFDropdown || field instanceof PDFOptionList) return field;
@@ -134,9 +134,18 @@ async function embedCjkFont(doc: PDFDocument, fields: Record<string, PdfValue>):
   return font;
 }
 /** Each fill starts from the frozen template. Omitted writable fields are cleared. */
-export async function fillPdf(source: Source, fields: Record<string, PdfValue>, filename = 'filled-form.pdf'): Promise<PdfOutput> {
+export async function fillPdf(source: Source, requested: Record<string, PdfValue>, filename = 'filled-form.pdf'): Promise<PdfOutput> {
   const doc = await load(source.content), form = doc.getForm();
   try {
+    // r78 pdf5: an empty text/choice value ("" or []) means "leave empty". Omitted writable fields are cleared
+    // and readOnly fields stay untouched, so treat it as an omission instead of a recoverable tool error that
+    // pushes the model towards copying the template placeholder. Checkbox false stays an explicit write.
+    const fields: Record<string, PdfValue> = {};
+    for (const [name, value] of Object.entries(requested)) {
+      const field = form.getFieldMaybe(name);
+      if (field && !(field instanceof PDFCheckBox) && (value === '' || typeof value === 'string' && !value.trim() || Array.isArray(value) && value.length === 0)) continue;
+      fields[name] = value;
+    }
     for (const [name, value] of Object.entries(fields)) {
       const field = form.getFieldMaybe(name);
       if (!field) throw new PdfInputError(`Unknown form field: ${name}`);
@@ -262,7 +271,12 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
   if (value.form.fieldCount !== original.length || actual.length !== original.length || original.some(field => !actual.some(other => other.name === field.name && other.type === field.type && other.readOnly === field.readOnly && other.required === field.required))) throw new PdfInputError('Form fieldCount or output form does not match the input form', 'structured.form.fieldCount');
   const receivedSources = new Set(sources.filter(source => materialFormat(source) !== 'pdf' && source.kind !== 'run-evidence' && observed.has(source.id)).map(source => source.id));
   const knownSources = new Set(sources.map(source => source.id));
-  const receivedRefs = (refs: string[]) => refs.length > 0 && refs.every(ref => receivedSources.has(baseEvidenceRef(ref, receivedSources, knownSources)));
+  // r78 pdf2: a filled value must be substantiated by at least one received case source. Citing the form PDF
+  // (e.g. for a dropdown's options), the fill output or its receipt alongside it is context, not an error;
+  // those extra refs are dropped from the field so only case evidence remains. Unreceived refs still fail.
+  const caseRefs = (refs: string[]) => [...new Set(refs.map(ref => baseEvidenceRef(ref, receivedSources, knownSources)).filter(ref => receivedSources.has(ref)))];
+  const contextRef = (ref: string) => { const base = baseEvidenceRef(ref, observed, knownSources); return base === source.id || base === output.ref || observed.has(base); };
+  const receivedRefs = (refs: string[]) => caseRefs(refs).length > 0 && refs.every(ref => receivedSources.has(baseEvidenceRef(ref, receivedSources, knownSources)) || contextRef(ref));
   const repairField = (name: string) => `Cite the received non-PDF source id (scoped row/column refs resolve to that id), or clear ${JSON.stringify(name)}: re-run pdf.fill with the complete desired field map without it, remove it from filledFields, copy the new output metadata, and list it in unknowns with a reason and all consulted source ids.`;
   const names = new Set<string>();
   for (const [index, item] of value.filledFields.entries()) {
@@ -272,6 +286,7 @@ export async function validateFillablePdfArtifact(value: FillablePdfArtifact, so
     names.add(item.name);
     if (field.readOnly) throw new PdfInputError(`readOnly field cannot be claimed as filled: ${item.name}`, `structured.filledFields.${index}`);
     if (!receivedRefs(item.evidenceRefs)) throw new PdfInputError(`Filled field must cite received source evidence: ${item.name}. ${repairField(item.name)} Received source ids: ${JSON.stringify([...receivedSources])}`, `structured.filledFields.${index}.evidenceRefs`);
+    item.evidenceRefs = caseRefs(item.evidenceRefs);
     if (pdfPlaceholder(item.value) || empty(item.value) && item.value !== false) throw new PdfInputError(`Empty or placeholder filled value: ${item.name}`, `structured.filledFields.${index}.value`);
     const options = original.find(original => original.name === item.name)!.options;
     if (options && (Array.isArray(item.value) ? item.value : [item.value]).some(option => typeof option !== 'string' || !options.includes(option))) throw new PdfInputError(`Invalid option value for field: ${item.name}; allowed options: ${JSON.stringify(options)}`, `structured.filledFields.${index}.value`);

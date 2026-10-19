@@ -84,7 +84,7 @@ describe('fillable PDF materials and tools', () => {
   });
   it.each([
     [{ invented: 'value' }, 'Unknown form field'], [{ caseId: 'NEW' }, 'readOnly'],
-    [{ subscribe: 'true' }, 'boolean'], [{ name: true }, 'string'], [{ name: '' }, 'non-empty'],
+    [{ subscribe: 'true' }, 'boolean'], [{ name: true }, 'string'],
     [{ country: 'CA' }, 'Invalid option'], [{ country: 'XX' }, 'Placeholder'], [{ country: ['SG', 'US'] }, 'multiselect'],
     [{ contactMethod: ['Email'] }, 'one option'], [{ interests: 'Music' }, 'multiselect'],
     [{ interests: ['Music', 'Music'] }, 'Invalid option'], [{ name: 'TBD' }, 'Placeholder'],

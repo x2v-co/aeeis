@@ -55,7 +55,10 @@ export function nodeModelCalls(run: AgentRun, taskId: string): ModelCall[] {
 export function executionLimitReason(run: AgentRun, step: Step, limits: ExecutionLimits, calls = nodeModelCalls(run, step.taskId)): string | undefined {
   if (step.limitReason) return step.limitReason;
   if (calls.length >= limits.maxNodeIterations - 1) return 'Node model iteration limit reached';
-  if (run.maxModelCalls - run.calls.length <= 2) return 'Run model call budget nearly exhausted';
+  // r78 csv: keep one call for each plan task that has not succeeded yet, plus this task's final call and the
+  // independent review. Without it, early tasks spent the whole budget and the review was skipped (partial).
+  const otherPending = (run.plans.at(-1)?.nodes ?? []).filter(node => node.id !== step.taskId && !run.steps.some(item => item.taskId === node.id && item.status === 'succeeded')).length;
+  if (run.maxModelCalls - run.calls.length <= 2 + otherPending) return 'Run model call budget nearly exhausted';
   if (step.observations.slice(-2).length === 2 && step.observations.slice(-2).every(observation => observation.tool.endsWith('.duplicate'))) return 'Repeated tool calls made no progress';
   const node = sourceReadUsage([step]), total = runSourceReadUsage(run);
   if (node.pages >= limits.maxNodeSourcePages) return 'Node source page limit reached';
