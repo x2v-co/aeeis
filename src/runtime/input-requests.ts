@@ -1,4 +1,4 @@
-import type { AgentRun } from './contracts.js';
+import type { AgentRun, Step } from './contracts.js';
 import { threadHistorySources } from './thread-context.js';
 
 export function inputAvailability(run: AgentRun): { hasSources: boolean; hasCapabilities: boolean } {
@@ -47,4 +47,23 @@ export function runInputRequest(run: AgentRun): { taskId: string; question: stri
     return { taskId: run.question.taskId, question: run.question.text, kind: fallback.kind, missing: fallback.missing };
   }
   return { taskId: run.question.taskId, question: run.question.text, kind: run.question.kind ?? fallback.kind!, missing: run.question.missing ?? fallback.missing! };
+}
+
+/** The goal itself asks to be asked first ("缺什么就先问我"), so a clarification question is the deliverable. */
+export function goalInvitesQuestions(goal: string): boolean {
+  return /先问|问我|问一下我|向我确认|跟我确认|和我确认|与我确认|先确认|缺什么|需要哪些信息|\bask me\b|\bcheck with me\b|\bconfirm with me\b|\bask (?:first|before)\b/i.test(goal);
+}
+
+/** r79 chifeng: a general deliverable with no sources, tools or Agents (e.g. a travel guide) proceeds on labelled
+ * assumptions instead of stopping at needs_input. Live-data goals, built-in skills, bound tasks and goals that ask to
+ * be asked keep the question. At most two questions per task are deferred. */
+export function shouldDeferQuestion(run: AgentRun, step: Step, question?: string, missing?: string[]): boolean {
+  const { hasSources, hasCapabilities } = inputAvailability(run);
+  if (hasSources || hasCapabilities || run.builtinSkill || run.taskExecution) return false;
+  if (needsExternalLiveData(run.goal) || unsupportedWeatherNotice(run) || goalInvitesQuestions(run.goal)) return false;
+  // Only a preference questionnaire for a goal that already names the deliverable and its constraints (chifeng: place,
+  // length, month, travellers; 6 asked details). A vague goal ("写一段介绍") or a request for material keeps waiting.
+  if (Array.from(run.goal.trim()).length < 20 || (missing?.length ?? 0) < 3) return false;
+  if (question !== undefined && inputQuestion(run, step.taskId, question, false, missing).kind !== 'clarification') return false;
+  return step.observations.filter(observation => observation.tool === 'question.deferred').length < 2;
 }
