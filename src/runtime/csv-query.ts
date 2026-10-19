@@ -85,8 +85,16 @@ function unique(values: string[], field: string): void {
 }
 function requireColumn(names: string[], name: string, field: string): number {
   const index = names.indexOf(name);
-  if (index < 0) throw new CsvQueryInputError(`CSV query ${field}: unknown column ${JSON.stringify(name)}`);
+  if (index < 0) throw new CsvQueryInputError(`CSV query ${field}: unknown column ${JSON.stringify(name)}; available columns: ${names.slice(0, 40).join(', ')}`);
   return index;
+}
+/** r79 csv: select/orderBy of a grouped query refer to its output columns. Naming a raw source column there failed
+ * three times with a bare "unknown column", so say what the output columns are and how to get row-level values. */
+function requireOutputColumn(outputColumns: string[], header: string[], grouped: boolean, name: string, field: string): number {
+  const index = outputColumns.indexOf(name);
+  if (index >= 0 || !grouped || !header.includes(name)) return requireColumn(outputColumns, name, field);
+  throw new CsvQueryInputError(`CSV query ${field}: unknown column ${JSON.stringify(name)} (a source column, not one of the output columns of this grouped query: ${outputColumns.join(', ')}). `
+    + 'Add it to groupBy, aggregate it with an alias (count/countDistinct/min/max/sum/avg + "as"), or run a separate query without groupBy/aggregates to list rows.');
 }
 
 function predicate(filter: CsvQueryOptions['filters'][number], index: number): (row: string[]) => boolean {
@@ -143,8 +151,8 @@ export function queryCsvSource(source: Source, input: unknown = {}) {
   unique(outputColumns, 'aggregate output');
   const selected = query.select ?? outputColumns;
   unique(selected, 'select');
-  const selectedIndexes = selected.map(name => requireColumn(outputColumns, name, 'select'));
-  const order = (query.orderBy ?? []).map(item => ({ ...item, index: requireColumn(outputColumns, item.column, 'orderBy') }));
+  const selectedIndexes = selected.map(name => requireOutputColumn(outputColumns, header, grouped, name, 'select'));
+  const order = (query.orderBy ?? []).map(item => ({ ...item, index: requireOutputColumn(outputColumns, header, grouped, item.column, 'orderBy') }));
   unique(order.map(item => item.column), 'orderBy');
   const predicates = query.filters.map(filter => predicate(filter, requireColumn(header, filter.column, 'filters')));
   // Date-filter effectiveness: how many rows each ISO-date comparison kept vs. could not parse.

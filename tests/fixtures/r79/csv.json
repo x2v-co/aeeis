@@ -1,0 +1,151 @@
+{
+ "case": "csv",
+ "runId": "run_303ad3af-a36b-4000-aa66-d24b05de519c",
+ "gitCommit": "685f4ea3aac057c6729a9606e15bc0293986989b",
+ "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+ "builtinSkill": "project-pulse/1",
+ "maxModelCalls": 20,
+ "materials": [
+  {
+   "id": "source_d824be54-ea1b-44a6-b9ad-6b7e116f8249",
+   "title": "alpha-tracker.csv",
+   "source": "browser-file:alpha-tracker.csv",
+   "content": "id,workstream,status,owner,due,note\nR001,payments-task-1,in_progress,owner1,2026-10-02,on track\nR002,search-task-2,blocked,owner2,2026-10-03,waiting on security review\nR003,notifications-task-3,todo,owner3,2026-10-04,on track\nR004,billing-task-4,done,owner4,2026-10-05,on track\nR005,reports-task-5,in_progress,owner5,2026-10-06,on track\nR006,onboarding-task-6,blocked,owner6,2026-10-07,waiting on security review\nR007,export-task-7,todo,owner0,2026-10-08,on track\nR008,sso-task-8,done,owner1,2026-10-09,on track\nR009,audit-task-9,in_progress,owner2,2026-10-10,on track\nR010,login-task-10,blocked,owner3,2026-10-11,waiting on security review\nR011,payments-task-11,todo,owner4,2026-10-12,on track\nR012,search-task-12,done,owner5,2026-10-13,on track\nR013,notifications-task-13,in_progress,owner6,2026-10-14,on track\nR014,billing-task-14,blocked,owner0,2026-10-15,waiting on security review\nR015,reports-task-15,todo,owner1,2026-10-16,on track\nR016,onboarding-task-16,done,owner2,2026-10-17,on track\nR017,export-task-17,in_progress,owner3,2026-10-18,on track\nR018,sso-task-18,blocked,owner4,2026-10-19,waiting on security review\nR019,audit-task-19,todo,owner5,2026-10-20,on track\nR020,login-task-20,done,owner6,2026-10-21,on track\nR021,payments-task-21,in_progress,owner0,2026-10-22,on track\nR022,search-task-22,blocked,owner1,2026-10-23,waiting on security review\nR023,notifications-task-23,todo,owner2,2026-10-24,on track\nR024,billing-task-24,done,owner3,2026-10-25,on track\nR025,reports-task-25,in_progress,owner4,2026-10-26,on track\nR026,onboarding-task-26,blocked,owner5,2026-10-27,waiting on security review\nR027,export-task-27,todo,owner6,2026-10-28,on track\nR028,sso-task-28,done,owner0,2026-10-01,on track\nR029,audit-task-29,in_progress,owner1,2026-10-02,on track\nR030,login-task-30,blocked,owner2,2026-10-03,waiting on security review\nR031,payments-task-31,todo,owner3,2026-10-04,on track\nR032,search-task-32,done,owner4,2026-10-05,on track\nR033,notifications-task-33,in_progress,owner5,2026-10-06,on track\nR034,billing-task-34,blocked,owner6,2026-10-07,waiting on security review\nR035,reports-task-35,todo,owner0,2026-10-08,on track\nR036,onboarding-task-36,done,owner1,2026-10-09,on track\nR037,export-task-37,in_progress,owner2,2026-10-10,on track\nR038,sso-task-38,blocked,owner3,2026-10-11,waiting on security review\nR039,audit-task-39,todo,owner4,2026-10-12,on track\nR040,login-task-40,done,owner5,2026-10-13,on track\nR041,payments-task-41,in_progress,owner6,2026-10-14,on track\nR042,search-task-42,blocked,owner0,2026-10-15,waiting on security review\nR043,notifications-task-43,todo,owner1,2026-10-16,on track\nR044,billing-task-44,done,owner2,2026-10-17,on track\nR045,reports-task-45,in_progress,owner3,2026-10-18,on track\nR046,onboarding-task-46,blocked,owner4,2026-10-19,waiting on security review\nR047,export-task-47,todo,owner5,2026-10-20,on track\nR048,sso-task-48,done,owner6,2026-10-21,on track\nR049,audit-task-49,in_progress,owner0,2026-10-22,on track\nR050,login-task-50,blocked,owner1,2026-10-23,waiting on security review\nR051,payments-task-51,todo,owner2,2026-10-24,on track\nR052,search-task-52,done,owner3,2026-10-25,on track\nR053,notifications-task-53,in_progress,owner4,2026-10-26,on track\nR054,billing-task-54,blocked,owner5,2026-10-27,waiting on security review\nR055,reports-task-55,todo,owner6,2026-10-28,on track\nR056,onboarding-task-56,done,owner0,2026-10-01,on track\nR057,export-task-57,in_progress,owner1,2026-10-02,on track\nR058,sso-task-58,blocked,owner2,2026-10-03,waiting on security review\nR059,audit-task-59,todo,owner3,2026-10-04,on track\nR060,login-task-60,done,owner4,2026-10-05,on track"
+  }
+ ],
+ "calls": [
+  {
+   "phase": "planner",
+   "taskId": null,
+   "state": "completed",
+   "rawOutput": "{\"summary\":\"分析 alpha-tracker.csv 的60条任务，汇总状态分布、逾期情况、安全评审阻塞、负责人负载和到期风险，形成证据关联的项目脉冲报告。\",\"nodes\":[{\"id\":\"analyze_status_progress\",\"title\":\"分析任务状态与整体进展\",\"instruction\":\"使用 sources.csvQuery 对 alpha-tracker.csv 按 status 聚合计数，并识别 done/in_progress/todo/blocked 的任务ID与占比。重点区分已完成、进行中、待开始和阻塞数量；不要假设未列出的里程碑或整体项目完成率之外的信息。交付：状态统计、代表性任务ID、可引用证据。\",\"dependsOn\":[]},{\"id\":\"analyze_blockers_risks\",\"title\":\"分析阻塞、逾期和风险\",\"instruction\":\"使用 sources.csvQuery 筛选 note 为 waiting on security review 的 blocked 任务，统计数量、负责人和到期日；结合当前日期 2026-10-19 分析 due 早于/等于今天的未完成任务风险。交付：阻塞清单模式、逾期/到期风险、受影响工作流，所有结论引用CSV证据。\",\"dependsOn\":[]},{\"id\":\"analyze_owners_deadlines\",\"title\":\"分析负责人和即将到期任务\",\"instruction\":\"使用 sources.csvQuery 按 owner、status 聚合任务数量，并筛选 due >= 2026-10-19 的未完成任务，尤其关注今天到期的 R018、R046。owner0 是否为真实负责人未知，应标为未知而非解释。交付：负责人负载、明确截止日期、未知事项和证据。\",\"dependsOn\":[]},{\"id\":\"synthesize_project_pulse\",\"title\":\"生成项目脉冲最终报告\",\"instruction\":\"综合前三项分析，输出完整 finish 对象。内容使用中文，包含项目进展、已完成变更、阻塞、风险、决策、负责人、截止日期、下一步和未知九个部分。每条非空记录必须引用 source_d824be54-ea1b-44a6-b9ad-6b7e116f8249；不得虚构负责人姓名、决策或行动执行状态。明确事实与推断：CSV note 中 on track 与 blocked/逾期并存，需提示状态口径风险。\",\"dependsOn\":[\"analyze_status_progress\",\"analyze_blockers_risks\",\"analyze_owners_deadlines\"]}]}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"rows\"}],\"orderBy\":[{\"column\":\"rows\",\"direction\":\"desc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"rows\"}],\"select\":[\"status\",\"id\"],\"orderBy\":[{\"column\":\"status\",\"direction\":\"asc\"},{\"column\":\"id\",\"direction\":\"asc\"}],\"limit\":200}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"rows\"}],\"select\":[\"status\",\"id\"],\"orderBy\":[{\"column\":\"id\",\"direction\":\"asc\"}],\"limit\":200}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"select\":[\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"task_count\"},{\"op\":\"countDistinct\",\"column\":\"id\",\"as\":\"unique_ids\"}],\"orderBy\":[{\"column\":\"task_count\",\"direction\":\"desc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"aggregates\":[{\"op\":\"countDistinct\",\"column\":\"id\",\"as\":\"task_count\"}],\"select\":[\"status\"],\"limit\":10}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\"],\"aggregates\":[{\"op\":\"countDistinct\",\"column\":\"id\",\"as\":\"task_count\"},{\"op\":\"min\",\"column\":\"due\",\"as\":\"earliest_due\"},{\"op\":\"max\",\"column\":\"due\",\"as\":\"latest_due\"}],\"orderBy\":[{\"column\":\"task_count\",\"direction\":\"desc\"}],\"limit\":10}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_status_progress",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"finish\",\"title\":\"Project Pulse\",\"content\":\"## 项目进展状态（基于 alpha-tracker.csv）\\n\\n### 状态统计\\n共 60 个任务，四种状态各 15 个，各占 25%：\\n\\n| 状态 | 数量 | 占比 |\\n|---|---|---|\\n| done（已完成） | 15 | 25% |\\n| in_progress（进行中） | 15 | 25% |\\n| todo（待开始） | 15 | 25% |\\n| blocked（阻塞） | 15 | 25% |\\n\\n### 代表性任务 ID\\n- 已完成（done）：R004、R008、R012、R016、R020、R024、R028、R032、R036、R040、R044、R048、R052、R056、R060 [source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 进行中（in_progress）：R001、R005、R009、R013、R017、R021、R025、R029、R033、R037、R041、R045、R049、R053、R057 [source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 待开始（todo）：R003、R007、R011、R015、R019、R023、R027、R031、R035、R039、R043、R047、R051、R055、R059 [source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 阻塞（blocked）：R002、R006、R010、R014、R018、R022、R026、R030、R034、R038、R042、R046、R050、R054、R058 [source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n### 关键观察\\n- 整体完成率为 25%（15/60），仅状态计数意义上的完成率；资料未提供里程碑或加权进度，不做额外推断。\\n- 所有 15 个 blocked 任务的 note 均为 “waiting on security review”，阻塞原因高度集中于安全评审 [source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]。\\n- 进行中与待开始任务备注均为 “on track”，资料未记录其他风险。\\n- 阻塞占比达 25%，与已完成数量相同，是当前最突出的进展约束；若安全评审不解除，四分之一任务无法推进（推断：基于状态与备注的直接归纳）。\\n\\n### 下一步（基于资料的直接行动项，不假设负责人身份之外的信息）\\n1. 优先推动安全评审（security review），解除 15 个 blocked 任务。\\n2. 持续跟进 15 个 in_progress 任务（备注 on track）。\\n3. 在阻塞解除后排期 15 个 todo 任务。\\n\\n资料未指明安全评审的负责人或截止时间，故不指定具体责任人与期限。\",\"artifactType\":\"project-pulse/1\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"],\"structured\":{\"schemaVersion\":\"project-pulse/1\",\"progress\":[{\"text\":\"60 个任务中：done 15（25%）、in_progress 15（25%）、todo 15（25%）、blocked 15（25%）。状态计数意义上整体完成率 25%。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"进行中任务：R001、R005、R009、R013、R017、R021、R025、R029、R033、R037、R041、R045、R049、R053、R057，备注均为 on track。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"待开始任务：R003、R007、R011、R015、R019、R023、R027、R031、R035、R039、R043、R047、R051、R055、R059，备注均为 on track。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"completedChanges\":[{\"text\":\"已完成任务 15 个：R004、R008、R012、R016、R020、R024、R028、R032、R036、R040、R044、R048、R052、R056、R060。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"blockers\":[{\"text\":\"15 个任务处于 blocked：R002、R006、R010、R014、R018、R022、R026、R030、R034、R038、R042、R046、R050、R054、R058；备注均为 “waiting on security review”，统一阻塞于安全评审。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"risks\":[{\"text\":\"阻塞任务占比 25%（15/60），与已完成数量相同；阻塞原因全部集中于安全评审，若不解除将限制四分之一任务推进（推断：基于状态与备注的归纳）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"decisions\":[],\"owners\":[{\"name\":\"owner1\",\"responsibility\":\"部分任务的负责人字段（如 R001 in_progress、R008 done、R002 blocked 的 owner 等）；资料仅记录 owner 编号，未提供真实身份。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner0–owner6\",\"responsibility\":\"CSV 的 owner 列出现 owner0 至 owner6；阻塞任务的安全评审负责人在资料中未指明。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"deadlines\":[{\"text\":\"各任务 due 日期分布于 2026-10-01 至 2026-10-28（每行单独的到期日，资料未给出项目级里程碑截止时间）。\",\"date\":\"2026-10-01/2026-10-28\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"nextActions\":[{\"text\":\"推动安全评审（security review），以解除 15 个 blocked 任务（R002、R006、R010 等）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"持续跟进 15 个 in_progress 任务至完成。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"在阻塞解除后排期启动 15 个 todo 任务。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"unknowns\":[\"安全评审（security review）的负责人/责任团队未在资料中指明。\",\"安全评审的预计完成时间或解除阻塞日期未在资料中给出。\",\"资料未提供项目级里程碑定义，除状态计数完成率（25%）外无法判断加权整体进度。\",\"owner0–owner6 仅为编号，资料未提供对应真实人员或团队。\"]}}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\",\"note\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"rows\"},{\"op\":\"min\",\"column\":\"due\",\"as\":\"earliest_due\"},{\"op\":\"max\",\"column\":\"due\",\"as\":\"latest_due\"}],\"orderBy\":[{\"column\":\"rows\",\"direction\":\"desc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"owner\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"blocked_count\"},{\"op\":\"min\",\"column\":\"due\",\"as\":\"earliest_due\"},{\"op\":\"max\",\"column\":\"due\",\"as\":\"latest_due\"}],\"filters\":[{\"column\":\"status\",\"op\":\"eq\",\"value\":\"blocked\"},{\"column\":\"note\",\"op\":\"eq\",\"value\":\"waiting on security review\"}],\"orderBy\":[{\"column\":\"blocked_count\",\"direction\":\"desc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"owner\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"blocked_count\"},{\"op\":\"min\",\"column\":\"due\",\"as\":\"earliest_due\"},{\"op\":\"max\",\"column\":\"due\",\"as\":\"latest_due\"}],\"filters\":[{\"column\":\"status\",\"op\":\"eq\",\"value\":\"blocked\"},{\"column\":\"note\",\"op\":\"eq\",\"value\":\"waiting on security review\"}],\"orderBy\":[{\"column\":\"blocked_count\",\"direction\":\"desc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"status\",\"owner\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"task_count\"},{\"op\":\"min\",\"column\":\"due\",\"as\":\"earliest_due\"},{\"op\":\"max\",\"column\":\"due\",\"as\":\"latest_due\"}],\"filters\":[{\"column\":\"due\",\"op\":\"lte\",\"value\":\"2026-10-19\"},{\"column\":\"status\",\"op\":\"nin\",\"value\":[\"done\"]}],\"orderBy\":[{\"column\":\"earliest_due\",\"direction\":\"asc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"select\":[\"id\",\"workstream\",\"owner\",\"due\"],\"filters\":[{\"column\":\"status\",\"op\":\"eq\",\"value\":\"blocked\"},{\"column\":\"note\",\"op\":\"eq\",\"value\":\"waiting on security review\"}],\"orderBy\":[{\"column\":\"due\",\"direction\":\"asc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"select\":[\"id\",\"workstream\",\"status\",\"owner\",\"due\"],\"filters\":[{\"column\":\"due\",\"op\":\"lte\",\"value\":\"2026-10-19\"},{\"column\":\"status\",\"op\":\"nin\",\"value\":[\"done\"]}],\"orderBy\":[{\"column\":\"due\",\"direction\":\"asc\"},{\"column\":\"id\",\"direction\":\"asc\"}],\"limit\":200}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_blockers_risks",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"finish\",\"title\":\"Project Pulse\",\"content\":\"## 项目进展\\n- 截至 CSV 快照，60 个任务在四类状态间均匀分布：in_progress、blocked、todo、done 各 15 个，各占 25%；所有 blocked 任务的 note 均为 “waiting on security review”。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 已完成（done）15 项；进行中（in_progress）15 项；待办（todo）15 项；阻塞（blocked）15 项。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n## 阻塞清单模式\\n- 共有 15 个 blocked 任务，原因全部是 “waiting on security review”，说明阻塞呈现单一、集中的安全评审瓶颈模式，而非分散的技术问题。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 按负责人统计：owner2 有 3 个阻塞任务；owner0、owner1、owner3、owner4、owner5、owner6 各有 2 个。阻塞影响全部 7 位负责人，其中 owner2 负担最高。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 15 个阻塞任务明细及到期日：R002/owner2/2026-10-03、R006/owner6/2026-10-07、R010/owner3/2026-10-11、R014/owner0/2026-10-15、R018/owner4/2026-10-19、R022/owner1/2026-10-23、R026/owner5/2026-10-27、R030/owner2/2026-10-03、R034/owner6/2026-10-07、R038/owner3/2026-10-11、R042/owner0/2026-10-15、R046/owner4/2026-10-19、R050/owner1/2026-10-23、R054/owner5/2026-10-27、R058/owner2/2026-10-03。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n## 逾期/到期风险（基准日 2026-10-19）\\n- 以 2026-10-19 为今天，due 早于或等于今天且状态非 done 的任务共 31 个，均已逾期或今天到期，构成集中交付风险。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 其中 blocked 13 个（R002、R006、R010、R014、R018、R030、R034、R038、R042、R046、R058 等；到期日范围 2026-10-03 至 2026-10-19）；in_progress 11 个（最早 2026-10-02，如 R001、R029、R057；含 R005、R033、R009、R037、R013、R041、R017、R045）；todo 7 个（最早 2026-10-04，如 R003、R031、R059；含 R007、R035、R011、R039、R015、R043）。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 今天（2026-10-19）到期且仍 blocked 的有 R018（sso-task-18，owner4）和 R046（onboarding-task-46，owner4），当日无法在解除安全评审前完成。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 逾期最久的未完成任务到期日为 2026-10-02（R001、R029、R057，均 in_progress），距今已 17 天；推断：长期在制任务与安全评审瓶颈叠加，可能进一步压缩后续排期。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n## 受影响工作流\\n- 受安全评审阻塞影响的工作流覆盖：search（R002、R042）、onboarding（R006、R046）、login（R010、R030、R050）、billing（R014、R034、R054）、sso（R018、R038、R058）、export? 无；实际包括 R022 search、R026 onboarding 等，按 workstream 字段计，阻塞横跨 search、onboarding、login、billing、sso、payments?——以 CSV 为准，阻塞任务的 workstream 包含 search-task、onboarding-task、login-task、billing-task、sso-task，共 5 类工作流。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 逾期/到期未完成的 31 个任务则横跨 payments、search、notifications、reports、onboarding、export、audit、login、billing、sso 共 10 类 workstream，影响面广于阻塞集合。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n## 建议的下一步（基于证据的行动方向，非已指派）\\n- 优先推动安全评审这一共性阻塞：15 个 blocked 任务同因，解除该瓶颈可一次性解锁最多任务，尤其是 13 个已逾期/今日到期的阻塞项。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 优先处理到期最早的阻塞批次（2026-10-03：R002、R030、R058，均 owner2）及今日到期的 R018、R046（owner4）。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- 同步清理 2026-10-02 起逾期的在制任务（R001、R029、R057），避免在制工作持续老化。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n\\n## 未知\\n- CSV 未提供安全评审的实际责任团队、评审开始/预计完成时间，无法判断瓶颈何时解除。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\\n- CSV 未提供任务间依赖关系，无法确认阻塞任务解除后下游受影响的具体任务。[source_d824be54-ea1b-44a6-b9ad-6b7e116f8249]\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"],\"artifactType\":\"project-pulse/1\",\"structured\":{\"schemaVersion\":\"project-pulse/1\",\"progress\":[{\"text\":\"60 个任务均匀分布于四种状态：done、in_progress、blocked、todo 各 15 项（各 25%）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"已完成 15 项，进行中 15 项，待办 15 项。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"completedChanges\":[{\"text\":\"15 个任务状态为 done（note 均为 on track）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"blockers\":[{\"text\":\"15 个任务 blocked，原因全部为 waiting on security review，构成单一安全评审瓶颈。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"按负责人：owner2 有 3 个阻塞；owner0、owner1、owner3、owner4、owner5、owner6 各 2 个，全部 7 位负责人均受影响。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"阻塞任务到期日范围 2026-10-03 至 2026-10-27；其中 13 个 due≤2026-10-19。明细：R002/R030/R058(owner2,10-03)、R006/R034(owner6,10-07)、R010/R038(owner3,10-11)、R014/R042(owner0,10-15)、R018/R046(owner4,10-19)，另有 R022(owner1,10-23)、R026/R054(owner5,10-27)、R050(owner1,10-23)。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"risks\":[{\"text\":\"截至 2026-10-19，due≤今天且未完成的任务共 31 个（blocked 13、in_progress 11、todo 7），形成大规模逾期/到期风险。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"今日（2026-10-19）到期仍 blocked：R018(sso-task-18)、R046(onboarding-task-46)，均 owner4。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"最早逾期未完成任务 due=2026-10-02（R001、R029、R057，均 in_progress），已逾期 17 天。推断：在制老化与安全评审瓶颈叠加，可能压缩后续排期。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"text\":\"逾期/到期未完成任务横跨 payments、search、notifications、reports、onboarding、export、audit、login、billing、sso 共 10 类 workstream，影响面广。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]}],\"decisions\":[],\"owners\":[{\"name\":\"owner2\",\"responsibility\":\"名下 3 个 blocked 任务（R002、R030、R058，均 due 2026-10-03，全部 waiting on security review），阻塞数最多；另有 2 个逾期 in_progress 任务（R009、R037，due 2026-10-10）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner4\",\"responsibility\":\"名下 2 个 blocked 任务 R018、R046 于 2026-10-19 今日到期；另有 2 个逾期 todo（R011、R039，due 2026-10-12）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner6\",\"responsibility\":\"2 个 blocked（R006、R034，due 2026-10-07）及 2 个逾期 in_progress（R013、R041，due 2026-10-14）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner3\",\"responsibility\":\"2 个 blocked（R010、R038，due 2026-10-11）、3 个逾期 todo（R003、R031、R059，due 2026-10-04）及 2 个逾期 in_progress（R017、R045，due 2026-10-18）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner0\",\"responsibility\":\"2 个 blocked（R014、R042，due 2026-10-15）及 2 个逾期 todo（R007、R035，due 2026-10-08）。\",\"evidenceRefs\":[\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\"]},{\"name\":\"owner1\",\"responsibility\":\"3 个逾期最久 in_progress（R001、R029、R057，due 2026-10-02）、2 个逾期 todo（R015、R043，due 2026-10-16）；2 个 blocked（R022、R050，due 2026-10-23，尚未到期）…[truncated]"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_owners_deadlines",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"owner\",\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"tasks\"}],\"orderBy\":[{\"column\":\"owner\",\"direction\":\"asc\"},{\"column\":\"status\",\"direction\":\"asc\"}],\"limit\":50}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_owners_deadlines",
+   "state": "completed",
+   "rawOutput": "{\"type\":\"tool\",\"tool\":\"sources.csvQuery\",\"argument\":\"source_d824be54-ea1b-44a6-b9ad-6b7e116f8249\",\"groupBy\":[\"owner\",\"status\"],\"aggregates\":[{\"op\":\"count\",\"as\":\"tasks\"}],\"filters\":[{\"column\":\"due\",\"op\":\"gte\",\"value\":\"2026-10-19\"},{\"column\":\"status\",\"op\":\"nin\",\"value\":[\"done\"]}],\"orderBy\":[{\"column\":\"due\",\"direction\":\"asc\"}]}"
+  },
+  {
+   "phase": "executor",
+   "taskId": "analyze_owners_deadlines",
+   "state": "unknown",
+   "error": "Model response timed out after 180000ms (overall timeout). Provider billing requires reconciliation."
+  },
+  {
+   "phase": "executor",
+   "taskId": "synthesize_project_pulse",
+   "state": "unknown",
+   "error": "Model response timed out after 179999ms (overall timeout). Provider billing requires reconciliation."
+  }
+ ],
+ "outcome": {
+  "status": "failed",
+  "partial": true,
+  "error": "Node final finish call exhausted; retry requires replanning"
+ },
+ "artifacts": [
+  {
+   "taskId": "analyze_status_progress",
+   "id": "artifact_195cb7c5-005e-495d-8476-72da4153828c"
+  },
+  {
+   "taskId": "analyze_blockers_risks",
+   "id": "artifact_907b556f-c172-45b4-8976-7c76b67e530d"
+  },
+  {
+   "taskId": "analyze_owners_deadlines",
+   "id": "artifact_41aff013-add3-4a4d-87d5-c33a49cbaf4a"
+  }
+ ]
+}

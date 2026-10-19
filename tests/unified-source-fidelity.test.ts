@@ -4,6 +4,7 @@ import { AgentEngine } from '../src/runtime/engine.js';
 import { inferenceFidelityProblems, maxSourceUnknowns, normalizeSourceUnknowns, sourceFidelityGuidance, deriveProseInferences } from '../src/runtime/sourceFidelityRules.js';
 import type { ProjectPulseArtifact } from '../src/runtime/contracts.js';
 import type { ModelRequest } from '../src/runtime/model.js';
+import { stripRuntimeUnknown } from '../src/runtime/run-limitations.js';
 
 afterEach(() => vi.restoreAllMocks());
 const pulse = (items: Partial<ProjectPulseArtifact> = {}): ProjectPulseArtifact => ({ schemaVersion: 'project-pulse/1', progress: [], completedChanges: [], blockers: [], risks: [], decisions: [], owners: [], deadlines: [], nextActions: [], unknowns: [], ...items });
@@ -54,7 +55,9 @@ describe('production source-fidelity regressions', () => {
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-output-fidelity/1', runId: run.id, labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }));
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-inference-autolabel/1', runId: run.id, labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }));
     expect(logs).toContainEqual(expect.objectContaining({ protocol: 'aeeis-finish-content-check/1', autoLabeledInferences: 2 }));
-    expect(reviewerInputs[0].artifacts[0]).toEqual(run.artifacts[0]);
+    // r79 md: the reviewer judges the model's content; the runtime Unknown: suffix is attached only after acceptance.
+    expect(run.artifacts[0]?.content).toContain('\n\nUnknown:\n- Remaining work:');
+    expect(reviewerInputs[0].artifacts[0]).toMatchObject({ ...run.artifacts[0], content: stripRuntimeUnknown(run.artifacts[0]!.content), hash: expect.any(String) });
     expect(reviewerInputs[0].fidelityNotes).toEqual([{ taskId: 'read_csv', labeled: 2, paths: ['structured.risks[0].text', 'content[0][0]'] }]);
     expect(systems.reviewer[0]).toContain('不能让无依据的断言冒充事实');
     expect(systems.reviewer[0]).toContain('Do not require revision solely for inference label wording or format');

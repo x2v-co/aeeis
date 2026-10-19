@@ -262,12 +262,14 @@ describe('durable execution allowances', () => {
     expect(partial.steps[0]).toMatchObject({ status: 'succeeded', finalCallId: call.id });
     expect(partial.artifacts[0]).toMatchObject({ partial: true, limitations: ['Node model iteration limit reached', 'Final synthesis failed: idle timeout'] });
     if (status === 'succeeded') expect((await fixture.drain()).status).toBe('succeeded');
+    // r79: the runtime Unknown: suffix is attached on delivery, not while the Run is still running.
+    const delivered = status === 'succeeded' ? await fixture.repository.get(partial.id) : partial;
     const count = fixture.complete.mock.calls.length;
     await fixture.engine.reconcileModelCall(partial.id, { callId: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', reason: 'Provider confirmed billing', output: { type: 'finish', title: 'Late result', content: 'Discard this late synthesis', evidenceRefs: [] }, usage: { inputTokens: 10, outputTokens: 5 } });
     const reconciled = await fixture.repository.get(partial.id);
     expect(reconciled.status).toBe(status);
     expect(reconciled.calls.find(receipt => receipt.id === call.id)).toMatchObject({ id: call.id, state: 'discarded', usage: { inputTokens: 10, outputTokens: 5 } });
-    expect(reconciled.artifacts).toEqual(partial.artifacts);
+    expect(reconciled.artifacts).toEqual(delivered.artifacts);
     expect(fixture.complete).toHaveBeenCalledTimes(count);
   });
 
@@ -354,7 +356,8 @@ describe('durable execution allowances', () => {
     expect(partial.artifacts[0]).toMatchObject({ partial: true, limitations: ['Node source page limit reached', 'Final synthesis failed: Provider rejected the finish'] });
     expect((await fixture.drain()).status).toBe('succeeded');
     expect(fixture.complete.mock.calls.filter(([request]) => request.system.includes('Execute the current task'))).toHaveLength(2);
-    expect(fixture.complete.mock.calls[2]![0].timeoutMs).toBe(180_000);
+    // r79 csv: without an operator-set AEEIS_FINAL_CALL_TIMEOUT_MS a final-only call gets the Run share, not 180 s.
+    expect(fixture.complete.mock.calls[2]![0].timeoutMs).toBeGreaterThan(180_000);
   });
 
   it('validates configuration and defaults', () => {

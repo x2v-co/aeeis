@@ -6,11 +6,15 @@ export function populateRunLimitations(run: AgentRun): void {
   const reasons = run.events.filter(event => event.type === 'input.unavailable_partial').map(event => event.data.reason).filter((reason): reason is string => typeof reason === 'string' && Boolean(reason.trim()));
   const limitations = [...new Set([...(run.limitations ?? []), ...reasons, ...run.artifacts.flatMap(artifact => artifact.limitations ?? [])])];
   if (limitations.length) run.limitations = limitations;
-  if (run.partial) {
-    const unknown = partialUnknownSection(run);
+  // r79 md: the suffix was appended while the Run was still executing, so later tasks received it in their
+  // dependencies, copied it, and the reviewer saw (and rejected) repeated Unknown: lists. It belongs to the
+  // delivered output only: add it once the Run is terminal, and strip it from in-flight artifacts.
+  const delivered = !['queued', 'planning', 'running', 'reviewing'].includes(run.status) || (run.status === 'reviewing' && (run.review?.verdict === 'accepted' || run.stopReview === 'pending'));
+  if (run.partial || !delivered) {
+    const unknown = run.partial && delivered ? partialUnknownSection(run) : undefined;
     for (const artifact of run.artifacts) {
       // Replace only the runtime-generated suffix as tasks and review finish.
-      const content = artifact.content.replace(/\n\nUnknown:\n- Remaining work:[\s\S]*$/, '') + `\n\n${unknown}`;
+      const content = stripRuntimeUnknown(artifact.content) + (unknown ? `\n\n${unknown}` : '');
       if (artifact.content === content) continue;
       artifact.content = content;
       artifact.hash = digest({ type: 'finish', title: artifact.title, content, evidenceRefs: artifact.evidenceRefs,
@@ -18,6 +22,12 @@ export function populateRunLimitations(run: AgentRun): void {
         ...(artifact.limitations ? { limitations: artifact.limitations } : {}) });
     }
   }
+}
+
+const runtimeUnknownSuffix = /\n\nUnknown:\n- Remaining work:[\s\S]*$/;
+/** Remove the runtime-generated partial suffix (never model-written text). */
+export function stripRuntimeUnknown(content: string): string {
+  return content.replace(runtimeUnknownSuffix, '');
 }
 
 /** Explicit gaps shared by the retained output and the run.partial diagnostic. */

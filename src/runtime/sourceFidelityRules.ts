@@ -21,6 +21,14 @@ export function normalizeSourceUnknowns(structured: Record<string, unknown>): { 
   return { limitations, moved, capped };
 }
 
+/** r79 md: a model-written "limitation" that only says the material lacks something (资料未包含负责人、年份…) is a
+ * source gap (unknowns), not a runtime limit. Treated as a limitation it marked the whole Run partial. */
+export function isSourceGapLimitation(text: string): boolean {
+  if (isRuntimeLimitation(text)) return false;
+  return /资料|来源|源文件|原文|材料|文档|快照|表单|附件|\b(?:source|document|material|file|snapshot|input)s?\b/i.test(text)
+    && /未|没有|不含|不包含|缺少|缺失|不详|无法确认|\bnot\s+(?:include|provide|state|mention|specify|record|contain|give)|\bmissing\b|\black|\babsent\b|\bdoes(?:n't| not)\b/i.test(text);
+}
+
 function isRuntimeLimitation(text: string): boolean {
   // Missing source information about timeout policy is a document gap.
   if (/(?:策略|阈值|配置|policy|configuration).{0,20}(?:未说明|未明确|不详|not documented|unspecified)/i.test(text)) return false;

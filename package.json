@@ -47,7 +47,8 @@
     "sandbox:release": "node --import ./scripts/load-local-env.mjs --import tsx scripts/sandbox.ts release",
     "replay:retest": "vitest run tests/pulse-inference-replay.test.ts tests/fillable-pdf-execution.test.ts --pool=forks --maxWorkers=1 --minWorkers=1 --no-file-parallelism --testNamePattern=\"source tools, inference derivation|local replay validates\"",
     "retest:r77-targeted": "vitest run tests/targeted/r77-targeted.test.ts tests/r77-retest-fixes.test.ts --reporter=verbose",
-    "retest:r78-targeted": "vitest run tests/r78-retest-fixes.test.ts tests/r77-retest-fixes.test.ts tests/targeted/r77-targeted.test.ts --reporter=verbose"
+    "retest:r78-targeted": "vitest run tests/r78-retest-fixes.test.ts tests/r77-retest-fixes.test.ts tests/targeted/r77-targeted.test.ts --reporter=verbose",
+    "retest:r79-targeted": "vitest run tests/r79-retest-fixes.test.ts tests/r78-retest-fixes.test.ts --reporter=verbose"
   },
   "devDependencies": {
     "@temporalio/testing": "^1.24.0",
