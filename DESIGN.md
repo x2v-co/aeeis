@@ -1,155 +1,149 @@
 ---
-name: AEEIS Control Surface
-description: A light, spacious operating console for long-running agent work.
+name: AEEIS Minimal
+description: One Bot, many concurrent tasks, and a quiet shared computer.
 colors:
-  ink: "#172033"
-  ink-soft: "#4f5b70"
-  muted: "#5f6d82"
-  page: "#f4f6f8"
+  ink: "#171717"
+  ink-soft: "#3f3f3f"
+  muted: "#737373"
+  page: "#ffffff"
   surface: "#ffffff"
-  blue: "#315efb"
-  blue-deep: "#2347d5"
-  cyan: "#13b8b0"
-  lime: "#baf36c"
-  amber: "#f2b84b"
-  red: "#d65262"
+  signal: "#171717"
+  signal-deep: "#000000"
+  moss: "#3d6b52"
+  ochre: "#8a5a12"
+  red: "#9b3a32"
 typography:
   display:
-    fontFamily: "Manrope, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(27px, 3.2vw, 44px)"
-    fontWeight: 800
-    lineHeight: 1.06
+    fontFamily: "Inter, WenQuanYi Micro Hei, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "clamp(34px, 5vw, 56px)"
+    fontWeight: 650
+    lineHeight: 1.02
     letterSpacing: "-0.055em"
   body:
-    fontFamily: "Manrope, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Inter, WenQuanYi Micro Hei, ui-sans-serif, system-ui, sans-serif"
     fontSize: "14px"
     fontWeight: 400
-    lineHeight: 1.75
+    lineHeight: 1.7
   label:
-    fontFamily: "DM Mono, ui-monospace, monospace"
+    fontFamily: "JetBrains Mono, Noto Sans Mono, ui-monospace, monospace"
     fontSize: "12px"
     fontWeight: 500
     lineHeight: 1.4
 rounded:
-  sm: "9px"
-  md: "16px"
-  lg: "26px"
+  sm: "4px"
+  md: "8px"
+  lg: "12px"
 spacing:
   sm: "8px"
   md: "16px"
   lg: "28px"
 components:
   button-primary:
-    backgroundColor: "{colors.blue}"
-    textColor: "#ffffff"
+    backgroundColor: "{colors.ink}"
+    textColor: "#fbf7f1"
     rounded: "{rounded.sm}"
-    padding: "13px 14px"
+    padding: "12px 14px"
   surface:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
-    padding: "clamp(20px, 2.4vw, 32px)"
+    rounded: "{rounded.lg}"
+    padding: "clamp(18px, 2.2vw, 28px)"
 ---
 
-# Design System: AEEIS Control Surface
+# Design System: AEEIS Ink Desk
 
 ## Overview
 
-**Creative North Star: “The Living Control Room”**
+**Creative North Star: “One Bot, many tasks”**
 
-AEEIS is an operating console for goals that continue after the first click. The visual world uses generous white space, a quiet paper-like background, crisp ink typography, and blue-to-mint state color to make long-running work feel clear and alive. Motion is reserved for meaningful system activity: the agent orbit in the hero, the running-state signal, and transitions that show the interface acknowledging a change.
-
-The interface keeps the control rail compact so the right side can hold the current run, plan graph, evidence, and delivery. Advanced governance is available on demand through collapsible panels, while the first viewport always answers what AEEIS is, where to start, and what the system is doing.
+Follow the 2026-10-21 conversation design: AEEIS stays one Bot. That Bot can carry several tasks at once. The sidebar is the Bot, and the tasks sit under it. Opening a task only shows that execution. It does not stop the others. The transcript is the entry. The composer stays at the bottom. Graphs, evidence, goals, and governance stay in the shared computer until asked for. The surface is white, hairline, and quiet.
 
 **Key Characteristics:**
-- Light, spacious surfaces with thin cool-gray borders
-- Blue for action and active execution; mint for evidence and completion; amber for human attention
-- Manrope for UI copy with DM Mono for technical labels and IDs
-- Purposeful motion with reduced-motion support
+- White page, #fafafa sidebar, 1px #ececec lines
+- Black only for the mark, the send button, and active presence
+- Tasks are indented rows under the Bot, not a second list of teammates
+- Inter for interface copy, with WenQuanYi Micro Hei for Chinese glyphs, and JetBrains Mono for IDs and status
+- Motion only on live signals, with reduced-motion support
 
 ## Colors
 
-The palette is cool and precise: ink and gray provide reading contrast, blue marks agency, mint marks verified progress, and amber marks a human decision.
+Black reads. Status colors stay small and only on state.
 
 ### Primary
-- **Signal Blue** (#315efb): Primary action, active run, focused controls, and the hero core.
+- **Ink** (#171717): Text, the send button, the brand mark, and active presence.
 
 ### Secondary
-- **Verified Mint** (#13b8b0): Connected status, successful delivery, and evidence completion.
-- **Attention Amber** (#f2b84b): Approval, input, waiting, and reconcile states.
+- **Moss** (#3d6b52): Completed work.
+- **Ochre** (#8a5a12): Waiting on a person.
+- **Red** (#9b3a32): Blocked work.
 
 ### Neutral
-- **Ink** (#172033): Headings and primary content.
-- **Ink Soft** (#4f5b70): Supporting copy.
-- **Page** (#f4f6f8): Global canvas.
-- **Surface** (#ffffff): Cards and work areas.
-- **Line** (#dce2ea): Boundaries and dividers.
+- **Muted** (#737373): Labels.
+- **Page / Surface** (#ffffff): The conversation and the computer.
+- **Sidebar** (#fafafa): The Bot and its tasks.
+- **Line** (#ececec): Boundaries. **Line Strong** (#d6d6d6): Inputs.
 
 ## Typography
 
-**Display Font:** Manrope (with system sans fallback)
-**Body Font:** Manrope (with system sans fallback)
-**Label/Mono Font:** DM Mono
+**UI Font:** Inter, with WenQuanYi Micro Hei and Droid Sans Fallback for Chinese
+**Label/Mono Font:** JetBrains Mono
 
-**Character:** Manrope gives the console a warm, contemporary voice; DM Mono is reserved for runtime vocabulary, IDs, and compact technical metadata.
+**Character:** Inter keeps Chinese and Latin at the same weight. Mono is reserved for runtime vocabulary, IDs, and compact technical metadata.
 
 ### Hierarchy
-- **Display** (800, clamp(27px, 3.2vw, 44px), 1.06): Product title and major run headings.
-- **Headline** (800, clamp(23px, 2.7vw, 36px), 1.08): Hero statement.
-- **Title** (700, 16px, 1.3): Section headings and card titles.
-- **Body** (400, 14px, 1.75): Explanations and instructions.
-- **Label** (500, 12px, 1.4, slight tracking): Navigation, statuses, and runtime metadata.
+- **Display** (650, 28px): The empty conversation, “AEEIS”.
+- **Title** (500, 14px): The user’s goal, in a light gray bubble.
+- **Section** (650, 15px, 1.3): Panel headings.
+- **Body** (400, 14px, 1.7): Explanations and instructions.
+- **Label** (500, 11–12px, mono): Navigation, statuses, and runtime metadata.
 
 ## Layout
 
-The page uses a two-column operating layout: a 310–370px sticky control rail and a fluid work surface. The top hero uses a 1fr / 240–360px composition with a small orbit visualization. At 780px and below, the rail becomes a normal stack, navigation becomes horizontally scrollable, and the orbit is removed to protect focus and width.
+The sidebar is one Bot, AEEIS, with its tasks indented underneath. The transcript shows the entry, or the execution of the task you opened. The composer accepts one message; Enter sends. “打开它的工作台” reveals the shared computer. Closing it leaves the conversation in place. Below 860px the sidebar and the conversation swap places. Share and thread pages stay transcript-only.
 
 ## Elevation & Depth
 
-Depth comes from white surfaces on a cool-gray page, 1px cool borders, and restrained ambient shadows. The hero and primary run use the strongest elevation; data rows stay mostly flat and gain a small lift on hover.
+Depth is flat. White sits on white, separated by 1px lines. The command palette, the run dock, and the activity toast are the only shadows.
 
 ## Shapes
 
-The shape language is soft but precise: 9px controls, 10px data rows, 16px work sections, and a 26px hero. Borders are thin and cool-gray. Pills are used for statuses and lifecycle steps only.
+Corners are short: 4px controls, 6px task rows, 12px bubbles. The brand mark is a plain black square.
 
 ## Components
 
 ### Buttons
-- **Shape:** 9px radius.
-- **Primary:** Signal Blue fill with white text and a restrained blue shadow.
-- **Hover / Focus:** Darker blue, two-pixel lift, and a visible focus ring.
-- **Secondary:** Pale blue surface with blue ink.
+- **Shape:** 4px radius. No lift on hover.
+- **Primary:** Black fill, white text. Hover stays black.
+- **Quiet:** Transparent or paper, ink text, hairline border.
 
 ### Cards / Containers
-- **Corner Style:** 16px work surfaces; 10px data rows.
-- **Background:** White or a very light blue/green tint for semantic states.
-- **Shadow Strategy:** Ambient shadow on major surfaces only.
-- **Border:** 1px cool-gray, semantic color for active states.
-- **Internal Padding:** 20–32px for work surfaces, 11–13px for rows.
+- **Work sheets:** White, 1px line.
+- **Rail:** No cards. Sections are separated by a bottom rule.
+- **Rows:** 6px, paper, ink border on hover or selection.
 
 ### Inputs / Fields
-- **Style:** White fill, 1px cool-gray border, 9px radius, 10–11px padding.
-- **Focus:** Blue border with a soft blue focus halo.
-- **Error / Disabled:** Red text for errors; reduced opacity for disabled actions.
+- **Style:** Paper fill, 1px strong line, 4px radius.
+- **Focus:** Ink border and a soft ink halo.
+- **Error:** Vermilion-red text. Disabled actions fade to half opacity.
 
 ### Navigation
 
-Sticky pill links provide quick jumps between work areas. They remain white and quiet at rest, gain blue ink and a slight lift on hover, and scroll horizontally on small screens.
+Text links with a bottom rule on hover. They stay quiet at rest and scroll horizontally on small screens.
 
-### Signature Component: Command Center
+### Signature Component: The Conversation
 
-The top command center is the primary launch surface. It accepts a single outcome sentence, mirrors that value into the full run form, supports the keyboard shortcut `⌘K`, and can switch the workspace into a focused run mode that removes the configuration rail.
+The home surface is a chat with AEEIS. An empty thread offers example intents. A selected run keeps approvals (“批准并执行”), questions, and delivery in the transcript. `⌘K` still opens the command palette. The computer is the agent’s desk and stays closed until asked for.
 
 ### Signature Component: Run Activity Strip
 
-Every selected run includes a compact activity strip beneath its title. The strip translates machine status into plain language, paired with a small signal animation and a scanning baseline. Human attention states use amber; successful completion uses mint; failures use red.
+A selected run shows a plain-language status between two rules, with a small signal and a scanning baseline. Human attention uses ochre. Completion uses moss. Failure uses red.
 
 ## Do's and Don'ts
 
-- **Do** keep the first viewport focused on one clear action: start a run.
-- **Do** translate statuses into a sentence that tells the user what happens next.
-- **Do** use motion to show a living process or an acknowledged action.
+- **Do** keep the conversation on screen when the computer opens or closes.
+- **Do** say what happens next in a sentence, inside the transcript.
+- **Do** use vermilion only for live presence, focus, and the primary hover.
 - **Do** support `prefers-reduced-motion`.
-- **Don't** make advanced governance compete with the primary run flow.
-- **Don't** use motion on decorative indicators that are not tied to live state.
+- **Don't** put goals, reminders, RSI, or system status on the home transcript.
+- **Don't** put motion on indicators that are not tied to live presence.
 - **Don't** let graph nodes or IDs create page-level horizontal overflow.
