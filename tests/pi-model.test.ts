@@ -211,7 +211,7 @@ describe('pi single-request model adapter', () => {
     const adapter = new PiModelAdapter({ pin: piPin, model: piModel, apiKey: 'fixture-key', fetch: transport.fetch });
     await expect(adapter.complete({ ...request, timeoutMs: 25 })).rejects.toBeInstanceOf(ModelTimeout);
     expect(transport.requests).toHaveLength(1);
-    expect(transport.requests[0]?.signal?.aborted).toBe(true);
+    await vi.waitFor(() => expect(transport.requests[0]?.signal?.aborted).toBe(true));
     finish(responses({ late: true }));
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(transport.requests).toHaveLength(1);

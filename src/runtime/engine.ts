@@ -1730,7 +1730,7 @@ export class AgentEngine {
         current.modelUsage = deriveModelUsage(current);
         call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
-        event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
+        event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, ...(phase === 'compaction' ? {} : { rawOutput: call.rawOutput }), validation: { issues: call.validationErrors } });
         if (phase === 'compaction') {
           // A summary is not task execution. Unknown billing must reconcile;
           // never synthesize partial artifacts or auto-retry a summary timeout.
@@ -1856,7 +1856,7 @@ export class AgentEngine {
         console.warn(JSON.stringify({ protocol: 'aeeis-model-schema-failure/1', runId: current.id, callId, taskId: taskId ?? null, phase: call.phase,
           issues: (validationDetails(error)?.issues ?? []).map(issue => ({ path: issue.path, code: issue.code })) }));
         recordTaskFailure(current, taskId);
-        event(current, 'run.failed', { callId, taskId, reason: current.error, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
+        event(current, 'run.failed', { callId, taskId, reason: current.error, ...(phase === 'compaction' ? {} : { rawOutput: call.rawOutput }), validation: { issues: call.validationErrors } });
       }
       if (paused) { current.resumeStatus = current.status; current.status = 'paused'; }
     });

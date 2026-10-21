@@ -210,10 +210,35 @@ export function modelRawOutput(value: unknown, credentialSource?: unknown): stri
   return capDebugField(typeof redacted === 'string' ? redacted : JSON.stringify(redacted) ?? String(redacted));
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+function compactionCallIds(run: Pick<AgentRun, 'calls'>): Set<string> {
+  return new Set(run.calls.filter(call => call.phase === 'compaction').map(call => call.id));
+}
+function omitCompactionEventPayload<T extends { data?: Record<string, unknown> }>(event: T, ids: Set<string>): T {
+  const callId = event.data?.callId;
+  if (typeof callId !== 'string' || !ids.has(callId) || !event.data) return event;
+  if (!('rawOutput' in event.data) && !('modelRequest' in event.data)) return event;
+  const data = { ...event.data };
+  delete data.rawOutput;
+  delete data.modelRequest;
+  return { ...event, data };
+}
+/** Drop compaction transcripts from event payloads. Planner and reviewer failures stay intact. */
+export function redactRunEvents<T extends { data?: Record<string, unknown> }>(run: Pick<AgentRun, 'calls'>, events: readonly T[]): T[] {
+  const ids = compactionCallIds(run);
+  if (!ids.size) return events as T[];
+  let changed = false;
+  const next = events.map(event => {
+    const redacted = omitCompactionEventPayload(event, ids);
+    if (redacted !== event) changed = true;
+    return redacted;
+  });
+  return changed ? next : events as T[];
+}
 export function withoutWorkingMemoryPayloads(run: AgentRun): AgentRun {
-  if (!run.workingMemory) return run;
+  const events = redactRunEvents(run, run.events);
+  if (!run.workingMemory) return events === run.events ? run : { ...run, events };
   const { workingMemory: _memory, reconciledModelCall: _reconciled, ...rest } = run;
-  return { ...rest,
+  return { ...rest, events,
     calls: run.calls.map(call => {
       if (call.phase !== 'compaction') return call;
       const { modelRequest: _request, rawOutput: _output, validationErrors: _errors, ...metadata } = call;

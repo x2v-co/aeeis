@@ -694,7 +694,7 @@ window.addEventListener('keydown', event => {
     }
   }
 });
-class ApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
+class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
@@ -705,9 +705,9 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   });
   const raw = await response.text();
   if (!readOnlyShare && token !== sessionStorage.getItem('aeeis.token')) throw new Error('身份已更改，请重新连接');
-  let value: (T & { error?: string }) | undefined;
+  let value: (T & { error?: string; retrySameRequest?: unknown }) | undefined;
   if (raw.trim()) {
-    try { value = JSON.parse(raw) as T & { error?: string }; }
+    try { value = JSON.parse(raw) as T & { error?: string; retrySameRequest?: unknown }; }
     catch {
       if (!response.ok) {
         const fallback = raw.replace(/\s+/g, ' ').trim();
@@ -715,7 +715,7 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
       }
     }
   }
-  if (!response.ok) throw new ApiError(value?.error ?? `运行服务请求失败（HTTP ${response.status}）`, response.status);
+  if (!response.ok) throw new ApiError(value?.error ?? `运行服务请求失败（HTTP ${response.status}）`, response.status, value?.retrySameRequest === true);
   return (value ?? {}) as T;
 }
 let authRequired = false;
@@ -795,7 +795,8 @@ function updateConversationControls(): void {
   const locked = conversationBusy || Boolean(conversationAttempt);
   const target = $<HTMLSelectElement>('conversation-target').value;
   const task = conversationTargetTask();
-  const active = task && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
+  const preparing = Boolean(task && task.status === 'preparing' && !task.runId && !task.latestRunId);
+  const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
   $('conversation-panel').setAttribute('aria-busy', String(conversationBusy));
   $('conversation-new-task-fields').hidden = target !== '__new';
   $<HTMLInputElement>('conversation-task-title').required = target === '__new';
@@ -810,8 +811,8 @@ function updateConversationControls(): void {
   for (const option of $<HTMLSelectElement>('conversation-target').options) option.disabled = correcting && (!option.value || option.value === '__new');
   $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : '发送讨论';
   $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
-  $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || correcting;
-  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : '创建执行后请在运行面板核对计划，再明确批准。';
+  $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || preparing || correcting;
+  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : '创建执行后请在运行面板核对计划，再明确批准。';
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
@@ -859,7 +860,8 @@ function renderConversation(): void {
       if (item.correctsMessageId) row.append(element('small', `归属纠正记录：${item.correctsMessageId}；原始路由和已有执行记录不变。`));
       const routeLabel = item.route.status === 'clarify' ? '待澄清：未执行，请明确选择任务' : item.route.status === 'general' ? '一般讨论：已记录，未调用模型' : `${corrected ? '原始关联任务（审计）' : '关联任务'}：${item.route.taskIds.map(conversationTaskName).join('、')}`;
       row.append(element('small', `${routeLabel} · 路由：${item.route.reason} · ${item.route.focusEffect === 'switch' && item.route.status === 'routed' ? '已切换讨论焦点' : '保持讨论焦点'}`));
-      if (item.execution) row.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
+      if (item.execution?.state === 'cancelled') row.append(element('small', '这次执行没有创建，请重新发送。'));
+      else if (item.execution) row.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
       else if (item.role === 'user' && item.route.status === 'routed') row.append(element('small', '已记录讨论，未调用模型。'));
       const reply = button('回复这条消息', async () => prepareConversationReply(item)); reply.type = 'button'; row.append(reply);
       if (item.role === 'user' && !item.execution && !item.correctsMessageId) {
@@ -997,7 +999,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     const body = conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
-        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
+        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
         focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions() } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
@@ -1018,7 +1020,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     // A Run is only opened on a separate explicit view action. Receiving a notification never steals focus.
   } catch (error) {
     if (epoch !== conversationEpoch) return;
-    if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+    if (error instanceof ApiError && error.status >= 400 && error.status < 500 && !error.retrySameRequest) {
       conversationAttempt = undefined; saveConversationAttempt();
       conversationNeedsRefresh = error.status === 409;
       if ([401, 403].includes(error.status)) { resetConversation(); $('conversation-status').textContent = '身份或权限已变化，请重新连接。'; }

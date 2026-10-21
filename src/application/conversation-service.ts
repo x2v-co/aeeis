@@ -6,6 +6,11 @@ import { requestSchema } from '../runtime/contracts.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
+
+/** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
+export class ReplayablePreparationError extends Conflict {
+  readonly retrySameRequest = true;
+}
 import { followupHash, followupRunId, idempotencyKeySchema } from '../runtime/thread-followups.js';
 import { redactRunData } from '../runtime/run-debug.js';
 import { ThreadService } from './thread-service.js';
@@ -24,6 +29,16 @@ const messageSchema = z.object({
 }).strict();
 const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase();
 const sameIds = (left: string[], right: string[]) => [...left].sort().join('\0') === [...right].sort().join('\0');
+/** Pure Han titles match by substring once they are long enough to be distinctive.
+ * Mixed and ASCII titles need a letter/number boundary so a short token cannot hide inside a longer word. */
+function mentionsTitle(text: string, title: string): boolean {
+  const folded = normalize(text);
+  const needle = normalize(title).trim();
+  if (needle.length < 2) return false;
+  if (/^[\p{Script=Han}]+$/u.test(needle)) return needle.length >= 3 && folded.includes(needle);
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'iu').test(folded);
+}
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
 function effectiveTasks(conversation: Conversation, message: ConversationMessage): string[] {
   return conversation.messages.slice().reverse().find(item => item.correctsMessageId === message.id)?.route.taskIds ?? message.route.taskIds;
@@ -57,11 +72,16 @@ export function routeConversationMessage(conversation: Conversation, input: z.in
   else if (replied) result = repliedTasks.length ? route('routed', 'reply', [...repliedTasks]) : route('clarify', 'ambiguous', [], [...replied.route.candidateTaskIds]);
   else {
     const text = normalize(input.text);
-    const named = conversation.tasks.filter(task => text.includes(normalize(task.title)) || text.includes(task.id));
+    const named = conversation.tasks.filter(task => mentionsTitle(input.text, task.title) || text.includes(task.id));
     if (named.length) result = route('routed', 'name', named.map(task => task.id));
     else if (conversation.focusTaskId) result = route('routed', 'focus', [conversation.focusTaskId]);
     else if (/继续|接着|那个|这个|上次|刚才|\b(?:continue|resume|that|it)\b/i.test(input.text)) result = route('clarify', 'ambiguous', [], conversation.tasks.map(task => task.id));
     else result = route('general', 'unassigned');
+  }
+  // Execution starts only from an explicit task, a reply, or a new task. Name matches and the discussion focus stay on the discussion path.
+  if (input.intent === 'execute' && !input.newTask && result.reason !== 'explicit' && result.reason !== 'reply') {
+    const candidates = result.candidateTaskIds.length ? result.candidateTaskIds : result.taskIds.length ? result.taskIds : (conversation.focusTaskId ? [conversation.focusTaskId] : conversation.tasks.map(task => task.id));
+    return route('clarify', 'ambiguous', [], candidates);
   }
   if (result.taskIds.length !== 1 && (input.intent === 'execute' || input.focus === 'switch')) return route('clarify', 'ambiguous', [], result.taskIds.length ? result.taskIds : conversation.tasks.map(task => task.id));
   return result;
@@ -163,38 +183,60 @@ export class ConversationService {
     return this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope);
   }
 
+  private async runExists(runId: string, scope: Ownership): Promise<boolean> {
+    try { await this.runs.get(runId, scope); return true; }
+    catch (error) { if (error instanceof NotFound) return false; throw error; }
+  }
   private async finish(id: string, messageId: string, scope: Ownership) {
     let conversation = await this.store.get(id, scope);
     let message = conversation.messages.find(item => item.id === messageId)!;
     if (message.execution?.state === 'pending') {
-      const task = conversation.tasks.find(item => item.id === message.execution!.taskId)!;
-      try { await this.runs.getThread(task.threadId, scope); }
-      catch (error) {
-        if (!(error instanceof NotFound)) throw error;
-        try { await this.runs.createThread({ id: task.threadId, ...scope, title: task.title, createdAt: task.createdAt }); }
-        catch (error) { if (!(error instanceof ThreadConflict)) throw error; }
+      const execution = message.execution;
+      const task = conversation.tasks.find(item => item.id === execution.taskId)!;
+      try {
+        try { await this.runs.getThread(task.threadId, scope); }
+        catch (error) {
+          if (!(error instanceof NotFound)) throw error;
+          try { await this.runs.createThread({ id: task.threadId, ...scope, title: task.title, createdAt: task.createdAt }); }
+          catch (error) { if (!(error instanceof ThreadConflict)) throw error; }
+        }
+        const thread = await this.runs.getThread(task.threadId, scope);
+        if (thread.title !== task.title || thread.createdAt !== task.createdAt) throw new Conflict('Task thread identity changed');
+        const run = await this.threads.followUp(task.threadId, { request: execution.request, ...(execution.parentRunId ? { parentRunId: execution.parentRunId } : {}) }, scope, message.id);
+        if (run.id !== execution.runId) throw new Conflict('Prepared Run does not match the routed execution');
+        conversation = await this.store.mutate(id, scope, current => {
+          const live = current.messages.find(item => item.id === messageId)!;
+          if (live.execution?.state !== 'pending') return;
+          const task = current.tasks.find(item => item.id === live.execution!.taskId)!;
+          if (task.pendingMessageId !== messageId) throw new Conflict('Task execution reservation changed');
+          live.execution.state = 'completed'; task.latestRunId = run.id; delete task.pendingMessageId;
+        });
+        message = conversation.messages.find(item => item.id === messageId)!;
+      } catch (error) {
+        // A committed Run must stay reserved so the same idempotency key can finish it.
+        // A missing Run releases the task; terminal cancellation cannot be undone.
+        if (await this.runExists(execution.runId, scope)) throw new ReplayablePreparationError(error instanceof Error ? error.message : 'Execution preparation failed');
+        await this.store.mutate(id, scope, current => {
+          const live = current.messages.find(item => item.id === messageId);
+          if (live?.execution?.state !== 'pending') return;
+          live.execution.state = 'cancelled';
+          const reserved = current.tasks.find(item => item.id === live.execution!.taskId);
+          if (reserved?.pendingMessageId === messageId) delete reserved.pendingMessageId;
+        });
+        if (error instanceof Conflict || error instanceof ThreadConflict || error instanceof NotFound || error instanceof RangeError) throw error;
+        const detail = error instanceof Error ? error.message : 'Execution preparation failed';
+        throw new Conflict(`执行没有创建，请重新发送。${detail}`);
       }
-      const thread = await this.runs.getThread(task.threadId, scope);
-      if (thread.title !== task.title || thread.createdAt !== task.createdAt) throw new Conflict('Task thread identity changed');
-      const run = await this.threads.followUp(task.threadId, { request: message.execution.request, ...(message.execution.parentRunId ? { parentRunId: message.execution.parentRunId } : {}) }, scope, message.id);
-      if (run.id !== message.execution.runId) throw new Conflict('Prepared Run does not match the routed execution');
-      conversation = await this.store.mutate(id, scope, current => {
-        const live = current.messages.find(item => item.id === messageId)!;
-        if (live.execution?.state !== 'pending') return;
-        const task = current.tasks.find(item => item.id === live.execution!.taskId)!;
-        if (task.pendingMessageId !== messageId) throw new Conflict('Task execution reservation changed');
-        live.execution.state = 'completed'; task.latestRunId = run.id; delete task.pendingMessageId;
-      });
-      message = conversation.messages.find(item => item.id === messageId)!;
     }
     const task = conversation.tasks.find(task => task.id === message.route.taskIds[0]);
     const response = message.route.status === 'clarify'
       ? '请明确选择要讨论或执行的任务；本条消息没有触发执行。'
       : message.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。'
-      : message.execution ? `已为「${task?.title}」创建执行，仍需遵守计划审批。`
+      : message.execution?.state === 'cancelled' ? '这次执行没有创建，请重新发送。'
+      : message.execution?.state === 'completed' ? `已为「${task?.title}」创建执行，仍需遵守计划审批。`
       : message.route.status === 'general' ? '已记录一般讨论；选择或新建任务后可继续。'
       : `已关联到${message.route.taskIds.map(id => `「${conversation.tasks.find(task => task.id === id)!.title}」`).join('、')}，未触发执行。`;
-    return { conversation: await this.view(conversation, scope), message: redactRunData(this.messageView(message)), response, ...(message.execution ? { runId: message.execution.runId } : {}) };
+    return { conversation: await this.view(conversation, scope), message: redactRunData(this.messageView(message)), response, ...(message.execution?.state === 'completed' ? { runId: message.execution.runId } : {}) };
   }
 
   async syncNotifications(id: string, scope: Ownership) {

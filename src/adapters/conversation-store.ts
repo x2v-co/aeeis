@@ -37,7 +37,7 @@ const schema = z.object({
     }).strict(),
     execution: z.object({
       taskId: identifier, runId, parentRunId: runId.optional(), request: requestSchema,
-      state: z.enum(['pending', 'completed']),
+      state: z.enum(['pending', 'completed', 'cancelled']),
     }).strict().optional(),
     notificationRunId: runId.optional(),
   }).strict()).max(1000),
@@ -127,7 +127,8 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
       for (const field of ['taskId', 'runId', 'parentRunId', 'request'] as const) {
         assert(isDeepStrictEqual(message.execution[field], next.execution[field]), `Conversation execution ${field} is immutable`);
       }
-      assert(message.execution.state === 'pending' || next.execution.state === 'completed', 'Completed conversation execution is immutable');
+      const previousState = message.execution.state, nextState = next.execution.state;
+      assert(previousState === nextState || (previousState === 'pending' && (nextState === 'completed' || nextState === 'cancelled')), 'Conversation execution state is immutable once terminal');
     } else assert(next.execution === undefined, 'Conversation execution is immutable');
   });
   if (isDeepStrictEqual(draft, before)) return structuredClone(before);
@@ -202,16 +203,8 @@ export class FileConversationStore implements ConversationStore {
       if (this.ready) return;
       if (this.closing) throw new Error('Conversation store is closed');
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      // Never steal a stale-looking lock: PID reuse and concurrent stale-lock
-      // unlink/recreate races can admit two writers. After an unclean exit an
-      // operator must verify the old process is gone before removing this file.
-      const lock = await open(this.lockPath, 'wx', 0o600).catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Conflict('Conversation directory already has a writer lock');
-        throw error;
-      });
-      this.lockToken = `${process.pid}:${randomUUID()}`;
+      await this.acquireLock();
       try {
-        try { await lock.writeFile(this.lockToken); await lock.sync(); } finally { await lock.close(); }
         await this.syncDirectory();
         // Fail closed on corrupt canonical state, without retaining the lock.
         for (const id of await this.ids()) await this.read(id);
@@ -221,6 +214,38 @@ export class FileConversationStore implements ConversationStore {
         throw error;
       }
     });
+  }
+  /** Reclaim a lock only when its recorded PID is dead. A live PID, including
+   * one reused by an unrelated process, still blocks startup. */
+  private async acquireLock(): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const lock = await open(this.lockPath, 'wx', 0o600);
+        this.lockToken = `${process.pid}:${randomUUID()}`;
+        try { await lock.writeFile(this.lockToken); await lock.sync(); } finally { await lock.close(); }
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (attempt === 1 || !await this.deadLock()) throw new Conflict('Conversation directory already has a writer lock');
+        await unlink(this.lockPath).catch(unlinkError => {
+          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+        });
+      }
+    }
+  }
+  private async deadLock(): Promise<boolean> {
+    const token = await readFile(this.lockPath, 'utf8').catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (token === undefined) return true;
+    const pid = Number(token.split(':', 1)[0]);
+    if (!Number.isInteger(pid) || pid <= 0) throw new Conflict('Invalid conversation writer lock; inspect before recovery');
+    try { process.kill(pid, 0); return false; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true;
+      throw error;
+    }
   }
   private path(id: string): string { validateId(id); return join(this.directory, `${id}.json`); }
   private async ids(): Promise<string[]> {

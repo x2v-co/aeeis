@@ -118,6 +118,18 @@ for (const [name, factory] of Object.entries(factories)) describe(`${name} conve
     await expect(store.mutate(value.id, scope, draft => { draft.messages[0]!.execution!.state = 'pending'; })).rejects.toBeInstanceOf(Conflict);
     await expect(store.get(value.id, scope)).resolves.toEqual(complete);
   }));
+  it('cancels a pending execution once and then keeps that state terminal', () => using(async store => {
+    const value = conversation(true); await store.create(value);
+    const cancelled = await store.mutate(value.id, scope, draft => {
+      draft.messages[0]!.execution!.state = 'cancelled';
+      delete draft.tasks[0]!.pendingMessageId;
+    });
+    expect(cancelled.messages[0]!.execution!.state).toBe('cancelled');
+    expect(await collect(store)).toEqual([]);
+    await expect(store.mutate(value.id, scope, draft => { draft.messages[0]!.execution!.state = 'pending'; })).rejects.toBeInstanceOf(Conflict);
+    await expect(store.mutate(value.id, scope, draft => { draft.messages[0]!.execution!.state = 'completed'; })).rejects.toBeInstanceOf(Conflict);
+    await expect(store.get(value.id, scope)).resolves.toEqual(cancelled);
+  }));
   const immutable: [string, (draft: Conversation) => void][] = [
     ['id', v => { v.id = conversation().id; }], ['owner', v => { v.owner = 'bob'; }], ['tenant', v => { v.tenantId = 'other'; }],
     ['createdAt', v => { v.createdAt = '2026-02-01T00:00:00.000Z'; }], ['schema', v => { (v as any).schemaVersion = 'conversation/2'; }],
@@ -280,6 +292,28 @@ describe('file conversation lifecycle', () => {
       await expect(contender.init()).rejects.toThrow('writer lock'); await contender.close();
       await second.create(value);
     } finally { await Promise.all([first.close(), second.close()]); await rm(directory, { recursive: true, force: true }); }
+  });
+  it('reclaims a writer lock only when its recorded process is gone', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-conversation-deadlock-'));
+    const lock = join(directory, '.conversations.writer.lock');
+    const stores: FileConversationStore[] = [];
+    try {
+      await writeFile(lock, `2147483647:${randomUUID()}`);
+      const reclaimed = new FileConversationStore(directory); stores.push(reclaimed);
+      await reclaimed.init();
+      await reclaimed.create(conversation());
+      await reclaimed.close();
+      await writeFile(lock, `${process.pid}:other`);
+      const live = new FileConversationStore(directory); stores.push(live);
+      await expect(live.init()).rejects.toThrow('writer lock');
+      await live.close();
+      expect(await readFile(lock, 'utf8')).toBe(`${process.pid}:other`);
+      await writeFile(lock, 'not-a-pid');
+      const invalid = new FileConversationStore(directory); stores.push(invalid);
+      await expect(invalid.init()).rejects.toThrow('Invalid conversation writer lock');
+      await invalid.close();
+      expect(await readFile(lock, 'utf8')).toBe('not-a-pid');
+    } finally { await Promise.all(stores.map(store => store.close())); await rm(directory, { recursive: true, force: true }); }
   });
   it('requires initialization and drains queued writes before close', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-conversation-close-'));

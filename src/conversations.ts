@@ -31,7 +31,7 @@ export interface ConversationMessage {
     runId: string;
     parentRunId?: string;
     request: TaskRequest;
-    state: 'pending' | 'completed';
+    state: 'pending' | 'completed' | 'cancelled';
   };
   notificationRunId?: string;
 }

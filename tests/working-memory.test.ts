@@ -174,6 +174,7 @@ describe('task scoped working memory through the durable engine', () => {
     expect(current.artifacts).toEqual([]);
     expect(current.steps[0]!.timeoutRetried).toBeUndefined();
     expect(current.events.some(event => event.type === 'model.timeout_retry')).toBe(false);
+    expect(current.events.find(event => event.type === 'model.unknown')?.data).not.toHaveProperty('rawOutput');
     const restarted = fixture.restart();
     await restarted.recover();
     await restarted.advance(current.id);

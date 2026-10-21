@@ -180,6 +180,29 @@ describe('single-entry conversation workbench', () => {
     el('conversation-execute').click(); await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
     expect(messagePosts(h)[1]?.body.expectedRevision).toBe(5);
     expect(messagePosts(h)[1]?.key).not.toBe(messagePosts(h)[0]?.key);
+    expect(messagePosts(h)[0]?.body.taskIds).toEqual(['task_a']);
+    expect(messagePosts(h)[1]?.body.taskIds).toEqual(['task_b']);
+  });
+
+  it('keeps the idempotency key when preparation asks to retry the same request', async () => {
+    const h = harness(undefined, { handler(url) { if (url.endsWith('/messages')) return response({ error: '结果尚未确认', retrySameRequest: true }, 409); } });
+    start(h.fetch); await ready(); fill('conversation-text', '继续执行'); el('conversation-execute').click();
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-retry').disabled).toBe(false));
+    expect(el('conversation-error').textContent).toContain('结果尚未确认');
+    expect(el('conversation-retry-panel').hidden).toBe(false);
+    expect(dom.window.sessionStorage.getItem('aeeis.conversation-pending')).toContain('继续执行');
+    el('conversation-retry').click();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.key).toBe(messagePosts(h)[0]?.key);
+    expect(messagePosts(h)[1]?.raw).toBe(messagePosts(h)[0]?.raw);
+  });
+
+  it('renders a cancelled execution as not created', async () => {
+    const view = fixture();
+    view.messages.push({ id: 'cancelled', role: 'user', text: '生成报告', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'cancelled' } });
+    const h = harness(view); start(h.fetch); await ready();
+    expect(el('conversation-messages').textContent).toContain('这次执行没有创建，请重新发送。');
+    expect(el('conversation-messages').textContent).not.toContain(runId);
   });
 
   it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {

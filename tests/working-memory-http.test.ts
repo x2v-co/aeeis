@@ -20,6 +20,8 @@ async function fixture() {
   run.calls.push({ id: 'call_summary', phase: 'compaction', taskId: 'alpha', state: 'completed', inputHash: 'b'.repeat(64), startedAt: run.createdAt, rawOutput: 'private-summary-payload', modelRequest: { system: 'summary', input: { slices: [{ text: 'private-manifest-payload' }] } } });
   run.calls.push({ id: 'call_planner', phase: 'planner', state: 'completed', inputHash: 'c'.repeat(64), startedAt: run.createdAt, rawOutput: 'planner-raw-marker', modelRequest: { system: 'planner', input: { marker: 'planner-model-marker' } } });
   run.steps[0]!.observations.push({ tool: 'context.read', argument: alpha.id, result: { text: 'private-read-payload' } });
+  run.events.push({ id: 'evt_summary_leak', seq: run.events.length + 1, type: 'model.failed', at: run.createdAt, data: { callId: 'call_summary', rawOutput: 'private-summary-payload', modelRequest: { system: 'summary-leak' } } });
+  run.events.push({ id: 'evt_planner_raw', seq: run.events.length + 1, type: 'model.failed', at: run.createdAt, data: { callId: 'call_planner', rawOutput: 'planner-event-raw' } });
   await repository.create(run);
   const app = buildApp({ repository, principalTokens: {
     alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] },
@@ -69,10 +71,12 @@ describe('owner-scoped working memory inspection', () => {
     }
     expect(JSON.stringify(debugRunView(f.run))).toContain('planner-model-marker');
     expect(JSON.stringify(debugBundle(f.run))).toContain('planner-raw-marker');
+    expect(JSON.stringify(debugBundle(f.run))).toContain('planner-event-raw');
     expect(JSON.stringify(sharedRunView(f.run))).not.toContain('planner-model-marker');
     const response = await f.app.inject({ method: 'GET', url: `/api/runs/${f.run.id}`, headers: { authorization: 'Bearer alice' } });
     expect(response.statusCode).toBe(200); expect(response.json().workingMemoryEnabled).toBe(true);
     expect(response.json().workingMemory).toBeUndefined(); expect(response.body).not.toContain('private-read-payload');
+    expect(response.body).not.toContain('private-summary-payload'); expect(response.body).toContain('planner-event-raw');
     expect(f.run.workingMemory?.originals).toHaveLength(2);
     expect(f.run.calls.find(call => call.id === 'call_summary')?.rawOutput).toBe('private-summary-payload');
   });

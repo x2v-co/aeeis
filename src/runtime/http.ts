@@ -2,7 +2,7 @@ import { ChangeAuditConflict, changeReasonSchema, verifyChain, type ChangeAuditA
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
-import { debugBundle, redactRunData, sharedRunView, withoutWorkingMemoryPayloads } from './run-debug.js';
+import { debugBundle, redactRunData, redactRunEvents, sharedRunView, withoutWorkingMemoryPayloads } from './run-debug.js';
 import { runInputRequest } from './input-requests.js';
 import { artifactFilename } from './artifact-download.js';
 import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-material.js';
@@ -30,7 +30,7 @@ import { projectRunGraphs } from './graphs.js';
 import { explainRun } from './explanation.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
 import { ThreadService } from '../application/thread-service.js';
-import { ConversationService } from '../application/conversation-service.js';
+import { ConversationService, ReplayablePreparationError } from '../application/conversation-service.js';
 import type { ConversationStore } from '../conversations.js';
 import { ThreadConflict } from './threads.js';
 import { inspectWorkingMemory, workingMemoryIndex } from './working-memory.js';
@@ -426,7 +426,10 @@ export function buildApp(options: Options) {
     if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound || error instanceof CollaborationTriggerNotFound || error instanceof ProjectionNotFound || error instanceof ReminderNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof ReminderConflict) return reply.code(409).send({ error: error.message });
-    if (error instanceof Conflict || error instanceof ThreadConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof Conflict || error instanceof ThreadConflict) {
+      const retrySameRequest = error instanceof ReplayablePreparationError;
+      return reply.code(409).send({ error: error.message, ...(retrySameRequest ? { retrySameRequest: true } : {}) });
+    }
     if (error instanceof RangeError) return reply.code(400).send({ error: error.message });
     const e = error as { statusCode?: number };
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send({ error: 'Invalid HTTP request' });
@@ -1391,7 +1394,12 @@ export function buildApp(options: Options) {
     const principal = principalOf(request); const limit = cursorCollectionLimit(request.query);
     if (limit === undefined) throw new RangeError('limit is required for event pagination');
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principal);
-    return eventsPage.call(options.repository, request.params.id, { owner: run.owner ?? 'owner', tenantId: run.tenantId ?? 'local' }, limit, request.query.cursor);
+    const scope = { owner: run.owner ?? 'owner', tenantId: run.tenantId ?? 'local' };
+    const page = await eventsPage.call(options.repository, request.params.id, scope, limit, request.query.cursor);
+    let source = run;
+    try { source = await options.repository.get(request.params.id, scope); }
+    catch { /* The readable snapshot still identifies compaction calls. */ }
+    return { ...page, events: redactRunEvents(source, page.events) };
   });
   app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string; waitMs?: string; heartbeatMs?: string } }>('/api/runs/:id/events/stream', async (request, reply) => {
     const eventsPage = options.repository.eventsPage;
@@ -1419,8 +1427,14 @@ export function buildApp(options: Options) {
     // Resolve ownership and cursor validation before sending SSE headers. An
     // error discovered after the stream starts cannot be represented as a
     // normal HTTP 404/400 response and would otherwise surface as a 500.
+    let callSource = readableRun;
+    const scrubPage = async (page: Awaited<ReturnType<typeof readEvents>>) => {
+      try { callSource = await options.repository.get(request.params.id, runScope); }
+      catch { /* The last readable aggregate still identifies compaction calls. */ }
+      return { ...page, events: redactRunEvents(callSource, page.events) };
+    };
     let initialPage: Awaited<ReturnType<typeof readEvents>>;
-    try { initialPage = await readEvents.call(options.repository, request.params.id, runScope, query.limit, initialCursor); }
+    try { initialPage = await scrubPage(await readEvents.call(options.repository, request.params.id, runScope, query.limit, initialCursor)); }
     catch (error) { release(); throw error; }
     let cursor = initialCursor;
     let closed = false;
@@ -1434,7 +1448,7 @@ export function buildApp(options: Options) {
         if (closed) return;
         const page = pending;
         pending = undefined;
-        const nextPage = page ?? await readEvents.call(options.repository, request.params.id, runScope, query.limit, cursor);
+        const nextPage = page ?? await scrubPage(await readEvents.call(options.repository, request.params.id, runScope, query.limit, cursor));
         if (nextPage.events.length) {
           for (const item of nextPage.events) {
             if (closed) return;
