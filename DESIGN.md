@@ -1,17 +1,17 @@
 ---
-name: AEEIS Ink Desk
-description: A Grok-style conversation with an on-demand workbench for long-running agent work.
+name: AEEIS Minimal
+description: One Bot, many concurrent tasks, and a quiet shared computer.
 colors:
-  ink: "#1c1916"
-  ink-soft: "#4a433c"
-  muted: "#5e564e"
-  page: "#efe8dc"
-  surface: "#fbf7f1"
-  signal: "#b43322"
-  signal-deep: "#8c2416"
-  moss: "#1f6b45"
-  ochre: "#a16207"
-  red: "#9f2c22"
+  ink: "#171717"
+  ink-soft: "#3f3f3f"
+  muted: "#737373"
+  page: "#ffffff"
+  surface: "#ffffff"
+  signal: "#171717"
+  signal-deep: "#000000"
+  moss: "#3d6b52"
+  ochre: "#8a5a12"
+  red: "#9b3a32"
 typography:
   display:
     fontFamily: "Inter, WenQuanYi Micro Hei, ui-sans-serif, system-ui, sans-serif"
@@ -54,35 +54,34 @@ components:
 
 ## Overview
 
-**Creative North Star: “A teammate, not a console”**
+**Creative North Star: “One Bot, many tasks”**
 
-AEEIS is one persistent agent. The screen is a conversation with it. The sidebar is a roster of ongoing work and shows whether the agent is idle, thinking, working, waiting, blocked, or done. The transcript holds the goal, the decision, tool activity, and the delivery. The composer stays fixed at the bottom. Graphs, evidence, goals, reminders, and governance live in its computer — a side panel opened from the conversation, never the home page. Vermilion means the agent is alive or needs a hand. Moss means the evidence checked out. Ochre means a person still has to decide.
+Follow the 2026-10-21 conversation design: AEEIS stays one Bot. That Bot can carry several tasks at once. The sidebar is the Bot, and the tasks sit under it. Opening a task only shows that execution. It does not stop the others. The transcript is the entry. The composer stays at the bottom. Graphs, evidence, goals, and governance stay in the shared computer until asked for. The surface is white, hairline, and quiet.
 
 **Key Characteristics:**
-- Warm paper page with a 3px vermilion rule at the top
-- Ink for primary actions; vermilion on hover and for live execution
-- Hairline sections in the control rail; lifted paper sheets for the current run
+- White page, #fafafa sidebar, 1px #ececec lines
+- Black only for the mark, the send button, and active presence
+- Tasks are indented rows under the Bot, not a second list of teammates
 - Inter for interface copy, with WenQuanYi Micro Hei for Chinese glyphs, and JetBrains Mono for IDs and status
 - Motion only on live signals, with reduced-motion support
 
 ## Colors
 
-Ink does the reading. Vermilion marks agency. Moss marks verified delivery. Ochre marks a human decision.
+Black reads. Status colors stay small and only on state.
 
 ### Primary
-- **Ink** (#1c1916): Headings, primary buttons, the current-run frame, and the brand mark.
-- **Signal Vermilion** (#b43322): Hover on primary actions, active execution, focus, and the page rule.
+- **Ink** (#171717): Text, the send button, the brand mark, and active presence.
 
 ### Secondary
-- **Verified Moss** (#1f6b45): Connected status, successful delivery, and evidence completion.
-- **Attention Ochre** (#a16207): Approval, input, waiting, and reconcile states.
+- **Moss** (#3d6b52): Completed work.
+- **Ochre** (#8a5a12): Waiting on a person.
+- **Red** (#9b3a32): Blocked work.
 
 ### Neutral
-- **Ink Soft** (#4a433c): Supporting copy.
-- **Muted** (#5e564e): Labels and metadata.
-- **Page** (#efe8dc): Global canvas.
-- **Surface** (#fbf7f1): Cards, inputs, and the command sheet.
-- **Line** (#e0d5c6): Boundaries. **Line Strong** (#cbbba6): Inputs and emphasis rules.
+- **Muted** (#737373): Labels.
+- **Page / Surface** (#ffffff): The conversation and the computer.
+- **Sidebar** (#fafafa): The Bot and its tasks.
+- **Line** (#ececec): Boundaries. **Line Strong** (#d6d6d6): Inputs.
 
 ## Typography
 
@@ -93,33 +92,33 @@ Ink does the reading. Vermilion marks agency. Moss marks verified delivery. Ochr
 
 ### Hierarchy
 - **Display** (650, 28px): The empty conversation, “AEEIS”.
-- **Title** (500, 14px): The user’s goal, set as an ink bubble on the right.
+- **Title** (500, 14px): The user’s goal, in a light gray bubble.
 - **Section** (650, 15px, 1.3): Panel headings.
 - **Body** (400, 14px, 1.7): Explanations and instructions.
 - **Label** (500, 11–12px, mono): Navigation, statuses, and runtime metadata.
 
 ## Layout
 
-The default viewport is a roster, a transcript, and a composer. The roster lists each run with a presence mark. The transcript is the selected run: the goal on the right, decision and activity cards on the left, approval inline. The composer accepts one message; Enter sends. “打开它的工作台” reveals the computer on the right (setup, goals, governance, status, or this run’s graphs). Closing it leaves the conversation in place. Below 860px the roster and the conversation swap places; the computer covers the screen until it is closed. Share and thread pages stay transcript-only.
+The sidebar is one Bot, AEEIS, with its tasks indented underneath. The transcript shows the entry, or the execution of the task you opened. The composer accepts one message; Enter sends. “打开它的工作台” reveals the shared computer. Closing it leaves the conversation in place. Below 860px the sidebar and the conversation swap places. Share and thread pages stay transcript-only.
 
 ## Elevation & Depth
 
-Depth is mostly flat. Paper sits on a warmer page, separated by 1px lines. Floating objects — the command palette, the run dock, and the activity toast — are the only surfaces with a shadow. The current run uses an ink border instead of a glow.
+Depth is flat. White sits on white, separated by 1px lines. The command palette, the run dock, and the activity toast are the only shadows.
 
 ## Shapes
 
-Corners are short: 4px controls, 6px rows, 8px decisions, 12px work sheets. Pills are limited to status and lifecycle filters. The brand mark is an ink square with a vermilion registration mark.
+Corners are short: 4px controls, 6px task rows, 12px bubbles. The brand mark is a plain black square.
 
 ## Components
 
 ### Buttons
 - **Shape:** 4px radius. No lift on hover.
-- **Primary:** Ink fill, paper text. Hover and press shift to vermilion.
+- **Primary:** Black fill, white text. Hover stays black.
 - **Quiet:** Transparent or paper, ink text, hairline border.
 
 ### Cards / Containers
-- **Work sheets:** 12px, paper fill, 1px line. The current run uses an ink border. Delivery uses a moss border.
-- **Rail:** No cards. Sections are separated by a bottom rule. The new-run block carries a vermilion spine.
+- **Work sheets:** White, 1px line.
+- **Rail:** No cards. Sections are separated by a bottom rule.
 - **Rows:** 6px, paper, ink border on hover or selection.
 
 ### Inputs / Fields

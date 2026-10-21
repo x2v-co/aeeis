@@ -259,15 +259,34 @@ function presenceOf(status?: string): { state: string; label: string } {
   if (status === 'failed' || status === 'unknown' || status === 'cancelled') return { state: 'blocked', label: runStatusLabel(status) };
   return { state: 'idle', label: runStatusLabel(status) };
 }
+function botPresence(runs: RunSummary[]): { state: string; label: string } {
+  const statuses = runs.map(run => run.status);
+  if (statuses.some(status => status === 'running' || status === 'queued')) return presenceOf('running');
+  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return presenceOf('planning');
+  if (statuses.some(status => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused')) return presenceOf('needs_approval');
+  if (statuses.some(status => status === 'failed' || status === 'unknown')) return presenceOf('failed');
+  if (statuses.some(status => status === 'succeeded')) return presenceOf('succeeded');
+  return presenceOf(undefined);
+}
+function syncBotRow(): void {
+  const state = botPresence(runSummaries);
+  const label = $('gb-bot-presence');
+  if (label) label.textContent = runSummaries.length ? `${state.label} · ${runSummaries.length} 项任务` : state.label;
+  const avatar = document.querySelector<HTMLElement>('#gb-bot .roster-avatar');
+  if (avatar) avatar.dataset.state = state.state;
+  const bot = $('gb-bot');
+  if (bot) bot.setAttribute('aria-pressed', String(!currentRunOpen));
+}
 function syncPresence(run?: RunView): void {
   const title = $('gb-title');
   const presence = $('gb-presence');
+  syncBotRow();
   if (!title || !presence) return;
   const active = Boolean(run && currentRunOpen);
   const state = presenceOf(active ? run?.status : undefined);
-  title.textContent = active && run ? run.goal : 'AEEIS';
-  presence.dataset.state = state.state;
-  presence.textContent = active && run ? `${state.label} · ${runStatusLabel(run.status)}` : '空闲 · 发一条消息开始';
+  title.textContent = 'AEEIS';
+  presence.dataset.state = active ? state.state : botPresence(runSummaries).state;
+  presence.textContent = active && run ? `${state.label} · ${run.goal}` : (runSummaries.length ? '入口 · 任务都还在跑' : '空闲 · 可以同时交给它几件事');
 }
 function syncTranscriptEmpty(): void {
   const empty = $('empty');
@@ -553,6 +572,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(butt
 });
 ($('gb-computer-close') as HTMLButtonElement | null)?.addEventListener('click', () => closeComputer());
 ($('gb-new-chat') as HTMLButtonElement | null)?.addEventListener('click', () => startNewChat());
+($('gb-bot') as HTMLButtonElement | null)?.addEventListener('click', () => startNewChat());
 ($('gb-back') as HTMLButtonElement | null)?.addEventListener('click', () => showRoster());
 document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link => {
   link.addEventListener('click', event => {
@@ -985,22 +1005,23 @@ function renderRunQueue(runs: RunSummary[]): void {
       current = undefined;
       await refresh();
     });
-    item.className = `roster-row${run.id === currentId ? ' selected' : ''}`;
+    item.className = `roster-row task-row${run.id === currentId ? ' selected' : ''}`;
     item.dataset.status = run.status;
     const presence = presenceOf(run.status);
-    const avatar = element('span', (run.goal.trim().slice(0, 1) || 'A').toLocaleUpperCase(), 'roster-avatar');
-    avatar.dataset.state = presence.state;
+    const dot = element('span', '', 'task-dot');
+    dot.dataset.state = presence.state;
     const copy = element('span', '', 'roster-copy');
     copy.append(element('strong', run.goal), element('small', presence.label));
-    item.append(avatar, copy);
+    item.append(dot, copy);
     list.append(item);
   }
+  syncBotRow();
   const count = $('run-count');
-  if (count) count.textContent = `${visible.length} / ${runs.length} 个运行`;
+  if (count) count.textContent = `${visible.length} / ${runs.length} 项任务`;
   const empty = $('runs-empty');
   if (empty) {
     empty.hidden = visible.length > 0;
-    empty.textContent = runs.length ? '当前筛选没有运行。' : '还没有运行记录。';
+    empty.textContent = runs.length ? '当前筛选没有任务。' : '还没有任务。先发一条消息。';
   }
   document.querySelectorAll<HTMLButtonElement>('#run-filters [data-run-filter]').forEach(control => {
     const active = control.dataset.runFilter === runFilter;
@@ -2395,7 +2416,7 @@ function render(run: RunView): void {
       const a = positions.get(dependency)!, b = positions.get(node.id)!;
       const path = document.createElementNS(svg.namespaceURI, 'path');
       path.setAttribute('d', `M${a.x+236} ${a.y+48} C${a.x+253} ${a.y+48} ${b.x-17} ${b.y+48} ${b.x} ${b.y+48}`);
-      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#8d6b52'); path.setAttribute('stroke-width', '1.5'); svg.append(path);
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#d4d4d4'); path.setAttribute('stroke-width', '1.5'); svg.append(path);
     }
     canvas.append(svg);
     for (const node of plan.nodes) {
