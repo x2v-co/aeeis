@@ -9,6 +9,7 @@ import type { AgentRun } from './contracts.js';
 import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
 import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, threadsMigration, ThreadConflict, validateThreadSequence, type Thread, type ThreadRepository } from './threads.js';
+import { assertWorkingMemoryUnchanged } from './working-memory.js';
 import { assertThreadHistoryUnchanged } from './thread-history.js';
 import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, FollowupLocks, threadFollowupsMigration, type ThreadFollowup } from './thread-followups.js';
 
@@ -591,7 +592,9 @@ export class FileRunRepository implements RunRepository {
       const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
       const membership = { threadId: run.threadId, parentRunId: run.parentRunId, threadSequence: run.threadSequence };
       const history = structuredClone(run.context.threadHistory);
+      const workingMemory = structuredClone(run.workingMemory);
       await change(run);
+      assertWorkingMemoryUnchanged(workingMemory, run.workingMemory);
       assertMembershipUnchanged(membership, run);
       assertThreadHistoryUnchanged(history, run.context.threadHistory);
       if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable'); run.revision++; run.updatedAt = new Date().toISOString();
@@ -1040,7 +1043,9 @@ export class PostgresRunRepository implements RunRepository {
       const eventIds = run.events.map(item => item.id);
       const membership = { threadId: run.threadId, parentRunId: run.parentRunId, threadSequence: run.threadSequence };
       const history = structuredClone(run.context.threadHistory);
+      const workingMemory = structuredClone(run.workingMemory);
       await change(run);
+      assertWorkingMemoryUnchanged(workingMemory, run.workingMemory);
       assertMembershipUnchanged(membership, run);
       assertThreadHistoryUnchanged(history, run.context.threadHistory);
       if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable');

@@ -5,6 +5,7 @@ import { InMemoryThreadShareStore } from '../runtime/thread-shares.js';
 import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, ThreadConflict, validateThreadSequence, type Thread } from '../runtime/threads.js';
 import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { scopedRecent, validateCollectionLimit } from './collection-query.js';
+import { assertWorkingMemoryUnchanged } from '../runtime/working-memory.js';
 import { assertThreadHistoryUnchanged } from '../runtime/thread-history.js';
 import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, FollowupLocks, type ThreadFollowup } from '../runtime/thread-followups.js';
 
@@ -126,6 +127,7 @@ export class InMemoryRunRepository implements RunRepository {
       await change(run);
       if (!isOwnedBy(run, { owner: before.owner, tenantId: before.tenantId ?? 'local' })) throw new Error('Run ownership is immutable');
       assertMembershipUnchanged(before, run);
+      assertWorkingMemoryUnchanged(before.workingMemory, run.workingMemory);
       assertThreadHistoryUnchanged(before.context.threadHistory, run.context.threadHistory);
       if (run.events.length < before.events.length || before.events.some((event, index) => event.id !== run.events[index]?.id)) throw new Error('Run events are append-only');
       run.revision++; run.updatedAt = new Date().toISOString();

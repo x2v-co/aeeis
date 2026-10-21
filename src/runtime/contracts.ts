@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { contextDecisionSchema, workingMemoryOptionSchema, type WorkingMemory } from './working-memory.js';
 import { csvQueryDecisionSchema } from './csv-query.js';
 import { structuredSourceDecisionSchemas } from './source-readers.js';
 import { pdfDecisionSchemas, pdfValueSchema, type PdfOutput } from './fillable-pdf.js';
@@ -59,6 +60,7 @@ export const requestSchema = z.object({
    * and records them in the Run; callers cannot change an approved tool version. */
   resources: resourceSelectionSchema.optional(),
   maxModelCalls: z.number().int().min(3).max(100).default(20),
+  workingMemory: workingMemoryOptionSchema.optional(),
   /** Optional per-Run model budget. Money is normalized to USD by Planprice. */
   modelBudget: modelBudgetSchema.optional(),
   externalBudget: externalBudgetSchema.optional(),
@@ -108,6 +110,7 @@ export const decisionSchema = z.discriminatedUnion('type', [
   z.discriminatedUnion('tool', [
     z.object({ type: z.literal('tool'), tool: z.enum(['sources.search', 'sources.read']), argument: z.string().min(1).max(1000), offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.number().int().min(1).max(100).optional(), characterOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strip(),
     csvQueryDecisionSchema,
+    contextDecisionSchema,
     ...structuredSourceDecisionSchemas,
     ...pdfDecisionSchemas,
   ]),
@@ -223,6 +226,8 @@ export interface Artifact { id: string; taskId: string; title: string; content: 
  */
 export interface ModelPin {
   model: string; endpoint: string; promptVersion: string; provider?: string;
+  /** Catalog input/output prices cannot price this adapter's usage. */
+  usageAccounting?: 'tokens-only';
   /** Initial output allowance and, when known, the provider's output limit. */
   maxTokens?: number; maxOutputTokens?: number;
   schemaVersion?: 'aeeis-model-pin/1'; routingMode?: 'catalog' | 'compatibility' | 'static';
@@ -237,6 +242,25 @@ export interface ModelPin {
 }
 export interface ModelBudget { tokens?: number; moneyUsd?: number }
 export interface ModelUsage { tokens: number; moneyUsd?: number; unreportedCalls: number }
+export interface ModelCallUsage {
+  /** Total input includes cache reads/writes exactly once. */
+  inputTokens: number;
+  outputTokens: number;
+  details?: {
+    source: 'pi-ai/1.3.0';
+    accounting: 'tokens-only';
+    reported: {
+      input_tokens: number; output_tokens: number; total_tokens?: number;
+      input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+      output_tokens_details?: { reasoning_tokens?: number };
+    };
+    /** Absent fields are unknown, not zero. */
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    reasoningTokens?: number;
+    normalized: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
+  };
+}
 export interface ExternalBudget { calls?: number; tokens?: number; moneyUsd?: number }
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
@@ -244,7 +268,9 @@ export interface ModelCall {
   modelRequest?: { system: string; input: unknown; maxTokens?: number; maxResponseBytes?: number; timeoutMs?: number; disableRetries?: boolean; thinking?: 'enabled' | 'disabled' | 'auto' | null; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null };
   rawOutput?: string;
   validationErrors?: Array<{ path: string; code: string; message: string }>;
-  id: string; phase: 'planner' | 'executor' | 'reviewer'; taskId?: string;
+  id: string; phase: 'planner' | 'executor' | 'reviewer' | 'compaction'; taskId?: string;
+  /** Compaction attempt fence; a reconciled retry must reject an older in-flight response. */
+  executionToken?: string;
   /** Provider idempotency key. Unknown calls reuse this key after reconcile. */
   idempotencyKey?: string;
   /** Recorded transport variants; the original logical request/hash stays intact. */
@@ -254,12 +280,12 @@ export interface ModelCall {
   globalBudgetAccountKey?: string;
   state: 'started' | 'completed' | 'failed' | 'unknown' | 'discarded';
   inputHash: string; outputHash?: string; startedAt: string; endedAt?: string;
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: ModelCallUsage;
 }
 /** A provider-confirmed result waiting for the normal Runtime phase handler.
  * It is deliberately short-lived: `advance` consumes it exactly once and
  * still applies the planner/executor/reviewer schema and evidence checks. */
-export interface ReconciledModelCall { callId: string; value: unknown; usage?: { inputTokens: number; outputTokens: number } }
+export interface ReconciledModelCall { callId: string; value: unknown; usage?: ModelCallUsage }
 export interface Event { id: string; seq: number; type: string; at: string; data: Record<string, unknown> }
 export interface RunCorrection { id: string; text: string; candidateId?: string; sourceRefs: string[]; createdAt: string }
 export interface Step {
@@ -279,6 +305,8 @@ export interface Step {
   timeoutBoostCallIndex?: number;
 }
 export interface AgentRun {
+  /** Private runtime originals and derived summaries; never project into debug/share views. */
+  workingMemory?: WorkingMemory;
   /** r81: plans.length at the planning round whose planner call already got its one stall/idle timeout retry. */
   plannerTimeoutRetryRound?: number;
   executionLimits?: import('./execution-limits.js').ExecutionLimits;

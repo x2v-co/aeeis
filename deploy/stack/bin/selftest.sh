@@ -91,7 +91,8 @@ if args[0] == 'compose':
         assert '--no-deps' in args and '--pull' in args and 'never' in args, args
         if mode == 'backup-run-fail': sys.exit(42)
         env = dict(os.environ, AEEIS_BACKUP_ROOT=os.environ['AEEIS_BACKUP_DIR'],
-                   AEEIS_POSTGRES_PASSWORD='test-aeeis', TEMPORAL_POSTGRES_PASSWORD='test-temporal')
+                   AEEIS_POSTGRES_PASSWORD='test-aeeis', TEMPORAL_POSTGRES_PASSWORD='test-temporal',
+                   PATH=str(Path(sys.argv[0]).parent / 'container') + os.pathsep + os.environ['PATH'])
         result = subprocess.run(['sh', os.environ['FAKE_STACK_DIR'] + '/bin/pg-dump-all.sh'], env=env)
         if result.returncode: sys.exit(result.returncode)
         if mode == 'backup-corrupt':
@@ -164,10 +165,11 @@ guard() { bash -euo pipefail -c '. "$1/bin/_lib.sh"; stack_guard' guard "$STACK_
 deploy() { AEEIS_DEPLOY_IMAGE=aeeis:test "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" --no-build; }
 reset_fake
 # Legacy name collision (including configurable legacy names).
-sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-cn/' "$AEEIS_ENV_FILE"
+# An explicit sed backup suffix works on BSD/macOS and GNU; EXIT removes backups.
+sed -i.bak 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-cn/' "$AEEIS_ENV_FILE"
 expect_failure deploy
 no_container_mutation
-sed -i 's/AEEIS_STACK=aeeis-cn$/AEEIS_STACK=aeeis-cn-prod/' "$AEEIS_ENV_FILE"
+sed -i.bak 's/AEEIS_STACK=aeeis-cn$/AEEIS_STACK=aeeis-cn-prod/' "$AEEIS_ENV_FILE"
 export AEEIS_LEGACY_STACK=aeeis-cn-prod
 expect_failure deploy
 no_container_mutation
@@ -266,7 +268,7 @@ for mode in list-fail malformed empty-output export-fail replay-fail no-marker; 
 done
 reset_fake
 deploy > "$test_dir/output" 2>&1
-grep -q 'running executions=4' "$test_dir/output"
+grep -q 'running executions=[[:space:]]*4$' "$test_dir/output"
 grep -q 'PASSED checked=4' "$test_dir/output"
 python3 - <<'PYTEST'
 import json,os
@@ -288,14 +290,14 @@ read_image() { bash -euo pipefail -c '. "$1/bin/_lib.sh"; printf "%s\n" "$AEEIS_
 [[ "$(read_image)" == aeeis:legacy ]]
 printf 'AEEIS_IMAGE=aeeis:legacy-prefix\nAEEIS_BUILD_ID=aeeis-cn-prod-old\n' > "$STACK_DIR/.current.env"
 [[ "$(read_image)" == aeeis:legacy-prefix ]]
-sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
+sed -i.bak 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
 reset_fake
 deploy > "$test_dir/output" 2>&1
 [[ -r "$STACK_DIR/.current.aeeis-drill.env" ]]
 [[ ! -e "$STACK_DIR/.candidate.aeeis-drill.env" ]]
 [[ "$(read_image)" == aeeis:test ]]
-sed -i 's/AEEIS_STACK=aeeis-drill/AEEIS_STACK=aeeis-cn-prod/' "$AEEIS_ENV_FILE"
+sed -i.bak 's/AEEIS_STACK=aeeis-drill/AEEIS_STACK=aeeis-cn-prod/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:legacy-prefix ]]
 reset_fake
 deploy > "$test_dir/output" 2>&1
@@ -303,9 +305,9 @@ deploy > "$test_dir/output" 2>&1
 grep -q 'aeeis:legacy-prefix' "$STACK_DIR/.previous.aeeis-cn-prod.env"
 [[ -r "$STACK_DIR/.current.aeeis-drill.env" ]]
 # New keyed state takes precedence over legacy, including a different image.
-sed -i 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.current.aeeis-cn-prod.env"
+sed -i.bak 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.current.aeeis-cn-prod.env"
 [[ "$(read_image)" == aeeis:prod ]]
-sed -i 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
+sed -i.bak 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
 echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate and stack state isolation passed'
 
@@ -334,7 +336,7 @@ deploy > "$test_dir/output" 2>&1
 grep -Fxq 'AEEIS_GIT_COMMIT=ccccccc' "$STACK_DIR/.current.aeeis-drill.env"
 AEEIS_GIT_COMMIT=ddddddd deploy > "$test_dir/output" 2>&1
 grep -Fxq 'AEEIS_GIT_COMMIT=ddddddd' "$STACK_DIR/.current.aeeis-drill.env"
-sed -i '/^AEEIS_GIT_COMMIT=/d' "$AEEIS_ENV_FILE"
+sed -i.bak '/^AEEIS_GIT_COMMIT=/d' "$AEEIS_ENV_FILE"
 reset_fake
 "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" > "$test_dir/output" 2>&1
 FAKE_EXPECT_COMMIT="$(git -C "$STACK_DIR/../.." rev-parse HEAD)"
@@ -385,6 +387,34 @@ PY
 echo 'stack selftest: post-pull startup metadata and unlabeled image environment preservation passed'
 
 # Run the real backup entrypoints with fake Docker and PostgreSQL clients.
+# The backup container has mv -T; macOS does not. Preserve its atomic rename
+# semantics on the same filesystem, only on the fake container's PATH.
+mkdir -p "$test_dir/bin/container"
+if [[ "$(uname -s)" == Darwin ]]; then
+  cat > "$test_dir/bin/container/mv" <<'PY'
+#!/usr/bin/env python3
+import os, sys
+assert len(sys.argv) == 4 and sys.argv[1] == '-T', sys.argv
+# Never treat an existing directory as a destination to move inside.
+if os.path.isdir(sys.argv[3]):
+    raise IsADirectoryError(sys.argv[3])
+os.replace(sys.argv[2], sys.argv[3])
+PY
+  chmod +x "$test_dir/bin/container/mv"
+  printf 'old\n' > "$test_dir/move-target"
+  printf 'replacement\n' > "$test_dir/move-source"
+  "$test_dir/bin/container/mv" -T "$test_dir/move-source" "$test_dir/move-target"
+  grep -Fxq replacement "$test_dir/move-target"
+  test ! -e "$test_dir/move-source"
+  mkdir "$test_dir/move-directory"
+  expect_failure "$test_dir/bin/container/mv" -T "$test_dir/move-target" "$test_dir/move-directory"
+  grep -Fxq replacement "$test_dir/move-target"
+  test ! -e "$test_dir/move-directory/move-target"
+  mkdir "$test_dir/move-source-directory"
+  expect_failure "$test_dir/bin/container/mv" -T "$test_dir/move-source-directory" "$test_dir/move-directory"
+  test -d "$test_dir/move-source-directory"
+  test ! -e "$test_dir/move-directory/move-source-directory"
+fi
 export FAKE_PG_LOG="$test_dir/pg.log"
 cat > "$test_dir/bin/pg_dump" <<'PY'
 #!/usr/bin/env python3
@@ -426,7 +456,11 @@ reset_backup() {
   export AEEIS_BACKUP_DIR="$test_dir/backups with spaces"
   rm -rf "$AEEIS_BACKUP_DIR"
   mkdir -p "$AEEIS_BACKUP_DIR/20000101T000000Z"
-  touch -d '30 days ago' "$AEEIS_BACKUP_DIR/20000101T000000Z"
+  python3 - "$AEEIS_BACKUP_DIR/20000101T000000Z" <<'PY'
+import os, sys, time
+old = time.time() - 30 * 24 * 60 * 60
+os.utime(sys.argv[1], (old, old))
+PY
 }
 reset_backup
 # A legacy quiesce setting must not cause an outage.

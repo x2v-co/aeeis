@@ -5,6 +5,6 @@ export function isStructuredSourceTool(tool: unknown): boolean {
 }
 export function isPdfTool(tool: unknown): boolean { return tool === 'pdf.formFields' || tool === 'pdf.fill'; }
 export function isSourceReadTool(tool: unknown): boolean {
-  return tool === 'sources.read' || tool === 'sources.csvQuery' || isStructuredSourceTool(tool) || isPdfTool(tool);
+  return tool === 'context.search' || tool === 'context.read' || tool === 'sources.read' || tool === 'sources.csvQuery' || isStructuredSourceTool(tool) || isPdfTool(tool);
 }
 export function isSourceTool(tool: unknown): boolean { return tool === 'sources.search' || isSourceReadTool(tool); }

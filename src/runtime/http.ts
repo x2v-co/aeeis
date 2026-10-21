@@ -2,7 +2,7 @@ import { ChangeAuditConflict, changeReasonSchema, verifyChain, type ChangeAuditA
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
 import { readThreadBundleRuns, threadDebugBundle } from './thread-debug.js';
-import { debugBundle, redactRunData, sharedRunView } from './run-debug.js';
+import { debugBundle, redactRunData, sharedRunView, withoutWorkingMemoryPayloads } from './run-debug.js';
 import { runInputRequest } from './input-requests.js';
 import { artifactFilename } from './artifact-download.js';
 import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-material.js';
@@ -30,7 +30,10 @@ import { projectRunGraphs } from './graphs.js';
 import { explainRun } from './explanation.js';
 import { AeeisConflict, AeeisNotFound, AeeisService } from '../application/aeeis-service.js';
 import { ThreadService } from '../application/thread-service.js';
+import { ConversationService } from '../application/conversation-service.js';
+import type { ConversationStore } from '../conversations.js';
 import { ThreadConflict } from './threads.js';
+import { inspectWorkingMemory, workingMemoryIndex } from './working-memory.js';
 import { isBootRecoverableRun } from './dispatcher.js';
 import type { RsiEvaluationHarness } from '../evaluation.js';
 import { ProjectionNotFound, type ProjectionOutbox, type ProjectionSink } from '../collaboration-projection.js';
@@ -59,7 +62,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -130,6 +133,8 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
 }
 export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads) : undefined;
+  const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
@@ -396,10 +401,10 @@ export function buildApp(options: Options) {
       const sharedGraphRead = request.method === 'GET' && (/^\/api\/goals\/[^/]+(?:\/plans(?:\/page)?|\/memories|\/context-manifests\/[^/]+|$)/.test(route) || /^\/api\/plans\/[^/]+\/(?:snapshot|scheduler)$/.test(route));
       const sharedEditorWrite = request.method === 'POST' && /^\/api\/goals\/[^/]+\/plans(?:\/revise)?$/.test(route);
       const sharedTaskTransition = request.method === 'POST' && /^\/api\/plans\/[^/]+\/tasks\/[^/]+\/transition$/.test(route);
-      const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route);
+      const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route) && !route.includes('/working-memory');
       const operatorRunAdmin = request.method === 'POST' && principal.roles.includes('operator')
         && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
-      if (/^\/api\/(rooms|goals|plans|runs|threads|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
+      if (/^\/api\/(rooms|goals|plans|runs|threads|conversations|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
   app.addHook('onResponse', async (request, reply) => {
@@ -575,6 +580,7 @@ export function buildApp(options: Options) {
     ]);
     return {
       executionProfile: options.demoMode ? 'fixture' : 'unverified',
+      conversationRouting: Boolean(conversations),
       modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
     };
   });
@@ -1023,7 +1029,7 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
     await options.rsiProposalSynthesis.reconcile(request.params.id, request.body, { owner: principal.id, tenantId: principal.tenantId });
-    return getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    return withoutWorkingMemoryPayloads(await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId));
   });
   app.get<{ Params: { id: string } }>('/api/evolution/candidates/:id', async request => {
     if (!options.rsi) throw new Error('RSI service is not configured');
@@ -1535,7 +1541,7 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principal);
     const inputRequest = runInputRequest(run);
-    return { ...run, canEdit: principal.roles.includes('owner') && run.owner === principal.id && (run.tenantId ?? 'local') === principal.tenantId, ...(inputRequest ? { inputRequest } : {}) };
+    return { ...withoutWorkingMemoryPayloads(run), workingMemoryEnabled: Boolean(run.workingMemory), canEdit: principal.roles.includes('owner') && run.owner === principal.id && (run.tenantId ?? 'local') === principal.tenantId, ...(inputRequest ? { inputRequest } : {}) };
   });
   app.get<{ Params: { id: string; artifactId: string } }>('/api/runs/:id/artifacts/:artifactId/download', async (request, reply) => {
     const run = await getReadableRun(options.repository, options.domain, request.params.id, principalOf(request));
@@ -1596,6 +1602,50 @@ export function buildApp(options: Options) {
     try { await options.dispatcher?.notifyReminder?.(id); }
     catch (error) { console.error('AEEIS reminder timer notification failed', id, error instanceof Error ? error.message : error); }
   }
+  const conversationScope = (request: FastifyRequest) => ({ owner: principalOf(request).id, tenantId: principalOf(request).tenantId });
+  app.get('/api/conversations', async request => conversationService().list(conversationScope(request)));
+  app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request))));
+  app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/notifications/sync', async request => {
+    z.object({}).strict().parse(request.body ?? {});
+    return conversationService().syncNotifications(request.params.id, conversationScope(request));
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/messages', async (request, reply) => {
+    const result = await conversationService().post(request.params.id, request.body, conversationScope(request), request.headers['idempotency-key'], Boolean(options.engine && options.dispatcher));
+    if (result.runId) {
+      const run = await options.repository.get(result.runId, conversationScope(request));
+      if (isBootRecoverableRun(run.status)) await notify(run.id);
+    }
+    return reply.code(result.runId ? 202 : 200).send(result);
+  });
+  const memoryQuerySchema = z.object({ taskId: z.string().min(1).max(100) }).strict();
+  const inspectMemory = (...args: Parameters<typeof inspectWorkingMemory>) => {
+    try { return inspectWorkingMemory(...args); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'Task working memory denied an unknown or out-of-scope original') throw new NotFound('Unknown working memory original');
+      if (error instanceof Error && error.message === 'Task working memory read offset is out of range') throw new RangeError('Working memory offset is out of range');
+      throw error;
+    }
+  };
+  app.get<{ Params: { id: string } }>('/api/runs/:id/working-memory', async request => {
+    const query = memoryQuerySchema.parse(request.query);
+    const run = await options.repository.get(request.params.id, conversationScope(request));
+    if (!run.workingMemory || !run.plans.at(-1)?.nodes.some(node => node.id === query.taskId)) throw new NotFound('Unknown task working memory');
+    return redactRunData(workingMemoryIndex(run, query.taskId), { credentialSource: run });
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/working-memory/search', async request => {
+    const query = memoryQuerySchema.extend({ q: z.string().trim().min(1).max(200), offset: z.coerce.number().int().nonnegative().max(100000).default(0), limit: z.coerce.number().int().min(1).max(6).default(6) }).parse(request.query);
+    const run = await options.repository.get(request.params.id, conversationScope(request));
+    if (!run.workingMemory || !run.plans.at(-1)?.nodes.some(node => node.id === query.taskId)) throw new NotFound('Unknown task working memory');
+    return redactRunData(inspectMemory(run, query.taskId, { type: 'tool', tool: 'context.search', argument: query.q, offset: query.offset, limit: query.limit }), { credentialSource: run });
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/working-memory/original', async request => {
+    const query = memoryQuerySchema.extend({ entryId: z.string().min(1).max(200), offset: z.coerce.number().int().nonnegative().max(10000000).default(0) }).parse(request.query);
+    const run = await options.repository.get(request.params.id, conversationScope(request));
+    if (!run.workingMemory || !run.plans.at(-1)?.nodes.some(node => node.id === query.taskId)) throw new NotFound('Unknown task working memory');
+    return redactRunData(inspectMemory(run, query.taskId, { type: 'tool', tool: 'context.read', argument: query.entryId, characterOffset: query.offset }), { credentialSource: run });
+  });
   app.post('/api/threads', async (request, reply) => {
     const principal = principalOf(request);
     return reply.code(201).send(await threads.create(request.body, { owner: principal.id, tenantId: principal.tenantId }));
@@ -1664,11 +1714,11 @@ export function buildApp(options: Options) {
     }, scope);
     try {
       const workflow = options.dispatcher?.cancel ? await options.dispatcher.cancel(id, reason) : { outcome: 'unsupported' as const };
-      return { run, workflow };
+      return { run: withoutWorkingMemoryPayloads(run), workflow };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Workflow cancellation failed';
       run = await options.repository.mutate(id, current => event(current, 'run.cancel.workflow_failed', { reason, actor: principal.id, message }), scope);
-      return { run, workflow: { outcome: 'error', message } };
+      return { run: withoutWorkingMemoryPayloads(run), workflow: { outcome: 'error', message } };
     }
   });
   app.post('/api/admin/reconcile', async (request, reply) => {
@@ -1706,7 +1756,7 @@ export function buildApp(options: Options) {
     if (action === 'model-reconcile') await options.engine.reconcileModelCall(id, request.body);
     else if (action === 'reconcile-cancelled') await options.engine.reconcileCancelledExternal(id, request.body);
     else if (action !== 'dispatch') await options.engine.command(id, action, request.body, { owner: principal.id, tenantId: principal.tenantId });
-    await notify(id); return getOwnedRun(options.repository, id, principal.id, principal.tenantId);
+    await notify(id); return withoutWorkingMemoryPayloads(await getOwnedRun(options.repository, id, principal.id, principal.tenantId));
   });
   app.post<{ Params: { id: string } }>('/internal/runs/:id/terminalize', async request => {
     const { reason } = z.object({ reason: z.string().min(1).max(1000) }).strict().parse(request.body);

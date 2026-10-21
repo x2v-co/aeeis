@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { ModelPin } from './contracts.js';
+import type { ModelCallUsage, ModelPin } from './contracts.js';
 
 export interface ModelRequest {
   system: string; input: unknown; idempotencyKey?: string;
@@ -33,7 +33,7 @@ export interface RateLimitDetails {
   status: 429; attempt: number; maxAttempts: number; delayMs: number; retryAfterMs: number | null; willRetry: boolean;
   decision: 'rate-limit-retry' | 'rate-limit-exhausted' | 'retry-after-exceeds-budget' | 'retry-disabled';
 }
-export interface ModelResponse { value: unknown; rawOutput?: string; usage?: { inputTokens: number; outputTokens: number } }
+export interface ModelResponse { value: unknown; rawOutput?: string; usage?: ModelCallUsage }
 export interface ModelHealth {
   ready: boolean;
   detail: string;

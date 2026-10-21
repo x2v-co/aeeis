@@ -45,6 +45,7 @@ interface RunGraphsView {
   planComparisons?: PlanComparison[];
 }
 interface RunView extends RunSummary {
+  workingMemoryEnabled?: boolean;
   canEdit?: boolean;
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
@@ -82,7 +83,19 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; status: string }
+interface ConversationMessageView {
+  id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
+  correctsMessageId?: string; effectiveTaskIds?: string[];
+  route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
+  execution?: { runId: string; taskId: string; state: string };
+}
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number }
+interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean }
+interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
+interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
+  conversationRouting?: boolean;
   executionProfile?: 'fixture' | 'unverified'; modelConfigured: boolean; model?: { model: string; endpoint: string } | null; modelRouting: string; runner: string;
   modelHealth?: { ready: boolean; detail?: string; catalog?: { ready: boolean; detail?: string }; provider?: { ready: boolean; detail?: string } }; skillGovernanceHealth?: { ready: boolean; detail?: string };
   rsiEvaluatorHealth?: { ready: boolean; detail?: string } | null;
@@ -121,6 +134,21 @@ let threadNextAfter: number | undefined;
 let threadRuns: ThreadRun[] = [];
 let pendingFollowup: { key: string; body: unknown; signature: string } | undefined;
 let followupSubmitting = false;
+let conversationEnabled = false;
+let conversationScope = '';
+let conversationEpoch = 0;
+let conversation: ConversationView | undefined;
+let conversationList: ConversationSummary[] = [];
+let conversationBusy = false;
+let conversationRefreshing = false;
+let conversationNeedsRefresh = false;
+let conversationReplyId: string | undefined;
+let conversationCorrectionId: string | undefined;
+let conversationAttempt: ConversationAttempt | undefined;
+let conversationRenderSignature = '';
+const CONVERSATION_SELECTION = 'aeeis.conversation';
+const CONVERSATION_SCOPE = 'aeeis.conversation-scope';
+const CONVERSATION_PENDING = 'aeeis.conversation-pending';
 let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 type InputPanelMode = 'answer' | 'reconcile' | 'reconcile-cancelled';
@@ -493,7 +521,8 @@ function executePaletteCommand(command: string): void {
   setCommandPalette(false, false);
   if (command === 'new-run') {
     $('command-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    $<HTMLInputElement>('quick-goal').focus();
+    if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
+    else $<HTMLInputElement>('quick-goal').focus();
   } else if (command === 'attention') {
     if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status))) {
       runFilter = 'attention';
@@ -665,6 +694,7 @@ window.addEventListener('keydown', event => {
     }
   }
 });
+class ApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
@@ -674,17 +704,18 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const raw = await response.text();
+  if (!readOnlyShare && token !== sessionStorage.getItem('aeeis.token')) throw new Error('身份已更改，请重新连接');
   let value: (T & { error?: string }) | undefined;
   if (raw.trim()) {
     try { value = JSON.parse(raw) as T & { error?: string }; }
     catch {
       if (!response.ok) {
         const fallback = raw.replace(/\s+/g, ' ').trim();
-        throw new Error(fallback && !fallback.startsWith('<') ? fallback.slice(0, 240) : `运行服务暂时不可用（HTTP ${response.status}）`);
+        throw new ApiError(fallback && !fallback.startsWith('<') ? fallback.slice(0, 240) : `运行服务暂时不可用（HTTP ${response.status}）`, response.status);
       }
     }
   }
-  if (!response.ok) throw new Error(value?.error ?? `运行服务请求失败（HTTP ${response.status}）`);
+  if (!response.ok) throw new ApiError(value?.error ?? `运行服务请求失败（HTTP ${response.status}）`, response.status);
   return (value ?? {}) as T;
 }
 let authRequired = false;
@@ -738,6 +769,309 @@ function button(label: string, action: () => Promise<void>): HTMLButtonElement {
   };
   return b;
 }
+function resetConversation(clearStorage = true): void {
+  conversationEpoch++; conversation = undefined; conversationList = []; conversationAttempt = undefined;
+  conversationReplyId = undefined; conversationCorrectionId = undefined; conversationBusy = false; conversationRefreshing = false; conversationNeedsRefresh = false; conversationRenderSignature = '';
+  $('conversation-messages').replaceChildren(); $('conversation-tasks').replaceChildren();
+  $<HTMLFormElement>('conversation-composer').reset();
+  $('conversation-status').textContent = ''; $('conversation-error').textContent = ''; $('conversation-reply-label').textContent = ''; $('conversation-correction-label').textContent = '';
+  $('working-memory-content').replaceChildren(); delete $('working-memory-content').dataset.signature; $('working-memory-panel').hidden = true;
+  if (clearStorage) { localStorage.removeItem(CONVERSATION_SELECTION); localStorage.removeItem(CONVERSATION_SCOPE); sessionStorage.removeItem(CONVERSATION_PENDING); }
+  renderConversation();
+}
+function saveConversationAttempt(): void {
+  if (conversationAttempt) sessionStorage.setItem(CONVERSATION_PENDING, JSON.stringify(conversationAttempt));
+  else sessionStorage.removeItem(CONVERSATION_PENDING);
+}
+function conversationTaskName(id: string): string { return conversation?.tasks.find(task => task.id === id)?.title ?? id; }
+function conversationTargetTask(): ConversationTaskView | undefined {
+  const target = $<HTMLSelectElement>('conversation-target').value;
+  const reply = conversation?.messages.find(item => item.id === conversationReplyId);
+  const replyTasks = reply?.effectiveTaskIds ?? reply?.route.taskIds;
+  const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : conversation?.focusTaskId);
+  return conversation?.tasks.find(task => task.id === id);
+}
+function updateConversationControls(): void {
+  const locked = conversationBusy || Boolean(conversationAttempt);
+  const target = $<HTMLSelectElement>('conversation-target').value;
+  const task = conversationTargetTask();
+  const active = task && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
+  $('conversation-panel').setAttribute('aria-busy', String(conversationBusy));
+  $('conversation-new-task-fields').hidden = target !== '__new';
+  $<HTMLInputElement>('conversation-task-title').required = target === '__new';
+  $('conversation-reply').hidden = !conversationReplyId;
+  $('conversation-retry-panel').hidden = !conversationAttempt;
+  $<HTMLButtonElement>('conversation-retry').disabled = conversationBusy;
+  $('conversation-composer').querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>('input, button, select, textarea').forEach(control => { control.disabled = locked || !conversation; });
+  const correcting = Boolean(conversationCorrectionId);
+  $('conversation-correction').hidden = !correcting;
+  $<HTMLTextAreaElement>('conversation-text').readOnly = correcting;
+  $<HTMLSelectElement>('conversation-focus-effect').disabled ||= correcting;
+  for (const option of $<HTMLSelectElement>('conversation-target').options) option.disabled = correcting && (!option.value || option.value === '__new');
+  $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : '发送讨论';
+  $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
+  $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || correcting;
+  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : '创建执行后请在运行面板核对计划，再明确批准。';
+  for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
+  for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
+  $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
+  $('conversation-tasks').querySelectorAll<HTMLButtonElement>('button[data-change-focus]').forEach(control => { control.disabled = locked; });
+}
+function renderConversation(): void {
+  $('conversation-panel').hidden = !conversationEnabled;
+  document.body.classList.toggle('conversation-mode', conversationEnabled);
+  if (!conversationEnabled) return;
+  const select = $<HTMLSelectElement>('conversation-select');
+  const choicesSignature = JSON.stringify(conversationList.map(item => [item.id, item.title]));
+  if (select.dataset.signature !== choicesSignature) {
+    select.dataset.signature = choicesSignature; select.replaceChildren();
+    if (!conversationList.length) { const option = element('option', '还没有对话，请新建'); option.value = ''; select.append(option); }
+    for (const item of conversationList) { const option = element('option', item.title); option.value = item.id; select.append(option); }
+  }
+  select.value = conversation?.id ?? '';
+  $('conversation-focus').textContent = `讨论焦点：${conversation?.focusTaskId ? conversationTaskName(conversation.focusTaskId) : '未选择任务（一般讨论）'}`;
+  const signature = JSON.stringify(conversation);
+  if (signature !== conversationRenderSignature) {
+    conversationRenderSignature = signature ?? '';
+    const target = $<HTMLSelectElement>('conversation-target'), previousTarget = target.value;
+    target.replaceChildren();
+    for (const [value, text] of [['', '自动识别 / 当前讨论焦点'], ['__new', '新建任务（独立 Thread）'], ...(conversation?.tasks ?? []).map(task => [task.id, task.title])]) {
+      const option = element('option', text); option.value = value!; target.append(option);
+    }
+    target.value = [...target.options].some(option => option.value === previousTarget) ? previousTarget : '';
+    const tasks = $('conversation-tasks'); tasks.replaceChildren();
+    for (const task of conversation?.tasks ?? []) {
+      const row = element('li', '', 'conversation-task'); row.dataset.focused = String(task.id === conversation?.focusTaskId); row.dataset.taskId = task.id;
+      row.append(element('strong', task.title), element('small', `运行状态：${task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)}`));
+      const focus = button('设为讨论焦点', async () => changeConversationFocus(task.id)); focus.type = 'button'; focus.dataset.changeFocus = task.id;
+      row.append(focus);
+      const runId = task.runId ?? task.latestRunId;
+      if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
+      tasks.append(row);
+    }
+    const messages = $('conversation-messages'); messages.replaceChildren();
+    for (const item of conversation?.messages ?? []) {
+      const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
+      row.append(element('small', `${item.role === 'notification' ? '任务通知' : '你'} · ${formatTime(item.createdAt)}`), element('p', item.text));
+      if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`));
+      const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
+      if (corrected) row.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
+      if (item.correctsMessageId) row.append(element('small', `归属纠正记录：${item.correctsMessageId}；原始路由和已有执行记录不变。`));
+      const routeLabel = item.route.status === 'clarify' ? '待澄清：未执行，请明确选择任务' : item.route.status === 'general' ? '一般讨论：已记录，未调用模型' : `${corrected ? '原始关联任务（审计）' : '关联任务'}：${item.route.taskIds.map(conversationTaskName).join('、')}`;
+      row.append(element('small', `${routeLabel} · 路由：${item.route.reason} · ${item.route.focusEffect === 'switch' && item.route.status === 'routed' ? '已切换讨论焦点' : '保持讨论焦点'}`));
+      if (item.execution) row.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
+      else if (item.role === 'user' && item.route.status === 'routed') row.append(element('small', '已记录讨论，未调用模型。'));
+      const reply = button('回复这条消息', async () => prepareConversationReply(item)); reply.type = 'button'; row.append(reply);
+      if (item.role === 'user' && !item.execution && !item.correctsMessageId) {
+        const correct = button('纠正归属', async () => {
+          if (conversationBusy || conversationAttempt) return;
+          conversationCorrectionId = item.id; conversationReplyId = undefined;
+          $<HTMLSelectElement>('conversation-target').value = '';
+          $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
+          $<HTMLTextAreaElement>('conversation-text').value = '纠正这条讨论的任务归属';
+          $('conversation-correction-label').textContent = `纠正归属：${item.text.slice(0, 160)}`;
+          updateConversationControls(); $<HTMLSelectElement>('conversation-target').focus();
+        }); correct.type = 'button'; row.append(correct);
+      }
+      if (item.route.status === 'clarify' && !corrected) {
+        for (const id of item.route.candidateTaskIds) {
+          const choice = button(`选择任务：${conversationTaskName(id)}`, async () => {
+            if (conversationBusy || conversationAttempt) return;
+            prepareConversationReply(item); $<HTMLSelectElement>('conversation-target').value = id;
+            $<HTMLTextAreaElement>('conversation-text').value = item.text; updateConversationControls();
+            $('conversation-status').textContent = '已选择任务。请检查内容，再点击“发送讨论”或“创建执行 Run”；尚未执行。';
+          }); choice.type = 'button'; row.append(choice);
+        }
+      }
+      const runId = item.notificationRunId ?? item.execution?.runId;
+      if (runId) { const view = button('查看此次运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
+      messages.append(row);
+    }
+    $('conversation-earlier').hidden = !conversation?.hasEarlierMessages;
+    $('conversation-empty').hidden = Boolean(conversation?.messages.length);
+    $('conversation-tasks-empty').hidden = Boolean(conversation?.tasks.length);
+  }
+  updateConversationControls();
+}
+function acceptConversation(view: ConversationView): void {
+  if (conversation?.id === view.id && conversation.revision > view.revision) return;
+  conversation = view;
+  const index = conversationList.findIndex(item => item.id === view.id);
+  if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
+  localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
+  renderConversation();
+}
+async function initializeConversations(status: RuntimeStatus): Promise<void> {
+  conversationEnabled = status.conversationRouting === true && !linkedRunId && !linkedThreadId && !readOnlyShare;
+  if (!conversationEnabled) { renderConversation(); return; }
+  const scope = JSON.stringify([status.mode, status.tenantId ?? '', status.principal ?? '']);
+  if (conversationScope && conversationScope !== scope || localStorage.getItem(CONVERSATION_SCOPE) && localStorage.getItem(CONVERSATION_SCOPE) !== scope) resetConversation();
+  conversationScope = scope;
+  const epoch = conversationEpoch;
+  try {
+    const list = await api<ConversationSummary[]>('/conversations');
+    if (epoch !== conversationEpoch) return;
+    conversationList = list;
+    const selectedId = conversation?.id ?? localStorage.getItem(CONVERSATION_SELECTION);
+    const selected = list.find(item => item.id === selectedId) ?? list[0];
+    if (selected) {
+      const view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
+      if (epoch !== conversationEpoch) return;
+      acceptConversation(view);
+      if (!conversationAttempt) {
+        try {
+          const saved = JSON.parse(sessionStorage.getItem(CONVERSATION_PENDING) ?? 'null') as ConversationAttempt | null;
+          if (saved?.scope === scope && saved.conversationId === view.id && typeof saved.key === 'string' && typeof saved.body === 'string') {
+            const body = JSON.parse(saved.body); conversationAttempt = saved;
+            conversationCorrectionId = body.correctsMessageId; conversationReplyId = body.replyTo;
+            $<HTMLTextAreaElement>('conversation-text').value = body.text ?? '';
+            $<HTMLSelectElement>('conversation-target').value = body.newTask ? '__new' : body.taskIds?.[0] ?? '';
+            $<HTMLInputElement>('conversation-task-title').value = body.newTask?.title ?? '';
+            $<HTMLSelectElement>('conversation-focus-effect').value = body.focus ?? 'keep';
+            if (conversationCorrectionId) $('conversation-correction-label').textContent = `纠正归属：${view.messages.find(item => item.id === conversationCorrectionId)?.text.slice(0, 160) ?? conversationCorrectionId}`;
+            if (conversationReplyId) $('conversation-reply-label').textContent = `回复：${view.messages.find(item => item.id === conversationReplyId)?.text.slice(0, 160) ?? conversationReplyId}`;
+            $('conversation-status').textContent = '已恢复尚未确认的请求。请重试原请求以确认结果。';
+          }
+        } catch { sessionStorage.removeItem(CONVERSATION_PENDING); }
+      }
+    }
+    renderConversation();
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    if (error instanceof ApiError && [401, 403, 404].includes(error.status)) resetConversation();
+    $('conversation-error').textContent = `无法读取对话：${errorMessage(error)}。请重新连接。`; renderConversation();
+  }
+}
+async function refreshConversation(sync = false): Promise<void> {
+  if (!conversationEnabled || !conversation || conversationRefreshing || conversationBusy) return;
+  const epoch = conversationEpoch, id = conversation.id;
+  conversationRefreshing = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}${sync ? '/notifications/sync' : ''}`, sync ? {} : undefined);
+    if (epoch !== conversationEpoch || conversation?.id !== id) return;
+    acceptConversation(view);
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    if (error instanceof ApiError && [401, 403, 404].includes(error.status)) resetConversation();
+    throw error;
+  } finally { if (epoch === conversationEpoch) { conversationRefreshing = false; updateConversationControls(); } }
+}
+function prepareConversationReply(item: ConversationMessageView): void {
+  if (conversationBusy || conversationAttempt) return;
+  if (conversationCorrectionId) $<HTMLTextAreaElement>('conversation-text').value = '';
+  conversationReplyId = item.id; conversationCorrectionId = undefined;
+  $<HTMLSelectElement>('conversation-target').value = '';
+  $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
+  $('conversation-reply-label').textContent = `回复：${item.text.slice(0, 160)}`;
+  updateConversationControls(); $<HTMLTextAreaElement>('conversation-text').focus();
+}
+async function changeConversationFocus(taskId: string | null): Promise<void> {
+  if (!conversation || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch, id = conversation.id;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/focus`, { taskId, expectedRevision: conversation.revision });
+    if (epoch === conversationEpoch) { acceptConversation(view); $('conversation-status').textContent = '讨论焦点已更新；没有启动或切换运行。'; }
+  } catch (error) { if (epoch === conversationEpoch) { conversationNeedsRefresh = error instanceof ApiError && error.status === 409; $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新对话，再明确选择焦点。' : ''}`; } }
+  finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function openConversationRun(runId: string): Promise<void> {
+  const epoch = conversationEpoch;
+  const run = await api<RunView>(`/runs/${encodeURIComponent(runId)}`);
+  const [graphs, explanation] = await Promise.all([api<RunGraphsView>(`/runs/${encodeURIComponent(runId)}/graphs`), api<RunExplanation>(`/runs/${encodeURIComponent(runId)}/explanation`)]);
+  if (epoch !== conversationEpoch) return;
+  currentId = runId; current = { ...run, graphs }; localStorage.setItem('aeeis.run', runId);
+  setCurrentRunOpen(true); render(current); renderExplanation(explanation);
+  if (!['succeeded', 'failed', 'cancelled'].includes(run.status)) ensureRunEventStream(run.id);
+  $('run-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('run-title').focus({ preventScroll: true });
+}
+async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
+  if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
+  if (!retry) {
+    const form = $<HTMLFormElement>('conversation-composer');
+    if (!form.reportValidity()) return;
+    if (intent === 'execute' && $<HTMLButtonElement>('conversation-execute').disabled) return;
+    const target = $<HTMLSelectElement>('conversation-target').value;
+    if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
+    const body = conversationCorrectionId
+      ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
+      : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
+        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
+        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions() } : {}) };
+    if (!body.text) return;
+    conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
+    saveConversationAttempt();
+  }
+  const attempt = conversationAttempt;
+  if (!attempt) return;
+  const epoch = conversationEpoch;
+  conversationBusy = true; $('conversation-error').textContent = ''; $('conversation-status').textContent = '正在发送…'; updateConversationControls();
+  try {
+    const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(attempt.conversationId)}/messages`, JSON.parse(attempt.body), 'POST', attempt.key);
+    if (epoch !== conversationEpoch) return;
+    if (!result.conversation || result.conversation.id !== attempt.conversationId || !Array.isArray(result.conversation.messages) || !result.message || typeof result.response !== 'string') throw new Error('服务端回执不完整');
+    conversationAttempt = undefined; saveConversationAttempt(); conversationReplyId = undefined; conversationCorrectionId = undefined;
+    $<HTMLFormElement>('conversation-composer').reset();
+    acceptConversation(result.conversation);
+    $('conversation-status').textContent = `系统回执：${result.response}`;
+    // A Run is only opened on a separate explicit view action. Receiving a notification never steals focus.
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+      conversationAttempt = undefined; saveConversationAttempt();
+      conversationNeedsRefresh = error.status === 409;
+      if ([401, 403].includes(error.status)) { resetConversation(); $('conversation-status').textContent = '身份或权限已变化，请重新连接。'; }
+    }
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请点击“刷新对话”，核对焦点后再明确发送；不会自动执行。' : conversationAttempt ? '。结果尚未确认，请重试原请求。' : ''}`;
+    $('conversation-status').textContent = '';
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-retry').addEventListener('click', () => { void sendConversation('discuss', true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-target').addEventListener('change', () => {
+  if ($<HTMLSelectElement>('conversation-target').value === '__new') conversationReplyId = undefined;
+  updateConversationControls();
+});
+$('conversation-cancel-correction').addEventListener('click', () => {
+  if (conversationBusy || conversationAttempt) return;
+  conversationCorrectionId = undefined; $<HTMLTextAreaElement>('conversation-text').value = ''; updateConversationControls();
+});
+$('conversation-cancel-reply').addEventListener('click', () => { conversationReplyId = undefined; updateConversationControls(); });
+$('conversation-clear-focus').addEventListener('click', () => { void changeConversationFocus(null); });
+for (const [id, sync] of [['conversation-refresh', false], ['conversation-sync', true]] as const) {
+  $(id).addEventListener('click', () => {
+    void refreshConversation(sync).then(() => {
+      conversationNeedsRefresh = false; $('conversation-error').textContent = '';
+      $('conversation-status').textContent = sync ? '任务通知已同步；讨论焦点由服务端保留。' : '已刷新。请核对讨论焦点和任务，再明确发送。'; updateConversationControls();
+    }).catch(error => { $('conversation-error').textContent = errorMessage(error); });
+  });
+}
+$('conversation-select').addEventListener('change', async () => {
+  if (conversationBusy || conversationAttempt) return;
+  const id = $<HTMLSelectElement>('conversation-select').value, epoch = ++conversationEpoch;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}`);
+    if (epoch !== conversationEpoch) return;
+    conversation = undefined; conversationReplyId = undefined; conversationCorrectionId = undefined; conversationNeedsRefresh = false;
+    $<HTMLFormElement>('conversation-composer').reset(); $('conversation-status').textContent = ''; $('conversation-error').textContent = ''; acceptConversation(view);
+  } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
+  finally { if (epoch === conversationEpoch) { conversationBusy = false; renderConversation(); } }
+});
+$('conversation-new').addEventListener('click', async () => {
+  if (!conversationEnabled || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch; conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>('/conversations', {});
+    if (epoch !== conversationEpoch) return;
+    conversationReplyId = undefined; conversationCorrectionId = undefined; conversationNeedsRefresh = false; $<HTMLFormElement>('conversation-composer').reset();
+    $('conversation-status').textContent = '新对话已建立。普通发送只记录讨论。'; $('conversation-error').textContent = ''; acceptConversation(view);
+  } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
+  finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+});
+
 function attentionCopy(status: string): [string, string] {
   const copy: Record<string, [string, string]> = {
     needs_approval: ['等待批准', '查看计划、预算和外部调用边界后批准执行'],
@@ -1026,6 +1360,7 @@ async function refresh(): Promise<void> {
     return;
   }
   if (linkedThreadId) { await refreshThread(); return; }
+  if (conversationEnabled) await refreshConversation().catch(error => { $('conversation-error').textContent = errorMessage(error); });
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
   const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
@@ -2120,11 +2455,77 @@ function renderRunDecision(run: RunView): void {
   }
   if (nextButton && (readOnlyShare || run.canEdit === false)) { nextButton.hidden = true; nextButton.onclick = null; }
 }
+interface MemoryOriginalSummary { id?: string; originalId?: string; locator?: string; phase?: string; totalChars?: number; excerpt?: string }
+function renderWorkingMemory(run: RunView): void {
+  const panel = $('working-memory-panel'), content = $('working-memory-content');
+  panel.hidden = readOnlyShare || run.canEdit !== true || !run.workingMemoryEnabled;
+  if (panel.hidden) { content.replaceChildren(); delete content.dataset.signature; return; }
+  const signature = `${run.id}:${run.plans.at(-1)?.hash}`;
+  if (content.dataset.signature === signature) return;
+  content.dataset.signature = signature; content.replaceChildren();
+  const epoch = conversationEpoch, token = sessionStorage.getItem('aeeis.token');
+  let sequence = 0;
+  const task = element('select'); task.id = 'working-memory-task';
+  const label = element('label', 'Run 计划节点'); label.htmlFor = task.id;
+  for (const node of run.plans.at(-1)?.nodes ?? []) { const option = element('option', `${node.title} (${node.id})`); option.value = node.id; task.append(option); }
+  const query = element('input'); query.id = 'working-memory-query'; query.maxLength = 200; query.placeholder = '搜索原文，输入 * 列出全部';
+  const queryLabel = element('label', '搜索工作记忆'); queryLabel.htmlFor = query.id;
+  const output = element('div'), original = element('div'), status = element('p'); status.setAttribute('role', 'status');
+  const valid = (request: number) => request === sequence && currentId === run.id && content.dataset.signature === signature && epoch === conversationEpoch && token === sessionStorage.getItem('aeeis.token');
+  const path = (suffix: string, params: Record<string, string>) => `/runs/${encodeURIComponent(run.id)}/working-memory${suffix}?${new URLSearchParams({ taskId: task.value, ...params })}`;
+  const showOriginal = async (entryId: string, offset = 0) => {
+    const request = ++sequence; status.textContent = '正在读取原文…'; original.replaceChildren();
+    try {
+      const page = await api<{ originalId: string; text: string; page: { characterOffset: number; totalChars: number; nextCharacterOffset: number | null } }>(path('/original', { entryId, offset: String(offset) }));
+      if (!valid(request)) return;
+      original.append(element('h4', '原文（不可信资料）'), element('small', `${page.originalId} · 字符 ${page.page.characterOffset}–${page.page.characterOffset + page.text.length} / ${page.page.totalChars}`), element('pre', page.text));
+      if (offset > 0) original.append(button('回到原文开头', () => showOriginal(entryId, 0)));
+      if (page.page.nextCharacterOffset !== null) original.append(button('下一页原文', () => showOriginal(entryId, page.page.nextCharacterOffset!)));
+      status.textContent = '原文已读取；未修改运行或讨论焦点。';
+    } catch (error) { if (valid(request)) status.textContent = errorMessage(error); }
+  };
+  const entries = (items: MemoryOriginalSummary[]) => {
+    for (const item of items) {
+      const id = item.originalId ?? item.id!;
+      const row = element('div', '', 'fact-row');
+      row.append(element('strong', item.locator ?? id), element('small', `${item.phase ?? '原文'} · ${item.totalChars ?? '?'} 字符`));
+      if (item.excerpt) row.append(element('p', item.excerpt));
+      row.append(button('查看原文', () => showOriginal(id))); output.append(row);
+    }
+  };
+  const loadIndex = async () => {
+    const request = ++sequence; status.textContent = '正在读取索引…'; output.replaceChildren(); original.replaceChildren();
+    try {
+      const index = await api<{ index: { totalOriginals: number; entries: MemoryOriginalSummary[]; more?: boolean }; summaries?: unknown[] }>(path('', {}));
+      if (!valid(request)) return;
+      output.append(element('p', `当前节点共有 ${index.index.totalOriginals} 份原文。${index.index.more ? '仅展示最近条目；搜索 * 可分页查看全部。' : ''}`)); entries(index.index.entries);
+      if (index.summaries?.length) { const summaries = element('details'); summaries.append(element('summary', '压缩摘要（非原文）'), element('pre', JSON.stringify(index.summaries, null, 2))); output.append(summaries); }
+      status.textContent = '索引已读取。';
+    } catch (error) { if (valid(request)) status.textContent = errorMessage(error); }
+  };
+  const search = async (offset = 0, term = query.value.trim()) => {
+    if (!term) { status.textContent = '请输入搜索词，或 * 列出全部。'; return; }
+    const request = ++sequence; status.textContent = '正在搜索…'; output.replaceChildren(); original.replaceChildren();
+    try {
+      const page = await api<{ total: number; results: MemoryOriginalSummary[]; nextOffset?: number }>(path('/search', { q: term, offset: String(offset), limit: '6' }));
+      if (!valid(request)) return;
+      output.append(element('p', `${page.total} 个匹配，当前从第 ${offset + 1} 项开始。`)); entries(page.results);
+      if (page.nextOffset !== undefined) output.append(button('下一页搜索结果', () => search(page.nextOffset, term)));
+      status.textContent = page.total ? '搜索完成。' : '没有匹配的原文。';
+    } catch (error) { if (valid(request)) status.textContent = errorMessage(error); }
+  };
+  task.onchange = () => { sequence++; output.replaceChildren(); original.replaceChildren(); status.textContent = '已选择节点，请读取索引或搜索。'; };
+  const searchForm = element('form'); searchForm.append(queryLabel, query);
+  const submit = element('button', '搜索原文'); submit.type = 'submit'; searchForm.append(submit);
+  searchForm.onsubmit = event => { event.preventDefault(); void search(); };
+  content.append(label, task, button('读取节点索引', loadIndex), searchForm, status, output, original);
+}
 function render(run: RunView): void {
+  renderWorkingMemory(run);
   document.body.classList.toggle('run-open', currentRunOpen);
   const shareResult = $('run-share-result');
   if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
-  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
+  if (!readOnlyShare && !linkedThreadId && !conversationEnabled && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
   $('create-run-share').hidden = readOnlyShare || run.canEdit === false;
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;
@@ -2717,6 +3118,12 @@ $('answer-form').onsubmit = event => {
 };
 $('connect').onclick = () => {
   const token = $<HTMLInputElement>('token').value;
+  if (token !== (sessionStorage.getItem('aeeis.token') ?? '')) {
+    resetConversation(); conversationScope = '';
+    stopRunEventStream(); current = undefined; currentId = ''; pendingFollowup = undefined;
+    localStorage.removeItem('aeeis.run'); $('detail').hidden = true; $('thread-panel').hidden = true;
+    $('run-share-result').replaceChildren(); $('thread-share-result').replaceChildren();
+  }
   if (token) sessionStorage.setItem('aeeis.token', token); else sessionStorage.removeItem('aeeis.token');
   const connect = $('connect') as HTMLButtonElement;
   connect.disabled = true;
@@ -2787,12 +3194,15 @@ async function initialize(): Promise<void> {
       if (!quickRunReady) quickSubmit.childNodes[0]!.textContent = '等待连接 ';
       else if (label) quickSubmit.childNodes[0]!.textContent = '启动任务 ';
     }
+    await initializeConversations(status);
     await refresh(); message('');
     if (minimalMode && !currentId) window.requestAnimationFrame(() => {
-      if (quickRunReady) $<HTMLInputElement>('quick-goal').focus();
+      if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
+      else if (quickRunReady) $<HTMLInputElement>('quick-goal').focus();
       else ($('details-toggle') as HTMLButtonElement | null)?.focus();
     });
   } catch (e) {
+    if (e instanceof ApiError && [401, 403].includes(e.status)) resetConversation();
     modelConfigured = false;
     quickRunReady = false;
     syncDetailsToggleLabel();
@@ -2874,6 +3284,7 @@ async function copyRunLink(url: string): Promise<void> { await navigator.clipboa
   } catch (error) { message(errorMessage(error)); }
   finally { button.disabled = false; }
 });
+if (!readOnlyShare) $<HTMLInputElement>('token').value = sessionStorage.getItem('aeeis.token') ?? '';
 void initialize();
 setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh().catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {

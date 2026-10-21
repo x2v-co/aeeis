@@ -39,6 +39,7 @@ import { resolveSourceResource, synthesizePdfArtifact, pdfArtifactContent, pdfOu
 import { isBinaryPdf, MAX_RUN_PDF_OUTPUT_BYTES } from './pdf-material.js';
 import { isSourceReadTool, isSourceTool, isStructuredSourceTool, isPdfTool } from './source-tools.js';
 import { boundedExecutorInput, boundedObservations } from './prompt-context.js';
+import { acceptWorkingSummary, captureWorkingOriginals, compactionInput, compactionSystem, isContextTool, lookupWorkingMemory, manifestCurrent, newWorkingMemory, prepareWorkingManifest, workingMemoryGuidance, workingMemoryInput, workingObservations, workingDependencies, workingOriginalIds, WORKING_MEMORY_LIMITS, type WorkingManifest } from './working-memory.js';
 import { executionLimitReason, executionLimitsSchema, nodeModelCalls, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from './execution-limits.js';
 import type { ResourceRegistry, ResourceResolution } from './resources.js';
 import { threadHistoryGuidance, threadHistoryInput, threadHistorySources } from './thread-context.js';
@@ -203,7 +204,7 @@ export function modelTimeUsedMs(run: Pick<AgentRun, 'calls'>, nowMs = Date.now()
  * independent-review reserve; the reviewer may always use its reserve. No single call may
  * exceed callMaxMs, so one stalled call cannot consume the whole Run budget.
  */
-export function allocateModelCallTimeout(options: { phase: 'planner' | 'executor' | 'reviewer'; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined; pendingTasks?: number | undefined; boost?: boolean | undefined }): number {
+export function allocateModelCallTimeout(options: { phase: ModelCall['phase']; usedMs: number; runBudgetMs: number; reviewReserveMs: number; callMaxMs: number; minCallMs: number; requestedMs?: number | undefined; pendingTasks?: number | undefined; boost?: boolean | undefined }): number {
   const remaining = Math.max(0, options.runBudgetMs - options.usedMs);
   // r62 pdf2: spread what is left before the review reserve over the plan tasks still to run,
   // so the current task cannot take the whole remainder with a single 420 s call.
@@ -888,6 +889,7 @@ export class AgentEngine {
       ? { adapter: this.resolver!.forPin(modelSelection.pin), ...(modelSelection.decision ? { decision: modelSelection.decision } : {}) }
       : await resolveModel();
     const selectedModel = resolution.adapter;
+    if (request.modelBudget?.moneyUsd !== undefined && selectedModel.pin.usageAccounting === 'tokens-only') throw new Conflict('Selected model adapter cannot enforce USD budgets');
     if (request.modelBudget?.moneyUsd !== undefined && !modelPrices(resolution.decision)) {
       throw new Conflict('Model money budget requires finite nonnegative USD input and output prices before execution');
     }
@@ -972,6 +974,7 @@ export class AgentEngine {
     const contextId = id('ctx');
     const contextManifestHash = digest({ contextId, owner, tenantId, goal: request.goal, privacy: request.privacy, audience, sources: sources.map(source => ({ id: source.id, title: source.title, source: source.source, hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content), classification: source.classification ?? request.privacy, kind: source.kind ?? 'unknown' })) });
     const run: AgentRun = {
+      ...(request.workingMemory ? { workingMemory: newWorkingMemory() } : {}),
       executionLimits: { ...this.executionLimits },
       schemaVersion: 1, id: pendingRunId, revision: 0, owner, tenantId, goal: request.goal,
       ...(request.goalId ? { goalId: request.goalId } : {}),
@@ -989,7 +992,7 @@ export class AgentEngine {
       ...(request.modelBudget ? { modelBudget: {
         ...(request.modelBudget.tokens === undefined ? {} : { tokens: request.modelBudget.tokens }),
         ...(request.modelBudget.moneyUsd === undefined ? {} : { moneyUsd: request.modelBudget.moneyUsd }),
-      } } : {}), modelUsage: { tokens: 0, unreportedCalls: 0, ...(modelPrices(resolution.decision) ? { moneyUsd: 0 } : {}) },
+      } } : {}), modelUsage: { tokens: 0, unreportedCalls: 0, ...(selectedModel.pin.usageAccounting !== 'tokens-only' && modelPrices(resolution.decision) ? { moneyUsd: 0 } : {}) },
       ...(request.externalBudget ? { externalBudget: {
         ...(request.externalBudget.calls === undefined ? {} : { calls: request.externalBudget.calls }),
         ...(request.externalBudget.tokens === undefined ? {} : { tokens: request.externalBudget.tokens }),
@@ -1271,6 +1274,13 @@ export class AgentEngine {
         if (digest(run.model) !== digest(model.pin)) throw new Error('Pinned model configuration changed; restore it to resume this run');
         if (run.pendingTool) await this.executePendingTool(run);
         else if (run.pendingDelegation) await this.executePendingDelegation(run);
+        else if (run.resumeModelCallId && run.calls.find(call => call.id === run.resumeModelCallId)?.phase === 'compaction') {
+          const call = run.calls.find(call => call.id === run.resumeModelCallId)!;
+          const manifestId = (call.modelRequest?.input as { manifestId?: string } | undefined)?.manifestId;
+          const manifest = run.workingMemory?.manifests.find(item => item.id === manifestId);
+          if (!manifest) throw new Conflict('Compaction reconciliation has no immutable manifest');
+          await this.compactWorkingMemory(run, model, manifest);
+        }
         else if (run.status === 'queued' || run.status === 'planning') await this.plan(run, model);
         else if (run.status === 'reviewing') await this.review(run, model);
         else await this.execute(run, model);
@@ -1343,7 +1353,8 @@ export class AgentEngine {
     await this.globalBudget.ledger.settle(call.globalBudgetAccountKey, this.modelGlobalKey(run.id, callId), this.modelGlobalUsage(run, usage));
   }
   private modelGlobalUsage(run: AgentRun, usage: ModelCall['usage'] | undefined): GlobalBudgetUsage {
-    return validModelUsage(usage) ? { tokens: usage.inputTokens + usage.outputTokens, ...(modelPrices(run.modelDecision) ? { moneyUsd: (usage.inputTokens * modelPrices(run.modelDecision)!.input + usage.outputTokens * modelPrices(run.modelDecision)!.output) / 1_000_000 } : {}) } : {};
+    const prices = run.model.usageAccounting === 'tokens-only' || usage?.details?.accounting === 'tokens-only' ? undefined : modelPrices(run.modelDecision);
+    return validModelUsage(usage) ? { tokens: usage.inputTokens + usage.outputTokens, ...(prices ? { moneyUsd: (usage.inputTokens * prices.input + usage.outputTokens * prices.output) / 1_000_000 } : {}) } : {};
   }
   private async markModelGlobalUnknown(run: AgentRun, callId: string): Promise<void> {
     const call = run.calls.find(item => item.id === callId);
@@ -1537,6 +1548,7 @@ export class AgentEngine {
     if (JSON.stringify(request).length > 120000) throw new Error('Context exceeds this runtime limit; reduce supplied materials or split the goal');
     const existingCallId = run.resumeModelCallId;
     const callId = existingCallId ?? id('model');
+    const executionToken = phase === 'compaction' ? id('compaction_attempt') : undefined;
     const idempotencyKey = `model:${run.id}:${callId}`;
     const startedAt = now();
     if (!existingCallId) {
@@ -1544,6 +1556,7 @@ export class AgentEngine {
       assertModelBudget(run); assertExternalSettlement(run);
     }
     const globalSelection = existingCallId ? undefined : this.modelGlobalSelection(run, startedAt);
+    if (globalSelection?.budget.moneyUsd !== undefined && (run.model.usageAccounting === 'tokens-only' || model.pin.usageAccounting === 'tokens-only')) throw new Conflict('Selected model adapter cannot enforce global USD budgets');
     let globalReservation: GlobalBudgetReservation | undefined;
     if (globalSelection && this.globalBudget) {
       globalReservation = await this.globalBudget.ledger.reserve(globalSelection, this.modelGlobalKey(run.id, callId));
@@ -1622,6 +1635,14 @@ export class AgentEngine {
       // A competing Engine may finish its call before this stale tick reaches
       // the reservation. Never run a second call against the old snapshot.
       if (!existingCallId && current.calls.length !== run.calls.length) return;
+      if (phase === 'compaction' && !existingCallId) {
+        const manifestId = (request.input as { manifestId: string }).manifestId;
+        const manifest = run.workingMemory?.manifests.find(item => item.id === manifestId);
+        if (!manifest || !current.workingMemory || !manifestCurrent(current, manifest)) return;
+        const remainingTasks = current.plans.at(-1)!.nodes.filter(node => !current.steps.some(step => step.taskId === node.id && step.status === 'succeeded')).length;
+        if (current.maxModelCalls - current.calls.length <= remainingTasks + 2) return;
+        if (!current.workingMemory.manifests.some(item => item.id === manifest.id)) current.workingMemory.manifests.push(structuredClone(manifest));
+      }
       assertModelBudget(current, existingCallId);
       assertExternalSettlement(current);
       const existing = current.calls.find(c => c.id === callId);
@@ -1639,6 +1660,7 @@ export class AgentEngine {
         }
         current.calls.push({ id: callId, phase, ...(taskId ? { taskId } : {}), idempotencyKey, ...(globalSelection ? { globalBudgetAccountKey: globalSelection.accountKey } : {}), modelRequest: JSON.parse(JSON.stringify(request)) as NonNullable<ModelCall['modelRequest']>, state: 'started', inputHash: digest(request), startedAt });
       }
+      if (executionToken) current.calls.find(call => call.id === callId)!.executionToken = executionToken;
       current.modelUsage = deriveModelUsage(current);
       delete current.resumeModelCallId;
       const step = current.steps.find(step => step.taskId === taskId);
@@ -1663,7 +1685,7 @@ export class AgentEngine {
     try {
       const reconciled = existingCallId && run.reconciledModelCall?.callId === existingCallId ? run.reconciledModelCall : undefined;
       result = reconciled ? { value: reconciled.value, ...(reconciled.usage ? { usage: reconciled.usage } : {}) } : await (async () => {
-        if (!repairing && !finalOnly) return model.complete(requestWithKey);
+        if (!repairing && !finalOnly && phase !== 'compaction') return model.complete(requestWithKey);
         const controller = new AbortController();
         const timeoutMs = repairing ? repairTimeoutMs : allocatedTimeoutMs ?? request.timeoutMs ?? this.finalCallTimeoutMs;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1674,13 +1696,20 @@ export class AgentEngine {
           return response;
         } finally { clearTimeout(timer); controller.abort(); }
       })();
+      if (phase === 'compaction' && (Buffer.byteLength(result.rawOutput ?? '', 'utf8') > WORKING_MEMORY_LIMITS.responseBytes || Buffer.byteLength(JSON.stringify(result.value) ?? '', 'utf8') > WORKING_MEMORY_LIMITS.responseBytes)) throw new ModelResponseRejected('Compaction response exceeds byte cap', result.usage);
       if (repairing && (Buffer.byteLength(result.rawOutput ?? '', 'utf8') > repairMaxBytes || Buffer.byteLength(JSON.stringify(result.value) ?? '', 'utf8') > repairMaxBytes)) throw new ModelResponseRejected('Artifact repair response exceeds 64KB byte cap', result.usage);
       await this.settleModelGlobal(await this.repository.get(run.id), callId, result.usage);
     }
     catch (error) {
       if (repairing) repairFailure = error instanceof ModelTimeout ? `${modelTimeoutReason('executor', error)}; provider billing still requires reconciliation` : failureReason(error, 'Artifact repair failed');
+      let staleCompaction = false;
       const failed = await this.repository.mutate(run.id, async current => {
         const call = current.calls.find(c => c.id === callId)!;
+        if (phase === 'compaction' && (call.state !== 'started' || call.executionToken !== executionToken)) {
+          staleCompaction = true;
+          event(current, 'model.result_discarded', { callId, reason: 'compaction_fence_invalidated' });
+          return;
+        }
         call.state = error instanceof ModelOutcomeUnknown ? 'unknown' : 'failed'; call.endedAt = now();
         const usage = error instanceof ModelResponseRejected ? error.usage : result?.usage;
         if (validModelUsage(usage)) call.usage = usage;
@@ -1702,6 +1731,12 @@ export class AgentEngine {
         call.validationErrors = redactRunData(validationDetails(error)?.issues ?? [{ path: '$', code: 'model_error', message: failureReason(error, 'Model failed') }]);
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, rawOutput: call.rawOutput, validation: { issues: call.validationErrors } });
+        if (phase === 'compaction') {
+          // A summary is not task execution. Unknown billing must reconcile;
+          // never synthesize partial artifacts or auto-retry a summary timeout.
+          event(current, 'context.summary_failed', { taskId: taskId ?? null, callId, outcome: call.state });
+          return;
+        }
         if (error instanceof ModelTimeout && !repairing && !(finalOnly && current.steps.find(step => step.taskId === taskId)?.observations.length) && !['cancelled', 'paused'].includes(current.status) && current.reconcileDisposition !== 'paused') {
           const reason = `${modelTimeoutReason(phase, error)}. Independent review was not completed.`;
           const timedOutStep = taskId ? current.steps.find(step => step.taskId === taskId) : undefined;
@@ -1765,8 +1800,10 @@ export class AgentEngine {
           if (error instanceof ModelTimeout && !repairing && phase !== 'reviewer' && queueReviewAfterStop(current, reason)) delete current.reconcileDisposition;
         }
       });
+      if (staleCompaction) return;
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
+      if (phase === 'compaction' && error instanceof ModelResponseRejected) return;
       if (failed.status === 'reviewing' && failed.stopReview === 'pending') return;
       if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
       if (error instanceof ModelTimeout && failed.events.at(-1)?.type === 'model.timeout_retry') return;
@@ -1779,6 +1816,12 @@ export class AgentEngine {
     const completed = result;
     await this.repository.mutate(run.id, async current => {
       const call = current.calls.find(c => c.id === callId)!;
+      if (phase === 'compaction' && (call.state !== 'started' || call.executionToken !== executionToken)) {
+        if (!call.usage && validModelUsage(completed.usage)) call.usage = completed.usage;
+        current.modelUsage = deriveModelUsage(current);
+        event(current, 'model.result_discarded', { callId, reason: 'compaction_fence_invalidated' });
+        return;
+      }
       if (!repairFailure) { call.state = 'completed'; call.endedAt = now(); call.outputHash = digest(completed.value); call.rawOutput = modelRawOutput(completed.rawOutput ?? completed.value, completed.value); }
       if (validModelUsage(completed.usage)) call.usage = completed.usage;
       if (!repairFailure) event(current, 'model.completed', { callId });
@@ -1787,7 +1830,7 @@ export class AgentEngine {
       else event(current, 'model.usage_missing', { callId });
       if (current.reconciledModelCall?.callId === callId) delete current.reconciledModelCall;
       delete current.reconcileDisposition;
-      if (terminalRunStatuses.has(current.status)) { call.state = 'discarded'; event(current, 'model.result_discarded', { callId }); return; }
+      if (terminalRunStatuses.has(current.status) || phase === 'compaction' && current.status === 'paused') { call.state = 'discarded'; event(current, 'model.result_discarded', { callId }); return; }
       const budgetError = settlementError(current);
       if (budgetError && !repairing) {
         if (current.status === 'paused') current.resumeStatus = 'failed';
@@ -1917,6 +1960,18 @@ export class AgentEngine {
       event(current, 'domain.plan.linked', { goalId: current.goalId, domainPlanId: domainPlan.id, planVersion: domainPlan.version, planHash: draft.hash });
     });
   }
+  private async compactWorkingMemory(run: AgentRun, model: ModelAdapter, manifest: WorkingManifest): Promise<void> {
+    if (!run.workingMemory!.manifests.some(item => item.id === manifest.id)) run.workingMemory!.manifests.push(manifest);
+    const request = this.requestForCall(run, 'compaction', { system: compactionSystem, input: compactionInput(run, manifest),
+      maxTokens: 2048, maxResponseBytes: WORKING_MEMORY_LIMITS.responseBytes, timeoutMs: 60_000, disableRetries: true }, manifest.taskId);
+    await this.call(run, model, 'compaction', request, (current, value) => {
+      const call = current.calls.find(item => item.phase === 'compaction' && item.taskId === manifest.taskId &&
+        (item.modelRequest?.input as { manifestId?: string } | undefined)?.manifestId === manifest.id)!;
+      const summary = acceptWorkingSummary(current, manifest, call.id, normalizeModelJson(value));
+      if (summary.status === 'discarded') call.state = 'discarded';
+      event(current, `context.summary_${summary.status}`, { taskId: manifest.taskId, manifestId: manifest.id, version: summary.version, callId: call.id });
+    }, manifest.taskId);
+  }
   private async execute(run: AgentRun, model: ModelAdapter): Promise<void> {
     const plan = run.plans.at(-1);
     if (!plan || !run.approval?.approved || run.approval.planHash !== plan.hash || (run.approval.planVersion !== undefined && run.approval.planVersion !== plan.version)) throw new Error('Execution requires approval of this exact plan');
@@ -1934,6 +1989,15 @@ export class AgentEngine {
         current.status = 'reviewing'; event(current, 'review.requested');
       }); return;
     }
+    if (run.workingMemory && !run.resumeModelCallId) {
+      let captured = false;
+      const expectedCalls = run.calls.length;
+      run = await this.repository.mutate(run.id, current => {
+        if (current.status !== 'running' || current.calls.some(call => call.state === 'started') || current.calls.length !== expectedCalls || current.plans.at(-1)?.hash !== plan.hash) return;
+        captureWorkingOriginals(current, node, evidenceRefsFromObservation); captured = true;
+      });
+      if (!captured) return;
+    }
     const step = run.steps.find(s => s.taskId === node.id)!;
     const limits = run.executionLimits ?? this.executionLimits;
     const weatherNotice = unsupportedWeatherNotice(run);
@@ -1942,11 +2006,16 @@ export class AgentEngine {
     const recoveryAllowance = recovery?.toolsAllowed ? recoveryToolCalls : 1;
     const proposedLimitReason = recovery?.toolsAllowed ? (run.maxModelCalls - run.calls.length <= 2 ? 'Run model call budget nearly exhausted' : undefined) : executionLimitReason(run, step, limits);
     const nodeCalls = nodeModelCalls(run, node.id);
+    if (run.workingMemory && !run.resumeModelCallId && !proposedLimitReason && !step.finishRepair && !recovery) {
+      const manifest = prepareWorkingManifest(run, node);
+      if (manifest) { await this.compactWorkingMemory(run, model, manifest); return; }
+    }
     const recoveryExhausted = Boolean(recovery && !run.resumeModelCallId && (recovery.exhausted || recoveryCalls >= recoveryAllowance));
     // A granted timeout retry (#68/#79) may re-run the node's final call once: the timed-out call returned nothing.
     if (!run.resumeModelCallId && !recovery && (step.finalCallId || nodeCalls.length >= limits.maxNodeIterations + (step.timeoutRetried ? 1 : 0))) throw new Error('Node final finish call exhausted; retry requires replanning');
     // r79 md: a runtime Unknown: suffix (e.g. added while the Run sat in needs_input/paused) is not dependency content.
-    const dependencies = run.artifacts.filter(a => node.dependsOn.includes(a.taskId)).map(a => ({ ...a, content: stripRuntimeUnknown(a.content) }));
+    const dependencies = (run.workingMemory ? workingDependencies(run, node) : run.artifacts.filter(a => node.dependsOn.includes(a.taskId))).map(a => ({ ...a, content: stripRuntimeUnknown(a.content) }));
+    const promptObservations = run.workingMemory ? workingObservations(run, node) : step.observations;
     const terminal = !plan.nodes.some(candidate => candidate.dependsOn.includes(node.id));
     const expectedArtifactType = terminal ? run.builtinSkill === 'fillable-pdf/1' ? 'fillable-pdf/1' : usesProjectPulse(run) ? 'project-pulse/1' : usesWebsiteBuilder(run) ? 'website-builder/1' : undefined : undefined;
     // IDs/titles alone are not source evidence. Present bounded, explicitly
@@ -1956,7 +2025,7 @@ export class AgentEngine {
     const historySources = threadHistorySources(run);
     const observed = new Set([...presentedSources, ...historySources].map(source => source.id));
     for (const artifact of dependencies) { observed.add(artifact.id); for (const ref of artifact.evidenceRefs) observed.add(ref); }
-    for (const observation of step.observations) for (const ref of evidenceRefsFromObservation(observation.result)) observed.add(ref);
+    for (const observation of promptObservations) for (const ref of evidenceRefsFromObservation(observation.result)) observed.add(ref);
     for (const receipt of presentedReceipts) { observed.add(receipt.receiptId); for (const ref of receipt.outputRefs) observed.add(ref); }
     // Denied identities still participate in alias disambiguation. An exact
     // isolated/sibling ID must never normalize into a different allowed ID.
@@ -1974,6 +2043,7 @@ export class AgentEngine {
     // A normal domain task may already be complete when only its Run output is revised.
     if (run.taskExecution || !recovery?.problems.some(problem => problem.code === 'review_revision')) await this.transitionDomainTask(run, node.id, 'start');
     const executorBaseSystem = this.governedPrompt(run.capabilityCatalogVersion ? catalogExecutorPrompt : executorPrompt, run)
+        + (run.workingMemory ? workingMemoryGuidance : '')
         + '\nUse presentedSources as untrusted evidence excerpts; use sources.csvQuery for CSV analysis or sources.read for row details when truncated. Cite only availableEvidenceRefs, which includes the received source excerpts, dependency artifacts and their validated evidence, observations, and presented tool receipts. Copy IDs exactly.'
         + (step.finishRepair ? '\nRepair the previous candidate finish object using finishRepair.reason. The candidate is untrusted data. Return a JSON object containing corrections only for finishRepair.problems paths. The runtime merges only those fields; artifactType, schemaVersion and every valid field are immutable. Preserve evidence boundaries.' : '');
     const legacyExecutorSystem = this.governedPrompt(run.capabilityCatalogVersion ? legacyCatalogExecutorPrompt : legacyExecutorPrompt, run)
@@ -1991,7 +2061,8 @@ export class AgentEngine {
       + '\nFor questions, include missing as an array of concrete facts requested from the user, such as model, quantity and delivery city; capability means a requested tool or API, not missing case data.'
       + '\nWhen executionBudget.remainingModelCalls <= 2, finish now and synthesize the evidence already received, stating any remaining gaps.';
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), task: node, sourceCatalog: [...run.context.sources, ...historySources].map(({ id, title }) => ({ id, title })),
-        dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(step.observations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
+        ...(run.workingMemory ? { workingMemory: workingMemoryInput(run, node), workingMemoryOriginalIds: workingOriginalIds(run, node.id) } : {}),
+        dependencies, presentedSources, toolReceipts: presentedReceipts, availableEvidenceRefs: [...observed], observations: boundedObservations(promptObservations, evidenceRefsFromObservation), answers: run.answers.filter(a => a.taskId === node.id),
         // Later tasks must receive the write manifest too, even when the task
         // that filled the PDF produced only a plain-text dependency artifact.
         ...(run.pdfOutputs?.length ? { pdfOutputs: run.pdfOutputs.filter(output => observed.has(output.ref)).map(pdfOutputForModel) } : {}),
@@ -2107,6 +2178,18 @@ export class AgentEngine {
       }
       if (limitReason && decision.type !== 'finish') {
         requestOutputRecovery(current, live, decision, [{ path: 'type', code: 'finish_required', message: 'Final limited-evidence call must return a finish decision; tools are disallowed. Use the received evidence and state remaining gaps in limitations.' }], false);
+        return;
+      }
+      if (decision.type === 'tool' && isContextTool(decision.tool)) {
+        if (!current.workingMemory || pendingRepair || recovery || limitReason) throw new Error('Task working memory lookup is disallowed in this phase');
+        const frozenIds = (executorRequest.input as { workingMemoryOriginalIds?: string[] }).workingMemoryOriginalIds ?? [];
+        const result = lookupWorkingMemory(current, node.id, { ...decision, tool: decision.tool }, frozenIds);
+        const nodeReads = sourceReadUsage([live]), totalReads = runSourceReadUsage(current), chars = JSON.stringify(result).length;
+        if (nodeReads.pages >= limits.maxNodeSourcePages || totalReads.pages >= limits.maxRunSourcePages ||
+          nodeReads.chars + chars > limits.maxNodeSourceChars || totalReads.chars + chars > limits.maxRunSourceChars) throw new Error('Task working memory lookup exceeds the source allowance');
+        current.sourceReadUsage = { pages: totalReads.pages + 1, chars: totalReads.chars + chars };
+        live.observations.push({ tool: decision.tool, argument: decision.argument, result, requestHash: digest(decision) });
+        event(current, 'context.lookup', { taskId: node.id, tool: decision.tool, chars });
         return;
       }
       if (decision.type === 'tool' || decision.type === 'capability') {
@@ -3440,15 +3523,17 @@ function modelPrices(decision: unknown): { input: number; output: number } | und
 /** Rebuild totals from call receipts so restart, cancellation and reconciliation
  * cannot double charge a completed call or silently erase missing usage. */
 function deriveModelUsage(run: AgentRun, ignoreCallId?: string): ModelUsage {
-  const prices = modelPrices(run.modelDecision);
+  const prices = run.model.usageAccounting === 'tokens-only' ? undefined : modelPrices(run.modelDecision);
   let tokens = 0, moneyUsd = 0, unreportedCalls = 0;
+  let moneyKnown = Boolean(prices);
   for (const call of run.calls) {
     if (call.id === ignoreCallId) continue;
+    if (call.usage?.details?.accounting === 'tokens-only') moneyKnown = false;
     if (!validModelUsage(call.usage)) { unreportedCalls++; continue; }
     tokens += call.usage.inputTokens + call.usage.outputTokens;
     if (prices) moneyUsd += (call.usage.inputTokens * prices.input + call.usage.outputTokens * prices.output) / 1_000_000;
   }
-  return { tokens, ...(prices ? { moneyUsd } : {}), unreportedCalls };
+  return { tokens, ...(moneyKnown ? { moneyUsd } : {}), unreportedCalls };
 }
 
 function validExternalTokens(value: unknown): value is number {
@@ -3521,6 +3606,7 @@ function assertModelBudget(run: AgentRun, ignoreCallId?: string): void {
   const usage = deriveModelUsage(run, ignoreCallId);
   if (usage.unreportedCalls) throw new Conflict('Model budget cannot continue while prior call usage is missing');
   if (run.modelBudget.moneyUsd !== undefined && !modelPrices(run.modelDecision)) throw new Conflict('Model money budget requires verifiable USD input and output prices');
+  if (run.modelBudget.moneyUsd !== undefined && usage.moneyUsd === undefined) throw new Conflict('Model money budget cannot continue while prior USD usage is unknown');
   if (run.modelBudget.tokens !== undefined && usage.tokens >= run.modelBudget.tokens) throw new Conflict('Model token budget exhausted');
   if (run.modelBudget.moneyUsd !== undefined && usage.moneyUsd! >= run.modelBudget.moneyUsd) throw new Conflict('Model money budget exhausted');
 }

@@ -82,7 +82,7 @@ function responseFor(system, input) {
     return { verdict: 'accepted', summary: 'Fixture review accepted the evidence-linked artifact.', issues: [] };
   }
 
-  if (system.includes('fillable-pdf/1')) {
+  if (system.includes('This Run uses the fillable-pdf/1 contract')) {
     const pdfSource = input.presentedSources?.find(source => source.format === 'pdf');
     const observations = input.observations ?? [];
     if (!observations.length) return { type: 'tool', tool: 'pdf.formFields', argument: pdfSource.id };
@@ -254,7 +254,8 @@ export function createFixtureModelServer() {
         choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(value) }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 1, completion_tokens: 1 },
       }));
-    } catch {
+    } catch (error) {
+      console.error('fixture model request failed', error instanceof Error ? error.stack : String(error));
       response.writeHead(400, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'fixture model received invalid JSON' } }));
     }

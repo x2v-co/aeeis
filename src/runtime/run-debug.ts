@@ -210,13 +210,28 @@ export function modelRawOutput(value: unknown, credentialSource?: unknown): stri
   return capDebugField(typeof redacted === 'string' ? redacted : JSON.stringify(redacted) ?? String(redacted));
 }
 const appVersion = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+export function withoutWorkingMemoryPayloads(run: AgentRun): AgentRun {
+  if (!run.workingMemory) return run;
+  const { workingMemory: _memory, reconciledModelCall: _reconciled, ...rest } = run;
+  return { ...rest,
+    calls: run.calls.map(call => {
+      if (call.phase !== 'compaction') return call;
+      const { modelRequest: _request, rawOutput: _output, validationErrors: _errors, ...metadata } = call;
+      return metadata;
+    }),
+    steps: run.steps.map(step => ({ ...step, observations: step.observations.map(observation => observation.tool.startsWith('context.')
+      ? { ...observation, result: { omitted: true, reason: 'Use the owner-scoped working-memory inspection API' } } : observation) })),
+  };
+}
 export function sharedRunView(run: AgentRun) {
-  return redactRunData({ ...run, canEdit: false, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true });
+  return redactRunData({ ...withoutWorkingMemoryPayloads(run), canEdit: false, graphs: projectRunGraphs(run), explanation: explainRun(run) }, { omitRawProviderText: true, credentialSource: run });
 }
 export function debugRunView(run: AgentRun) {
-  return redactRunData({ ...run, graphs: projectRunGraphs(run), explanation: explainRun(run) });
+  return redactRunData({ ...withoutWorkingMemoryPayloads(run), graphs: projectRunGraphs(run), explanation: explainRun(run) }, { credentialSource: run });
 }
 export function debugBundle(run: AgentRun, options: { omitRawProviderText?: boolean } = {}) {
+  const credentialSource = run;
+  run = withoutWorkingMemoryPayloads(run);
   // Events, plans and steps (taskAttempts) are emitted once at the top level. Embedding them
   // again under `run` made every lifecycle event appear twice in the bundle.
   const { events: _events, plans: _plans, steps: _steps, ...runSummary } = run;
@@ -224,5 +239,5 @@ export function debugBundle(run: AgentRun, options: { omitRawProviderText?: bool
     taskAttempts: run.steps.map(step => ({ ...step, calls: run.calls.filter(call => call.taskId === step.taskId) })),
     modelRawOutput: run.calls.filter(call => call.rawOutput !== undefined).map(call => ({ callId: call.id, phase: call.phase, taskId: call.taskId, rawOutput: call.rawOutput })),
     validationErrors: run.calls.filter(call => call.validationErrors).map(call => ({ callId: call.id, taskId: call.taskId, errors: call.validationErrors })),
-    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' }, options);
+    events: run.events, graphs: projectRunGraphs(run), explanation: explainRun(run), appVersion, gitCommit: process.env.AEEIS_GIT_COMMIT || 'unknown' }, { ...options, credentialSource });
 }

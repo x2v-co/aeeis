@@ -17,7 +17,7 @@ export class StaticModelResolver implements ModelResolver {
   constructor(private readonly adapter: ModelAdapter) {}
   async resolve(_request: ModelSelectionRequest): Promise<ModelResolution> { return { adapter: this.adapter }; }
   forPin(pin: ModelPin): ModelAdapter {
-    if (pin.model !== this.adapter.pin.model || pin.endpoint !== this.adapter.pin.endpoint || pin.promptVersion !== this.adapter.pin.promptVersion || pin.provider !== this.adapter.pin.provider || pin.maxTokens !== this.adapter.pin.maxTokens || pin.maxOutputTokens !== this.adapter.pin.maxOutputTokens) throw new Error('Pinned model is unavailable in the configured resolver');
+    if (pin.model !== this.adapter.pin.model || pin.endpoint !== this.adapter.pin.endpoint || pin.promptVersion !== this.adapter.pin.promptVersion || pin.provider !== this.adapter.pin.provider || pin.maxTokens !== this.adapter.pin.maxTokens || pin.maxOutputTokens !== this.adapter.pin.maxOutputTokens || pin.usageAccounting !== this.adapter.pin.usageAccounting) throw new Error('Pinned model is unavailable in the configured resolver');
     return this.adapter;
   }
   async health(): Promise<ModelHealth> {
@@ -39,6 +39,7 @@ export class CatalogModelResolver implements ModelResolver {
     const selectedRow = rows.find(row => row.model === decision.selected.model && row.provider === decision.selected.provider && row.endpoint === decision.selected.endpoint && row.offeringId === decision.selected.offeringId)
       ?? rows.find(row => row.model === decision.selected.model && row.provider === decision.selected.provider && row.endpoint === decision.selected.endpoint && row.offeringId);
     const pin = selectedRow ? formalCatalogPin(selectedRow, rows.filter(row => decision.candidates.some(candidate => candidate.accepted || (candidate.model === row.model && candidate.provider === row.provider))), decision) : undefined;
+    if (pin && baseAdapter.pin.usageAccounting === 'tokens-only') throw new Error('Token-only model adapters do not support formal catalog routing');
     const adapter = pin ? withPin(baseAdapter, pin) : baseAdapter;
     this.adapters.set(key(adapter.pin), adapter);
     return { adapter, decision };
