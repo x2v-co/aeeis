@@ -1,6 +1,6 @@
 ---
 name: AEEIS Ink Desk
-description: A warm paper operating desk for long-running agent work.
+description: A Grok-style conversation with an on-demand workbench for long-running agent work.
 colors:
   ink: "#1c1916"
   ink-soft: "#4a433c"
@@ -54,9 +54,9 @@ components:
 
 ## Overview
 
-**Creative North Star: “The Ink Desk”**
+**Creative North Star: “A teammate, not a console”**
 
-AEEIS is a desk for work that continues after the first sentence. The surface is warm paper, the type is ink, and vermilion is reserved for something that is alive or needs a hand. Moss means the evidence checked out. Ochre means a person still has to decide. The first screen asks for one outcome. The rest of the console stays flat and quiet until that work exists.
+AEEIS is one persistent agent. The screen is a conversation with it. The sidebar is a roster of ongoing work and shows whether the agent is idle, thinking, working, waiting, blocked, or done. The transcript holds the goal, the decision, tool activity, and the delivery. The composer stays fixed at the bottom. Graphs, evidence, goals, reminders, and governance live in its computer — a side panel opened from the conversation, never the home page. Vermilion means the agent is alive or needs a hand. Moss means the evidence checked out. Ochre means a person still has to decide.
 
 **Key Characteristics:**
 - Warm paper page with a 3px vermilion rule at the top
@@ -92,15 +92,15 @@ Ink does the reading. Vermilion marks agency. Moss marks verified delivery. Ochr
 **Character:** Inter keeps Chinese and Latin at the same weight. Mono is reserved for runtime vocabulary, IDs, and compact technical metadata.
 
 ### Hierarchy
-- **Display** (650, clamp(34px, 5vw, 56px), 1.02): The launch question, “你要推进什么？”
-- **Title** (650, clamp(22px, 2.2vw, 30px), 1.25): The current run goal.
+- **Display** (650, 28px): The empty conversation, “AEEIS”.
+- **Title** (500, 14px): The user’s goal, set as an ink bubble on the right.
 - **Section** (650, 15px, 1.3): Panel headings.
 - **Body** (400, 14px, 1.7): Explanations and instructions.
 - **Label** (500, 11–12px, mono): Navigation, statuses, and runtime metadata.
 
 ## Layout
 
-The default viewport is a single writing desk: brand, one question, one field, one ink button. Opening settings reveals a two-column console. At 1051px and above the run sits on the left and the control rail becomes a hairline inspector on the right. At 780px and below, the rail stacks, navigation scrolls sideways, and the orbit stamp is removed.
+The default viewport is a roster, a transcript, and a composer. The roster lists each run with a presence mark. The transcript is the selected run: the goal on the right, decision and activity cards on the left, approval inline. The composer accepts one message; Enter sends. “打开它的工作台” reveals the computer on the right (setup, goals, governance, status, or this run’s graphs). Closing it leaves the conversation in place. Below 860px the roster and the conversation swap places; the computer covers the screen until it is closed. Share and thread pages stay transcript-only.
 
 ## Elevation & Depth
 
@@ -131,9 +131,9 @@ Corners are short: 4px controls, 6px rows, 8px decisions, 12px work sheets. Pill
 
 Text links with a bottom rule on hover. They stay quiet at rest and scroll horizontally on small screens.
 
-### Signature Component: The Desk
+### Signature Component: The Conversation
 
-The launch surface is the page itself. It asks “你要推进什么？”, accepts one outcome sentence, and mirrors that value into the full run form. `⌘K` opens the command palette.
+The home surface is a chat with AEEIS. An empty thread offers example intents. A selected run keeps approvals (“批准并执行”), questions, and delivery in the transcript. `⌘K` still opens the command palette. The computer is the agent’s desk and stays closed until asked for.
 
 ### Signature Component: Run Activity Strip
 
@@ -141,10 +141,10 @@ A selected run shows a plain-language status between two rules, with a small sig
 
 ## Do's and Don'ts
 
-- **Do** keep the first viewport to one question and one action.
-- **Do** say what happens next in a sentence.
-- **Do** use vermilion only for live work, focus, and the primary hover.
+- **Do** keep the conversation on screen when the computer opens or closes.
+- **Do** say what happens next in a sentence, inside the transcript.
+- **Do** use vermilion only for live presence, focus, and the primary hover.
 - **Do** support `prefers-reduced-motion`.
-- **Don't** let governance panels compete with the run.
-- **Don't** put motion on indicators that are not tied to live state.
+- **Don't** put goals, reminders, RSI, or system status on the home transcript.
+- **Don't** put motion on indicators that are not tied to live presence.
 - **Don't** let graph nodes or IDs create page-level horizontal overflow.
