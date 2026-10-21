@@ -90,6 +90,8 @@ npm run demo:working-memory:compaction
 
 It keeps the entry focus on `任务甲` while a note names `任务乙`, then executes only `任务甲` with an explicit task id. The fixture reads one large `任务甲原文` source twice, so the older page is summarized by a `compaction` model call before the next executor request. The acceptance requires an `active` summary whose reference is a supplied slice id, a readable original that still contains the fact, **0 matches** from the sibling `deliver` node, and **0 matches** from `任务乙`'s own Run. The public Run projection keeps the compaction call's phase and usage, and omits its `modelRequest` and `rawOutput`. The entry task card shows only the original and active-summary counts. Summary text stays on the owner memory panel, where each item is rendered as untrusted text with its slice reference.
 
+While the workbench tab is visible, the run refresh that follows execution events reloads those counts. Opening the run, a summary event, or a terminal event does not move the discussion focus. A compaction call is labeled in the run progress as task-memory organization: an active summary is not classified as evidence, and rejected, discarded, or failed summaries stay visible as non-evidence outcomes.
+
 ### Review fixes retained on this branch
 
 An execution request resolves only from an explicit task id, a reply, or a new task. A pure Han title matches only at length 3 or more; a mixed or ASCII title matches only on a letter or number boundary. If preparation fails before a Run exists, the reservation becomes `cancelled` and the task can accept a new request. `model.failed`, `model.unknown`, and `run.failed` events omit `rawOutput` when the call phase is `compaction`.

@@ -55,7 +55,7 @@ interface RunView extends RunSummary {
   steps: Array<{ taskId: string; status: string; error?: string; failureReason?: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
   model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
-  events: Array<{ seq: number; type: string; at: string; data?: { validation?: { issues?: Array<{ path?: string; message?: string }> } } }>;
+  events: Array<{ seq: number; type: string; at: string; data?: { phase?: string; reason?: string; validation?: { issues?: Array<{ path?: string; message?: string }> } } }>;
   calls: Array<{ phase: string; state: string; usage?: { inputTokens: number; outputTokens: number } }>;
   modelBudget?: { tokens?: number; moneyUsd?: number }; modelUsage?: { tokens: number; moneyUsd?: number; unreportedCalls: number };
   evolutionTraffic?: Array<{ routeId: string; target: string; candidateId: string; percentage: number; bucket: number; selected: boolean }>;
@@ -227,9 +227,45 @@ function eventLabel(type: string): string {
     'run.cancelled_reconcile_requested': '已请求核查取消前的调用', 'run.cancelled_reconcile_failed': '取消前的调用核查失败', 'artifact.created': '产物已生成',
     'model.unknown': '模型结果待核查', 'model.reconciled': '模型结果已核查', 'model.validation_failed': '模型输出校验失败', 'model.budget_stopped': '模型预算已停止',
     'task.execution.started': '任务开始执行', 'task.execution.completed': '任务执行完成', 'task.execution.failed': '任务执行失败',
+    'context.summary_active': '压缩摘要已写入', 'context.summary_rejected': '压缩摘要未采用',
+    'context.summary_discarded': '压缩摘要已丢弃', 'context.summary_failed': '压缩摘要未生成',
   };
   const normalized = type.trim().replace(/\s+/g, '.');
   return labels[type] ?? labels[normalized] ?? normalized.replace(/^run\./, '').replace(/[._-]+/g, ' ');
+}
+function describeEvent(type: string, data?: { phase?: string; reason?: string }, verbose = false): string {
+  const compaction = data?.phase === 'compaction' || (typeof data?.reason === 'string' && data.reason.startsWith('compaction'));
+  if (compaction) {
+    const short: Record<string, string> = {
+      'model.started': '整理任务记忆', 'model.completed': '记忆整理完成', 'model.failed': '记忆整理失败',
+      'model.unknown': '记忆整理待核查', 'model.result_discarded': '记忆整理已丢弃',
+    };
+    const full: Record<string, string> = {
+      'model.started': '开始整理任务记忆（摘要不是证据）', 'model.completed': '任务记忆整理完成（摘要不是证据）',
+      'model.failed': '任务记忆整理失败（未写入摘要）', 'model.unknown': '任务记忆整理结果待核查（未写入摘要）',
+      'model.result_discarded': '过期的任务记忆整理已丢弃（不是证据）',
+    };
+    if (short[type]) return verbose ? full[type]! : short[type]!;
+  }
+  if (verbose && type.startsWith('context.summary_')) {
+    const full: Record<string, string> = {
+      'context.summary_active': '已写入压缩摘要（不是证据，不改变讨论焦点）',
+      'context.summary_rejected': '压缩摘要未采用（不是证据）',
+      'context.summary_discarded': '压缩摘要已丢弃（不是证据）',
+      'context.summary_failed': '压缩摘要未生成（不是证据）',
+    };
+    if (full[type]) return full[type];
+  }
+  return eventLabel(type);
+}
+function compactionProgress(event: { type: string; data?: { phase?: string; reason?: string } } | undefined): [string, string] | undefined {
+  if (!event) return;
+  const compaction = event.data?.phase === 'compaction' || (typeof event.data?.reason === 'string' && event.data.reason.startsWith('compaction')) || event.type.startsWith('context.summary_');
+  if (!compaction) return;
+  const detail = '压缩摘要只留给该任务后续引用。它不是证据，也不改变讨论焦点。';
+  if (event.type === 'context.summary_active' || event.type === 'model.completed') return ['已整理任务记忆', detail];
+  if (event.type === 'model.started') return ['正在整理任务记忆', detail];
+  return ['任务记忆未写入', detail];
 }
 
 // Keep the control rail useful at a glance. Advanced modules remain in the DOM
@@ -1453,7 +1489,7 @@ function queueEventStreamRefresh(): void {
 }
 
 let runPulseTimer: number | undefined;
-function showRunPulse(eventName: string): void {
+function showRunPulse(eventName: string, data?: { phase?: string; reason?: string }): void {
   if (document.hidden) return;
   const labels: Record<string, string> = {
     'run.updated': '运行状态已更新',
@@ -1476,7 +1512,7 @@ function showRunPulse(eventName: string): void {
   const pulse = $('run-pulse');
   const text = $('run-pulse-message');
   if (!pulse || !text) return;
-  text.textContent = labels[eventName] ?? eventLabel(eventName);
+  text.textContent = labels[eventName] ?? describeEvent(eventName, data, true);
   pulse.hidden = false;
   if (runPulseTimer !== undefined) window.clearTimeout(runPulseTimer);
   runPulseTimer = window.setTimeout(() => { pulse.hidden = true; }, 5200);
@@ -1532,12 +1568,14 @@ async function consumeRunEventStream(runId: string, generation: number): Promise
           if (id && /^\d+$/.test(id)) eventStreamCursor = btoa(JSON.stringify({ seq: Number(id) })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
           if (name !== 'heartbeat' && name !== 'timeout') {
             let eventName = name;
+            let phase: string | undefined;
             try {
-              const payload = data ? JSON.parse(data) as { type?: unknown; eventType?: unknown } : undefined;
+              const payload = data ? JSON.parse(data) as { type?: unknown; eventType?: unknown; data?: { phase?: unknown } } : undefined;
               if (typeof payload?.type === 'string') eventName = payload.type;
               else if (typeof payload?.eventType === 'string') eventName = payload.eventType;
+              if (typeof payload?.data?.phase === 'string') phase = payload.data.phase;
             } catch { /* the refresh still handles non-JSON event payloads */ }
-            showRunPulse(eventName);
+            showRunPulse(eventName, phase ? { phase } : undefined);
             queueEventStreamRefresh();
           }
         }
@@ -2267,13 +2305,14 @@ function updateRunActivity(run: RunView): void {
     failed: ['运行遇到问题', '查看错误后可以重试失败步骤或重新规划'],
     cancelled: ['运行已取消', '已保存取消前的状态和外部调用边界'],
   };
-  const [title, detail] = copy[run.status] ?? ['运行状态已更新', `当前状态：${run.status}`];
-  if (stage.textContent !== title) stage.textContent = title;
   const latest = run.events.at(-1);
+  const compacting = ['running', 'reviewing'].includes(run.status) ? compactionProgress(latest) : undefined;
+  const [title, detail] = compacting ?? copy[run.status] ?? ['运行状态已更新', `当前状态：${run.status}`];
+  if (stage.textContent !== title) stage.textContent = title;
   const anchor = run.events.find(event => ['run.created', 'run.started', 'run.planned'].includes(event.type))?.at ?? run.updatedAt;
   const elapsedMs = anchor ? Date.now() - Date.parse(anchor) : 0;
   const elapsed = Number.isFinite(elapsedMs) && elapsedMs > 0 ? formatElapsed(elapsedMs) : '';
-  const activityMeta = `${detail}${elapsed ? ` · 已${['queued', 'planning'].includes(run.status) ? '等待' : '运行'} ${elapsed}` : ''}${latest ? ` · 最新事件 ${eventLabel(latest.type)}` : ''}`;
+  const activityMeta = `${detail}${elapsed ? ` · 已${['queued', 'planning'].includes(run.status) ? '等待' : '运行'} ${elapsed}` : ''}${latest ? ` · 最新事件 ${describeEvent(latest.type, latest.data, true)}` : ''}`;
   if (meta.textContent !== activityMeta) meta.textContent = activityMeta;
   const trail = $('activity-trail');
   if (trail) {
@@ -2282,8 +2321,8 @@ function updateRunActivity(run: RunView): void {
     if (trail.dataset.signature !== trailSignature) {
       trail.replaceChildren();
       for (const event of trailEvents) {
-        const item = element('li', eventLabel(event.type));
-        item.title = `${event.type} · ${formatTime(event.at)}`;
+        const item = element('li', describeEvent(event.type, event.data));
+        item.title = `${describeEvent(event.type, event.data, true)} · ${event.type} · ${formatTime(event.at)}`;
         trail.append(item);
       }
       trail.dataset.signature = trailSignature;
@@ -2747,13 +2786,13 @@ function render(run: RunView): void {
   for (const e of timelineEvents) {
     const item = element('li', '', `timeline-item timeline-${timelineTone(e.type)}`);
     item.title = e.type;
-    item.append(element('time', formatTime(e.at)), element('strong', eventLabel(e.type)), element('small', `#${e.seq}`));
+    item.append(element('time', formatTime(e.at)), element('strong', describeEvent(e.type, e.data, true)), element('small', `#${e.seq}`));
     const details = element('details'); details.append(element('summary', '事件详情'), element('pre', JSON.stringify(e.data ?? {}, null, 2))); item.append(details);
     timeline.append(item);
   }
   const events = $('events'); events.replaceChildren();
   for (const e of run.events.slice(-60).reverse()) {
-    const item = element('li', `${new Date(e.at).toLocaleTimeString()} · ${eventLabel(e.type)}`);
+    const item = element('li', `${new Date(e.at).toLocaleTimeString()} · ${describeEvent(e.type, e.data, true)}`);
     item.title = e.type;
     const details = element('details'); details.append(element('summary', '事件详情'), element('pre', JSON.stringify(e.data ?? {}, null, 2))); item.append(details);
     events.append(item);
@@ -3060,6 +3099,7 @@ function renderPlanHistory(run: RunView): void {
 }
 
 function timelineTone(type: string): 'success' | 'failure' | 'waiting' | 'neutral' {
+  if (type.startsWith('context.summary_')) return type.endsWith('_active') ? 'neutral' : 'failure';
   if (/succeed|complete|accepted|finished|artifact|review.accepted|goal.completed/i.test(type)) return 'success';
   if (/fail|error|reject|cancel|unknown|blocked/i.test(type)) return 'failure';
   if (/wait|pause|approval|question|input|reconcile/i.test(type)) return 'waiting';

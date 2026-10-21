@@ -298,4 +298,56 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts).toHaveLength(0);
   });
+
+  it('names compaction in the run progress and refreshes memory counts without moving focus', async () => {
+    const view = fixture();
+    view.tasks[1] = { ...view.tasks[1]!, status: 'running', memory: { originals: 2, activeSummaries: 0 } };
+    const events = [
+      { seq: 1, type: 'model.started', at: date, data: { phase: 'compaction', callId: 'call_compact' } },
+      { seq: 2, type: 'context.summary_rejected', at: date, data: { taskId: 'node_report', callId: 'call_compact' } },
+      { seq: 3, type: 'context.summary_discarded', at: date, data: { taskId: 'node_report', callId: 'call_compact' } },
+      { seq: 4, type: 'context.summary_failed', at: date, data: { taskId: 'node_report', callId: 'call_compact' } },
+      { seq: 5, type: 'context.summary_active', at: date, data: { taskId: 'node_report', manifestId: 'manifest_1', version: 1, callId: 'call_compact' } },
+    ];
+    let push: ((frame: string) => void) | undefined;
+    const h = harness(view, { handler(url) {
+      if (url.includes('/events/stream')) {
+        return { ok: true, status: 200, body: new ReadableStream({ start(controller) {
+          const encoder = new TextEncoder();
+          push = frame => controller.enqueue(encoder.encode(frame));
+        } }) };
+      }
+      if (url === `/api/runs/${runId}`) return response({ ...runFixture(), status: 'running', events });
+    } });
+    start(h.fetch); await ready();
+    expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('尚未压缩');
+    clickText('查看运行', doc().querySelector('[data-task-id="task_b"]')!);
+    await vi.waitFor(() => expect(el('activity-stage').textContent).toBe('已整理任务记忆'));
+    expect(el('activity-meta').textContent).toContain('已写入压缩摘要（不是证据，不改变讨论焦点）');
+    expect(el('activity-meta').textContent).toContain('它不是证据，也不改变讨论焦点');
+    expect(el('activity-trail').textContent).toContain('压缩摘要已写入');
+    expect(el('activity-trail').querySelector('li:last-child')!.getAttribute('title')).toContain('不是证据，不改变讨论焦点');
+    expect(el('timeline').textContent).toContain('开始整理任务记忆（摘要不是证据）');
+    expect(el('timeline').textContent).toContain('压缩摘要已丢弃（不是证据）');
+    expect(el('timeline').textContent).toContain('压缩摘要未生成（不是证据）');
+    const items = [...el('timeline').querySelectorAll('li')];
+    expect(items.find(item => item.textContent?.includes('已写入压缩摘要'))?.className).toContain('timeline-neutral');
+    expect(items.find(item => item.textContent?.includes('压缩摘要未采用'))?.className).toContain('timeline-failure');
+    expect(items.find(item => item.textContent?.includes('压缩摘要已丢弃'))?.className).toContain('timeline-failure');
+    expect(el('events').textContent).toContain('压缩摘要未采用（不是证据）');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    view.tasks[1]!.memory = { originals: 3, activeSummaries: 1 };
+    view.tasks[1]!.status = 'succeeded';
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('1 份压缩摘要，3 份原文'));
+    expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).not.toContain('SECRET');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts).toHaveLength(0);
+    await vi.waitFor(() => expect(push).toBeTypeOf('function'));
+    push!(`id: 6\nevent: model.started\ndata: ${JSON.stringify({ seq: 6, type: 'model.started', data: { phase: 'compaction', callId: 'call_compact_2' } })}\n\n`);
+    await vi.waitFor(() => expect(el('run-pulse-message').textContent).toContain('开始整理任务记忆（摘要不是证据）'));
+    expect(el('run-pulse').hidden).toBe(false);
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts).toHaveLength(0);
+  });
 });
