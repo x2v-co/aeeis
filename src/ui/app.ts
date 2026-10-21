@@ -2256,7 +2256,7 @@ function render(run: RunView): void {
       const a = positions.get(dependency)!, b = positions.get(node.id)!;
       const path = document.createElementNS(svg.namespaceURI, 'path');
       path.setAttribute('d', `M${a.x+236} ${a.y+48} C${a.x+253} ${a.y+48} ${b.x-17} ${b.y+48} ${b.x} ${b.y+48}`);
-      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#5378a5'); path.setAttribute('stroke-width', '2'); svg.append(path);
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#8d6b52'); path.setAttribute('stroke-width', '1.5'); svg.append(path);
     }
     canvas.append(svg);
     for (const node of plan.nodes) {

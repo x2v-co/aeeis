@@ -1,10 +1,10 @@
 {
-  "name": "AEEIS Control Surface",
-  "description": "A light, spacious operating console for long-running agent work.",
+  "name": "AEEIS Ink Desk",
+  "description": "A warm paper operating desk for long-running agent work.",
   "tokens": {
-    "colors": {"ink":"#172033","surface":"#ffffff","page":"#f4f6f8","blue":"#315efb","cyan":"#13b8b0","amber":"#f2b84b","red":"#d65262"},
-    "radii": {"control":"9px","surface":"16px","hero":"26px"},
-    "fonts": {"ui":"Manrope","mono":"DM Mono"}
+    "colors": {"ink":"#1c1916","surface":"#fbf7f1","page":"#efe8dc","signal":"#b43322","moss":"#1f6b45","ochre":"#a16207","red":"#9f2c22"},
+    "radii": {"control":"4px","surface":"12px","hero":"12px"},
+    "fonts": {"ui":"Inter","cjk":"WenQuanYi Micro Hei","mono":"JetBrains Mono"}
   },
-  "motion": {"signature":"command center, focused run mode, agent orbit, and run activity strip","reducedMotion":"prefers-reduced-motion"}
+  "motion": {"signature":"ink desk, vermilion page rule, registration mark, and run activity strip","reducedMotion":"prefers-reduced-motion"}
 }
