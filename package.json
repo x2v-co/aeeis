@@ -14,6 +14,7 @@
     "dev": "npm run build && node --import ./scripts/load-local-env.mjs --import tsx src/server.ts",
     "demo:local": "node scripts/demo-local.mjs",
     "demo:working-memory": "node scripts/demo-working-memory-local.mjs",
+    "demo:working-memory:compaction": "npm run build && node scripts/accept-working-memory-compaction.mjs",
     "demo:full-local": "node scripts/demo-full-local.mjs",
     "smoke:local": "node scripts/smoke-local.mjs",
     "smoke:full-local": "node scripts/smoke-full-local.mjs",

@@ -81,6 +81,11 @@ function responseFor(system, input) {
     }
     return { verdict: 'accepted', summary: 'Fixture review accepted the evidence-linked artifact.', issues: [] };
   }
+  if (system.includes('task working-memory summarizer')) {
+    const sliceId = input.slices?.[0]?.id;
+    if (typeof sliceId !== 'string' || !sliceId) throw new Error('Fixture compaction response requires a supplied slice id');
+    return { items: [{ text: 'MODEL GENERATED: ALPHA-FACT-ONLY remains unverified derived context and is not evidence.', references: [sliceId] }] };
+  }
 
   if (system.includes('This Run uses the fillable-pdf/1 contract')) {
     const pdfSource = input.presentedSources?.find(source => source.format === 'pdf');
@@ -183,6 +188,14 @@ function responseFor(system, input) {
     const observation = input.observations.at(-1)?.result ?? {};
     const evidenceRefs = [observation.receiptRef, ...(observation.result?.claims ?? []).flatMap((claim) => claim.evidenceRefs ?? [])].filter(Boolean);
     return { type: 'finish', title: 'External Agent result', content: 'Completed the result using the admitted external Agent.', evidenceRefs };
+  }
+  if (String(input.goal ?? '').includes('WORKING-MEMORY-COMPACTION') && input.task?.id === 'inspect') {
+    const catalog = Array.isArray(input.sourceCatalog) ? input.sourceCatalog : [];
+    const alpha = catalog.find((item) => String(item?.title ?? '').includes('任务甲原文')) ?? catalog[0];
+    const observations = input.observations ?? [];
+    if (observations.length < 2 && alpha?.id) {
+      return { type: 'tool', tool: 'sources.read', argument: alpha.id, ...(observations.length === 1 ? { characterOffset: 1 } : {}) };
+    }
   }
   if (input.task?.id === 'inspect' && !(input.observations?.length)) {
     if (source?.id) return { type: 'tool', tool: 'sources.read', argument: source.id };
