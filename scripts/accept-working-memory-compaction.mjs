@@ -3,9 +3,9 @@
  * Offline acceptance for task-scoped compaction.
  *
  * Starts a scrubbed file-store server and the deterministic fixture model,
- * then proves one entry can compact 任务甲 without letting 任务乙 or the
- * sibling deliver node read 任务甲's original fact. No paid model, database,
- * or production token is used.
+ * then proves one entry can compact 任务甲 while 任务乙 plans and executes.
+ * 任务乙 and the sibling deliver node still cannot read 任务甲's original fact.
+ * No paid model, database, or production token is used.
  */
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -43,6 +43,8 @@ const cleanEnvironment = {
   AEEIS_MODEL_ALLOW_INSECURE_HTTP: '1',
   AEEIS_MODEL_STREAM: '0',
   AEEIS_MODEL_MAX_ATTEMPTS: '1',
+  // Hold the compaction response so 任务乙 can plan and execute while it is in flight.
+  AEEIS_FIXTURE_COMPACTION_DELAY_MS: process.env.AEEIS_FIXTURE_COMPACTION_DELAY_MS ?? '4000',
 };
 
 const children = [];
@@ -101,6 +103,20 @@ async function request(method, path, body) {
   catch { parsed = { raw: text }; }
   if (!response.ok) throw new Error(`${method} ${path} failed with HTTP ${response.status}: ${JSON.stringify(parsed).slice(0, 800)}`);
   return parsed;
+}
+
+async function untilRun(id, predicate, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  let run;
+  while (Date.now() < deadline) {
+    run = await request('GET', `/api/runs/${id}`);
+    if (predicate(run)) return run;
+    if (['failed', 'unknown', 'cancelled'].includes(run.status)) {
+      throw new Error(`Run ${id} entered ${run.status}: ${run.error ?? ''} phases=${run.calls?.map(call => call.phase).join(',')}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`Run ${id} stayed ${run?.status ?? 'missing'}; phases=${run?.calls?.map(call => `${call.phase}:${call.state}`).join(',')}`);
 }
 
 async function untilStatus(id, wanted, timeoutMs = 90_000) {
@@ -163,7 +179,29 @@ async function main() {
   let run = await untilStatus(executed.runId, ['needs_approval']);
   const plan = run.plans.at(-1);
   await request('POST', `/api/runs/${run.id}/approve`, { planHash: plan.hash, planVersion: plan.version });
-  run = await untilStatus(run.id, ['succeeded']);
+  run = await untilRun(run.id, current => current.calls.some(call => call.phase === 'compaction' && call.state === 'started'));
+  const compactionInFlight = run.calls.find(call => call.phase === 'compaction' && call.state === 'started');
+  conversation = await request('GET', `/api/conversations/${conversation.id}`);
+  assert(conversation.focusTaskId === alpha.id, '任务甲 compaction moved the entry focus');
+  const betaRun = await request('POST', `/api/conversations/${conversation.id}/messages`, {
+    text: '请只确认任务乙自己的短说明。',
+    expectedRevision: conversation.revision,
+    intent: 'execute',
+    taskIds: [beta.id],
+  });
+  let other = await untilRun(betaRun.runId, current => current.calls.some(call => call.phase === 'planner'));
+  const alphaDuringBetaPlan = await request('GET', `/api/runs/${run.id}`);
+  const compactionWhileBetaPlans = alphaDuringBetaPlan.calls.find(call => call.id === compactionInFlight.id);
+  assert(compactionWhileBetaPlans?.state === 'started', `任务乙规划时任务甲压缩已经是 ${compactionWhileBetaPlans?.state ?? 'missing'}`);
+  assert(other.calls[0].startedAt >= compactionInFlight.startedAt, '任务乙的规划早于任务甲压缩开始');
+  other = await untilStatus(other.id, ['needs_approval']);
+  const otherPlan = other.plans.at(-1);
+  await request('POST', `/api/runs/${other.id}/approve`, { planHash: otherPlan.hash, planVersion: otherPlan.version });
+  other = await untilRun(other.id, current => current.calls.some(call => call.phase === 'executor'));
+  const alphaDuringBetaExecute = await request('GET', `/api/runs/${run.id}`);
+  const compactionWhileBetaExecutes = alphaDuringBetaExecute.calls.find(call => call.id === compactionInFlight.id);
+  assert(compactionWhileBetaExecutes?.state === 'started', `任务乙执行时任务甲压缩已经是 ${compactionWhileBetaExecutes?.state ?? 'missing'}`);
+  [run, other] = await Promise.all([untilStatus(run.id, ['succeeded']), untilStatus(other.id, ['succeeded'])]);
 
   const phases = run.calls.map(call => call.phase);
   const compaction = run.calls.filter(call => call.phase === 'compaction');
@@ -191,18 +229,9 @@ async function main() {
   const sibling = await request('GET', `/api/runs/${run.id}/working-memory/search?taskId=deliver&q=${encodeURIComponent('alpha evidence detail')}`);
   assert(sibling.total === 0, `Sibling deliver node saw ${sibling.total} matches`);
 
-  conversation = (await request('GET', `/api/conversations/${conversation.id}`));
-  const betaRun = await request('POST', `/api/conversations/${conversation.id}/messages`, {
-    text: '请只确认任务乙自己的短说明。',
-    expectedRevision: conversation.revision,
-    intent: 'execute',
-    taskIds: [beta.id],
-  });
-  let other = await untilStatus(betaRun.runId, ['needs_approval']);
-  const otherPlan = other.plans.at(-1);
-  await request('POST', `/api/runs/${other.id}/approve`, { planHash: otherPlan.hash, planVersion: otherPlan.version });
-  other = await untilStatus(other.id, ['succeeded']);
   assert(!other.calls.some(call => call.phase === 'compaction'), '任务乙 was compacted by 任务甲\'s large source');
+  const betaExecutor = other.calls.find(call => call.phase === 'executor');
+  assert(betaExecutor?.startedAt < compaction[0].endedAt, '任务乙的执行没有落在任务甲压缩窗口内');
   const isolated = await request('GET', `/api/runs/${other.id}/working-memory/search?taskId=inspect&q=${encodeURIComponent('alpha evidence detail')}`);
   assert(isolated.total === 0, `任务乙 found ${isolated.total} copies of 任务甲's fact`);
   const privateNote = await request('GET', `/api/runs/${run.id}/working-memory/search?taskId=inspect&q=${encodeURIComponent('BETA-PRIVATE')}`);
@@ -216,8 +245,8 @@ async function main() {
   const entryJson = JSON.stringify(entry);
   assert(!entryJson.includes('alpha evidence detail') && !entryJson.includes('MODEL GENERATED'), '对话视图带出了摘要或原文');
 
-  console.log('CASE PASSED：任务甲完成了一次模型压缩；任务乙和 deliver 节点都没有读到 ALPHA-FACT-ONLY。');
-  console.log(JSON.stringify({ runId: run.id, phases, summary: summary.items[0].text, siblingMatches: sibling.total, otherTaskMatches: isolated.total, api }));
+  console.log('CASE PASSED：任务甲压缩期间任务乙已规划和执行；任务乙和 deliver 节点都没有读到 ALPHA-FACT-ONLY。');
+  console.log(JSON.stringify({ runId: run.id, otherRunId: other.id, phases, compaction: { startedAt: compaction[0].startedAt, endedAt: compaction[0].endedAt }, betaExecutorStartedAt: betaExecutor.startedAt, summary: summary.items[0].text, siblingMatches: sibling.total, otherTaskMatches: isolated.total, api }));
   if (process.env.AEEIS_ACCEPTANCE_HOLD === '1') {
     console.log(`Holding the fixture server at ${api}`);
     await new Promise(() => {});

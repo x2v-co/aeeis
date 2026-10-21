@@ -260,6 +260,10 @@ export function createFixtureModelServer() {
       const rawInput = messages.find((item) => item?.role === 'user')?.content ?? '{}';
       const input = JSON.parse(String(rawInput));
       const value = responseFor(system, input);
+      const compactionDelay = Number(process.env.AEEIS_FIXTURE_COMPACTION_DELAY_MS ?? 0);
+      if (system.includes('task working-memory summarizer') && Number.isFinite(compactionDelay) && compactionDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(compactionDelay, 15_000)));
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         id: `fixture-${Date.now()}`,
