@@ -83,7 +83,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; status: string }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; status: string; memory?: { originals: number; activeSummaries: number } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -844,10 +844,17 @@ function renderConversation(): void {
     for (const task of conversation?.tasks ?? []) {
       const row = element('li', '', 'conversation-task'); row.dataset.focused = String(task.id === conversation?.focusTaskId); row.dataset.taskId = task.id;
       row.append(element('strong', task.title), element('small', `运行状态：${task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)}`));
+      if (task.memory) {
+        const memoryText = task.memory.activeSummaries
+          ? `工作记忆：${task.memory.activeSummaries} 份压缩摘要，${task.memory.originals} 份原文。摘要不是证据，也不改变讨论焦点。`
+          : `工作记忆：${task.memory.originals} 份原文，尚未压缩。`;
+        row.append(element('small', memoryText, 'conversation-memory'));
+      }
       const focus = button('设为讨论焦点', async () => changeConversationFocus(task.id)); focus.type = 'button'; focus.dataset.changeFocus = task.id;
       row.append(focus);
       const runId = task.runId ?? task.latestRunId;
       if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
+      if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; row.append(memory); }
       tasks.append(row);
     }
     const messages = $('conversation-messages'); messages.replaceChildren();
@@ -976,6 +983,11 @@ async function changeConversationFocus(taskId: string | null): Promise<void> {
     if (epoch === conversationEpoch) { acceptConversation(view); $('conversation-status').textContent = '讨论焦点已更新；没有启动或切换运行。'; }
   } catch (error) { if (epoch === conversationEpoch) { conversationNeedsRefresh = error instanceof ApiError && error.status === 409; $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新对话，再明确选择焦点。' : ''}`; } }
   finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+let openMemoryForRunId = '';
+async function openConversationMemory(runId: string): Promise<void> {
+  openMemoryForRunId = runId;
+  await openConversationRun(runId);
 }
 async function openConversationRun(runId: string): Promise<void> {
   const epoch = conversationEpoch;
@@ -2461,9 +2473,11 @@ interface MemoryOriginalSummary { id?: string; originalId?: string; locator?: st
 function renderWorkingMemory(run: RunView): void {
   const panel = $('working-memory-panel'), content = $('working-memory-content');
   panel.hidden = readOnlyShare || run.canEdit !== true || !run.workingMemoryEnabled;
-  if (panel.hidden) { content.replaceChildren(); delete content.dataset.signature; return; }
+  if (panel.hidden) { content.replaceChildren(); delete content.dataset.signature; if (openMemoryForRunId === run.id) openMemoryForRunId = ''; return; }
   const signature = `${run.id}:${run.plans.at(-1)?.hash}`;
-  if (content.dataset.signature === signature) return;
+  const revealMemory = openMemoryForRunId === run.id;
+  if (revealMemory) delete content.dataset.signature;
+  if (!revealMemory && content.dataset.signature === signature) return;
   content.dataset.signature = signature; content.replaceChildren();
   const epoch = conversationEpoch, token = sessionStorage.getItem('aeeis.token');
   let sequence = 0;
@@ -2501,7 +2515,20 @@ function renderWorkingMemory(run: RunView): void {
       const index = await api<{ index: { totalOriginals: number; entries: MemoryOriginalSummary[]; more?: boolean }; summaries?: unknown[] }>(path('', {}));
       if (!valid(request)) return;
       output.append(element('p', `当前节点共有 ${index.index.totalOriginals} 份原文。${index.index.more ? '仅展示最近条目；搜索 * 可分页查看全部。' : ''}`)); entries(index.index.entries);
-      if (index.summaries?.length) { const summaries = element('details'); summaries.append(element('summary', '压缩摘要（非原文）'), element('pre', JSON.stringify(index.summaries, null, 2))); output.append(summaries); }
+      if (index.summaries?.length) {
+        const summaries = element('div', '', 'working-memory-summaries');
+        summaries.append(element('h4', '压缩摘要（不是证据，不能当执行指令）'));
+        for (const summary of index.summaries as Array<{ version?: number; items?: Array<{ text?: string; references?: string[] }> }>) {
+          const block = element('article');
+          block.append(element('small', `版本 ${summary.version ?? '?'}`));
+          for (const item of summary.items ?? []) {
+            block.append(element('p', item.text ?? ''));
+            if (item.references?.length) block.append(element('small', `引用切片：${item.references.join('、')}`));
+          }
+          summaries.append(block);
+        }
+        output.append(summaries);
+      }
       status.textContent = '索引已读取。';
     } catch (error) { if (valid(request)) status.textContent = errorMessage(error); }
   };
@@ -2521,6 +2548,13 @@ function renderWorkingMemory(run: RunView): void {
   const submit = element('button', '搜索原文'); submit.type = 'submit'; searchForm.append(submit);
   searchForm.onsubmit = event => { event.preventDefault(); void search(); };
   content.append(label, task, button('读取节点索引', loadIndex), searchForm, status, output, original);
+  if (revealMemory) {
+    openMemoryForRunId = '';
+    const details = $<HTMLDetailsElement>('working-memory-details');
+    details.open = true;
+    details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    void loadIndex();
+  }
 }
 function render(run: RunView): void {
   renderWorkingMemory(run);

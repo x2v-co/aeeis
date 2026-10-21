@@ -179,6 +179,17 @@ describe('single-entry conversation routing', () => {
     expect(JSON.stringify(runs[0]!.context)).toContain('11 元'); expect(JSON.stringify(runs[0]!.context)).not.toContain('29 元');
     expect(JSON.stringify(runs[1]!.context)).toContain('29 元'); expect(JSON.stringify(runs[1]!.context)).not.toContain('11 元');
     expect(runs.every(run => !!run.workingMemory)).toBe(true);
+    await f.repository.mutate(runs[0]!.id, run => {
+      run.workingMemory!.originals.push({ id: 'wm_original_secret', taskId: 'inspect', planVersion: 1, planHash: 'hash', phase: 'executor', locator: 'observations/0', capturedAtEventSeq: 1, text: 'SECRET ORIGINAL FACT', contentHash: 'abc', evidenceRefs: [], accessHash: 'def' });
+      run.workingMemory!.summaries.push(
+        { version: 1, manifestId: 'wm_manifest_a', callId: 'call_a', status: 'active', items: [{ text: 'SECRET SUMMARY TEXT', references: ['wm_slice_a'] }], contentHash: 'ghi' },
+        { version: 2, manifestId: 'wm_manifest_b', callId: 'call_b', status: 'rejected', items: [], contentHash: 'jkl' },
+      );
+    });
+    const projected = await f.fresh(entry.id);
+    expect(projected.tasks.find(task => task.latestRunId === runs[0]!.id)?.memory).toEqual({ originals: 1, activeSummaries: 1 });
+    expect(projected.tasks.find(task => task.latestRunId === runs[1]!.id)?.memory).toBeUndefined();
+    expect(JSON.stringify(projected)).not.toContain('SECRET');
     expect(f.notify).toHaveBeenCalledTimes(2); expect(f.model.complete).not.toHaveBeenCalled();
     expect(JSON.stringify(results[0]!.json().conversation)).not.toContain('"request"');
     expect((await f.post(entry.id, { text: '再执行一次', taskIds: a.message.route.taskIds, expectedRevision: 0, intent: 'execute' })).statusCode).toBe(409);

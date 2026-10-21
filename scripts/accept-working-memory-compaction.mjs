@@ -208,11 +208,23 @@ async function main() {
   const privateNote = await request('GET', `/api/runs/${run.id}/working-memory/search?taskId=inspect&q=${encodeURIComponent('BETA-PRIVATE')}`);
   assert(privateNote.total === 0, '任务甲 search returned 任务乙\'s private note');
 
+  const entry = await request('GET', `/api/conversations/${conversation.id}`);
+  const alphaTask = entry.tasks.find(task => task.id === alpha.id);
+  const betaTask = entry.tasks.find(task => task.id === beta.id);
+  assert(alphaTask.memory?.activeSummaries >= 1 && alphaTask.memory.originals >= 1, '任务甲的入口卡片没有记忆计数');
+  assert(!betaTask.memory || betaTask.memory.activeSummaries === 0, '任务乙的入口卡片显示了压缩摘要');
+  const entryJson = JSON.stringify(entry);
+  assert(!entryJson.includes('alpha evidence detail') && !entryJson.includes('MODEL GENERATED'), '对话视图带出了摘要或原文');
+
   console.log('CASE PASSED：任务甲完成了一次模型压缩；任务乙和 deliver 节点都没有读到 ALPHA-FACT-ONLY。');
-  console.log(JSON.stringify({ runId: run.id, phases, summary: summary.items[0].text, siblingMatches: sibling.total, otherTaskMatches: isolated.total }));
+  console.log(JSON.stringify({ runId: run.id, phases, summary: summary.items[0].text, siblingMatches: sibling.total, otherTaskMatches: isolated.total, api }));
+  if (process.env.AEEIS_ACCEPTANCE_HOLD === '1') {
+    console.log(`Holding the fixture server at ${api}`);
+    await new Promise(() => {});
+  }
 }
 
-main().then(() => shutdown(0)).catch(error => {
+main().then(() => { if (process.env.AEEIS_ACCEPTANCE_HOLD !== '1') return shutdown(0); }).catch(error => {
   console.error(error instanceof Error ? error.stack : error);
   return shutdown(1);
 });

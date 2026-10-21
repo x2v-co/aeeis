@@ -40,6 +40,15 @@ function mentionsTitle(text: string, title: string): boolean {
   return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'iu').test(folded);
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
+/** Counts only. Summary text and originals stay on the owner memory API. */
+function taskMemory(run: { workingMemory?: { originals: readonly unknown[]; summaries: readonly { status: string }[] } } | undefined): { originals: number; activeSummaries: number } | undefined {
+  const memory = run?.workingMemory;
+  if (!memory) return;
+  const activeSummaries = memory.summaries.filter(summary => summary.status === 'active').length;
+  const originals = memory.originals.length;
+  if (!activeSummaries && !originals) return;
+  return { originals, activeSummaries };
+}
 function effectiveTasks(conversation: Conversation, message: ConversationMessage): string[] {
   return conversation.messages.slice().reverse().find(item => item.correctsMessageId === message.id)?.route.taskIds ?? message.route.taskIds;
 }
@@ -105,7 +114,8 @@ export class ConversationService {
   private async view(conversation: Conversation, scope: Ownership) {
     const tasks = await Promise.all(conversation.tasks.map(async task => {
       const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
-      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}) };
+      const memory = taskMemory(run);
+      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}) };
     }));
     return redactRunData({ ...conversation, tasks, messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
   }

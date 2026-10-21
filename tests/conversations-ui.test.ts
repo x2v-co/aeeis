@@ -259,6 +259,26 @@ describe('single-entry conversation workbench', () => {
     expect(dom.window.getComputedStyle(el('quick-run')).display).not.toBe('none');
   });
 
+  it('shows memory counts on the task card and opens readable summaries without moving focus', async () => {
+    const view = fixture();
+    view.tasks[1] = { ...view.tasks[1]!, memory: { originals: 2, activeSummaries: 1 } };
+    const h = harness(view, { handler(url) {
+      if (url.includes('/working-memory?')) return response({ index: { totalOriginals: 2, entries: [] }, summaries: [{ version: 1, items: [{ text: '<script>SECRET SUMMARY</script>', references: ['wm_slice_one'] }] }] });
+    } });
+    start(h.fetch); await ready();
+    const card = doc().querySelector<HTMLElement>('[data-task-id="task_b"]')!;
+    expect(card.textContent).toContain('1 份压缩摘要，2 份原文');
+    expect(card.textContent).not.toContain('SECRET');
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('工作记忆');
+    clickText('查看任务记忆', card);
+    await vi.waitFor(() => expect(el('working-memory-content').textContent).toContain('<script>SECRET SUMMARY</script>'));
+    expect(el<HTMLDetailsElement>('working-memory-details').open).toBe(true);
+    expect(el('working-memory-content').textContent).toContain('引用切片：wm_slice_one');
+    expect(doc().querySelector('#working-memory-content script')).toBeNull();
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts).toHaveLength(0);
+  });
+
   it('reads memory by Run plan node, searches and paginates original text without changing focus', async () => {
     const h = harness(undefined, { handler(url) {
       if (url.includes('/working-memory/original')) return response({ originalId: 'original_one', text: '<script>untrusted page</script>', page: { characterOffset: url.includes('offset=1800') ? 1800 : 0, totalChars: 2000, nextCharacterOffset: url.includes('offset=1800') ? null : 1800 } });
