@@ -24,7 +24,8 @@ const schema = z.object({
   focusTaskId: identifier.optional(), recentTaskIds: z.array(identifier).max(100),
   tasks: z.array(z.object({
     id: identifier, threadId: z.string().regex(new RegExp(`^thread_${uuid}$`)), title: z.string(),
-    createdAt: timestamp, latestRunId: runId.optional(), pendingMessageId: identifier.optional(),
+    createdAt: timestamp, priority: z.number().int().min(1).max(100).optional(),
+    latestRunId: runId.optional(), pendingMessageId: identifier.optional(),
   }).strict()).max(100),
   messages: z.array(z.object({
     id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']),
@@ -57,6 +58,7 @@ function validate(value: Conversation): void {
   assert(schema.safeParse(value).success, 'Invalid conversation state or capacity exceeded (100 tasks / 1000 messages)');
   assert(unique(value.tasks.map(task => task.id)), 'Duplicate conversation task ID');
   assert(unique(value.tasks.map(task => task.threadId)), 'Duplicate conversation thread ID');
+  assert(unique(value.tasks.flatMap(task => task.priority === undefined ? [] : [String(task.priority)])), 'Duplicate task priority');
   assert(unique(value.messages.map(message => message.id)), 'Duplicate conversation message ID');
   assert(unique(value.messages.map(message => message.keyHash)), 'Duplicate conversation message key');
   const tasks = new Set(value.tasks.map(task => task.id));

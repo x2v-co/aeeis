@@ -842,16 +842,20 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 .conversation-panel > select { max-width: 440px; }
 .conversation-focus-row { margin: 14px 0; padding: 12px 0; border-block: 1px solid var(--line); }
 .conversation-focus-row strong { flex: 1 1 240px; font-size: 14px; overflow-wrap: anywhere; }
-.conversation-layout { display: grid; grid-template-columns: minmax(190px, .75fr) minmax(0, 2fr); gap: 24px; }
-.conversation-task-pane { min-width: 0; border-right: 1px solid var(--line); padding-right: 20px; }
-.conversation-task-pane h3 { margin: 0 0 12px; font-size: 13px; }
+.conversation-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.conversation-task-pane { min-width: 0; }
+.conversation-task-pane h3 { margin: 0 0 8px; font-size: 13px; }
+.task-dashboard { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.task-dashboard-table { width: 100%; min-width: 680px; border-collapse: collapse; }
+.task-dashboard-table th, .task-dashboard-table td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+.task-dashboard-table th { position: sticky; top: 0; background: var(--surface); font-size: 12px; color: #756f60; }
 .conversation-tasks, .conversation-messages { list-style: none; padding: 0; margin: 0; }
-.conversation-task { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-.conversation-task:first-child { padding-top: 0; }
-.conversation-task strong, .conversation-task small { display: block; margin-bottom: 6px; }
-.conversation-task small { font-size: 12px; }
-.conversation-task button { margin: 4px 6px 0 0; font-size: 12px; }
-.conversation-task[data-focused="true"] > strong::before { content: "讨论焦点 · "; color: var(--blue-deep); }
+.conversation-task { overflow-wrap: anywhere; }
+.conversation-task strong, .conversation-task small { display: block; }
+.conversation-task small { margin-top: 4px; font-size: 12px; }
+.conversation-task button { margin: 0 6px 6px 0; font-size: 12px; }
+.conversation-task[data-focused="true"] td:nth-child(2) > strong::before { content: "讨论焦点 · "; color: var(--blue-deep); }
+.conversation-plan { max-width: 42ch; }
 .conversation-discussion { min-width: 0; }
 .conversation-messages { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .conversation-message { padding: 12px 0; border-bottom: 1px solid var(--line); }
@@ -875,8 +879,15 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 @media (max-width: 780px) {
   body.conversation-mode #command-center { padding: 16px 12px; }
   .conversation-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .conversation-task-pane { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 12px; }
-  .conversation-tasks { max-height: 220px; overflow-y: auto; }
+  .conversation-task-pane { border-bottom: 1px solid var(--line); padding: 0 0 12px; }
+  .task-dashboard { max-height: none; overflow: visible; }
+  .task-dashboard-table, .task-dashboard-table tbody, .task-dashboard-table tr, .task-dashboard-table td { display: block; width: 100%; min-width: 0; }
+  .task-dashboard-table thead { display: none; }
+  .task-dashboard-table tr { padding: 12px; border-bottom: 1px solid var(--line); }
+  .task-dashboard-table td { border: 0; padding: 0 0 6px; }
+  .task-dashboard-table td:first-child::before { content: "优先级 "; color: #756f60; font-size: 12px; }
+  .task-dashboard-table td:nth-child(3)::before { content: "执行状态 "; color: #756f60; font-size: 12px; }
+  .conversation-task button { margin-bottom: 8px; }
   .conversation-actions button { flex: 1 1 160px; }
   .conversation-panel button { min-height: 44px; }
 }

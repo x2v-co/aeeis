@@ -167,6 +167,7 @@ for (const [name, factory] of Object.entries(factories)) describe(`${name} conve
       v => { const item = message(); item.route.taskIds = ['missing']; v.messages.push(item); },
       v => { const item = message(); item.route.candidateTaskIds = ['missing']; v.messages.push(item); },
       v => { const item = message(); item.replyTo = item.id; v.messages.push(item); },
+      v => { v.tasks[0]!.priority = 1; v.tasks[1]!.priority = 1; },
       v => { v.tasks[1]!.pendingMessageId = v.messages[0]!.id; },
       v => { v.tasks[0]!.pendingMessageId = 'missing'; },
       v => { (v.messages[0]!.execution as any).state = 'cancelled'; },

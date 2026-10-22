@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { Conversation, ConversationMessage, ConversationRoute, ConversationStore, ConversationTask } from '../conversations.js';
+import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationStore, type ConversationTask } from '../conversations.js';
 import type { Ownership } from '../security/principal.js';
 import { requestSchema } from '../runtime/contracts.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
@@ -41,6 +41,12 @@ function mentionsTitle(text: string, title: string): boolean {
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
 /** Counts only. Summary text and originals stay on the owner memory API. */
+function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: number; hash: string; summary: string }>; approval?: { approved?: boolean; planHash?: string } } | undefined): { planVersion: number; planHash: string; summary: string } | undefined {
+  if (!run || run.status !== 'needs_approval' || run.approval?.approved) return;
+  const plan = run.plans.at(-1);
+  if (!plan || run.approval?.planHash !== plan.hash) return;
+  return { planVersion: plan.version, planHash: plan.hash, summary: plan.summary.slice(0, 240) };
+}
 function taskMemory(run: { workingMemory?: { originals: readonly unknown[]; summaries: readonly { status: string }[] } } | undefined): { originals: number; activeSummaries: number } | undefined {
   const memory = run?.workingMemory;
   if (!memory) return;
@@ -115,7 +121,8 @@ export class ConversationService {
     const tasks = await Promise.all(conversation.tasks.map(async task => {
       const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
       const memory = taskMemory(run);
-      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}) };
+      const approval = pendingApproval(run);
+      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}) };
     }));
     return redactRunData({ ...conversation, tasks, messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
   }
@@ -131,6 +138,23 @@ export class ConversationService {
       if (body.taskId !== null && !current.tasks.some(task => task.id === body.taskId)) throw new NotFound('Unknown task');
       if (body.taskId === null) delete current.focusTaskId;
       else this.setFocus(current, body.taskId);
+    });
+    return this.view(updated, scope);
+  }
+  async priority(id: string, taskId: string, input: unknown, scope: Ownership) {
+    const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
+    const updated = await this.store.mutate(id, scope, current => {
+      if (current.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再调整优先级');
+      if (!current.tasks.some(task => task.id === taskId)) throw new NotFound('Unknown task');
+      const ordered = conversationTaskOrder(current.tasks);
+      const index = ordered.findIndex(task => task.id === taskId);
+      const swap = body.direction === 'higher' ? index - 1 : index + 1;
+      if (swap < 0 || swap >= ordered.length) throw new Conflict('这项任务的优先级已经到头');
+      const next = ordered.slice();
+      const moving = next[index]!;
+      next[index] = next[swap]!;
+      next[swap] = moving;
+      next.forEach((task, rank) => { task.priority = rank + 1; });
     });
     return this.view(updated, scope);
   }

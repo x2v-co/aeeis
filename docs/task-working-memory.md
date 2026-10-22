@@ -61,6 +61,7 @@ Implemented as an opt-in v1 for new Runs (`workingMemory: { enabled: true }`). O
 - Run-scoped task working memory with immutable originals, compaction manifests/summaries, bounded `context.search`/`context.read`, live authorization fingerprints and owner-only diagnostics.
 - Ordinary owner/share/debug Run projections omit raw working memory, compaction payloads and context-read results while retaining normal planner/executor/reviewer request diagnostics. The public Run response exposes only `workingMemoryEnabled`.
 - Browser workbench support: task/focus display, discussion-only default, explicit Run creation, ambiguity choices, reply/correction actions, recovery of uncertain submissions and working-memory inspection.
+- Entry task dashboard: one row per task with manual priority, execution status, memory counts, and quick approval of the current plan. Priority changes only the table order. Approval uses the existing Run command and does not move discussion focus.
 
 ### Automated verification
 
@@ -91,6 +92,8 @@ npm run demo:working-memory:compaction
 It keeps the entry focus on `任务甲` while a note names `任务乙`, then executes only `任务甲` with an explicit task id. The fixture reads one large `任务甲原文` source twice, so the older page is summarized by a `compaction` model call before the next executor request. The fixture holds that compaction response open, and the acceptance starts `任务乙` in that window: `任务乙` plans and begins an executor call while `任务甲`'s compaction call is still `started`. The acceptance requires an `active` summary whose reference is a supplied slice id, a readable original that still contains the fact, **0 matches** from the sibling `deliver` node, and **0 matches** from `任务乙`'s own Run. `任务乙` itself is not compacted. The public Run projection keeps the compaction call's phase and usage, and omits its `modelRequest` and `rawOutput`. The entry task card shows only the original and active-summary counts. Summary text stays on the owner memory panel, where each item is rendered as untrusted text with its slice reference.
 
 While the workbench tab is visible, the run refresh that follows execution events reloads those counts. Opening the run, a summary event, or a terminal event does not move the discussion focus. A compaction call is labeled in the run progress as task-memory organization: an active summary is not classified as evidence, and rejected, discarded, or failed summaries stay visible as non-evidence outcomes.
+
+The same entry shows a task dashboard. Each row is one entry task: its manual priority, title, latest Run status, and memory counts. Tasks without a stored priority stay in creation order after tasks that have one. Raising or lowering a task swaps it with the neighbor and writes a dense rank; that write does not change discussion focus, start or stop a Run, or call the model. A row waiting for approval shows a plan-summary preview and can submit the current plan version and hash through the existing Run approval command, without changing budgets or focus. A changed plan is rejected. The preview is not evidence. Plan node instructions and compaction originals stay out of the conversation JSON.
 
 ### Review fixes retained on this branch
 

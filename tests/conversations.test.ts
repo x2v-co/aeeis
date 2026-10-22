@@ -249,7 +249,7 @@ describe('single-entry conversation routing', () => {
     const f = await fixture(), entry = await f.create(); await f.addTask(entry.id, '私有任务');
     for (const token of ['bob', 'elsewhere', 'agent']) {
       const headers = { authorization: `Bearer ${token}`, 'idempotency-key': 'guess' };
-      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/notifications/sync', {}]] as const) {
+      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/tasks/task_missing/priority', { expectedRevision: 0, direction: 'higher' }], ['POST', '/notifications/sync', {}]] as const) {
         const response = await f.app.inject({ method, url: `/api/conversations/${entry.id}${path}`, headers, ...(payload ? { payload } : {}) });
         expect(response.statusCode).toBe(token === 'agent' ? 403 : 404); expect(response.body).not.toContain('私有任务');
       }
@@ -316,5 +316,50 @@ describe('single-entry conversation routing', () => {
     for (const extra of [{ owner: 'bob' }, { tenantId: 'other' }, { runId: 'run_fake' }]) expect((await f.post(entry.id, { text: 'hello', expectedRevision: 0, ...extra })).statusCode).toBe(400);
     expect((await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/messages`, headers: f.headers, payload: { text: 'hello', expectedRevision: 0 } })).statusCode).toBe(400);
     expect((await f.fresh(entry.id)).messages).toHaveLength(0);
+  });
+  it('reorders task priority without moving focus or starting work, and exposes the current plan for quick approval', async () => {
+    const f = await fixture(), entry = await f.create();
+    const a = await f.addTask(entry.id, '任务甲');
+    const b = await f.addTask(entry.id, '任务乙');
+    const aId = a.message.route.taskIds[0] as string, bId = b.message.route.taskIds[0] as string;
+    const focus = b.conversation.focusTaskId;
+    const raise = await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/tasks/${bId}/priority`, headers: f.headers, payload: { expectedRevision: b.conversation.revision, direction: 'higher' } });
+    expect(raise.statusCode, raise.body).toBe(200);
+    const raised = raise.json();
+    expect(raised.focusTaskId).toBe(focus);
+    expect(raised.tasks.map((task: { id: string }) => task.id)).toEqual([aId, bId]);
+    expect(raised.tasks.find((task: { id: string }) => task.id === bId).priority).toBe(1);
+    expect(raised.tasks.find((task: { id: string }) => task.id === aId).priority).toBe(2);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    expect(await f.repository.list()).toHaveLength(0);
+    expect((await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/tasks/${bId}/priority`, headers: f.headers, payload: { expectedRevision: raised.revision, direction: 'higher' } })).statusCode).toBe(409);
+    expect((await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/tasks/${aId}/priority`, headers: f.headers, payload: { expectedRevision: b.conversation.revision, direction: 'lower' } })).statusCode).toBe(409);
+    const current = await f.fresh(entry.id);
+    expect(current.focusTaskId).toBe(focus);
+    expect(current.tasks.find((task: { id: string }) => task.id === bId).priority).toBe(1);
+    const lowered = await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/tasks/${bId}/priority`, headers: f.headers, payload: { expectedRevision: current.revision, direction: 'lower' } });
+    expect(lowered.statusCode, lowered.body).toBe(200);
+    expect(lowered.json().tasks.find((task: { id: string }) => task.id === aId).priority).toBe(1);
+    expect(lowered.json().focusTaskId).toBe(focus);
+    expect((await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/tasks/missing/priority`, headers: f.headers, payload: { expectedRevision: lowered.json().revision, direction: 'lower' } })).statusCode).toBe(404);
+
+    const started = await f.post(entry.id, { text: '执行任务甲', taskIds: [aId], expectedRevision: lowered.json().revision, intent: 'execute' });
+    expect(started.statusCode, started.body).toBe(202);
+    await f.engine.advance(started.json().runId);
+    const waiting = await f.fresh(entry.id);
+    const task = waiting.tasks.find((item: { id: string; pendingApproval?: { planHash: string; planVersion: number; summary: string }; status: string }) => item.id === aId);
+    expect(task.status).toBe('needs_approval');
+    expect(task.pendingApproval).toMatchObject({ planVersion: 1, summary: 'Work' });
+    expect(task.pendingApproval.planHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(waiting)).not.toContain('Complete task');
+    expect(waiting.focusTaskId).toBe(focus);
+    const approved = await f.app.inject({ method: 'POST', url: `/api/runs/${started.json().runId}/approve`, headers: f.headers, payload: { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion } });
+    expect(approved.statusCode, approved.body).toBe(200);
+    const after = await f.fresh(entry.id);
+    expect(after.focusTaskId).toBe(focus);
+    const approvedTask = after.tasks.find((item: { id: string }) => item.id === aId);
+    expect(approvedTask.pendingApproval).toBeUndefined();
+    expect(approvedTask.status).not.toBe('needs_approval');
+    expect(f.notify).toHaveBeenCalled();
   });
 });

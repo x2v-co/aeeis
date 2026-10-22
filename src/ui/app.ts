@@ -1,4 +1,5 @@
 import type { PlanComparison } from '../runtime/graphs.js';
+import { conversationTaskOrder } from '../conversations.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
@@ -83,7 +84,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; status: string; memory?: { originals: number; activeSummaries: number } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -791,6 +792,11 @@ function message(text: string): void {
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag); el.textContent = text; el.className = className; return el;
 }
+function dashboardButton(label: string, action: () => Promise<void>): HTMLButtonElement {
+  const control = element('button', label); control.type = 'button';
+  control.addEventListener('click', () => { if (!control.disabled) void action(); });
+  return control;
+}
 function button(label: string, action: () => Promise<void>): HTMLButtonElement {
   const b = element('button', label);
   b.onclick = () => {
@@ -852,7 +858,9 @@ function updateConversationControls(): void {
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  $('conversation-tasks').querySelectorAll<HTMLButtonElement>('button[data-change-focus]').forEach(control => { control.disabled = locked; });
+  $('conversation-tasks').querySelectorAll<HTMLButtonElement>('button[data-change-focus], button[data-priority], button[data-approve]').forEach(control => {
+    control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
+  });
 }
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
@@ -876,23 +884,44 @@ function renderConversation(): void {
       const option = element('option', text); option.value = value!; target.append(option);
     }
     target.value = [...target.options].some(option => option.value === previousTarget) ? previousTarget : '';
-    const tasks = $('conversation-tasks'); tasks.replaceChildren();
-    for (const task of conversation?.tasks ?? []) {
-      const row = element('li', '', 'conversation-task'); row.dataset.focused = String(task.id === conversation?.focusTaskId); row.dataset.taskId = task.id;
-      row.append(element('strong', task.title), element('small', `运行状态：${task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)}`));
+    const taskBody = $('conversation-tasks').querySelector('tbody');
+    taskBody?.replaceChildren();
+    const ordered = conversationTaskOrder(conversation?.tasks ?? []);
+    ordered.forEach((task, index) => {
+      const row = document.createElement('tr'); row.className = 'conversation-task'; row.dataset.focused = String(task.id === conversation?.focusTaskId); row.dataset.taskId = task.id;
+      const rank = document.createElement('td'); rank.append(element('strong', String(index + 1)));
+      const name = document.createElement('td'); name.append(element('strong', task.title));
       if (task.memory) {
         const memoryText = task.memory.activeSummaries
           ? `工作记忆：${task.memory.activeSummaries} 份压缩摘要，${task.memory.originals} 份原文。摘要不是证据，也不改变讨论焦点。`
           : `工作记忆：${task.memory.originals} 份原文，尚未压缩。`;
-        row.append(element('small', memoryText, 'conversation-memory'));
+        name.append(element('small', memoryText, 'conversation-memory'));
       }
+      if (task.pendingApproval) {
+        const preview = element('small', `待批计划：${task.pendingApproval.summary}`, 'conversation-plan');
+        preview.title = task.pendingApproval.summary;
+        name.append(preview);
+      }
+      const status = document.createElement('td');
+      status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
+      const actions = document.createElement('td');
+      const raise = dashboardButton('提高优先级', () => changeConversationPriority(task.id, 'higher'));
+      raise.dataset.priority = 'higher'; raise.dataset.boundary = String(index === 0); raise.title = index === 0 ? '已经是最高优先级' : '把这项任务提前一位';
+      const lower = dashboardButton('降低优先级', () => changeConversationPriority(task.id, 'lower'));
+      lower.dataset.priority = 'lower'; lower.dataset.boundary = String(index === ordered.length - 1); lower.title = index === ordered.length - 1 ? '已经是最低优先级' : '把这项任务后移一位';
       const focus = button('设为讨论焦点', async () => changeConversationFocus(task.id)); focus.type = 'button'; focus.dataset.changeFocus = task.id;
-      row.append(focus);
+      actions.append(raise, lower, focus);
       const runId = task.runId ?? task.latestRunId;
-      if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
-      if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; row.append(memory); }
-      tasks.append(row);
-    }
+      if (runId && task.pendingApproval) {
+        const approve = dashboardButton('批准并执行', () => approveConversationTask(task));
+        approve.dataset.approve = task.id; approve.className = 'decision-primary';
+        actions.append(approve);
+      }
+      if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; actions.append(view); }
+      if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; actions.append(memory); }
+      row.append(rank, name, status, actions); taskBody?.append(row);
+    });
+    $('conversation-tasks').hidden = ordered.length === 0;
     const messages = $('conversation-messages'); messages.replaceChildren();
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
@@ -987,8 +1016,8 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
     $('conversation-error').textContent = `无法读取对话：${errorMessage(error)}。请重新连接。`; renderConversation();
   }
 }
-async function refreshConversation(sync = false): Promise<void> {
-  if (!conversationEnabled || !conversation || conversationRefreshing || conversationBusy) return;
+async function refreshConversation(sync = false, force = false): Promise<void> {
+  if (!conversationEnabled || !conversation || conversationRefreshing || (!force && conversationBusy)) return;
   const epoch = conversationEpoch, id = conversation.id;
   conversationRefreshing = true; updateConversationControls();
   try {
@@ -1009,6 +1038,43 @@ function prepareConversationReply(item: ConversationMessageView): void {
   $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
   $('conversation-reply-label').textContent = `回复：${item.text.slice(0, 160)}`;
   updateConversationControls(); $<HTMLTextAreaElement>('conversation-text').focus();
+}
+async function changeConversationPriority(taskId: string, direction: 'higher' | 'lower'): Promise<void> {
+  if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}/priority`, { expectedRevision: conversation.revision, direction });
+    if (epoch === conversationEpoch) {
+      acceptConversation(view);
+      $('conversation-status').textContent = '任务优先级已更新。讨论焦点和运行状态都没有改变。';
+      if (conversation?.focusTaskId !== focus) $('conversation-error').textContent = '优先级更新后讨论焦点发生变化，请刷新核对。';
+    }
+  } catch (error) {
+    if (epoch === conversationEpoch) {
+      conversationNeedsRefresh = error instanceof ApiError && error.status === 409 && /刷新/.test(errorMessage(error));
+      $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新对话，再调整优先级。' : ''}`;
+    }
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function approveConversationTask(task: ConversationTaskView): Promise<void> {
+  if (!conversation || !task.runId || !task.pendingApproval || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/approve`, { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
+    if (conversation?.id === id && conversation.focusTaskId !== focus) $('conversation-error').textContent = '批准后讨论焦点发生变化，请刷新核对。';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 async function changeConversationFocus(taskId: string | null): Promise<void> {
   if (!conversation || conversationBusy || conversationAttempt) return;

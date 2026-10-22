@@ -350,4 +350,53 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts).toHaveLength(0);
   });
+
+  it('reorders the task dashboard and approves the visible plan without moving focus', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId, pendingApproval: { planVersion: 1, planHash: 'plan-hash', summary: '<img src=x onerror=alert(1)>发布计划' } };
+    const h = harness(view, { handler(url, request) {
+      if (url.includes('/priority')) {
+        const id = url.split('/tasks/')[1]?.split('/')[0];
+        const body = JSON.parse(request.body);
+        const ordered = view.tasks.map((task, index) => ({ task, index })).sort((left, right) => (left.task.priority ?? Number.POSITIVE_INFINITY) - (right.task.priority ?? Number.POSITIVE_INFINITY) || left.index - right.index).map(item => item.task);
+        const index = ordered.findIndex(task => task.id === id);
+        const swap = body.direction === 'higher' ? index - 1 : index + 1;
+        if (swap < 0 || swap >= ordered.length) return response({ error: '这项任务的优先级已经到头' }, 409);
+        const next = ordered.slice();
+        const moving = next[index]!; next[index] = next[swap]!; next[swap] = moving;
+        next.forEach((task, rank) => { task.priority = rank + 1; });
+        view.revision++;
+        return response(view);
+      }
+      if (url.endsWith('/approve')) {
+        const body = JSON.parse(request.body);
+        if (body.planHash !== 'plan-hash' || body.planVersion !== 1) return response({ error: '计划已更新，请刷新后批准最新版本' }, 409);
+        view.tasks[0]!.status = 'running';
+        delete view.tasks[0]!.pendingApproval;
+        view.revision++;
+        return response({ id: runId, status: 'running' });
+      }
+    } });
+    start(h.fetch); await ready();
+    const ids = () => [...doc().querySelectorAll<HTMLElement>('#conversation-tasks [data-task-id]')].map(row => row.dataset.taskId);
+    expect(ids()).toEqual(['task_a', 'task_b']);
+    expect(doc().querySelector<HTMLButtonElement>('[data-task-id="task_a"] [data-priority="higher"]')!.disabled).toBe(true);
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('待批计划：<img src=x onerror=alert(1)>发布计划');
+    expect(doc().querySelector('#conversation-tasks img, #conversation-tasks script')).toBeNull();
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('待批准');
+    clickText('提高优先级', doc().querySelector('[data-task-id="task_b"]')!);
+    await vi.waitFor(() => expect(ids()).toEqual(['task_b', 'task_a']));
+    expect(h.posts.at(-1)?.body).toEqual({ expectedRevision: 1, direction: 'higher' });
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/messages'))).toBe(false);
+    await vi.waitFor(() => expect(doc().querySelector<HTMLButtonElement>('[data-task-id="task_a"] [data-approve]')!.disabled).toBe(false));
+    clickText('批准并执行', doc().querySelector('[data-task-id="task_a"]')!);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/approve'))?.body).toEqual({ planHash: 'plan-hash', planVersion: 1 });
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('批准并执行');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(el('conversation-status').textContent).toContain('讨论焦点没有改变');
+    expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
+  });
 });
