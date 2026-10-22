@@ -1642,6 +1642,7 @@ export function buildApp(options: Options) {
   app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request))));
   app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request)));
   app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/standing', async request => conversationService().setStanding(request.params.id, request.body, conversationScope(request)));
   app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
     const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request));
     // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.

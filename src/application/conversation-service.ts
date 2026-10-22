@@ -16,6 +16,10 @@ import { redactRunData } from '../runtime/run-debug.js';
 import { ThreadService } from './thread-service.js';
 
 const idSchema = z.string().min(1).max(100);
+const standingSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  text: z.string().max(5000).transform(value => value.trim()).refine(value => value.length <= 500, '这句话最多 500 字'),
+}).strict();
 const messageSchema = z.object({
   text: z.string().trim().min(1).max(7000),
   expectedRevision: z.number().int().nonnegative(),
@@ -171,6 +175,15 @@ export class ConversationService {
     });
     return this.view(updated, scope);
   }
+  async setStanding(id: string, input: unknown, scope: Ownership) {
+    const body = standingSchema.parse(input);
+    const updated = await this.store.mutate(id, scope, current => {
+      if (current.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再改这句话');
+      if (body.text) current.standingInstruction = body.text;
+      else delete current.standingInstruction;
+    });
+    return this.view(updated, scope);
+  }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
@@ -253,10 +266,18 @@ export class ConversationService {
         }
         const options = body.runOptions ?? {};
         const materials = [...(body.runOptions?.materials ?? [])];
-        if (selectedNotes.length) {
-          if (materials.length >= 20) throw new Conflict('Leave one material slot for task discussion history');
-          materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
+        const standing = current.standingInstruction?.trim() ?? '';
+        const history = selectedNotes.length > 0;
+        const reserved = (history ? 1 : 0) + (standing ? 1 : 0);
+        if (materials.length + reserved > 20) {
+          throw new Conflict(history && standing
+            ? 'Leave material slots for the standing instruction and task discussion history'
+            : standing
+              ? 'Leave one material slot for the standing instruction'
+              : 'Leave one material slot for task discussion history');
         }
+        if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
+        if (history) materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
         const request = requestSchema.parse({ ...options, goal: `任务：${task.title}\n当前请求：${body.text}`, materials, workingMemory: { enabled: true } });
         const runId = followupRunId(task.threadId, followupHash(message.id), scope);
         message.execution = { taskId: task.id, runId, ...(parent ? { parentRunId: parent.id } : {}), request, state: 'pending' };

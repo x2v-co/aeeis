@@ -92,7 +92,7 @@ interface ConversationMessageView {
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
 }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string }
 interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
@@ -148,6 +148,7 @@ let conversationReplyId: string | undefined;
 let conversationCorrectionId: string | undefined;
 let conversationAttempt: ConversationAttempt | undefined;
 let conversationRenderSignature = '';
+let standingBoundId = '';
 const CONVERSATION_SELECTION = 'aeeis.conversation';
 const CONVERSATION_SCOPE = 'aeeis.conversation-scope';
 const CONVERSATION_PENDING = 'aeeis.conversation-pending';
@@ -908,6 +909,26 @@ function updateConversationControls(): void {
     }
   }
   syncEntrySurface();
+  syncStandingInstruction();
+}
+function syncStandingInstruction(): void {
+  const section = $('standing-instruction');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  section.hidden = !life;
+  const field = $<HTMLTextAreaElement>('standing-text');
+  const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life;
+  const nextId = conversation?.id ?? '';
+  if (field) {
+    const focused = document.activeElement === field;
+    if (!conversation || nextId !== standingBoundId || !focused) {
+      field.value = conversation?.standingInstruction ?? '';
+      standingBoundId = nextId;
+    }
+    field.disabled = locked;
+  }
+  $<HTMLButtonElement>('standing-save').disabled = locked;
+  $<HTMLButtonElement>('standing-clear').disabled = locked || !conversation?.standingInstruction;
 }
 function usingDemoBots(): boolean {
   return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
@@ -1919,6 +1940,37 @@ async function openConversationRun(runId: string): Promise<void> {
   $('run-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   $('run-title').focus({ preventScroll: true });
 }
+async function saveStandingInstruction(text: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  if (!conversation || conversationBusy || conversationAttempt) return;
+  const trimmed = text.trim();
+  if (trimmed.length > 500) {
+    $('conversation-error').textContent = '这句话最多 500 字。';
+    return;
+  }
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/standing`, { expectedRevision: conversation.revision, text: trimmed });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    const field = $<HTMLTextAreaElement>('standing-text');
+    if (field) field.value = view.standingInstruction ?? '';
+    standingBoundId = view.id;
+    $('conversation-status').textContent = trimmed ? '已记住这句话。讨论不会改它。下一次明确创建 Run 时，它会作为不可信材料带进去。' : '已忘掉这句话。之后的 Run 不再带上它。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再改这句话。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
 async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
   const surface = rosterView();
   if (surface !== 'entry' && surface !== 'bot') return;
@@ -1963,6 +2015,13 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('standing-form')?.addEventListener('submit', event => {
+  event.preventDefault();
+  void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
+$('standing-clear')?.addEventListener('click', () => {
+  void saveStandingInstruction('').catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('execution-review')?.addEventListener('change', () => {
   localStorage.setItem('aeeis.execution-review', executionReviewValue());
