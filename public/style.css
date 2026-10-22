@@ -849,7 +849,8 @@ body.gb #runs button.roster-row {
 }
 body.gb #runs button.roster-row:hover,
 body.gb #runs button.roster-row.selected { border: 0; background: #fff; }
-body.gb button.roster-row.is-busy { color: inherit !important; }
+body.gb button.roster-row.is-busy,
+body.gb button.group-row.is-busy { color: inherit !important; }
 body.gb button.roster-row.is-busy::after { display: none; }
 body.gb .roster-avatar {
   position: relative;
@@ -1076,9 +1077,11 @@ body.gb.thread-page #gb-computer-toggle { display: none !important; }
   body.gb .gb-bar { gap: 8px; padding: 8px 10px; }
   body.gb .gb-bar .badge { display: none; }
   body.gb #gb-computer-toggle { padding: 6px 8px; font-size: 12px; }
-  body.gb:not(.run-open):not(.draft-open) .gb-stage { display: none; }
+  body.gb:not(.run-open):not(.draft-open):not(.group-open):not(.group-draft) .gb-stage { display: none; }
   body.gb.run-open:not(.roster-focus) .gb-roster,
-  body.gb.draft-open:not(.roster-focus) .gb-roster { display: none; }
+  body.gb.draft-open:not(.roster-focus) .gb-roster,
+  body.gb.group-open:not(.roster-focus) .gb-roster,
+  body.gb.group-draft:not(.roster-focus) .gb-roster { display: none; }
   body.gb.roster-focus .gb-stage { display: none; }
   body.gb #gb-computer:not([hidden]) {
     position: fixed;
@@ -1094,3 +1097,94 @@ body.gb.thread-page #gb-computer-toggle { display: none !important; }
   body.gb .roster-avatar::after,
   body.gb #gb-presence::before { animation: none !important; }
 }
+body.gb #group-queue {
+  flex: none;
+  max-height: 34%;
+  margin: 0;
+  padding: 8px 8px 10px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+body.gb #group-queue .queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+body.gb #group-queue h2 { margin: 4px 8px; color: var(--muted); font-size: 12px; }
+body.gb #gb-new-group {
+  height: 26px;
+  padding: 0 8px;
+  border-color: var(--line);
+  color: var(--ink);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+body.gb #groups { display: flex; flex-direction: column; gap: 2px; }
+body.gb #groups button.group-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  box-shadow: none;
+}
+body.gb #groups button.group-row:hover,
+body.gb #groups button.group-row.selected { background: #fff; }
+body.gb #groups-empty { margin: 4px 8px 8px; }
+body.gb #group-draft,
+body.gb #group-panel,
+body.gb #group-composer { display: none; }
+body.gb.group-draft #group-draft,
+body.gb.group-open #group-panel,
+body.gb.group-open #group-composer { display: block; }
+body.gb.group-open #quick-run,
+body.gb.group-open .command-tools,
+body.gb.minimal-mode.group-open #configuration,
+body.gb.group-open #configuration,
+body.gb.group-open #config-action,
+body.gb.group-draft #quick-run,
+body.gb.group-draft .command-tools,
+body.gb.minimal-mode.group-draft #configuration,
+body.gb.group-draft #configuration,
+body.gb.group-draft #config-action,
+body.gb.group-open #empty,
+body.gb.group-open #detail,
+body.gb.group-draft #empty,
+body.gb.group-draft #detail { display: none !important; }
+body.gb.group-draft .gb-composer { display: none; }
+body.gb #group-draft { max-width: 640px; }
+body.gb #group-draft h2 { margin: 8px 0 8px; font-size: 22px; letter-spacing: -.03em; }
+body.gb #group-draft p { max-width: 58ch; }
+body.gb #group-create { display: grid; gap: 8px; margin-top: 16px; }
+body.gb #group-create > button {
+  justify-self: start;
+  width: auto;
+  min-width: 112px;
+  height: 36px;
+  color: #fff;
+  background: var(--ink);
+  border-color: var(--ink);
+}
+body.gb #group-create label { font-size: 12px; color: var(--muted); }
+body.gb .group-person-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+body.gb .group-person-row label { grid-column: 1 / -1; }
+body.gb .group-candidate,
+body.gb .group-person { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; }
+body.gb .group-person button { margin-left: auto; }
+body.gb .group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+body.gb #group-members { margin: 0; }
+body.gb #group-transcript { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+body.gb .group-message { display: grid; gap: 4px; max-width: 680px; }
+body.gb .group-message header { display: flex; gap: 8px; align-items: baseline; }
+body.gb .group-message strong { font-size: 12px; }
+body.gb .group-message small { color: var(--muted); font-size: 11px; }
+body.gb .group-message p { margin: 0; padding: 10px 12px; border-radius: 12px; background: #f4f4f5; white-space: pre-wrap; overflow-wrap: anywhere; }
+body.gb #group-composer { position: relative; }
+body.gb .group-mentions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+body.gb .group-mentions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 12px; }
+body.gb #group-send-note { margin: 8px 0 0; }

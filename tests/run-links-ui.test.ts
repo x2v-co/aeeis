@@ -40,6 +40,32 @@ function start(path: string, fetch: any) {
   dom.window.eval(source);
 }
 const response = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
+describe('group chat', () => {
+  it('opens a draft from the roster and refuses a group that is only AEEIS', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/rooms') && init?.method === 'POST') return response({ id: 'room_created', title: '发布协作', status: 'active', createdAt: run.createdAt, updatedAt: run.updatedAt });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
+    dom.window.document.getElementById('gb-new-group')!.click();
+    await vi.waitFor(() => expect(dom.window.document.body.classList.contains('group-draft')).toBe(true));
+    const doc = dom.window.document;
+    expect(doc.getElementById('group-draft')?.hidden).toBe(false);
+    expect(doc.getElementById('detail')?.hidden).toBe(true);
+    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 6');
+    (doc.getElementById('group-title') as HTMLInputElement).value = '发布协作';
+    (doc.getElementById('group-create') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('至少'));
+    expect(fetch.mock.calls.some(call => String(call[0]) === '/api/rooms' && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
+  });
+});
 describe('run link workbench', () => {
   it('renders filled PDF fields, unknowns, evidence and a PDF download in the actual workbench', async () => {
     const run = fixture(), output = await fillPdf(formSource, profile);
