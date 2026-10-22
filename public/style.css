@@ -781,15 +781,6 @@ body.gb .gb-brand .muted { display: none; }
 body.gb .gb-brand h1 { margin: 0; font-size: 16px; letter-spacing: -.03em; }
 body.gb .gb-brand .brand-mark { width: 28px; height: 28px; margin: 0; font-size: 13px; }
 body.gb .brand-mark::after { display: none; }
-body.gb #gb-new-chat {
-  margin: 0 12px 10px;
-  height: 32px;
-  border-color: var(--line);
-  color: var(--ink);
-  background: #fff;
-  font-weight: 500;
-}
-body.gb #gb-new-chat:hover { border-color: var(--ink); background: #fff; color: var(--ink); }
 body.gb .bot-block { padding: 14px 8px 4px; }
 body.gb #gb-bot {
   display: grid;

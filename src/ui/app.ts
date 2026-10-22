@@ -564,7 +564,7 @@ function showRoster(): void {
   document.body.classList.add('roster-focus');
   document.body.classList.remove('draft-open');
 }
-function showEntry(options?: { resetDraft?: boolean }): void {
+function showEntry(): void {
   entryEpoch += 1;
   leaveGroup();
   stopRunEventStream();
@@ -576,13 +576,6 @@ function showEntry(options?: { resetDraft?: boolean }): void {
   setCurrentRunOpen(false);
   if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
   setIntentPresetsOpen(true);
-  if (options?.resetDraft) {
-    const quickGoal = $<HTMLInputElement>('quick-goal');
-    if (quickGoal) quickGoal.value = '';
-    const goal = $<HTMLTextAreaElement>('goal');
-    if (goal) goal.value = '';
-    quickGoal?.focus();
-  }
   renderRunQueue(runSummaries);
 }
 document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
@@ -608,7 +601,6 @@ document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(butt
   else setComputerOpen(true, 'setup');
 });
 ($('gb-computer-close') as HTMLButtonElement | null)?.addEventListener('click', () => closeComputer());
-($('gb-new-chat') as HTMLButtonElement | null)?.addEventListener('click', () => showEntry({ resetDraft: true }));
 ($('gb-new-group') as HTMLButtonElement | null)?.addEventListener('click', () => showGroupDraft());
 ($('group-add-person') as HTMLButtonElement | null)?.addEventListener('click', () => addDraftPerson());
 ($('group-person') as HTMLInputElement | null)?.addEventListener('keydown', event => {

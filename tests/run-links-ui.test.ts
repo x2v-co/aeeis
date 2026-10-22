@@ -67,7 +67,7 @@ describe('group chat', () => {
   });
 });
 describe('entry', () => {
-  it('returns 新对话 to the entry and keeps the task in the roster', async () => {
+  it('returns to the entry when the Bot is selected and keeps the task in the roster', async () => {
     const run = fixture();
     const fetch = vi.fn(async (url: string) => {
       if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
@@ -82,9 +82,8 @@ describe('entry', () => {
     await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
     const draft = dom.window.document.getElementById('quick-goal') as HTMLInputElement;
     draft.value = '先别发出去';
+    expect(dom.window.document.getElementById('gb-new-chat')).toBeNull();
     dom.window.document.getElementById('gb-bot')!.click();
-    expect(draft.value).toBe('先别发出去');
-    dom.window.document.getElementById('gb-new-chat')!.click();
     const doc = dom.window.document;
     expect(doc.getElementById('detail')?.hidden).toBe(true);
     expect(doc.getElementById('empty')?.hidden).toBe(false);
@@ -92,7 +91,7 @@ describe('entry', () => {
     expect(doc.getElementById('gb-title')?.textContent).toBe('AEEIS');
     expect(doc.getElementById('gb-presence')?.textContent).toContain('任务都还在跑');
     expect(doc.getElementById('runs')?.textContent).toContain(run.goal);
-    expect((doc.getElementById('quick-goal') as HTMLInputElement).value).toBe('');
+    expect(draft.value).toBe('先别发出去');
     expect(doc.defaultView!.localStorage.getItem('aeeis.run')).toBeNull();
   });
 });

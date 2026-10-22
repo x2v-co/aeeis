@@ -99,7 +99,7 @@ Black reads. Status colors stay small and only on state.
 
 ## Layout
 
-The sidebar is one Bot, AEEIS, with its tasks indented underneath. “新对话” returns to that entry and clears the draft. It does not stop a task. Clicking the Bot returns to the same entry and keeps a draft already typed. A group sits below the tasks: AEEIS is always in it, plus one to five admitted external agents or members, six people at most. The transcript shows the entry, the execution of the task you opened, or that shared Room. Opening a group does not stop a task. Approvals, logins, and secrets stay in the one-to-one conversation. The composer accepts one message; Enter sends. In a group, `@` names who owns the next step. “打开它的工作台” reveals the shared computer. Closing it leaves the conversation in place. Below 860px the sidebar and the conversation swap places. Share and thread pages stay transcript-only.
+The sidebar is one Bot, AEEIS, with its tasks indented underneath. Clicking the Bot returns to that entry and keeps a draft already typed. It does not stop a task. A group sits below the tasks: AEEIS is always in it, plus one to five admitted external agents or members, six people at most. The transcript shows the entry, the execution of the task you opened, or that shared Room. Opening a group does not stop a task. Approvals, logins, and secrets stay in the one-to-one conversation. The composer accepts one message; Enter sends. In a group, `@` names who owns the next step. “打开它的工作台” reveals the shared computer. Closing it leaves the conversation in place. Below 860px the sidebar and the conversation swap places. Share and thread pages stay transcript-only.
 
 ## Elevation & Depth
 
