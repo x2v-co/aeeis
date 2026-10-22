@@ -1,6 +1,6 @@
 export interface ReviewPlan {
   version: number; hash: string; summary: string;
-  author?: { type: 'user' | 'model' };
+  author?: { type: 'user' | 'model' | 'policy' };
   nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[] }>;
 }
 export interface PlanReviewRun {
@@ -37,7 +37,7 @@ export function planReview(run: PlanReviewRun, submit: Submit, writable: boolean
   const error = el('p'); error.setAttribute('role', 'alert');
   const history = el('details'); history.append(el('summary', `计划版本历史 · ${run.plans.length} 个版本`));
   run.plans.forEach((version, index) => {
-    const item = el('details'); item.append(el('summary', `v${version.version} · ${version.author?.type === 'user' ? '用户编辑' : '模型规划'} · ${version.summary}`));
+    const item = el('details'); item.append(el('summary', `v${version.version} · ${version.author?.type === 'user' ? '用户编辑' : version.author?.type === 'policy' ? '直接执行' : '模型规划'} · ${version.summary}`));
     const before = run.plans[index - 1];
     if (before) {
       if (before.summary !== version.summary) item.append(el('p', `计划摘要：${before.summary} → ${version.summary}`));

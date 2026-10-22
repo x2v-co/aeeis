@@ -150,7 +150,7 @@ describe('single-entry conversation workbench', () => {
     fill('conversation-focus-effect', 'switch'); fill('materials', '资料 <script>unsafe</script>'); fill('allowed-tools', 'read'); fill('model-budget-tokens', '1200');
     el('conversation-execute').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { executionReview: 'required', allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { executionReview: 'required', planning: 'dag', allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goal');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goalId');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('taskExecution');
@@ -171,10 +171,25 @@ describe('single-entry conversation workbench', () => {
     fill('conversation-text', '现在执行');
     el('conversation-execute').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
-    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', runOptions: { executionReview: 'yolo' } });
+    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', runOptions: { executionReview: 'yolo', planning: 'direct' } });
+    expect(el('conversation-execution-note').textContent).toContain('直接执行');
     await vi.waitFor(() => expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo'));
     expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
     dom.window.localStorage.removeItem('aeeis.execution-review');
+  });
+
+  it('switches the next explicit run to a task graph when the request leaves the read-only boundary', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    fill('conversation-text', '今天天气怎么样');
+    expect(el('conversation-execution-note').textContent).toContain('先出任务图');
+    expect(el('conversation-execution-note').textContent).toContain('实时数据');
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(false));
+    el('conversation-execute').click();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', runOptions: { planning: 'dag' } });
+    fill('allowed-tools', '');
+    fill('conversation-text', '读这张纸条');
+    expect(el('conversation-execution-note').textContent).toContain('直接执行');
   });
 
   it('blocks execution of nonterminal tasks but still accepts discussion', async () => {

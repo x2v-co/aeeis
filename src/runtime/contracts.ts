@@ -82,6 +82,8 @@ export const requestSchema = z.object({
   privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
   /** Plan-review gate chosen by the owner when this Run is created. Missing means required. */
   executionReview: z.enum(['required', 'auto', 'yolo']).optional(),
+  /** Who proposes the first plan. Missing means the planner. `direct` is admitted only for one read-only deliverable. */
+  planning: z.enum(['direct', 'dag']).optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -364,7 +366,7 @@ export interface AgentRun {
   agentProgress?: Array<{ idempotencyKey: string; progress: AgentProgressEvent }>;
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown; disposition?: 'isolated'; isolatedCost?: { tokens?: number | undefined; money?: number | undefined; currency?: string | undefined } }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string;
-    author?: { type: 'user' | 'model'; actor?: string; provenanceRef?: string };
+    author?: { type: 'user' | 'model' | 'policy'; actor?: string; provenanceRef?: string };
     /** Number of model calls already reserved when this revision was proposed. */
     modelCallOffset?: number;
   }>;
@@ -379,6 +381,8 @@ export interface AgentRun {
   corrections?: RunCorrection[];
   /** Frozen at creation. Missing means every plan waits for the owner. */
   executionReview?: 'required' | 'auto' | 'yolo';
+  /** Frozen at creation. Missing means the planner proposes the task graph. */
+  planning?: 'direct' | 'dag';
   approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;

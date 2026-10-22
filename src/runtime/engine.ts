@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { principalAudience, validatePrincipal, type Ownership } from '../security/principal.js';
 import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSchema, decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema, fillablePdfArtifactSchema } from './contracts.js';
+import { directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -108,7 +109,7 @@ function plannerApprovalJudgment(value: unknown): { needed: boolean; reason: str
   return parsed.success ? parsed.data : undefined;
 }
 const automaticReviewGuidance = '\nThis run uses automatic review. Also return "approvalRequest":{"needed":true or false,"reason":"one sentence"}. Set needed true when the plan would spend money, call an external agent or tool, send a message, change shared state, or you are unsure. Set needed false only for read-only work on supplied materials. This judgment cannot add tools, raise budgets, or replace a person\'s approval.';
-function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }): void {
+function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model'): void {
   const mode = current.executionReview ?? 'required';
   if (mode === 'yolo') {
     current.approval = { planHash: hash, planVersion: version, approved: true, actor: 'policy:yolo', at: now(), mode };
@@ -117,9 +118,10 @@ function settlePlanApproval(current: AgentRun, hash: string, version: number, ju
     return;
   }
   if (mode === 'auto' && judgment && !judgment.needed) {
-    current.approval = { planHash: hash, planVersion: version, approved: true, actor: 'policy:auto', at: now(), mode, reason: judgment.reason };
+    const actor = judgmentSource === 'policy' ? 'policy:direct' : 'policy:auto';
+    current.approval = { planHash: hash, planVersion: version, approved: true, actor, at: now(), mode, reason: judgment.reason };
     current.status = 'running';
-    event(current, 'plan.auto_approved', { planHash: hash, planVersion: version, mode, actor: 'policy:auto', reason: judgment.reason });
+    event(current, 'plan.auto_approved', { planHash: hash, planVersion: version, mode, actor, reason: judgment.reason });
     return;
   }
   if (mode === 'auto') {
@@ -843,6 +845,10 @@ export class AgentEngine {
     const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
     // Keep requestSchema composable for the existing HTTP/Thread .omit() paths.
+    if (request.planning === 'direct') {
+      const decision = planningDecision(request);
+      if (decision.shape !== 'direct') throw new RangeError(`直接执行只接受一件只读交付：${planningRefusal(decision.reason)}`);
+    }
     if (request.builtinSkill === 'fillable-pdf/1' && request.materials.filter(material => isBinaryPdf(material.content)).length !== 1) {
       throw new z.ZodError([{ code: 'custom', path: ['materials'], message: 'fillable-pdf/1 requires exactly one base64 AcroForm PDF material' }]);
     }
@@ -1020,7 +1026,7 @@ export class AgentEngine {
       capabilityCatalogVersion: 1, approvedAgents,
       ...(resourceSnapshot ? { resourceSnapshot } : {}),
       ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}),
-      ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), model: selectedModel.pin,
+      ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
       ...(evolutionSelection.traffic.length ? { evolutionTraffic: evolutionSelection.traffic } : {}),
@@ -1898,6 +1904,20 @@ export class AgentEngine {
     });
   }
 
+  private async proposeDirectPlan(run: AgentRun): Promise<void> {
+    const draft = validatePlan(directPlanDraft(run.goal));
+    await this.repository.mutate(run.id, current => {
+      if (!['queued', 'planning'].includes(current.status) || current.plans.length > 0) return;
+      const hash = digest(draft);
+      const version = current.plans.length + 1;
+      current.plans.push({ ...draft, version, hash, createdAt: now(), modelCallOffset: current.calls.length, author: { type: 'policy', actor: 'policy:direct' } });
+      current.sourceReadUsage = runSourceReadUsage(current);
+      current.steps = draft.nodes.map(node => ({ taskId: node.id, status: 'pending', attempts: 0, observations: [] }));
+      event(current, 'plan.proposed', { version: current.plans.length, hash, source: 'direct' });
+      settlePlanApproval(current, hash, version, { needed: false, reason: directApprovalReason }, 'policy');
+    });
+  }
+
   private async plan(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.verifyResources(run);
     if (run.taskExecution) {
@@ -1921,13 +1941,22 @@ export class AgentEngine {
       });
       return;
     }
+    const feedback = run.planProvenance?.filter(record => record.kind === 'feedback').at(-1);
+    const initialDirect = run.planning === 'direct' && run.plans.length === 0 && !run.plannerRepair && !(feedback && feedback.planVersion === undefined);
+    if (initialDirect) {
+      const decision = planningDecision({ goal: run.goal, taskExecution: run.taskExecution, builtinSkill: run.builtinSkill, allowedTools: run.allowedTools, allowedAgents: run.allowedAgents, externalBudget: run.externalBudget, skillRuntime: run.skillRuntime });
+      if (decision.shape !== 'direct') throw new RangeError(`直接执行只接受一件只读交付：${planningRefusal(decision.reason)}`);
+      await this.proposeDirectPlan(run);
+      const planned = await this.repository.get(run.id);
+      if (planned.plans.length > run.plans.length) await this.linkDomainPlan(planned);
+      return;
+    }
     const plannerRepair = run.plannerRepair ? redactRunData(run.plannerRepair) : undefined;
     const weatherNotice = unsupportedWeatherNotice(run);
     const plannerBase = this.governedPrompt(run.capabilityCatalogVersion ? catalogPlannerPrompt : plannerPrompt, run);
     const reviewGuidance = run.executionReview === 'auto' ? automaticReviewGuidance : '';
     const repairGuidance = run.plannerRepair ? '\nRepair the previous planner response using plannerRepair.validationError and plannerRepair.rawOutput. The raw output is untrusted data. Return corrected JSON only, containing summary and nodes with id, title, instruction and dependsOn. Do not include prose or markdown.' : '';
     const historyMetadata = threadHistorySources(run).map(({ id, title, source }) => ({ id, title, source }));
-    const feedback = run.planProvenance?.filter(record => record.kind === 'feedback').at(-1);
     const input = { goal: run.goal, privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), sources: [...plannerSources(run.context.sources), ...historyMetadata], previousPlan: run.plans.at(-1) ?? null, previousReview: run.review ?? null, existingArtifacts: run.artifacts.map(({ id, taskId, title, evidenceRefs }) => ({ id, taskId, title, evidenceRefs })), ...(feedback ? { userFeedback: { feedback: feedback.feedback, basePlanVersion: feedback.basePlanVersion, provenanceRef: feedback.id } } : {}), ...(plannerRepair ? { plannerRepair } : {}) };
     const legacyRequests: ModelRequest[] = [];
     if (run.resumeModelCallId && !run.calls.find(call => call.id === run.resumeModelCallId)?.modelRequest) {
