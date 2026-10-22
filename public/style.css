@@ -983,7 +983,7 @@ body.gb #empty {
   align-content: end;
 }
 body.gb #empty h2 { max-width: none; font-size: 22px !important; font-weight: 600 !important; letter-spacing: -.03em; }
-body.gb #empty::after { content: "点开一项任务只查看这次执行，其他任务继续。"; margin-top: 12px; }
+body.gb #empty::after { content: none; }
 body.gb #thread-panel,
 body.gb #detail,
 body.gb #run-workspace { border: 0 !important; background: transparent !important; box-shadow: none !important; }
