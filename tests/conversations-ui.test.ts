@@ -26,6 +26,14 @@ function runFixture() {
 }
 function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; handler?: (url: string, options: any) => any } = {}) {
   const posts: Array<{ url: string; body: any; key: string; raw: string }> = [];
+  const lives = new Map<string, any>();
+  const conversationFor = (requestUrl: string) => {
+    const match = String(requestUrl).match(/\/api\/conversations\/([^/?]+)/);
+    if (!match) return undefined;
+    const id = decodeURIComponent(match[1] ?? '');
+    if (id === view.id) return view;
+    return lives.get(id);
+  };
   let principal = 'owner';
   const fetch = vi.fn(async (url: string, request: any) => {
     if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
@@ -33,27 +41,51 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (custom !== undefined) return custom;
     if (url === '/api/status') return response({ modelConfigured: options.model ?? true, runner: 'fixture', mode: 'single-owner-local', principal, tenantId: 'local', conversationRouting: options.enabled ?? true });
     if (url === '/api/tools') return response({ tools: [], defaultAllowedTools: [] });
-    if (url === '/api/conversations') return response(request.method === 'POST' ? view : [view]);
-    if (url.endsWith('/notifications/sync')) {
-      if (!view.messages.some(item => item.id === 'notice')) view.messages.push({ id: 'notice', role: 'notification', text: '周报已完成', createdAt: date, notificationRunId: runId, route: { status: 'routed', reason: 'explicit', taskIds: ['task_b'], candidateTaskIds: [], focusEffect: 'keep' } });
-      view.revision++; return response(view);
-    }
-    if (url.endsWith('/focus')) { const body = JSON.parse(request.body); view.focusTaskId = body.taskId ?? undefined; view.revision++; return response(view); }
-    if (url.endsWith('/messages')) {
+    if (url === '/api/conversations' && request.method === 'POST') {
       const body = JSON.parse(request.body);
-      const replied = view.messages.find(item => item.id === body.replyTo);
-      const created = body.newTask ? { id: `task_new_${view.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${view.tasks.length}`, status: 'discussion' } : undefined;
-      if (created) {
-        view.tasks.push(created);
-        if (body.focus === 'switch') view.focusTaskId = created.id;
+      if (body?.agentId) {
+        const known = [view, ...lives.values()].find(item => item.agentId === body.agentId);
+        if (known) return response(known);
+        if (body.claimId) {
+          const claimed = body.claimId === view.id ? view : lives.get(body.claimId);
+          if (!claimed) return response({ error: 'Unknown conversation' }, 404);
+          if (claimed.agentId && claimed.agentId !== body.agentId) return response({ error: '这条对话已经属于另一个人' }, 409);
+          claimed.agentId = body.agentId;
+          return response(claimed);
+        }
+        const created = { id: `conv_life_${lives.size + 1}`, title: body.title || body.agentId, revision: 0, agentId: body.agentId, tasks: [] as any[], messages: [] as any[], hasEarlierMessages: false };
+        lives.set(created.id, created);
+        return response(created);
       }
-      const route = { status: 'routed', reason: created ? 'new-task' : body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: created ? [created.id] : body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [view.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
-      const message = { id: `message_${view.messages.length}`, role: 'user', text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
-      if (body.correctsMessageId) view.messages.find(item => item.id === body.correctsMessageId).effectiveTaskIds = body.taskIds;
-      view.messages.push(message); view.revision++;
-      return response({ conversation: view, message, response: body.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。' : body.intent === 'execute' ? '已创建执行，仍需计划审批。' : '已记录讨论，未触发执行。', ...(body.intent === 'execute' ? { runId } : {}) });
+      return response(view);
     }
-    if (url === `/api/conversations/${view.id}`) return response(view);
+    if (url === '/api/conversations') return response([view, ...lives.values()]);
+    if (url.endsWith('/notifications/sync')) {
+      const target = conversationFor(url) ?? view;
+      if (!target.messages.some((item: { id: string }) => item.id === 'notice')) target.messages.push({ id: 'notice', role: 'notification', text: '周报已完成', createdAt: date, notificationRunId: runId, route: { status: 'routed', reason: 'explicit', taskIds: ['task_b'], candidateTaskIds: [], focusEffect: 'keep' } });
+      target.revision++; return response(target);
+    }
+    if (url.endsWith('/focus')) { const target = conversationFor(url) ?? view; const body = JSON.parse(request.body); target.focusTaskId = body.taskId ?? undefined; target.revision++; return response(target); }
+    if (url.endsWith('/messages')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      const replied = target.messages.find((item: { id: string }) => item.id === body.replyTo);
+      const created = body.newTask ? { id: `task_new_${target.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${target.tasks.length}`, status: 'discussion' } : undefined;
+      if (created) {
+        target.tasks.push(created);
+        if (body.focus === 'switch') target.focusTaskId = created.id;
+      }
+      const route = { status: 'routed', reason: created ? 'new-task' : body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: created ? [created.id] : body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [target.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
+      const message = { id: `message_${target.messages.length}`, role: 'user', text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
+      if (body.correctsMessageId) target.messages.find((item: { id: string }) => item.id === body.correctsMessageId).effectiveTaskIds = body.taskIds;
+      target.messages.push(message); target.revision++;
+      return response({ conversation: target, message, response: body.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。' : body.intent === 'execute' ? '已创建执行，仍需计划审批。' : '已记录讨论，未触发执行。', ...(body.intent === 'execute' ? { runId } : {}) });
+    }
+    if (/^\/api\/conversations\/[^/]+$/.test(url)) {
+      const target = conversationFor(url);
+      if (target) return response(target);
+    }
     if (url === `/api/runs/${runId}`) return response(runFixture());
     if (url.endsWith('/graphs')) return response({ execution: { nodes: [], edges: [] }, evidence: { nodes: [], edges: [] } });
     if (url.endsWith('/explanation')) return response({ schemaVersion: 'run-explanation/1', run: { id: runId, status: 'succeeded', privacy: 'internal', updatedAt: date }, attention: { kind: 'none', nextAction: 'done', blockers: [] }, plan: { tasks: { total: 1, pending: 0, running: 0, succeeded: 1 }, readyTaskIds: [], pendingTaskIds: [] }, execution: { eventCount: 0, modelCalls: { total: 0, started: 0, completed: 0, failed: 0, unknown: 0, discarded: 0 }, tools: { total: 0, completed: 0, failed: 0, unknown: 0 }, delegations: { total: 0, completed: 0, failed: 0, unknown: 0 } }, evidence: { sourceCount: 0, artifactCount: 0, receiptCount: 0, evidenceNodeCount: 0, memoryRefs: [] }, governance: { tools: [], agents: [] }, budget: {} });
@@ -491,7 +523,7 @@ describe('single-entry conversation workbench', () => {
 });
 
 describe('entry bots and group chats', () => {
-  it('shows demo bots in groups and keeps execution on AEEIS', async () => {
+  it('opens a roster bot on that person\'s life thread and keeps the Run explicit', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
@@ -515,22 +547,28 @@ describe('entry bots and group chats', () => {
     expect(bots.textContent).toContain('工作');
     expect(bots.textContent).toContain('研究');
     expect(bots.textContent).toContain('纪要');
-    expect(bots.textContent).toContain('开始对话');
+    expect(bots.textContent).toContain('在');
+    expect(bots.textContent).toContain('2 件事');
+    expect(bots.textContent).not.toContain('开始对话');
     const draft = el<HTMLTextAreaElement>('conversation-text');
     draft.value = '先别发出去';
     doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
+    await vi.waitFor(() => {
+      expect(el('entry-title').textContent).toBe('发布');
+      expect(el('conversation-tasks').textContent ?? '').not.toContain('发布方案');
+    });
     expect(el('bot-note-title').textContent).toBe('发布');
-    expect(el('bot-note-copy').textContent).toContain('不会单独执行');
-    expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(true);
-    expect(el('conversation-focus').textContent).toContain('发布方案');
-    expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
-    expect(draft.value).toBe('先别发出去');
-    await vi.waitFor(() => expect(el('group-panel').hidden).toBe(false));
-    expect(h.posts.find(post => post.url === '/api/rooms')?.body).toMatchObject({ title: '发布', description: '私聊' });
-    expect(h.posts.find(post => post.url.endsWith('/members'))?.body).toEqual({ principalId: 'demo.release', role: 'agent' });
-    expect(el('chat-note').textContent).toContain('单独对话');
-    expect(el('entry-title').textContent).toBe('发布');
-    expect(el('entry-presence').textContent).toBe('私聊');
+    expect(el('bot-note-copy').textContent).toContain('不会自己回复');
+    expect(el('bot-note-copy').textContent).toContain('明确创建 Run');
+    expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
+    expect(el('conversation-send').textContent).toBe('发送讨论');
+    expect(el('conversation-focus').textContent).not.toContain('发布方案');
+    expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs') || post.url === '/api/rooms')).toBe(false);
+    expect(h.posts.find(post => post.url === '/api/conversations')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
+    expect(JSON.stringify(h.posts)).not.toContain('先别发出去');
+    expect(draft.value).toBe('');
+    expect(el('entry-presence').textContent).toBe('在');
+    expect(el('group-panel').hidden).toBe(true);
     const postsBeforeComputer = h.posts.length;
     el('entry-computer').click();
     expect(doc().body.classList.contains('computer-open')).toBe(true);
@@ -539,7 +577,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts).toHaveLength(postsBeforeComputer);
     el('entry-computer').click();
     expect(doc().body.classList.contains('computer-open')).toBe(false);
-    expect(el('bots').textContent).toContain('私聊');
+    expect(el('bots').textContent).not.toContain('私聊');
     expect(el('groups').textContent ?? '').not.toContain('发布');
     (el<HTMLInputElement>('bot-group-name')).value = '值班';
     el<HTMLFormElement>('bot-group-draft').requestSubmit();
@@ -548,11 +586,13 @@ describe('entry bots and group chats', () => {
     const heading = [...doc().querySelectorAll('.bot-group-label')].find(item => item.textContent?.startsWith('值班'));
     expect(heading?.nextElementSibling?.textContent).toContain('发布');
     el('gb-bot').click();
+    await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
     expect(el('bot-note').hidden).toBe(true);
     expect(el<HTMLButtonElement>('conversation-send').textContent).toBe('发送讨论');
-    expect(draft.value).toBe('先别发出去');
-    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(draft.value).toBe('');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
+    expect(h.posts.find(post => post.body?.claimId)?.body).toEqual({ title: 'AEEIS', agentId: 'aeeis', claimId: h.view.id });
+    expect(h.posts.some(post => post.url === '/api/rooms')).toBe(false);
   });
 
   it('replaces the demo roster when an agent is admitted', async () => {
@@ -578,6 +618,8 @@ describe('entry bots and group chats', () => {
     ];
     const events: Array<{ id: string; operation: string; actorType: string; actorId: string; content: string; createdAt: string }> = [];
     const calls: Array<{ url: string; method: string; body: any }> = [];
+    const membersByRoom = new Map<string, Array<{ id: string; roomId: string; principalId: string; role: string; status: string; invitedBy: string; createdAt: string; updatedAt: string }>>();
+    const roomIdOf = (requestUrl: string) => decodeURIComponent(String(requestUrl).match(/\/rooms\/([^/?]+)/)?.[1] ?? '');
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
@@ -588,13 +630,18 @@ describe('entry bots and group chats', () => {
         return response(room ?? {});
       }
       if (url === '/api/rooms' && method === 'POST') {
-        const room = { id: 'room_group', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        const room = { id: body.description === '私聊' ? 'room_direct' : 'room_group', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
         rooms.unshift(room);
         return response(room);
       }
       if (url === '/api/rooms?limit=50') return response(rooms);
-      if (String(url).endsWith('/members') && method === 'POST') return response({ id: 'member_1', roomId: 'room_group', principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
-      if (String(url).endsWith('/members')) return response([]);
+      if (String(url).endsWith('/members') && method === 'POST') {
+        const roomId = roomIdOf(String(url));
+        const member = { id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
+        membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
+        return response(member);
+      }
+      if (String(url).endsWith('/members')) return response(membersByRoom.get(roomIdOf(String(url))) ?? []);
       if (String(url).endsWith('/goals') && method === 'GET') return response([]);
       if (String(url).endsWith('/goals') && method === 'POST') return response({ id: 'goal_group', title: body.title, status: 'active', createdAt: date, roomId: body.roomId });
       if (String(url).includes('/context-manifests')) return response({ id: 'ctx_group' });
@@ -637,6 +684,18 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
+    await vi.waitFor(() => expect(el('group-members').textContent).toContain('member.editor'));
+    clickText('member.editor', el('group-members'));
+    await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('私聊'));
+    expect(el('entry-title').textContent).toBe('member.editor');
+    expect(el('chat-note').textContent).toContain('会话记录');
+    expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(true);
+    expect(calls.find(call => call.url === '/api/rooms' && call.method === 'POST' && call.body?.description === '私聊')?.body).toMatchObject({ title: 'member.editor', description: '私聊' });
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    groupRow?.click();
+    await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
     el('chat-archive').click();
     await vi.waitFor(() => expect(el('group-panel').hidden).toBe(true));
     expect(el('groups').textContent ?? '').not.toContain('发布协作');
@@ -650,19 +709,24 @@ describe('entry bots and group chats', () => {
     view.tasks = view.tasks.map(task => task.id === 'task_a' ? { ...task, status: 'running', runId, latestRunId: runId } : task);
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; createdAt: string }>>();
+    const membersByRoom = new Map<string, Array<{ id: string; roomId: string; principalId: string; role: string; status: string; invitedBy: string; createdAt: string; updatedAt: string }>>();
     const h = harness(view, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
       const roomMatch = String(url).match(/\/rooms\/([^/?]+)/);
-      const roomId = roomMatch ? decodeURIComponent(roomMatch[1]) : '';
+      const roomId = roomMatch ? decodeURIComponent(roomMatch[1] ?? '') : '';
       if (url === '/api/rooms' && method === 'POST') {
         const room = { id: `room_${rooms.length}`, title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
         rooms.unshift(room);
         return response(room);
       }
       if (url === '/api/rooms?limit=50') return response(rooms);
-      if (String(url).endsWith('/members') && method === 'POST') return response({ id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
-      if (String(url).endsWith('/members')) return response([]);
+      if (String(url).endsWith('/members') && method === 'POST') {
+        const member = { id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
+        membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
+        return response(member);
+      }
+      if (String(url).endsWith('/members')) return response(membersByRoom.get(roomId) ?? []);
       if (String(url).endsWith('/goals') && method === 'GET') return response([]);
       if (String(url).endsWith('/goals') && method === 'POST') return response({ id: `goal_${roomId}`, title: body.title, status: 'active', createdAt: date, roomId: body.roomId });
       if (String(url).includes('/context-manifests')) return response({ id: `ctx_${roomId}` });
@@ -723,28 +787,52 @@ describe('entry bots and group chats', () => {
     expect(el<HTMLTextAreaElement>('group-text').value).toBe('');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
     doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
+    await vi.waitFor(() => {
+      expect(el('entry-title').textContent).toBe('发布');
+      expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
+    });
+    expect(el('entry-presence').textContent).toBe('在');
+    expect(h.posts.find(post => post.body?.agentId === 'demo.release')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
+    expect(h.posts.some(post => post.url === '/api/rooms' && post.body?.description === '私聊')).toBe(false);
+    el<HTMLTextAreaElement>('conversation-text').value = '发布口径先记在这里';
+    el('conversation-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('发布口径先记在这里'));
+    expect(messagePosts(h)).toHaveLength(2);
+    expect(messagePosts(h)[1]?.url).toBe('/api/conversations/conv_life_1/messages');
+    expect(messagePosts(h)[1]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
+    expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    groupRow?.click();
+    await vi.waitFor(() => expect(el('group-members').textContent).toContain('member.editor'));
+    clickText('member.editor', el('group-members'));
     await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('私聊'));
-    expect(el<HTMLTextAreaElement>('group-text').placeholder).toContain('@AEEIS');
-    el<HTMLTextAreaElement>('group-text').value = '请 @发布 看一下';
-    el<HTMLFormElement>('group-composer').requestSubmit();
-    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @发布 看一下'));
-    expect(messagePosts(h)).toHaveLength(1);
+    expect(el('entry-title').textContent).toBe('member.editor');
+    expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 记下私聊';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「记下私聊」'));
-    expect(messagePosts(h)).toHaveLength(2);
-    expect(messagePosts(h)[1]?.body).toMatchObject({
-      text: '来自私聊「发布」：@AEEIS 记下私聊',
+    expect(messagePosts(h)).toHaveLength(3);
+    expect(messagePosts(h)[2]?.url).toBe(`/api/conversations/${view.id}/messages`);
+    expect(messagePosts(h)[2]?.body).toMatchObject({
+      text: '来自私聊「member.editor」：@AEEIS 记下私聊',
       expectedRevision: 2,
       newTask: { title: '记下私聊' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
-    expect(el('conversation-focus').textContent).toContain('发布方案');
-    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('仅讨论，未执行');
+    expect(messagePosts(h)[2]?.body).not.toHaveProperty('runOptions');
+    expect(el('conversation-tasks').textContent ?? '').not.toContain('记下私聊');
+    expect(el('conversation-messages').textContent).toContain('发布口径先记在这里');
+    el('gb-bot').click();
+    await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
+    expect(doc().querySelector('[data-task-id="task_new_2"]')?.textContent).toContain('整理发布风险');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]')?.dataset.focused).toBe('false');
+    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('记下私聊');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_3"]')?.dataset.focused).toBe('false');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
-    expect(typed.value).toBe('还留在入口');
+    expect(el('conversation-messages').textContent).not.toContain('发布口径先记在这里');
+    expect(typed.value).toBe('');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
   });
 });

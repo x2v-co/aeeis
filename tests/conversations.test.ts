@@ -82,6 +82,45 @@ describe('single-entry conversation routing', () => {
     expect(f.model.complete).not.toHaveBeenCalled();
     expect(f.notify).not.toHaveBeenCalled();
   });
+  it('keeps one life thread per person and records discussion without a Run', async () => {
+    const f = await fixture();
+    const home = await f.create();
+    const release = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } });
+    expect(release.statusCode).toBe(201);
+    const releaseBody = release.json();
+    expect(releaseBody.id).not.toBe(home.id);
+    expect(releaseBody.agentId).toBe('demo.release');
+    expect(releaseBody.tasks).toEqual([]);
+    const reused = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } });
+    expect(reused.statusCode).toBe(201);
+    expect(reused.json().id).toBe(releaseBody.id);
+    const stolen = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: 'AEEIS', agentId: 'aeeis', claimId: releaseBody.id } });
+    expect(stolen.statusCode).toBe(409);
+    expect((await f.fresh(releaseBody.id)).agentId).toBe('demo.release');
+    const claimed = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: 'AEEIS', agentId: 'aeeis', claimId: home.id } });
+    expect(claimed.statusCode).toBe(201);
+    expect(claimed.json().id).toBe(home.id);
+    expect(claimed.json().agentId).toBe('aeeis');
+    expect(claimed.json().title).toBe(home.title);
+    const again = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '另一个名字', agentId: 'aeeis' } });
+    expect(again.json().id).toBe(home.id);
+    const discuss = await f.post(releaseBody.id, { text: '先记下发布口径', newTask: { title: '发布口径' }, intent: 'discuss', focus: 'keep', expectedRevision: releaseBody.revision });
+    expect(discuss.statusCode, discuss.body).toBe(200);
+    const discussed = discuss.json();
+    expect(discussed.runId).toBeUndefined();
+    expect(discussed.conversation.agentId).toBe('demo.release');
+    expect(discussed.conversation.focusTaskId).toBeUndefined();
+    expect(discussed.conversation.tasks.map((task: { title: string; status: string }) => ({ title: task.title, status: task.status }))).toEqual([{ title: '发布口径', status: 'discussion' }]);
+    expect((await f.fresh(home.id)).tasks).toEqual([]);
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    expect(f.notify).not.toHaveBeenCalled();
+    const listed = (await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json();
+    expect(listed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: home.id, agentId: 'aeeis', taskCount: 0 }),
+      expect.objectContaining({ id: releaseBody.id, agentId: 'demo.release', taskCount: 1 }),
+    ]));
+  });
   it('keeps side questions separate from focus and supports explicit focus switching', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, 'AEEIS'), b = await f.addTask(entry.id, 'Grok 迁移');

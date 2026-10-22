@@ -92,7 +92,7 @@ interface ConversationMessageView {
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
 }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string }
 interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
@@ -151,6 +151,9 @@ let conversationRenderSignature = '';
 const CONVERSATION_SELECTION = 'aeeis.conversation';
 const CONVERSATION_SCOPE = 'aeeis.conversation-scope';
 const CONVERSATION_PENDING = 'aeeis.conversation-pending';
+const LIFE_HOME = 'aeeis.life.aeeis';
+let aeeisConversationId = linkedRunId || linkedThreadId || readOnlyShare ? '' : (localStorage.getItem(LIFE_HOME) ?? '');
+const lifeOpening = new Set<string>();
 let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 type InputPanelMode = 'answer' | 'reconcile' | 'reconcile-cancelled';
@@ -844,7 +847,10 @@ function resetConversation(clearStorage = true): void {
   $<HTMLFormElement>('conversation-composer').reset();
   $('conversation-status').textContent = ''; $('conversation-error').textContent = ''; $('conversation-reply-label').textContent = ''; $('conversation-correction-label').textContent = '';
   $('working-memory-content').replaceChildren(); delete $('working-memory-content').dataset.signature; $('working-memory-panel').hidden = true;
-  if (clearStorage) { localStorage.removeItem(CONVERSATION_SELECTION); localStorage.removeItem(CONVERSATION_SCOPE); sessionStorage.removeItem(CONVERSATION_PENDING); }
+  if (clearStorage) {
+    localStorage.removeItem(CONVERSATION_SELECTION); localStorage.removeItem(CONVERSATION_SCOPE); localStorage.removeItem(LIFE_HOME); sessionStorage.removeItem(CONVERSATION_PENDING);
+    aeeisConversationId = '';
+  }
   renderConversation();
 }
 function saveConversationAttempt(): void {
@@ -892,12 +898,13 @@ function updateConversationControls(): void {
   $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], textarea[data-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
-  if (rosterView() !== 'entry') {
+  const surface = rosterView();
+  if (surface === 'group' || surface === 'draft' || surface === 'direct') {
     $<HTMLButtonElement>('conversation-send').disabled = true;
     $<HTMLButtonElement>('conversation-execute').disabled = true;
-    if ((rosterView() === 'bot' || rosterView() === 'direct') && !conversationCorrectionId) {
-      $<HTMLButtonElement>('conversation-send').textContent = '先选 AEEIS';
-      $('conversation-execution-note').textContent = '任务仍交给 AEEIS。成员对话只保留会话记录，不会单独执行，也不会自己回复。';
+    if (surface === 'direct' && !conversationCorrectionId) {
+      $<HTMLButtonElement>('conversation-send').textContent = '先回到这个人';
+      $('conversation-execution-note').textContent = '这间私聊只保留会话记录。执行回到这个人的对话里，明确创建 Run。它不会自己回复。';
     }
   }
   syncEntrySurface();
@@ -964,13 +971,62 @@ function directRoomId(principalId: string): string {
   }
   return '';
 }
-function botPresence(runs: RunSummary[]): { state: string; label: string } {
-  const statuses = runs.map(run => run.status);
-  if (statuses.some(status => status === 'running' || status === 'queued')) return { state: 'working', label: '执行中' };
-  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return { state: 'thinking', label: '思考中' };
-  if (statuses.some(status => ATTENTION_STATUSES.has(status) || status === 'paused')) return { state: 'waiting', label: '等你' };
-  if (statuses.some(status => status === 'succeeded')) return { state: 'done', label: '完成' };
-  return { state: 'idle', label: '空闲' };
+function lifeAgent(view: { id: string; agentId?: string } | undefined): string {
+  if (!view) return '';
+  if (view.agentId) return view.agentId;
+  return view.id === aeeisConversationId ? 'aeeis' : '';
+}
+function lifeSummary(agentId: string): ConversationSummary | undefined {
+  const stamped = conversationList.find(item => item.agentId === agentId);
+  if (stamped) return stamped;
+  if (agentId === 'aeeis' && aeeisConversationId) return conversationList.find(item => item.id === aeeisConversationId) ?? (conversation?.id === aeeisConversationId ? conversation : undefined);
+  return undefined;
+}
+function taskCountOf(item: ConversationSummary | undefined): number | undefined {
+  if (!item) return undefined;
+  if (typeof item.taskCount === 'number') return item.taskCount;
+  const tasks = (item as ConversationView).tasks;
+  return Array.isArray(tasks) ? tasks.length : undefined;
+}
+function lifeTaskCount(agentId: string): number | undefined {
+  if (conversation && lifeAgent(conversation) === agentId) return conversation.tasks.length;
+  return taskCountOf(lifeSummary(agentId));
+}
+function lifePresenceLabel(agentId: string): string {
+  const count = lifeTaskCount(agentId);
+  return count ? `${count} 件事` : '在';
+}
+function lifeAvatarState(agentId: string): string {
+  if (!conversation || lifeAgent(conversation) !== agentId) return 'idle';
+  const statuses = conversation.tasks.map(task => task.status);
+  if (statuses.some(status => status === 'running' || status === 'queued' || status === 'preparing')) return 'working';
+  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return 'thinking';
+  if (statuses.some(status => ATTENTION_STATUSES.has(status) || status === 'paused')) return 'waiting';
+  return 'idle';
+}
+function rememberAeeisHome(list: ConversationSummary[], loaded?: ConversationSummary): void {
+  const stamped = list.find(item => item.agentId === 'aeeis');
+  if (stamped) {
+    aeeisConversationId = stamped.id;
+    localStorage.setItem(LIFE_HOME, stamped.id);
+    return;
+  }
+  if (aeeisConversationId && list.some(item => item.id === aeeisConversationId && !item.agentId)) return;
+  const unscoped = loaded && !loaded.agentId ? loaded : list.find(item => !item.agentId);
+  if (!unscoped) return;
+  aeeisConversationId = unscoped.id;
+  localStorage.setItem(LIFE_HOME, unscoped.id);
+}
+function aeeisThread(): { id: string; revision: number } | undefined {
+  const stamped = conversationList.find(item => item.agentId === 'aeeis');
+  if (stamped) return stamped;
+  if (aeeisConversationId) {
+    const remembered = conversationList.find(item => item.id === aeeisConversationId);
+    if (remembered) return remembered;
+    if (conversation?.id === aeeisConversationId) return conversation;
+  }
+  if (conversationList.length <= 1) return conversation ?? conversationList[0];
+  return conversation;
 }
 function participantLabel(principalId: string): string {
   return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
@@ -995,7 +1051,7 @@ function showRoster(focused: boolean): void {
 }
 function syncEntrySurface(): void {
   const view = rosterView();
-  const discussion = view === 'entry';
+  const life = view === 'entry' || view === 'bot';
   const messages = $('conversation-messages');
   const earlier = $('conversation-earlier');
   const empty = $('conversation-empty');
@@ -1004,38 +1060,39 @@ function syncEntrySurface(): void {
   const placement = $('bot-placement');
   const draft = $('group-draft');
   const panel = $('group-panel');
-  if (messages) messages.hidden = !discussion;
-  if (earlier) earlier.hidden = !discussion || !conversation?.hasEarlierMessages;
-  if (empty) empty.hidden = !discussion || Boolean(conversation?.messages.length);
+  if (messages) messages.hidden = !life;
+  if (earlier) earlier.hidden = !life || !conversation?.hasEarlierMessages;
+  if (empty) empty.hidden = !life || Boolean(conversation?.messages.length);
   if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
   if (note) note.hidden = view !== 'bot';
   if (placement) placement.hidden = view !== 'bot' && view !== 'direct';
   if (draft) draft.hidden = view !== 'draft';
   if (panel) panel.hidden = view !== 'group' && view !== 'direct';
   const room = chatRoom();
-  const counterpart = view === 'direct' ? (botById(directMembers.get(room?.id ?? '') ?? selectedBotId) ?? botById(activeBotId())) : botById(activeBotId());
-  if (view === 'bot' || view === 'direct') {
+  const directPrincipal = directMembers.get(room?.id ?? '') ?? '';
+  const counterpart = view === 'direct' ? (botById(directPrincipal) ?? botById(activeBotId())) : botById(activeBotId());
+  if (view === 'bot') {
     const title = $('bot-note-title');
     const copy = $('bot-note-copy');
-    if (title) title.textContent = counterpart?.name ?? room?.title ?? '成员';
-    if (copy) copy.textContent = counterpart?.demo
-      ? '这是演示里的一位成员。单独对话会留在名册里。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
-      : '单独对话会留在名册里。单独对话还没有接到模型，可以继续写会话记录，或在群聊里点名。任务仍交给 AEEIS。';
+    if (title) title.textContent = counterpart?.name ?? '成员';
+    if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
   }
   const chatNote = $('chat-note');
   const rename = $('group-rename');
   const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
-    ? '这是和这一位成员的单独对话。@AEEIS 会记成入口讨论，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。@AEEIS 会记成入口讨论，不执行。点成员名字可以打开和这位的单独对话。归档后从群聊列表撤下。';
+    ? '这间私聊只保留会话记录。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记成入口讨论，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记成入口讨论，不执行，也不调用模型。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。';
+  const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
+  const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
   const entryTitle = $('entry-title');
   const entryPresence = $('entry-presence');
-  if (entryTitle) entryTitle.textContent = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? (counterpart?.name ?? room?.title ?? '成员') : 'AEEIS';
-  if (entryPresence) entryPresence.textContent = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : view === 'bot' ? '单独对话' : (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : '空闲');
+  if (entryTitle) entryTitle.textContent = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
+  if (entryPresence) entryPresence.textContent = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
   renderBotPlacement();
 }
 function renderBotRoster(): void {
@@ -1051,10 +1108,9 @@ function renderBotRoster(): void {
     item.dataset.botId = bot.id;
     if (bot.id === 'aeeis') item.id = 'gb-bot';
     const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
-    avatar.dataset.state = bot.id === 'aeeis' ? botPresence(runSummaries).state : 'idle';
+    avatar.dataset.state = lifeAvatarState(bot.id);
     const copy = element('span', '', 'roster-copy');
-    const directId = bot.id === 'aeeis' ? '' : directRoomId(bot.id);
-    const presence = element('small', bot.id === 'aeeis' ? (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : botPresence(runSummaries).label) : (directId ? '私聊' : '开始对话'));
+    const presence = element('small', lifePresenceLabel(bot.id));
     copy.append(element('strong', bot.name), presence);
     item.append(avatar, copy);
     list.append(item);
@@ -1162,15 +1218,57 @@ function renameBotGroup(id: string): void {
 }
 function selectBot(id: string): void {
   if (!rosterBots().some(bot => bot.id === id)) return;
-  if (id !== 'aeeis') { void openDirect(id).catch(error => message(errorMessage(error))); return; }
-  selectedBotId = id;
-  localStorage.setItem('aeeis.bot', id);
-  groupDraftOpen = false;
-  clearOpenGroup();
-  showRoster(false);
-  renderBotRoster();
-  renderGroups(roomSummaries);
+  void openLifeThread(id).catch(error => message(errorMessage(error)));
+}
+async function openLifeThread(agentId: string): Promise<void> {
+  if (!conversationEnabled || conversationBusy || conversationAttempt || lifeOpening.has(agentId)) return;
+  const bot = botById(agentId);
+  if (!bot) return;
+  if (conversation && lifeAgent(conversation) === agentId && !openGroupId && !groupDraftOpen) {
+    selectedBotId = agentId;
+    localStorage.setItem('aeeis.bot', agentId);
+    showRoster(false);
+    renderBotRoster();
+    renderGroups(roomSummaries);
+    updateConversationControls();
+    return;
+  }
+  lifeOpening.add(agentId);
+  const epoch = conversationEpoch;
+  conversationBusy = true;
   updateConversationControls();
+  try {
+    let summary = lifeSummary(agentId);
+    let view: ConversationView;
+    if (!summary) view = await api<ConversationView>('/conversations', { title: bot.name, agentId });
+    else if (agentId === 'aeeis' && !summary.agentId) view = await api<ConversationView>('/conversations', { title: 'AEEIS', agentId: 'aeeis', claimId: summary.id });
+    else if (conversation && conversation.id === summary.id) view = conversation;
+    else view = await api<ConversationView>(`/conversations/${encodeURIComponent(summary.id)}`);
+    if (epoch !== conversationEpoch) return;
+    groupDraftOpen = false;
+    clearOpenGroup();
+    showRoster(false);
+    if (conversation?.id !== view.id) {
+      conversationReplyId = undefined;
+      conversationCorrectionId = undefined;
+      conversationNeedsRefresh = false;
+      $<HTMLFormElement>('conversation-composer').reset();
+      $('conversation-status').textContent = '';
+      $('conversation-error').textContent = '';
+    }
+    selectedBotId = agentId;
+    localStorage.setItem('aeeis.bot', agentId);
+    if (agentId === 'aeeis') {
+      aeeisConversationId = view.id;
+      localStorage.setItem(LIFE_HOME, view.id);
+    }
+    acceptConversation(view);
+    renderBotRoster();
+    renderGroups(roomSummaries);
+  } finally {
+    lifeOpening.delete(agentId);
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
 }
 function indexDirectRooms(rooms: RoomSummary[]): void {
   const directs = rooms.filter(room => room.status === 'active' && room.description === '私聊');
@@ -1185,10 +1283,9 @@ function indexDirectRooms(rooms: RoomSummary[]): void {
   })).then(() => { if (directIndexKey === key && $('bots')) renderBotRoster(); });
 }
 async function openDirect(principalId: string): Promise<void> {
-  if (!principalId || principalId === 'aeeis') { selectBot('aeeis'); return; }
+  if (!principalId) return;
+  if (botById(principalId)) { await openLifeThread(principalId); return; }
   if (directOpening.has(principalId)) return;
-  const known = botById(principalId);
-  if (known) { selectedBotId = principalId; localStorage.setItem('aeeis.bot', principalId); }
   groupDraftOpen = false;
   showRoster(false);
   renderBotRoster();
@@ -1198,9 +1295,9 @@ async function openDirect(principalId: string): Promise<void> {
     await directIndexPromise;
     const existing = directRoomId(principalId);
     if (existing) { await openGroup(existing); return; }
-    const room = await api<RoomSummary>('/rooms', { title: known?.name || principalId, description: '私聊' });
+    const room = await api<RoomSummary>('/rooms', { title: principalId, description: '私聊' });
     try {
-      await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId, role: known ? 'agent' : 'editor' });
+      await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId, role: 'editor' });
     } catch (error) {
       await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
       throw error;
@@ -1458,22 +1555,27 @@ async function submitGroupMessage(event: Event): Promise<void> {
   if (mentionsAeeis(text)) {
     const kind = room?.description === '私聊' ? '私聊' : '群聊';
     const title = entryMentionTitle(text, room?.title || kind, kind);
-    if (!conversationEnabled || !conversation) handoffError = '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
+    const target = aeeisThread();
+    if (!conversationEnabled || !target) handoffError = '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
     else if (conversationBusy || conversationAttempt) handoffError = '入口正在发送另一条讨论，这条点名只留在会话里。';
     else {
       const epoch = conversationEpoch;
-      const id = conversation.id;
+      const id = target.id;
+      const expectedRevision = conversation?.id === id ? conversation.revision : target.revision;
       conversationBusy = true;
       updateConversationControls();
       try {
         const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(id)}/messages`, {
           text: clipEntryText(`来自${kind}「${room?.title || kind}」：${text}`, 7000),
-          expectedRevision: conversation.revision,
+          expectedRevision,
           newTask: { title },
           focus: 'keep',
           intent: 'discuss',
         }, 'POST', groupIdempotencyKey());
-        if (epoch === conversationEpoch && result.conversation?.id === id) acceptConversation(result.conversation);
+        if (epoch === conversationEpoch && result.conversation?.id === id) {
+          if (conversation?.id === id) acceptConversation(result.conversation);
+          else rememberLifeSummary(result.conversation);
+        }
       } catch (error) {
         handoffError = `会话已留下，入口讨论没有记上。${errorMessage(error)}`;
       } finally {
@@ -1626,11 +1728,19 @@ function renderConversation(): void {
   }
   updateConversationControls();
 }
+function rememberLifeSummary(view: ConversationView): void {
+  const index = conversationList.findIndex(item => item.id === view.id);
+  if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
+  if (view.agentId === 'aeeis') {
+    aeeisConversationId = view.id;
+    localStorage.setItem(LIFE_HOME, view.id);
+  }
+  renderBotRoster();
+}
 function acceptConversation(view: ConversationView): void {
   if (conversation?.id === view.id && conversation.revision > view.revision) return;
   conversation = view;
-  const index = conversationList.findIndex(item => item.id === view.id);
-  if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
+  rememberLifeSummary(view);
   localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
   renderConversation();
 }
@@ -1651,6 +1761,7 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
       const view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
       if (epoch !== conversationEpoch) return;
       acceptConversation(view);
+      rememberAeeisHome(conversationList, view);
       if (!conversationAttempt) {
         try {
           const saved = JSON.parse(sessionStorage.getItem(CONVERSATION_PENDING) ?? 'null') as ConversationAttempt | null;
@@ -1671,6 +1782,7 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
       const view = await api<ConversationView>('/conversations', {});
       if (epoch !== conversationEpoch) return;
       acceptConversation(view);
+      rememberAeeisHome(conversationList, view);
     }
     renderConversation();
   } catch (error) {
@@ -1808,7 +1920,8 @@ async function openConversationRun(runId: string): Promise<void> {
   $('run-title').focus({ preventScroll: true });
 }
 async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
-  if (rosterView() !== 'entry') return;
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
   if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
   if (!retry) {
     const form = $<HTMLFormElement>('conversation-composer');
