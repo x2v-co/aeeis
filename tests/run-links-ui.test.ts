@@ -66,6 +66,64 @@ describe('group chat', () => {
     expect(fetch.mock.calls.some(call => String(call[0]) === '/api/rooms' && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
   });
 });
+describe('bot groups', () => {
+  it('shows demo bots in groups and keeps execution on AEEIS', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/runs') && init?.method === 'POST') return response(run);
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('bots')?.textContent).toContain('发布'));
+    const doc = dom.window.document;
+    expect(doc.getElementById('bots')?.textContent).toContain('工作');
+    expect(doc.getElementById('bots')?.textContent).toContain('研究');
+    expect(doc.getElementById('bots')?.textContent).toContain('纪要');
+    const release = [...doc.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]')].find(row => row.dataset.botId === 'demo.release');
+    release?.click();
+    expect(doc.getElementById('gb-title')?.textContent).toBe('发布');
+    expect(doc.getElementById('empty')?.textContent).toContain('不会单独执行');
+    expect(doc.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]')?.disabled).toBe(true);
+    expect(fetch.mock.calls.some(call => String(call[0]).startsWith('/api/runs') && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
+    (doc.getElementById('bot-group-name') as HTMLInputElement).value = '值班';
+    (doc.getElementById('bot-group-draft') as HTMLFormElement).requestSubmit();
+    const duty = [...doc.querySelectorAll<HTMLButtonElement>('#bot-placement button')].find(button => button.textContent === '值班');
+    duty?.click();
+    const heading = [...doc.querySelectorAll('.bot-group-label')].find(item => item.textContent?.startsWith('值班'));
+    expect(heading?.nextElementSibling?.textContent).toContain('发布');
+    doc.getElementById('gb-bot')!.click();
+    expect(doc.getElementById('gb-title')?.textContent).toBe('AEEIS');
+    expect(doc.getElementById('runs')?.textContent).toContain(run.goal);
+  });
+
+  it('replaces the demo roster when an agent is admitted', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/agents')) return response([{
+        agentId: 'agent.release', status: 'admitted', discoveredAt: run.createdAt,
+        card: { name: '发布核对', owner: 'demo', capabilities: [], cardVersion: '1' },
+        reputation: { samples: 0, dimensions: {} },
+      }]);
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('bots')?.textContent).toContain('发布核对'));
+    const text = dom.window.document.getElementById('bots')?.textContent ?? '';
+    expect(text).not.toContain('纪要');
+    expect(text).toContain('AEEIS');
+  });
+});
 describe('entry', () => {
   it('returns to the entry when the Bot is selected and keeps the task in the roster', async () => {
     const run = fixture();

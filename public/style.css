@@ -781,8 +781,40 @@ body.gb .gb-brand .muted { display: none; }
 body.gb .gb-brand h1 { margin: 0; font-size: 16px; letter-spacing: -.03em; }
 body.gb .gb-brand .brand-mark { width: 28px; height: 28px; margin: 0; font-size: 13px; }
 body.gb .brand-mark::after { display: none; }
-body.gb .bot-block { padding: 14px 8px 4px; }
-body.gb #gb-bot {
+body.gb #bot-queue {
+  flex: none;
+  max-height: 46%;
+  margin: 0;
+  padding: 8px 8px 4px;
+  overflow: auto;
+  background: transparent;
+}
+body.gb #bot-queue .queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+body.gb #bot-queue h2 { margin: 4px 8px; color: var(--muted); font-size: 12px; }
+body.gb #gb-new-bot-group {
+  height: 26px;
+  padding: 0 8px;
+  border-color: var(--line);
+  color: var(--ink);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+body.gb #bot-group-draft:not([hidden]) { display: flex; gap: 6px; margin: 0 8px 8px; }
+body.gb #bot-group-draft input { height: 32px; min-width: 0; }
+body.gb #bot-group-draft button { height: 32px; padding: 0 10px; }
+body.gb #bots { display: flex; flex-direction: column; gap: 2px; }
+body.gb .bot-group-label {
+  margin: 8px 8px 2px;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+body.gb button.bot-group-label { width: 100%; cursor: pointer; }
+body.gb .bot-row {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   gap: 8px;
@@ -795,8 +827,20 @@ body.gb #gb-bot {
   background: transparent;
   text-align: left;
 }
-body.gb #gb-bot[aria-pressed="true"],
-body.gb #gb-bot:hover { background: #fff; }
+body.gb .bot-row[aria-pressed="true"],
+body.gb .bot-row:hover { background: #fff; }
+body.gb #bot-placement { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 16px; }
+body.gb #bot-placement[hidden] { display: none !important; }
+body.gb #bot-placement button {
+  height: 28px;
+  padding: 0 10px;
+  border-color: var(--line);
+  color: var(--ink);
+  background: #fff;
+  font-size: 12px;
+}
+body.gb #bot-placement button[aria-pressed="true"] { color: #fff; background: var(--ink); border-color: var(--ink); }
+body.gb .bot-placement-label { color: var(--muted); font-size: 12px; }
 body.gb #runs button.task-row {
   grid-template-columns: 8px minmax(0, 1fr);
   gap: 10px;
