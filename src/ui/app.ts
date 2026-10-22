@@ -1,4 +1,5 @@
 import type { PlanComparison } from '../runtime/graphs.js';
+import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder } from '../conversations.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
@@ -52,7 +53,7 @@ interface RunView extends RunSummary {
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
   privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; resourceSnapshot?: { plugin?: { id: string; version: string; interface: string; digest: string; channel?: string }; skill?: { id: string; version: string; interface: string; digest: string; channel?: string }; workflow?: { id: string; version: string; interface: string; digest: string; channel?: string }; tools?: Array<{ id: string; version: string; interface: string; digest: string; channel?: string }>; lockfileDigest: string; policyDigest: string; resolvedAt: string; resolverVersion: string }; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
-  plans: Array<{ hash: string; version: number; summary: string; author?: { type: 'user' | 'model' }; nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
+  plans: Array<{ hash: string; version: number; summary: string; author?: { type: 'user' | 'model' | 'policy' }; nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
   steps: Array<{ taskId: string; status: string; error?: string; failureReason?: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
   model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
@@ -257,7 +258,9 @@ function eventLabel(type: string): string {
   const normalized = type.trim().replace(/\s+/g, '.');
   return labels[type] ?? labels[normalized] ?? normalized.replace(/^run\./, '').replace(/[._-]+/g, ' ');
 }
-function describeEvent(type: string, data?: { phase?: string; reason?: string }, verbose = false): string {
+function describeEvent(type: string, data?: { phase?: string; reason?: string; source?: string; actor?: string }, verbose = false): string {
+  if (type === 'plan.proposed' && data?.source === 'direct') return '直接计划已写入';
+  if (type === 'plan.auto_approved' && data?.actor === 'policy:direct') return '直接计划已按边界放行';
   const compaction = data?.phase === 'compaction' || (typeof data?.reason === 'string' && data.reason.startsWith('compaction'));
   if (compaction) {
     const short: Record<string, string> = {
@@ -1762,7 +1765,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
         ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
-        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions() } : {}) };
+        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
     saveConversationAttempt();
@@ -1797,6 +1800,10 @@ $('execution-review')?.addEventListener('change', () => {
   localStorage.setItem('aeeis.execution-review', executionReviewValue());
   updateConversationControls();
 });
+for (const id of ['conversation-text', 'conversation-task-title', 'allowed-tools', 'allowed-agents', 'builtin-skill', 'external-budget-calls', 'external-budget-tokens', 'external-budget-usd']) {
+  $(id)?.addEventListener('input', () => updateConversationControls());
+  $(id)?.addEventListener('change', () => updateConversationControls());
+}
 $('conversation-retry').addEventListener('click', () => { void sendConversation('discuss', true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-target').addEventListener('change', () => {
   if ($<HTMLSelectElement>('conversation-target').value === '__new') { conversationReplyId = undefined; openConversationRoute(); }
@@ -2870,6 +2877,28 @@ async function readMaterialFiles(files: FileList | null): Promise<void> {
   renderMaterialFiles();
 });
 renderMaterialFiles();
+function listedIds(id: string): string[] {
+  return [...new Set($<HTMLInputElement>(id).value.split(',').map(value => value.trim()).filter(Boolean))];
+}
+function externalBudgetPresent(): boolean {
+  return ['external-budget-calls', 'external-budget-tokens', 'external-budget-usd'].some(id => $<HTMLInputElement>(id).value.trim());
+}
+function conversationExecutionGoal(): string {
+  const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
+  const target = $<HTMLSelectElement>('conversation-target').value;
+  const title = target === '__new' ? $<HTMLInputElement>('conversation-task-title').value.trim() : (conversationTargetTask()?.title ?? '当前任务');
+  return `任务：${title || '当前任务'}\n当前请求：${text}`;
+}
+function currentPlanningDecision(goal = conversationExecutionGoal()) {
+  const builtinSkill = $<HTMLSelectElement>('builtin-skill').value;
+  return planningDecision({
+    goal,
+    ...(builtinSkill ? { builtinSkill } : {}),
+    allowedTools: listedIds('allowed-tools'),
+    allowedAgents: listedIds('allowed-agents'),
+    ...(externalBudgetPresent() ? { externalBudget: { calls: 1 } } : {}),
+  });
+}
 function executionReviewValue(): 'required' | 'auto' | 'yolo' {
   const value = $<HTMLSelectElement>('execution-review')?.value;
   return value === 'auto' || value === 'yolo' ? value : 'required';
@@ -2882,15 +2911,24 @@ function restoreExecutionReview(): void {
 }
 function executionReviewNote(): string {
   const mode = executionReviewValue();
-  if (mode === 'yolo') return '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。';
-  if (mode === 'auto') return '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。';
-  return '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+  const decision = currentPlanningDecision();
+  const gate = mode === 'yolo'
+    ? '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。'
+    : mode === 'auto'
+      ? (decision.shape === 'direct'
+        ? '自动：这次只有一个只读步骤，由边界放行，不调用规划模型。讨论焦点不会因此改变。'
+        : '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。')
+      : '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+  const shape = decision.shape === 'direct'
+    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的审核档放行。'
+    : `这次先出任务图：${planningRefusal(decision.reason)}。`;
+  return `${gate}${shape}`;
 }
-function runOptions(includeProjectQuery = true): Record<string, unknown> {
+function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
-  const allowedTools = [...new Set($<HTMLInputElement>('allowed-tools').value.split(',').map(value => value.trim()).filter(Boolean))];
-  const allowedAgents = [...new Set($<HTMLInputElement>('allowed-agents').value.split(',').map(value => value.trim()).filter(Boolean))];
+  const allowedTools = listedIds('allowed-tools');
+  const allowedAgents = listedIds('allowed-agents');
   const brainScope = $<HTMLInputElement>('brain-scope').value.trim();
   const brainQuery = $<HTMLInputElement>('brain-query').value.trim();
   const memoryQuery = $<HTMLInputElement>('memory-query').value.trim();
@@ -2912,7 +2950,8 @@ function runOptions(includeProjectQuery = true): Record<string, unknown> {
     ...(content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : []),
     ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
   ];
-  return { executionReview: executionReviewValue(), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  const planning = includeProjectQuery ? currentPlanningDecision(goal || conversationExecutionGoal()).shape : undefined;
+  return { executionReview: executionReviewValue(), ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -3927,14 +3966,18 @@ $('reminder-repeat')?.addEventListener('change', updateReminderFields);
 $('new-run').onsubmit = event => {
   event.preventDefault(); const submit = $('submit') as HTMLButtonElement; submit.disabled = true; submit.classList.add('is-busy'); submit.setAttribute('aria-busy', 'true'); message('');
   const goalId = $<HTMLSelectElement>('goal-id').value;
+  const goal = $<HTMLTextAreaElement>('goal').value;
   let quickRunOutcome = '';
-  void Promise.resolve().then(() => api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, ...(goalId ? { goalId } : {}), ...runOptions() }))
+  void Promise.resolve().then(() => {
+    const options = runOptions(true, goal);
+    quickRunOutcome = options.planning === 'direct' ? '已启动，正在准备直接执行…' : '已启动，正在生成计划…';
+    return api<{ id: string }>('/runs', { goal, ...(goalId ? { goalId } : {}), ...options });
+  })
     .then(async result => {
       setCurrentRunOpen(true);
       currentId = result.id;
       current = undefined;
       localStorage.setItem('aeeis.run', currentId);
-      quickRunOutcome = '已启动，正在生成计划…';
       await refresh();
       window.requestAnimationFrame(() => $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     })
