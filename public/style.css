@@ -994,6 +994,7 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-message { display: grid; gap: 4px; }
 .group-message header { display: flex; gap: 8px; align-items: baseline; }
 .group-message p { margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.group-message[data-type="system"] p { padding-left: 0; color: var(--muted); background: transparent; }
 .group-mentions { display: flex; flex-wrap: wrap; gap: 6px; }
 .group-mentions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 12px; }
 #group-composer { display: grid; gap: 8px; }

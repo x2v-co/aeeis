@@ -42,7 +42,12 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url.endsWith('/messages')) {
       const body = JSON.parse(request.body);
       const replied = view.messages.find(item => item.id === body.replyTo);
-      const route = { status: 'routed', reason: body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [view.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
+      const created = body.newTask ? { id: `task_new_${view.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${view.tasks.length}`, status: 'discussion' } : undefined;
+      if (created) {
+        view.tasks.push(created);
+        if (body.focus === 'switch') view.focusTaskId = created.id;
+      }
+      const route = { status: 'routed', reason: created ? 'new-task' : body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: created ? [created.id] : body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [view.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
       const message = { id: `message_${view.messages.length}`, role: 'user', text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
       if (body.correctsMessageId) view.messages.find(item => item.id === body.correctsMessageId).effectiveTaskIds = body.taskIds;
       view.messages.push(message); view.revision++;
@@ -638,5 +643,108 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+  });
+
+  it('records an @AEEIS mention as an entry discussion and leaves other mentions in the room', async () => {
+    const view = fixture();
+    view.tasks = view.tasks.map(task => task.id === 'task_a' ? { ...task, status: 'running', runId, latestRunId: runId } : task);
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; createdAt: string }>>();
+    const h = harness(view, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      const roomMatch = String(url).match(/\/rooms\/([^/?]+)/);
+      const roomId = roomMatch ? decodeURIComponent(roomMatch[1]) : '';
+      if (url === '/api/rooms' && method === 'POST') {
+        const room = { id: `room_${rooms.length}`, title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        rooms.unshift(room);
+        return response(room);
+      }
+      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (String(url).endsWith('/members') && method === 'POST') return response({ id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
+      if (String(url).endsWith('/members')) return response([]);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([]);
+      if (String(url).endsWith('/goals') && method === 'POST') return response({ id: `goal_${roomId}`, title: body.title, status: 'active', createdAt: date, roomId: body.roomId });
+      if (String(url).includes('/context-manifests')) return response({ id: `ctx_${roomId}` });
+      if (String(url).includes('/session-events') && method === 'POST') {
+        const list = events.get(roomId) ?? [];
+        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, createdAt: date };
+        list.push(event);
+        events.set(roomId, list);
+        return response(event);
+      }
+      if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const typed = el<HTMLTextAreaElement>('conversation-text');
+    typed.value = '还留在入口';
+    el('gb-new-group').click();
+    el<HTMLInputElement>('group-title').value = '发布协作';
+    el<HTMLInputElement>('group-person').value = 'member.editor';
+    el('group-add-person').click();
+    el<HTMLFormElement>('group-create').requestSubmit();
+    await vi.waitFor(() => expect(el('group-panel').hidden).toBe(false));
+    expect(el<HTMLTextAreaElement>('group-text').placeholder).toContain('@AEEIS');
+    el<HTMLTextAreaElement>('group-text').value = '请 @所有人 看一下';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @所有人 看一下'));
+    el<HTMLTextAreaElement>('group-text').value = '请 @AEEIS发布 看一下';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @AEEIS发布 看一下'));
+    expect(messagePosts(h)).toHaveLength(0);
+    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「整理发布风险」'));
+    const mention = messagePosts(h);
+    expect(mention).toHaveLength(1);
+    expect(mention[0]?.body).toEqual({
+      text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
+      expectedRevision: 1,
+      newTask: { title: '整理发布风险' },
+      focus: 'keep',
+      intent: 'discuss',
+    });
+    expect(mention[0]?.body).not.toHaveProperty('runOptions');
+    const roomEvents = [...events.values()].flat().filter(event => event.content.includes('整理发布风险') || event.content.includes('入口讨论'));
+    expect(roomEvents.map(event => event.type)).toEqual(['message', 'system']);
+    const receipt = doc().querySelector<HTMLElement>('#group-transcript [data-type="system"]');
+    expect(receipt?.textContent).toContain('记录');
+    expect(receipt?.textContent).toContain('未执行，讨论焦点不变');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    const created = doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]');
+    expect(created?.textContent).toContain('整理发布风险');
+    expect(created?.textContent).toContain('仅讨论，未执行');
+    expect(created?.dataset.focused).toBe('false');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.textContent).toContain('执行中');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
+    expect(typed.value).toBe('还留在入口');
+    expect(el<HTMLTextAreaElement>('group-text').value).toBe('');
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
+    await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('私聊'));
+    expect(el<HTMLTextAreaElement>('group-text').placeholder).toContain('@AEEIS');
+    el<HTMLTextAreaElement>('group-text').value = '请 @发布 看一下';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @发布 看一下'));
+    expect(messagePosts(h)).toHaveLength(1);
+    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 记下私聊';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「记下私聊」'));
+    expect(messagePosts(h)).toHaveLength(2);
+    expect(messagePosts(h)[1]?.body).toMatchObject({
+      text: '来自私聊「发布」：@AEEIS 记下私聊',
+      expectedRevision: 2,
+      newTask: { title: '记下私聊' },
+      focus: 'keep',
+      intent: 'discuss',
+    });
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('仅讨论，未执行');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
+    expect(typed.value).toBe('还留在入口');
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
   });
 });
