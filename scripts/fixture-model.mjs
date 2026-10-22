@@ -45,7 +45,9 @@ function responseFor(system, input) {
       })),
     };
   }
-  if (system.includes('Plan a real deliverable') && system.includes('fillable-pdf/1')) {
+  // Match the fillable-pdf contract guidance, not the generic fidelity sentence that
+  // mentions fillable-pdf/1 on every executor and reviewer prompt.
+  if (system.includes('Plan a real deliverable') && system.includes('This Run uses the fillable-pdf/1 contract')) {
     return { summary: 'Inspect and fill the supplied AcroForm using source evidence.', nodes: [{ id: 'fill_form', title: 'Fill form', instruction: 'Inspect the form, fill only sourced values, and report every unknown.', dependsOn: [] }] };
   }
   if (system.includes('Plan a real deliverable')) {

@@ -240,4 +240,30 @@ describe('fillable PDF execution and downloads', () => {
     expect(run.calls.map(call => call.phase)).toEqual(['planner', 'executor', 'executor', 'executor', 'reviewer']);
     expect(run.artifacts[0]?.structured).toMatchObject({ schemaVersion: 'fillable-pdf/1', output: { filename: 'registration-filled.pdf' } });
   });
+
+  it('keeps generic executor prompts that mention fillable-pdf/1 on the source-read path', async () => {
+    const server = createFixtureModelServer();
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve, reject) => server.close((error: Error | undefined) => error ? reject(error) : resolve())));
+    const address = server.address() as { port: number };
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'system', content: 'Execute the current task. Keep at most 5 unknowns, except fillable-pdf/1 must report every unfilled field with its exact field name and reason.' },
+          { role: 'user', content: JSON.stringify({
+            goal: 'Local smoke: verify the AEEIS agent execution loop',
+            task: { id: 'inspect', title: 'Inspect supplied material', instruction: 'Read the supplied material.', dependsOn: [] },
+            sourceCatalog: [{ id: 'source_1', title: 'Local smoke source' }],
+            presentedSources: [{ id: 'source_1', format: 'text', title: 'Local smoke source', content: 'The local Fixture Model must produce an evidence-bound deliverable.' }],
+            observations: [],
+          }) },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { choices: Array<{ message: { content: string } }> };
+    expect(JSON.parse(body.choices[0]!.message.content)).toMatchObject({ type: 'tool', tool: 'sources.read', argument: 'source_1' });
+  });
 });
