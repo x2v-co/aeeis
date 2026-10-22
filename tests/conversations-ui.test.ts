@@ -83,6 +83,8 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).toEqual({ text: '补充讨论背景', expectedRevision: 1, focus: 'keep', intent: 'discuss' });
     expect(el('conversation-messages').textContent).toContain('关联任务：发布方案');
     expect(el('conversation-messages').textContent).toContain('未调用模型');
+    expect(el<HTMLAnchorElement>('entry-team').textContent).toBe('多 Bot 频道');
+    expect(el<HTMLAnchorElement>('entry-team').getAttribute('href')).toBe('/team/');
     expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(true);
     expect(h.posts.some(post => /\/runs$|\/approve$/.test(post.url))).toBe(false);
     expect(dom.window.getComputedStyle(el('quick-run')).display).toBe('none');
