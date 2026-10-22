@@ -855,6 +855,10 @@ function conversationTargetTask(): ConversationTaskView | undefined {
   const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : conversation?.focusTaskId);
   return conversation?.tasks.find(task => task.id === id);
 }
+function openConversationRoute(): void {
+  const route = document.querySelector<HTMLDetailsElement>('#conversation-route');
+  if (route) route.open = true;
+}
 function updateConversationControls(): void {
   const locked = conversationBusy || Boolean(conversationAttempt);
   const target = $<HTMLSelectElement>('conversation-target').value;
@@ -998,8 +1002,8 @@ function syncEntrySurface(): void {
   if (earlier) earlier.hidden = !discussion || !conversation?.hasEarlierMessages;
   if (empty) empty.hidden = !discussion || Boolean(conversation?.messages.length);
   if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
-  if (note) note.hidden = view !== 'bot' && view !== 'direct';
-  if (placement) placement.hidden = view === 'group' || view === 'draft';
+  if (note) note.hidden = view !== 'bot';
+  if (placement) placement.hidden = view !== 'bot' && view !== 'direct';
   if (draft) draft.hidden = view !== 'draft';
   if (panel) panel.hidden = view !== 'group' && view !== 'direct';
   const room = chatRoom();
@@ -1539,7 +1543,7 @@ function renderConversation(): void {
           $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
           $<HTMLTextAreaElement>('conversation-text').value = '纠正这条讨论的任务归属';
           $('conversation-correction-label').textContent = `纠正归属：${item.text.slice(0, 160)}`;
-          updateConversationControls(); $<HTMLSelectElement>('conversation-target').focus();
+          updateConversationControls(); openConversationRoute(); $<HTMLSelectElement>('conversation-target').focus();
         }); correct.type = 'button'; row.append(correct);
       }
       if (item.route.status === 'clarify' && !corrected) {
@@ -1547,7 +1551,7 @@ function renderConversation(): void {
           const choice = button(`选择任务：${conversationTaskName(id)}`, async () => {
             if (conversationBusy || conversationAttempt) return;
             prepareConversationReply(item); $<HTMLSelectElement>('conversation-target').value = id;
-            $<HTMLTextAreaElement>('conversation-text').value = item.text; updateConversationControls();
+            $<HTMLTextAreaElement>('conversation-text').value = item.text; openConversationRoute(); updateConversationControls();
             $('conversation-status').textContent = '已选择任务。请检查内容，再点击“发送讨论”或“创建执行 Run”；尚未执行。';
           }); choice.type = 'button'; row.append(choice);
         }
@@ -1785,7 +1789,7 @@ $('conversation-composer').addEventListener('submit', event => { event.preventDe
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-retry').addEventListener('click', () => { void sendConversation('discuss', true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-target').addEventListener('change', () => {
-  if ($<HTMLSelectElement>('conversation-target').value === '__new') conversationReplyId = undefined;
+  if ($<HTMLSelectElement>('conversation-target').value === '__new') { conversationReplyId = undefined; openConversationRoute(); }
   updateConversationControls();
 });
 $('conversation-cancel-correction').addEventListener('click', () => {

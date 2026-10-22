@@ -862,12 +862,42 @@ body.conversation-mode .entry-titles { flex: 1; min-width: 0; }
 body.conversation-mode #entry-title { margin: 0; overflow: hidden; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 body.conversation-mode #entry-presence { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
 body.conversation-mode #conversation-messages { flex: 1; min-height: 0; max-height: none; overflow: auto; padding: 18px 22px 8px; }
+body.conversation-mode #conversation-messages:empty { flex: 0; min-height: 0; padding: 0; }
+body.conversation-mode #conversation-empty:not([hidden]) { flex: 1; display: flex; align-items: center; margin: 0; padding: 0 22px; }
 body.conversation-mode #bot-note { flex: none; padding: 18px 22px 0; }
 body.conversation-mode #group-draft:not([hidden]) { flex: 1; min-height: 0; overflow: auto; padding: 18px 22px; }
 body.conversation-mode #group-panel:not([hidden]) { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; padding: 18px 22px 0; }
 body.conversation-mode #group-transcript { flex: 1; min-height: 0; overflow: auto; }
 body.conversation-mode #conversation-composer,
-body.conversation-mode #group-composer { flex: none; margin: 0; padding: 10px 16px 14px; border-top: 1px solid var(--line); }
+body.conversation-mode #group-composer { flex: none; margin: 0; padding: 10px 16px 14px; border-top: 1px solid var(--line); background: #fff; }
+body.conversation-mode #conversation-composer { display: grid; gap: 8px; }
+body.conversation-mode #conversation-composer .quick-input-row textarea,
+body.conversation-mode #group-composer .quick-input-row textarea { width: auto; flex: 1; height: 46px; min-height: 46px; resize: none; }
+body.conversation-mode #conversation-composer .quick-input-row button,
+body.conversation-mode #group-composer .quick-input-row button { height: 46px; min-width: 96px; padding-inline: 14px; color: #fff; border-color: var(--ink); background: var(--ink); white-space: nowrap; }
+body.conversation-mode #conversation-composer .quick-input-row button:hover,
+body.conversation-mode #group-composer .quick-input-row button:hover { color: #fff; border-color: var(--ink); background: #2a2a2a; }
+body.conversation-mode .composer-route { color: var(--muted); font-size: 12px; }
+body.conversation-mode .composer-route summary { width: fit-content; cursor: pointer; }
+body.conversation-mode .composer-route[open] { display: grid; gap: 6px; }
+body.conversation-mode .composer-route label { margin: 0; }
+body.conversation-mode .conversation-actions { justify-content: flex-start; gap: 8px; }
+body.conversation-mode #conversation-execute { min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #conversation-execution-note { flex: 1; min-width: 12rem; }
+body.conversation-mode #bot-note { padding: 14px 22px 0; }
+body.conversation-mode #bot-note h3 { margin: 0 0 4px; font-size: 13px; }
+body.conversation-mode #bot-note p,
+body.conversation-mode #chat-note,
+body.conversation-mode #group-send-note,
+body.conversation-mode #conversation-execution-note,
+body.conversation-mode #conversation-send-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+body.conversation-mode .conversation-task-pane .bot-placement { margin: 4px 8px 10px; }
+body.conversation-mode .task-dashboard-table tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+body.conversation-mode .task-dashboard-table td { width: auto; }
+body.conversation-mode .task-dashboard-table td:nth-child(2) { flex: 1 1 120px; }
+body.conversation-mode .task-dashboard-table td:last-child { flex: 1 1 100%; }
+body.conversation-mode .conversation-task button,
+body.conversation-mode .conversation-task .quiet-button { min-height: 28px; margin: 0 4px 4px 0; padding: 4px 8px; }
 body.conversation-mode .task-dashboard { max-height: none; overflow: visible; border: 0; border-radius: 0; }
 body.conversation-mode .task-dashboard-table,
 body.conversation-mode .task-dashboard-table tbody,
