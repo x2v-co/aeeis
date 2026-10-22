@@ -851,6 +851,8 @@ body.conversation-mode #conversation-select,
 body.conversation-mode .conversation-focus-row,
 body.conversation-mode #conversation-tasks-title + p,
 body.conversation-mode #command-center .command-tools { display: none !important; }
+#workbench-team, body.conversation-mode #entry-team { flex: none; color: var(--muted); font-size: 12px; text-decoration: none; white-space: nowrap; }
+#workbench-team:hover, body.conversation-mode #entry-team:hover { color: var(--ink); }
 body.conversation-mode #entry-computer { flex: none; white-space: nowrap; }
 body.conversation-mode .conversation-layout { grid-template-columns: 272px minmax(0, 1fr); gap: 0; flex: 1; min-height: 0; height: 100%; }
 body.conversation-mode .conversation-task-pane { overflow: auto; background: #fafafa; border-right: 1px solid var(--line); padding: 8px; }

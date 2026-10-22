@@ -564,6 +564,16 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
+  const teamAssets: Record<string, [string, string]> = {
+    '/team': ['index.html', 'text/html; charset=utf-8'],
+    '/team/': ['index.html', 'text/html; charset=utf-8'],
+    '/team/index.html': ['index.html', 'text/html; charset=utf-8'],
+    '/team/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+    '/team/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  };
+  for (const [route, [file, type]] of Object.entries(teamAssets)) {
+    app.get(route, async (_request, reply) => reply.type(type).send(await readFile(new URL(`../../public/team/${file}`, import.meta.url), 'utf8')));
+  }
   app.get('/api/tools', async () => ({
     tools: options.tools ? await options.tools.listTools() : [],
     defaultAllowedTools: options.localToolDefaults ?? [],
