@@ -40,12 +40,20 @@ function mentionsTitle(text: string, title: string): boolean {
   return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'iu').test(folded);
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
+/** Statuses whose next step can still be ordered. Terminal success and cancellation are left alone. */
+const RANKED_RUN_STATUSES = new Set(['queued', 'planning', 'running', 'reviewing', 'needs_approval', 'needs_input', 'paused', 'failed', 'unknown', 'waiting_external']);
 /** Counts only. Summary text and originals stay on the owner memory API. */
 function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: number; hash: string; summary: string }>; approval?: { approved?: boolean; planHash?: string } } | undefined): { planVersion: number; planHash: string; summary: string } | undefined {
   if (!run || run.status !== 'needs_approval' || run.approval?.approved) return;
   const plan = run.plans.at(-1);
   if (!plan || run.approval?.planHash !== plan.hash) return;
   return { planVersion: plan.version, planHash: plan.hash, summary: plan.summary.slice(0, 240) };
+}
+function pendingQuestion(run: { status: string; question?: { text?: string } } | undefined): { text: string } | undefined {
+  if (!run || run.status !== 'needs_input') return;
+  const text = run.question?.text?.trim();
+  if (!text) return;
+  return { text: text.length > 2000 ? `${text.slice(0, 2000)}…` : text };
 }
 function taskMemory(run: { workingMemory?: { originals: readonly unknown[]; summaries: readonly { status: string }[] } } | undefined): { originals: number; activeSummaries: number } | undefined {
   const memory = run?.workingMemory;
@@ -122,7 +130,8 @@ export class ConversationService {
       const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
-      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}) };
+      const question = pendingQuestion(run);
+      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}) };
     }));
     return redactRunData({ ...conversation, tasks, messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
   }
@@ -156,7 +165,28 @@ export class ConversationService {
       next[swap] = moving;
       next.forEach((task, rank) => { task.priority = rank + 1; });
     });
+    await this.syncSchedulingPriorities(updated, scope);
     return this.view(updated, scope);
+  }
+  private async syncSchedulingPriorities(conversation: Conversation, scope: Ownership): Promise<void> {
+    for (const task of conversation.tasks) {
+      if (task.priority === undefined || !task.latestRunId) continue;
+      await this.assignSchedulingPriority(task.latestRunId, task.priority, scope);
+    }
+  }
+  private async assignSchedulingPriority(runId: string, priority: number, scope: Ownership): Promise<void> {
+    if (!Number.isSafeInteger(priority) || priority < 1 || priority > 100) return;
+    try {
+      const current = await this.runs.get(runId, scope);
+      if (current.schedulingPriority === priority || !RANKED_RUN_STATUSES.has(current.status)) return;
+      await this.runs.mutate(runId, run => {
+        if (!RANKED_RUN_STATUSES.has(run.status) || run.schedulingPriority === priority) return;
+        run.schedulingPriority = priority;
+      }, scope);
+    } catch (error) {
+      if (error instanceof NotFound) return;
+      throw error;
+    }
   }
   private setFocus(conversation: Conversation, taskId: string) {
     conversation.focusTaskId = taskId;
@@ -260,6 +290,13 @@ export class ConversationService {
         if (error instanceof Conflict || error instanceof ThreadConflict || error instanceof NotFound || error instanceof RangeError) throw error;
         const detail = error instanceof Error ? error.message : 'Execution preparation failed';
         throw new Conflict(`执行没有创建，请重新发送。${detail}`);
+      }
+    }
+    if (message.execution?.state === 'completed' && message.execution.runId) {
+      const linked = conversation.tasks.find(item => item.id === message.execution?.taskId);
+      if (linked?.priority !== undefined) {
+        try { await this.assignSchedulingPriority(message.execution.runId, linked.priority, scope); }
+        catch (error) { console.error('Scheduling rank was not stored', message.execution.runId, error instanceof Error ? error.name : 'Error'); }
       }
     }
     const task = conversation.tasks.find(task => task.id === message.route.taskIds[0]);

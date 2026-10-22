@@ -463,7 +463,10 @@ export function buildApp(options: Options) {
       ...(signature === undefined ? {} : { signature }),
       ...(request.aeeisRawBody === undefined ? {} : { body: request.aeeisRawBody }),
     });
-    try { await options.dispatcher?.notify(request.params.id); }
+    try {
+      await applyRunSchedulingRank(request.params.id);
+      await options.dispatcher?.notify(request.params.id);
+    }
     catch (error) {
       await options.repository.mutate(request.params.id, run => {
         event(run, 'dispatch.failed', { reason: error instanceof Error ? error.message : 'Execution service unavailable', source: 'agent-callback' });
@@ -1606,8 +1609,16 @@ export function buildApp(options: Options) {
     return { correction: updated.corrections?.at(-1), candidate };
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id/graphs', async request => { const principal = principalOf(request); return projectRunGraphs(await getReadableRun(options.repository, options.domain, request.params.id, principal)); });
+  async function applyRunSchedulingRank(id: string): Promise<void> {
+    if (!options.dispatcher?.setSchedulingRank) return;
+    const run = await options.repository.get(id);
+    options.dispatcher.setSchedulingRank(id, run.schedulingPriority);
+  }
   async function notify(id: string): Promise<void> {
-    try { await options.dispatcher?.notify(id); }
+    try {
+      await applyRunSchedulingRank(id);
+      await options.dispatcher?.notify(id);
+    }
     catch {
       await options.repository.mutate(id, run => { event(run, 'dispatch.failed'); run.error = 'Execution service unavailable. Restore it and use resume dispatch.'; });
     }
@@ -1621,7 +1632,17 @@ export function buildApp(options: Options) {
   app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request))));
   app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request)));
   app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request)));
-  app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request)));
+  app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
+    const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request));
+    // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.
+    if (options.dispatcher?.setSchedulingRank) {
+      for (const task of view.tasks) {
+        const runId = task.latestRunId;
+        if (runId) options.dispatcher.setSchedulingRank(runId, task.priority);
+      }
+    }
+    return view;
+  });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/notifications/sync', async request => {
     z.object({}).strict().parse(request.body ?? {});
     return conversationService().syncNotifications(request.params.id, conversationScope(request));
@@ -1836,7 +1857,10 @@ export function buildApp(options: Options) {
     const updated = await options.engine.acceptAgentCallback(request.params.id, request.body as AgentTransportResponse, {
       ...(timestamp === undefined ? {} : { timestamp }), ...(signature === undefined ? {} : { signature }), ...(request.aeeisRawBody === undefined ? {} : { body: request.aeeisRawBody }),
     });
-    try { await options.dispatcher?.notify(request.params.id); }
+    try {
+      await applyRunSchedulingRank(request.params.id);
+      await options.dispatcher?.notify(request.params.id);
+    }
     catch (error) {
       await options.repository.mutate(request.params.id, run => {
         event(run, 'dispatch.failed', { reason: error instanceof Error ? error.message : 'Execution service unavailable', source: 'agent-callback' });

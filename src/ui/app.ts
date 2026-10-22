@@ -84,7 +84,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -858,7 +858,7 @@ function updateConversationControls(): void {
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  $('conversation-tasks').querySelectorAll<HTMLButtonElement>('button[data-change-focus], button[data-priority], button[data-approve]').forEach(control => {
+  $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], textarea[data-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
 }
@@ -885,6 +885,10 @@ function renderConversation(): void {
     }
     target.value = [...target.options].some(option => option.value === previousTarget) ? previousTarget : '';
     const taskBody = $('conversation-tasks').querySelector('tbody');
+    const answerDrafts = new Map<string, string>();
+    taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
+      if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
+    });
     taskBody?.replaceChildren();
     const ordered = conversationTaskOrder(conversation?.tasks ?? []);
     ordered.forEach((task, index) => {
@@ -902,6 +906,7 @@ function renderConversation(): void {
         preview.title = task.pendingApproval.summary;
         name.append(preview);
       }
+      if (task.pendingQuestion) name.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
       const status = document.createElement('td');
       status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
       const actions = document.createElement('td');
@@ -916,6 +921,22 @@ function renderConversation(): void {
         const approve = dashboardButton('批准并执行', () => approveConversationTask(task));
         approve.dataset.approve = task.id; approve.className = 'decision-primary';
         actions.append(approve);
+      }
+      if (runId && task.status === 'needs_input' && task.pendingQuestion) {
+        const field = document.createElement('textarea');
+        field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+        field.placeholder = '回答后从当前节点继续'; field.dataset.answer = task.id;
+        field.setAttribute('aria-label', `回答「${task.title}」`);
+        const draft = answerDrafts.get(task.id);
+        if (draft) field.value = draft;
+        const submit = dashboardButton('提交回答', () => answerConversationTask(task, field.value));
+        submit.dataset.answerSubmit = task.id;
+        actions.append(field, submit);
+      }
+      if (runId && task.status === 'failed') {
+        const retry = dashboardButton('重试', () => retryConversationTask(task));
+        retry.dataset.retry = task.id;
+        actions.append(retry);
       }
       if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; actions.append(view); }
       if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; actions.append(memory); }
@@ -1047,7 +1068,7 @@ async function changeConversationPriority(taskId: string, direction: 'higher' | 
     const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}/priority`, { expectedRevision: conversation.revision, direction });
     if (epoch === conversationEpoch) {
       acceptConversation(view);
-      $('conversation-status').textContent = '任务优先级已更新。讨论焦点和运行状态都没有改变。';
+      $('conversation-status').textContent = '任务优先级已更新。讨论焦点和运行状态都没有改变；几个任务都能推进时，排在前面的先走一步。';
       if (conversation?.focusTaskId !== focus) $('conversation-error').textContent = '优先级更新后讨论焦点发生变化，请刷新核对。';
     }
   } catch (error) {
@@ -1055,6 +1076,48 @@ async function changeConversationPriority(taskId: string, direction: 'higher' | 
       conversationNeedsRefresh = error instanceof ApiError && error.status === 409 && /刷新/.test(errorMessage(error));
       $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新对话，再调整优先级。' : ''}`;
     }
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function answerConversationTask(task: ConversationTaskView, answer: string): Promise<void> {
+  const text = answer.trim();
+  if (!conversation || !task.runId || !text || conversationBusy || conversationAttempt) {
+    if (conversation && !text) $('conversation-error').textContent = '请先写下回答，再提交。';
+    return;
+  }
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/answer`, { answer: text });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已回答「${task.title}」。讨论焦点没有改变。`;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '回答后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function retryConversationTask(task: ConversationTaskView): Promise<void> {
+  if (!conversation || !task.runId || task.status !== 'failed' || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/retry`, {});
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已请求重试「${task.title}」。讨论焦点没有改变。`;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '重试后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 async function approveConversationTask(task: ConversationTaskView): Promise<void> {
@@ -1069,7 +1132,7 @@ async function approveConversationTask(task: ConversationTaskView): Promise<void
     if (currentId === runId) await refresh();
     if (epoch !== conversationEpoch) return;
     $('conversation-status').textContent = `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
-    if (conversation?.id === id && conversation.focusTaskId !== focus) $('conversation-error').textContent = '批准后讨论焦点发生变化，请刷新核对。';
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '批准后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
     $('conversation-error').textContent = errorMessage(error);

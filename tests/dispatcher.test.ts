@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
-import { notifyTemporalRunWorkflow, TemporalDispatcher } from '../src/runtime/dispatcher.js';
+import { LocalDispatcher, notifyRecoverableRuns, notifyTemporalRunWorkflow, TemporalDispatcher } from '../src/runtime/dispatcher.js';
+import type { AgentEngine } from '../src/runtime/engine.js';
 
 function fakeClient(signal: (attempt: number) => Promise<void>, start: () => Promise<void>) {
   let attempts = 0;
@@ -141,5 +142,82 @@ describe('Temporal run cancellation and description', () => {
     expect(client.workflow.getHandle).toHaveBeenCalledWith('run-6');
     handle.describe.mockRejectedValue(new WorkflowNotFoundError('missing', 'run-6', undefined));
     await expect(dispatcher.describe('run-6')).resolves.toEqual({ status: 'NOT_FOUND' });
+  });
+});
+
+describe('local dispatcher yield and rank', () => {
+  function driver(advance: (id: string) => Promise<string>) {
+    return new LocalDispatcher({ advance } as unknown as AgentEngine);
+  }
+  it('returns from notify while one step is still in flight and lets another run advance', async () => {
+    let release: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const seen: string[] = [];
+    const dispatcher = driver(async id => {
+      seen.push(`start:${id}`);
+      if (id === 'compact') await gate;
+      seen.push(`end:${id}`);
+      return 'needs_approval';
+    });
+    const pending = dispatcher.notify('compact');
+    await pending;
+    expect(seen).toEqual(['start:compact']);
+    await dispatcher.notify('other');
+    expect(seen).toEqual(['start:compact', 'start:other', 'end:other']);
+    release!();
+    await dispatcher.close();
+    expect(seen).toEqual(['start:compact', 'start:other', 'end:other', 'end:compact']);
+  });
+  it('starts the higher rank first after both steps yield, without serializing the in-flight calls', async () => {
+    let release: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const order: string[] = [];
+    const counts = new Map<string, number>();
+    const dispatcher = driver(async id => {
+      const step = (counts.get(id) ?? 0) + 1;
+      counts.set(id, step);
+      order.push(`${id}:${step}`);
+      if (step === 1) await gate;
+      return step === 1 ? 'running' : 'needs_approval';
+    });
+    dispatcher.setSchedulingRank('low', 2);
+    dispatcher.setSchedulingRank('high', 1);
+    await Promise.all([dispatcher.notify('low'), dispatcher.notify('high')]);
+    expect(order).toEqual(['high:1', 'low:1']);
+    release!();
+    await vi.waitFor(() => expect(order).toEqual(['high:1', 'low:1', 'high:2', 'low:2']));
+    await dispatcher.close();
+  });
+  it('keeps an unranked run behind a ranked one and does not advance when only the rank changes', async () => {
+    const order: string[] = [];
+    const dispatcher = driver(async id => {
+      order.push(id);
+      return 'needs_approval';
+    });
+    dispatcher.setSchedulingRank('ranked', 4);
+    expect(order).toEqual([]);
+    await notifyRecoverableRuns(dispatcher, [
+      { id: 'plain', status: 'running' },
+      { id: 'ranked', status: 'planning', schedulingPriority: 4 },
+      { id: 'done', status: 'succeeded', schedulingPriority: 1 },
+    ]);
+    await dispatcher.close();
+    expect(order).toEqual(['ranked', 'plain']);
+  });
+  it('does not take the next step after close', async () => {
+    let release: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    const dispatcher = driver(async () => {
+      calls += 1;
+      if (calls === 1) await gate;
+      return 'running';
+    });
+    await dispatcher.notify('run');
+    expect(calls).toBe(1);
+    const closed = dispatcher.close();
+    release!();
+    await closed;
+    expect(calls).toBe(1);
   });
 });

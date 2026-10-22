@@ -321,6 +321,9 @@ export interface AgentRun {
   taskExecution?: { domainPlanId: string; taskId: string; requestHash: string };
   followUpPlanId?: string;
   status: RunStatus; createdAt: string; updatedAt: string;
+  /** Manual entry-task rank for local scheduling. 1 starts first. Missing sorts after every ranked Run.
+   * The number does not approve, pause, resume, or cancel this Run. */
+  schedulingPriority?: number;
   cancellation?: { reason: string; actor: string; at: string; source: 'api' };
   reconciliation?: { workflowStatus: string; previousStatus: RunStatus; actor: string; at: string; reason: string };
   context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; threadHistory?: ThreadHistory; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };

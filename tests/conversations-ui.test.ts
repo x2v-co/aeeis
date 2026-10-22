@@ -399,4 +399,51 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
   });
+
+  it('answers and retries in the task row without moving focus or sending a discussion message', async () => {
+    const failedRunId = 'run_00000000-0000-4000-8000-000000000002';
+    const view = fixture();
+    view.tasks[1] = { ...view.tasks[1]!, status: 'needs_input', pendingQuestion: { text: '<img src=x onerror=alert(1)>还缺预算' } };
+    view.tasks.push({ id: 'task_c', title: '复盘', threadId: 'thread_c', status: 'failed', runId: failedRunId, latestRunId: failedRunId });
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url.endsWith('/answer')) {
+        const body = JSON.parse(request.body);
+        if (body.answer !== '预算 11 元') return response({ error: 'bad answer' }, 400);
+        view.tasks[1]!.status = 'running';
+        delete view.tasks[1]!.pendingQuestion;
+        view.revision++;
+        return response({ id: runId, status: 'running' });
+      }
+      if (request.method === 'POST' && url.endsWith('/retry')) {
+        view.tasks[2]!.status = 'running';
+        view.revision++;
+        return response({ id: failedRunId, status: 'running' });
+      }
+      if (url.includes('/priority')) return response({ error: '这项任务的优先级已经到头' }, 409);
+    } });
+    start(h.fetch); await ready();
+    const inputRow = doc().querySelector<HTMLElement>('[data-task-id="task_b"]')!;
+    expect(inputRow.textContent).toContain('待回答：<img src=x onerror=alert(1)>还缺预算');
+    expect(inputRow.textContent).toContain('待补充');
+    expect(doc().querySelector('#conversation-tasks img, #conversation-tasks script')).toBeNull();
+    const field = inputRow.querySelector<HTMLTextAreaElement>('textarea[data-answer]')!;
+    field.value = '预算 11 元';
+    clickText('提高优先级', inputRow);
+    await vi.waitFor(() => expect(el('conversation-error').textContent).toContain('已经到头'));
+    expect(h.posts.some(post => post.url.endsWith('/answer') || post.url.endsWith('/retry') || post.url.endsWith('/messages'))).toBe(false);
+    expect(field.value).toBe('预算 11 元');
+    await vi.waitFor(() => expect(inputRow.querySelector<HTMLButtonElement>('[data-answer-submit]')!.disabled).toBe(false));
+    clickText('提交回答', inputRow);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/answer'))?.body).toEqual({ answer: '预算 11 元' });
+    expect(doc().querySelector('[data-task-id="task_b"] textarea')).toBeNull();
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(el('conversation-status').textContent).toContain('讨论焦点没有改变');
+    const failedRow = doc().querySelector<HTMLElement>('[data-task-id="task_c"]')!;
+    clickText('重试', failedRow);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_c"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/retry'))?.body).toEqual({});
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+  });
 });

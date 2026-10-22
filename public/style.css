@@ -855,7 +855,8 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 .conversation-task small { margin-top: 4px; font-size: 12px; }
 .conversation-task button { margin: 0 6px 6px 0; font-size: 12px; }
 .conversation-task[data-focused="true"] td:nth-child(2) > strong::before { content: "讨论焦点 · "; color: var(--blue-deep); }
-.conversation-plan { max-width: 42ch; }
+.conversation-plan, .conversation-question { max-width: 42ch; white-space: pre-wrap; }
+.conversation-answer { display: block; width: 100%; min-width: 12rem; min-height: 64px; margin: 0 0 6px; font: inherit; }
 .conversation-discussion { min-width: 0; }
 .conversation-messages { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .conversation-message { padding: 12px 0; border-bottom: 1px solid var(--line); }

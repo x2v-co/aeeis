@@ -60,6 +60,9 @@ function cancelTimeoutMs(): number {
 
 export interface Dispatcher {
   notify(id: string): Promise<void>;
+  /** Lower numbers start first. Missing ranks sort after every ranked Run.
+   * Updating a rank does not approve, pause, resume, or cancel. */
+  setSchedulingRank?(id: string, rank: number | undefined): void;
   cancel?(id: string, reason?: string): Promise<WorkflowCancellation>;
   /** Describe the latest execution of a workflow ID, without pinning a run ID. */
   describe?(id: string): Promise<{ status: WorkflowStatus }>;
@@ -68,25 +71,88 @@ export interface Dispatcher {
   close(): Promise<void>;
   health?(): Promise<{ ready: boolean; detail: string }>;
 }
+const LOCAL_RUNNABLE = new Set(['queued', 'planning', 'running', 'reviewing']);
+/** One step per turn, then back to the queue. In-flight model calls keep overlapping:
+ * a compaction request is not a lock on any other Run, and a started call is
+ * finished inside the advance that reserved it. */
 export class LocalDispatcher implements Dispatcher {
-  private jobs = new Map<string, Promise<void>>();
+  private queued = new Set<string>();
+  private inflight = new Map<string, Promise<void>>();
+  private ranks = new Map<string, number>();
+  private pumpScheduled = false;
   private closing = false;
   constructor(private engine: AgentEngine) {}
-  async notify(id: string): Promise<void> {
-    if (this.jobs.has(id) || this.closing) return;
-    const work = (async () => {
-      while (!this.closing) {
-        const status = await this.engine.advance(id);
-        if (!['queued', 'planning', 'running', 'reviewing'].includes(status)) break;
-      }
-    })().finally(() => this.jobs.delete(id));
-    this.jobs.set(id, work);
-    // Keep failures observable without an unhandled rejection. The durable status remains inspectable.
-    void work.catch(error => console.error('Local run driver failed', error instanceof Error ? error.name : 'Error'));
+  setSchedulingRank(id: string, rank: number | undefined): void {
+    if (rank === undefined || !Number.isSafeInteger(rank) || rank < 1 || rank > 100) this.ranks.delete(id);
+    else this.ranks.set(id, rank);
+    this.schedulePump();
   }
-  async close(): Promise<void> { this.closing = true; await Promise.allSettled(this.jobs.values()); }
+  async notify(id: string): Promise<void> {
+    if (this.closing || !id) return;
+    this.queued.add(id);
+    this.schedulePump();
+  }
+  private rankValue(id: string): number {
+    return this.ranks.get(id) ?? Number.POSITIVE_INFINITY;
+  }
+  private schedulePump(): void {
+    if (this.pumpScheduled || this.closing) return;
+    this.pumpScheduled = true;
+    queueMicrotask(() => {
+      this.pumpScheduled = false;
+      this.pump();
+    });
+  }
+  private pump(): void {
+    if (this.closing) return;
+    const ready = [...this.queued].filter(id => !this.inflight.has(id));
+    ready.sort((left, right) => this.rankValue(left) - this.rankValue(right) || (left < right ? -1 : left > right ? 1 : 0));
+    for (const id of ready) this.start(id);
+  }
+  private start(id: string): void {
+    if (this.inflight.has(id) || this.closing) return;
+    this.queued.delete(id);
+    let resolve!: () => void;
+    const done = new Promise<void>(resolveDone => { resolve = resolveDone; });
+    this.inflight.set(id, done);
+    void (async () => {
+      let status = '';
+      let failed = false;
+      try { status = await this.engine.advance(id); }
+      catch (error) {
+        failed = true;
+        console.error('Local run driver failed', error instanceof Error ? error.name : 'Error');
+      }
+      if (failed || this.closing || this.engine.isDraining || !LOCAL_RUNNABLE.has(status)) this.queued.delete(id);
+      else this.queued.add(id);
+    })().finally(() => {
+      this.inflight.delete(id);
+      resolve();
+      this.schedulePump();
+    });
+  }
+  async close(): Promise<void> {
+    this.closing = true;
+    this.queued.clear();
+    while (this.inflight.size) await Promise.allSettled([...this.inflight.values()]);
+  }
   async cancel(_id: string, _reason?: string): Promise<WorkflowCancellation> { return { outcome: 'unsupported' }; }
   async health(): Promise<{ ready: boolean; detail: string }> { return { ready: !this.closing, detail: this.closing ? 'local dispatcher is closing' : 'LocalDispatcher ready' }; }
+}
+
+/** Boot recovery. A local dispatcher learns every rank before the first step
+ * so the page starts in priority order and still overlaps. Temporal stays
+ * one signal at a time; it has no cross-run rank. */
+export async function notifyRecoverableRuns(dispatcher: Dispatcher, runs: readonly { id: string; status: string; schedulingPriority?: number }[]): Promise<void> {
+  const recoverable = runs.filter(run => isBootRecoverableRun(run.status));
+  if (dispatcher.setSchedulingRank) {
+    await Promise.all(recoverable.map(run => {
+      dispatcher.setSchedulingRank!(run.id, run.schedulingPriority);
+      return dispatcher.notify(run.id);
+    }));
+    return;
+  }
+  for (const run of recoverable) await dispatcher.notify(run.id);
 }
 export class TemporalDispatcher implements Dispatcher {
   private constructor(private client: Client, private connection: Connection, private taskQueue: string, private readonly workerHealthUrl?: string) {}
