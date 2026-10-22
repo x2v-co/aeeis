@@ -450,7 +450,22 @@ describe('single-entry conversation workbench', () => {
 
 describe('entry bots and group chats', () => {
   it('shows demo bots in groups and keeps execution on AEEIS', async () => {
-    const h = harness();
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/rooms' && method === 'POST') {
+        const room = { id: `room_direct_${rooms.length}`, title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        rooms.unshift(room);
+        return response(room);
+      }
+      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (String(url).endsWith('/members') && method === 'POST') return response({ id: 'member_direct', roomId: rooms[0]?.id, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
+      if (String(url).endsWith('/members')) return response([]);
+      if (String(url).includes('/session-events')) return response({ items: [] });
+      if (String(url).endsWith('/goals')) return response([]);
+      return undefined;
+    } });
     start(h.fetch);
     await ready();
     await vi.waitFor(() => expect(el('bots').textContent).toContain('发布'));
@@ -458,6 +473,7 @@ describe('entry bots and group chats', () => {
     expect(bots.textContent).toContain('工作');
     expect(bots.textContent).toContain('研究');
     expect(bots.textContent).toContain('纪要');
+    expect(bots.textContent).toContain('开始对话');
     const draft = el<HTMLTextAreaElement>('conversation-text');
     draft.value = '先别发出去';
     doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
@@ -467,6 +483,12 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
     expect(draft.value).toBe('先别发出去');
+    await vi.waitFor(() => expect(el('group-panel').hidden).toBe(false));
+    expect(h.posts.find(post => post.url === '/api/rooms')?.body).toMatchObject({ title: '发布', description: '私聊' });
+    expect(h.posts.find(post => post.url.endsWith('/members'))?.body).toEqual({ principalId: 'demo.release', role: 'agent' });
+    expect(el('chat-note').textContent).toContain('单独对话');
+    expect(el('bots').textContent).toContain('私聊');
+    expect(el('groups').textContent ?? '').not.toContain('发布');
     (el<HTMLInputElement>('bot-group-name')).value = '值班';
     el<HTMLFormElement>('bot-group-draft').requestSubmit();
     const duty = [...doc().querySelectorAll<HTMLButtonElement>('#bot-placement button')].find(button => button.textContent === '值班');
@@ -499,13 +521,20 @@ describe('entry bots and group chats', () => {
   });
 
   it('refuses a group that is only AEEIS and sends a room message without moving focus', async () => {
-    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [
+      { id: 'room_backend', title: '后台房间', description: '长期协作', status: 'active', createdAt: date, updatedAt: date },
+    ];
     const events: Array<{ id: string; operation: string; actorType: string; actorId: string; content: string; createdAt: string }> = [];
     const calls: Array<{ url: string; method: string; body: any }> = [];
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
       if (String(url).startsWith('/api/rooms') || String(url).includes('/goals') || String(url).includes('context-manifests') || String(url).includes('session-events')) calls.push({ url: String(url), method, body });
+      if (method === 'PATCH' && String(url).startsWith('/api/rooms/')) {
+        const room = rooms.find(item => String(url).includes(item.id));
+        if (room) Object.assign(room, body, { id: room.id });
+        return response(room ?? {});
+      }
       if (url === '/api/rooms' && method === 'POST') {
         const room = { id: 'room_group', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
         rooms.unshift(room);
@@ -526,6 +555,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
+    expect(el('groups').textContent ?? '').not.toContain('后台房间');
     el('gb-new-group').click();
     expect(el('group-draft').hidden).toBe(false);
     expect(el('group-count-live').textContent).toContain('1 / 6');
@@ -555,5 +585,11 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
+    el('chat-archive').click();
+    await vi.waitFor(() => expect(el('group-panel').hidden).toBe(true));
+    expect(el('groups').textContent ?? '').not.toContain('发布协作');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(typed.value).toBe('还留在入口');
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
 });

@@ -195,6 +195,10 @@ let groupMembers: RoomMemberSummary[] = [];
 let groupEvents: SessionEventSummary[] = [];
 const draftAgents = new Set<string>();
 let draftPeople: string[] = [];
+const directMembers = new Map<string, string>();
+const directOpening = new Set<string>();
+let directIndexKey = '';
+let directIndexPromise: Promise<void> = Promise.resolve();
 let timelineFilter = localStorage.getItem('aeeis.timeline-filter') ?? 'all';
 const MAX_MATERIAL_FILES = 8;
 const MAX_MATERIAL_FILE_BYTES = 1_000_000;
@@ -882,9 +886,9 @@ function updateConversationControls(): void {
   if (rosterView() !== 'entry') {
     $<HTMLButtonElement>('conversation-send').disabled = true;
     $<HTMLButtonElement>('conversation-execute').disabled = true;
-    if (rosterView() === 'bot' && !conversationCorrectionId) {
+    if ((rosterView() === 'bot' || rosterView() === 'direct') && !conversationCorrectionId) {
       $<HTMLButtonElement>('conversation-send').textContent = '先选 AEEIS';
-      $('conversation-execution-note').textContent = '任务仍交给 AEEIS。这位不会单独执行，也不会自己回复。';
+      $('conversation-execution-note').textContent = '任务仍交给 AEEIS。成员对话只保留会话记录，不会单独执行，也不会自己回复。';
     }
   }
   syncEntrySurface();
@@ -930,10 +934,26 @@ function botById(id: string): RosterBot | undefined {
 function activeBotId(): string {
   return rosterBots().some(bot => bot.id === selectedBotId) ? selectedBotId : 'aeeis';
 }
-function rosterView(): 'entry' | 'bot' | 'group' | 'draft' {
+function chatRoom(): RoomSummary | undefined {
+  return roomSummaries.find(room => room.id === openGroupId);
+}
+function isManagedChat(room: RoomSummary): boolean {
+  return room.status === 'active' && (room.description === '私聊' || room.description === '群聊');
+}
+function rosterView(): 'entry' | 'bot' | 'group' | 'draft' | 'direct' {
   if (groupDraftOpen) return 'draft';
-  if (openGroupId) return 'group';
+  const room = chatRoom();
+  if (room?.description === '私聊') return 'direct';
+  if (room?.description === '群聊' || openGroupId) return openGroupId ? 'group' : 'entry';
   return activeBotId() === 'aeeis' ? 'entry' : 'bot';
+}
+function directRoomId(principalId: string): string {
+  for (const [roomId, memberId] of directMembers) {
+    if (memberId !== principalId) continue;
+    const room = roomSummaries.find(item => item.id === roomId);
+    if (room && isManagedChat(room) && room.description === '私聊') return roomId;
+  }
+  return '';
 }
 function botPresence(runs: RunSummary[]): { state: string; label: string } {
   const statuses = runs.map(run => run.status);
@@ -974,20 +994,31 @@ function syncEntrySurface(): void {
   if (messages) messages.hidden = !discussion;
   if (earlier) earlier.hidden = !discussion || !conversation?.hasEarlierMessages;
   if (empty) empty.hidden = !discussion || Boolean(conversation?.messages.length);
-  if (composer) composer.hidden = view === 'group' || view === 'draft';
-  if (note) note.hidden = view !== 'bot';
+  if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
+  if (note) note.hidden = view !== 'bot' && view !== 'direct';
   if (placement) placement.hidden = view === 'group' || view === 'draft';
   if (draft) draft.hidden = view !== 'draft';
-  if (panel) panel.hidden = view !== 'group';
-  if (view === 'bot') {
-    const bot = botById(activeBotId());
+  if (panel) panel.hidden = view !== 'group' && view !== 'direct';
+  const room = chatRoom();
+  const counterpart = view === 'direct' ? (botById(directMembers.get(room?.id ?? '') ?? selectedBotId) ?? botById(activeBotId())) : botById(activeBotId());
+  if (view === 'bot' || view === 'direct') {
     const title = $('bot-note-title');
     const copy = $('bot-note-copy');
-    if (title) title.textContent = bot?.name ?? 'Bot';
-    if (copy) copy.textContent = bot?.demo
-      ? '这是演示里的一位 Bot。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
-      : '这位已经准入。单独对话还没有接上，可以在群聊里点名。任务仍交给 AEEIS。';
+    if (title) title.textContent = counterpart?.name ?? room?.title ?? '成员';
+    if (copy) copy.textContent = counterpart?.demo
+      ? '这是演示里的一位成员。单独对话会留在名册里。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
+      : '单独对话会留在名册里。单独对话还没有接到模型，可以继续写会话记录，或在群聊里点名。任务仍交给 AEEIS。';
   }
+  const chatNote = $('chat-note');
+  const rename = $('group-rename');
+  const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
+  const groupText = $<HTMLTextAreaElement>('group-text');
+  if (chatNote) chatNote.textContent = view === 'direct'
+    ? '这是和这一位成员的单独对话。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。点成员名字可以打开和这位的单独对话。归档后从群聊列表撤下。';
+  if (rename) rename.hidden = view === 'direct';
+  if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。这里不批准计划，也不调用模型。' : '用 @ 点名下一步交给谁。这里不批准计划，也不调用模型。';
   renderBotPlacement();
 }
 function renderBotRoster(): void {
@@ -1005,7 +1036,8 @@ function renderBotRoster(): void {
     const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
     avatar.dataset.state = bot.id === 'aeeis' ? botPresence(runSummaries).state : 'idle';
     const copy = element('span', '', 'roster-copy');
-    const presence = element('small', bot.id === 'aeeis' ? (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : botPresence(runSummaries).label) : (bot.demo ? '演示' : bot.note));
+    const directId = bot.id === 'aeeis' ? '' : directRoomId(bot.id);
+    const presence = element('small', bot.id === 'aeeis' ? (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : botPresence(runSummaries).label) : (directId ? '私聊' : '开始对话'));
     copy.append(element('strong', bot.name), presence);
     item.append(avatar, copy);
     list.append(item);
@@ -1024,7 +1056,20 @@ function renderBotRoster(): void {
   const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
   if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
   for (const bot of loose) renderRow(bot);
-  const viewingBot = rosterView() === 'entry' || rosterView() === 'bot';
+  for (const room of roomSummaries.filter(item => item.status === 'active' && item.description === '私聊')) {
+    const principalId = directMembers.get(room.id);
+    if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'bot-row';
+    item.dataset.roomId = room.id;
+    const avatar = element('span', room.title.slice(0, 1) || '成', 'roster-avatar');
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', room.title), element('small', '私聊'));
+    item.append(avatar, copy);
+    list.append(item);
+  }
+  const viewingBot = rosterView() === 'entry' || rosterView() === 'bot' || rosterView() === 'direct';
   const visible = activeBotId();
   list.querySelectorAll<HTMLButtonElement>('[data-bot-id]').forEach(row => {
     row.setAttribute('aria-pressed', String(viewingBot && row.dataset.botId === visible));
@@ -1100,10 +1145,66 @@ function renameBotGroup(id: string): void {
 }
 function selectBot(id: string): void {
   if (!rosterBots().some(bot => bot.id === id)) return;
+  if (id !== 'aeeis') { void openDirect(id).catch(error => message(errorMessage(error))); return; }
   selectedBotId = id;
   localStorage.setItem('aeeis.bot', id);
   groupDraftOpen = false;
   clearOpenGroup();
+  renderBotRoster();
+  renderGroups(roomSummaries);
+  updateConversationControls();
+}
+function indexDirectRooms(rooms: RoomSummary[]): void {
+  const directs = rooms.filter(room => room.status === 'active' && room.description === '私聊');
+  const key = directs.map(room => room.id).join('|');
+  if (key === directIndexKey) return;
+  directIndexKey = key;
+  directIndexPromise = Promise.all(directs.map(async room => {
+    if (directMembers.has(room.id)) return;
+    const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`).catch(() => [] as RoomMemberSummary[]);
+    const other = members.find(member => member.status === 'active');
+    if (other) directMembers.set(room.id, other.principalId);
+  })).then(() => { if (directIndexKey === key && $('bots')) renderBotRoster(); });
+}
+async function openDirect(principalId: string): Promise<void> {
+  if (!principalId || principalId === 'aeeis') { selectBot('aeeis'); return; }
+  if (directOpening.has(principalId)) return;
+  const known = botById(principalId);
+  if (known) { selectedBotId = principalId; localStorage.setItem('aeeis.bot', principalId); }
+  groupDraftOpen = false;
+  renderBotRoster();
+  updateConversationControls();
+  directOpening.add(principalId);
+  try {
+    await directIndexPromise;
+    const existing = directRoomId(principalId);
+    if (existing) { await openGroup(existing); return; }
+    const room = await api<RoomSummary>('/rooms', { title: known?.name || principalId, description: '私聊' });
+    try {
+      await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId, role: known ? 'agent' : 'editor' });
+    } catch (error) {
+      await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+      throw error;
+    }
+    directMembers.set(room.id, principalId);
+    directIndexKey = '';
+    roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
+    message('');
+    await openGroup(room.id);
+  } finally { directOpening.delete(principalId); }
+}
+async function archiveOpenChat(): Promise<void> {
+  const id = openGroupId;
+  const room = chatRoom();
+  if (!id || !room || !isManagedChat(room)) return;
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`, { status: 'archived' }, 'PATCH');
+  roomSummaries = roomSummaries.map(item => item.id === id ? { ...item, ...updated, status: 'archived' } : item);
+  directMembers.delete(id);
+  directIndexKey = '';
+  clearOpenGroup();
+  selectedBotId = 'aeeis';
+  localStorage.setItem('aeeis.bot', 'aeeis');
+  message('');
   renderBotRoster();
   renderGroups(roomSummaries);
   updateConversationControls();
@@ -1188,15 +1289,17 @@ async function createGroup(event: Event): Promise<void> {
 }
 function renderGroups(rooms: RoomSummary[]): void {
   roomSummaries = rooms;
+  indexDirectRooms(rooms);
   if (!openGroupId && !groupDraftOpen) {
     const saved = localStorage.getItem('aeeis.group') ?? '';
-    if (saved && rooms.some(room => room.id === saved && room.status === 'active')) openGroupId = saved;
+    const savedRoom = rooms.find(room => room.id === saved);
+    if (savedRoom && isManagedChat(savedRoom)) openGroupId = saved;
     else if (saved) localStorage.removeItem('aeeis.group');
   }
   const list = $('groups');
   if (!list) return;
-  const visible = rooms.filter(room => room.status === 'active');
-  if (openGroupId && !visible.some(room => room.id === openGroupId)) {
+  const visible = rooms.filter(room => room.status === 'active' && room.description === '群聊');
+  if (openGroupId && !rooms.some(room => room.id === openGroupId && isManagedChat(room))) {
     openGroupId = '';
     groupMembers = [];
     groupEvents = [];
@@ -1217,6 +1320,7 @@ function renderGroups(rooms: RoomSummary[]): void {
   const empty = $('groups-empty');
   if (empty) empty.hidden = visible.length > 0;
   if (openGroupId) void loadGroup(openGroupId);
+  renderBotRoster();
   syncEntrySurface();
 }
 async function openGroup(id: string): Promise<void> {
@@ -1243,7 +1347,18 @@ function renderGroupTranscript(): void {
   const empty = $('group-thread-empty');
   const members = $('group-members');
   if (!list) return;
-  if (members) members.textContent = ['AEEIS', ...groupMembers.map(member => participantLabel(member.principalId))].join('、');
+  if (members) {
+    members.replaceChildren(document.createTextNode('AEEIS'));
+    for (const member of groupMembers) {
+      members.append(document.createTextNode('、'));
+      const openMember = document.createElement('button');
+      openMember.type = 'button';
+      openMember.className = 'quiet-button';
+      openMember.textContent = participantLabel(member.principalId);
+      openMember.addEventListener('click', () => { void openDirect(member.principalId).catch(error => message(errorMessage(error))); });
+      members.append(openMember);
+    }
+  }
   list.replaceChildren();
   for (const event of groupEvents) {
     if (event.operation === 'retract') continue;
@@ -1292,7 +1407,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
   const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
-  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: '群聊消息', audienceMode: 'room' });
+  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
   await api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
     goalId: goal.id, type: 'message', content: text, contextManifestId: manifest.id,
     idempotencyKey: `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`,
@@ -1703,6 +1818,7 @@ $('bots')?.addEventListener('click', event => {
   const target = (event.target as HTMLElement | null)?.closest('button');
   if (!target || !$('bots')?.contains(target)) return;
   if (target.dataset.botId) selectBot(target.dataset.botId);
+  else if (target.dataset.roomId) void openGroup(target.dataset.roomId).catch(error => message(errorMessage(error)));
   else if (target.dataset.groupId) renameBotGroup(target.dataset.groupId);
 });
 $('bot-group-draft')?.addEventListener('submit', createBotGroup);
@@ -1716,6 +1832,7 @@ $('group-create')?.addEventListener('submit', event => { void createGroup(event)
 $('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
 $('group-text')?.addEventListener('input', () => renderMentions());
 $('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
+$('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });
 
 function attentionCopy(status: string): [string, string] {
   const copy: Record<string, [string, string]> = {
