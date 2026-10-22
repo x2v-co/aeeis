@@ -976,6 +976,7 @@ function participantLabel(principalId: string): string {
   return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
 }
 function eventAuthor(event: SessionEventSummary): string {
+  if (event.type === 'system') return '记录';
   if (event.actorType === 'agent') return participantLabel(event.actorId);
   if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
   return '你';
@@ -1026,11 +1027,11 @@ function syncEntrySurface(): void {
   const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
-    ? '这是和这一位成员的单独对话。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。点成员名字可以打开和这位的单独对话。归档后从群聊列表撤下。';
+    ? '这是和这一位成员的单独对话。@AEEIS 会记成入口讨论，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。@AEEIS 会记成入口讨论，不执行。点成员名字可以打开和这位的单独对话。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。这里不批准计划，也不调用模型。' : '用 @ 点名下一步交给谁。这里不批准计划，也不调用模型。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记成入口讨论，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记成入口讨论，不执行，也不调用模型。';
   const entryTitle = $('entry-title');
   const entryPresence = $('entry-presence');
   if (entryTitle) entryTitle.textContent = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? (counterpart?.name ?? room?.title ?? '成员') : 'AEEIS';
@@ -1383,6 +1384,7 @@ function renderGroupTranscript(): void {
   for (const event of groupEvents) {
     if (event.operation === 'retract') continue;
     const item = element('li', '', 'group-message');
+    item.dataset.type = event.type;
     const heading = element('header');
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
     item.append(heading, element('p', event.content));
@@ -1415,6 +1417,25 @@ function renderMentions(): void {
     box.append(choice);
   }
 }
+const AEEIS_MENTION = /(?:^|[^\p{L}\p{N}_])@aeeis(?=$|[^\p{L}\p{N}_])/giu;
+function mentionsAeeis(text: string): boolean {
+  AEEIS_MENTION.lastIndex = 0;
+  return AEEIS_MENTION.test(text.normalize('NFKC'));
+}
+function clipEntryText(value: string, max: number): string {
+  const sliced = value.slice(0, max);
+  const last = sliced.charCodeAt(sliced.length - 1);
+  return last >= 0xD800 && last <= 0xDBFF ? sliced.slice(0, -1) : sliced;
+}
+function entryMentionTitle(text: string, roomTitle: string, kind: string): string {
+  AEEIS_MENTION.lastIndex = 0;
+  const stripped = text.normalize('NFKC').replace(AEEIS_MENTION, ' ').replace(/\s+/g, ' ').trim();
+  const title = clipEntryText(stripped || `来自${kind}「${roomTitle || kind}」`, 80).trim();
+  return title.length >= 2 ? title : '入口请求';
+}
+function groupIdempotencyKey(): string {
+  return `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`;
+}
 async function submitGroupMessage(event: Event): Promise<void> {
   event.preventDefault();
   const input = $<HTMLTextAreaElement>('group-text');
@@ -1428,13 +1449,47 @@ async function submitGroupMessage(event: Event): Promise<void> {
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
   const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
-  await api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
-    goalId: goal.id, type: 'message', content: text, contextManifestId: manifest.id,
-    idempotencyKey: `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`,
+  const postSession = (type: 'message' | 'system', content: string) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
+    goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
   });
+  await postSession('message', text);
   if (input) input.value = '';
+  let handoffError = '';
+  if (mentionsAeeis(text)) {
+    const kind = room?.description === '私聊' ? '私聊' : '群聊';
+    const title = entryMentionTitle(text, room?.title || kind, kind);
+    if (!conversationEnabled || !conversation) handoffError = '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
+    else if (conversationBusy || conversationAttempt) handoffError = '入口正在发送另一条讨论，这条点名只留在会话里。';
+    else {
+      const epoch = conversationEpoch;
+      const id = conversation.id;
+      conversationBusy = true;
+      updateConversationControls();
+      try {
+        const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(id)}/messages`, {
+          text: clipEntryText(`来自${kind}「${room?.title || kind}」：${text}`, 7000),
+          expectedRevision: conversation.revision,
+          newTask: { title },
+          focus: 'keep',
+          intent: 'discuss',
+        }, 'POST', groupIdempotencyKey());
+        if (epoch === conversationEpoch && result.conversation?.id === id) acceptConversation(result.conversation);
+      } catch (error) {
+        handoffError = `会话已留下，入口讨论没有记上。${errorMessage(error)}`;
+      } finally {
+        if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+      }
+      if (!handoffError) {
+        try {
+          await postSession('system', `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
+        } catch (error) {
+          handoffError = `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`;
+        }
+      }
+    }
+  }
   await loadGroup(roomId);
-  message('');
+  message(handoffError);
 }
 async function renameGroup(): Promise<void> {
   if (!openGroupId) return;

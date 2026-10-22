@@ -58,6 +58,30 @@ describe('single-entry conversation routing', () => {
     expect(f.model.complete).not.toHaveBeenCalled(); expect(f.notify).not.toHaveBeenCalled();
     expect((await f.fresh(entry.id)).messages).toHaveLength(1);
   });
+  it('records a kept-focus discussion task without a Run when a room names AEEIS', async () => {
+    const f = await fixture(), entry = await f.create();
+    const first = await f.addTask(entry.id, '发布方案');
+    const focus = first.conversation.focusTaskId;
+    const mention = await f.post(entry.id, {
+      text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
+      newTask: { title: '整理发布风险' },
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: first.conversation.revision,
+    });
+    expect(mention.statusCode, mention.body).toBe(200);
+    const body = mention.json();
+    expect(body.runId).toBeUndefined();
+    expect(body.message.execution).toBeUndefined();
+    expect(body.message.route).toMatchObject({ reason: 'new-task', focusEffect: 'keep', status: 'routed' });
+    expect(body.conversation.focusTaskId).toBe(focus);
+    const created = body.conversation.tasks.find((task: { title: string; status: string }) => task.title === '整理发布风险');
+    expect(created?.status).toBe('discussion');
+    expect(created?.id).not.toBe(focus);
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    expect(f.notify).not.toHaveBeenCalled();
+  });
   it('keeps side questions separate from focus and supports explicit focus switching', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, 'AEEIS'), b = await f.addTask(entry.id, 'Grok 迁移');
