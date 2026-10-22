@@ -980,6 +980,9 @@ function clearOpenGroup(): void {
   groupEvents = [];
   localStorage.removeItem('aeeis.group');
 }
+function showRoster(focused: boolean): void {
+  document.body.classList.toggle('roster-focus', focused);
+}
 function syncEntrySurface(): void {
   const view = rosterView();
   const discussion = view === 'entry';
@@ -1019,6 +1022,10 @@ function syncEntrySurface(): void {
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。这里不批准计划，也不调用模型。' : '用 @ 点名下一步交给谁。这里不批准计划，也不调用模型。';
+  const entryTitle = $('entry-title');
+  const entryPresence = $('entry-presence');
+  if (entryTitle) entryTitle.textContent = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? (counterpart?.name ?? room?.title ?? '成员') : 'AEEIS';
+  if (entryPresence) entryPresence.textContent = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : view === 'bot' ? '单独对话' : (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : '空闲');
   renderBotPlacement();
 }
 function renderBotRoster(): void {
@@ -1150,6 +1157,7 @@ function selectBot(id: string): void {
   localStorage.setItem('aeeis.bot', id);
   groupDraftOpen = false;
   clearOpenGroup();
+  showRoster(false);
   renderBotRoster();
   renderGroups(roomSummaries);
   updateConversationControls();
@@ -1172,6 +1180,7 @@ async function openDirect(principalId: string): Promise<void> {
   const known = botById(principalId);
   if (known) { selectedBotId = principalId; localStorage.setItem('aeeis.bot', principalId); }
   groupDraftOpen = false;
+  showRoster(false);
   renderBotRoster();
   updateConversationControls();
   directOpening.add(principalId);
@@ -1246,6 +1255,7 @@ function renderGroupCandidates(): void {
 }
 function showGroupDraft(): void {
   clearOpenGroup();
+  showRoster(false);
   draftAgents.clear();
   draftPeople = [];
   groupDraftOpen = true;
@@ -1328,6 +1338,7 @@ async function openGroup(id: string): Promise<void> {
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
   openGroupId = id;
   groupDraftOpen = false;
+  showRoster(false);
   localStorage.setItem('aeeis.group', id);
   renderGroups(roomSummaries);
   $<HTMLTextAreaElement>('group-text')?.focus();
@@ -1833,6 +1844,13 @@ $('group-composer')?.addEventListener('submit', event => { void submitGroupMessa
 $('group-text')?.addEventListener('input', () => renderMentions());
 $('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
 $('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });
+$('entry-back')?.addEventListener('click', () => showRoster(true));
+$('entry-computer')?.addEventListener('click', () => {
+  const open = document.body.classList.toggle('computer-open');
+  const button = $<HTMLButtonElement>('entry-computer');
+  button.setAttribute('aria-pressed', String(open));
+  button.textContent = open ? '关上工作台' : '打开它的工作台';
+});
 
 function attentionCopy(status: string): [string, string] {
   const copy: Record<string, [string, string]> = {

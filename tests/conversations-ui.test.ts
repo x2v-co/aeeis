@@ -487,6 +487,16 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url === '/api/rooms')?.body).toMatchObject({ title: '发布', description: '私聊' });
     expect(h.posts.find(post => post.url.endsWith('/members'))?.body).toEqual({ principalId: 'demo.release', role: 'agent' });
     expect(el('chat-note').textContent).toContain('单独对话');
+    expect(el('entry-title').textContent).toBe('发布');
+    expect(el('entry-presence').textContent).toBe('私聊');
+    const postsBeforeComputer = h.posts.length;
+    el('entry-computer').click();
+    expect(doc().body.classList.contains('computer-open')).toBe(true);
+    expect(el('entry-computer').textContent).toBe('关上工作台');
+    expect(el('entry-computer').getAttribute('aria-pressed')).toBe('true');
+    expect(h.posts).toHaveLength(postsBeforeComputer);
+    el('entry-computer').click();
+    expect(doc().body.classList.contains('computer-open')).toBe(false);
     expect(el('bots').textContent).toContain('私聊');
     expect(el('groups').textContent ?? '').not.toContain('发布');
     (el<HTMLInputElement>('bot-group-name')).value = '值班';
