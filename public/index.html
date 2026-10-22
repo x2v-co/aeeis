@@ -18,7 +18,7 @@
     <label for="conversation-focus-effect">发送后如何处理讨论焦点</label><select id="conversation-focus-effect"><option value="keep">保持焦点（临时提问 / 回复其他任务）</option><option value="switch">切换到本条消息关联的任务</option></select>
     <p id="conversation-send-note" class="muted">发送讨论只保存记录，不生成模型回答。执行使用“更多设置”中的资料、工具和预算；创建 Run 不代表批准计划。</p></details>
     <div class="quick-input-row"><label class="sr-only" for="conversation-text">消息</label><textarea id="conversation-text" rows="1" required maxlength="7000" aria-describedby="conversation-send-note" placeholder="写下要推进的事，或补充讨论"></textarea><button id="conversation-send" type="submit">发送讨论</button></div>
-    <div class="conversation-actions"><button id="conversation-execute" type="button" class="quiet-button">创建执行 Run</button><p id="conversation-execution-note" class="muted"></p></div>
+    <div class="conversation-actions"><label class="sr-only" for="execution-review">执行审核</label><select id="execution-review" aria-describedby="conversation-execution-note"><option value="required">需要审批</option><option value="auto">自动</option><option value="yolo">自动执行</option></select><button id="conversation-execute" type="button" class="quiet-button">创建执行 Run</button><p id="conversation-execution-note" class="muted"></p></div>
   </form>
   <div id="conversation-retry-panel" class="conversation-retry" hidden><p>发送结果尚未确认。原请求和幂等键已保留；重试不会创建重复执行。请先确认原请求，再发送新内容。</p><button id="conversation-retry" type="button">重试原请求</button></div>
   <p id="conversation-status" role="status" aria-live="polite"></p><p id="conversation-error" role="alert"></p>

@@ -238,6 +238,7 @@ function eventLabel(type: string): string {
     'run.started': '开始执行', 'task.started': '任务开始', 'task.completed': '任务完成', 'run.reviewed': '审核完成',
     'run.completed': '运行完成', 'run.failed': '运行异常', 'run.cancelled': '运行已取消',
     'plan.budgets_updated': '预算已更新', 'plan.proposed': '计划已生成', 'plan.approved': '计划已批准', 'plan.revised': '计划已更新',
+    'plan.auto_approved': '计划已按审核档自动放行', 'plan.approval_requested': '模型请求批准',
     'model.selected': '模型已选择', 'model.started': '模型开始调用', 'model.completed': '模型调用完成', 'model.usage.recorded': '模型用量已记录',
     'skill.selected': '工作方式已选择', 'skill.completed': '工作方式已完成',
     'tool.requested': '等待工具回执', 'tool.completed': '工具已返回', 'tool.failed': '工具调用失败', 'tool.unknown': '工具结果待核查', 'tool.reconciled': '工具结果已核查',
@@ -880,7 +881,8 @@ function updateConversationControls(): void {
   $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : '发送讨论';
   $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
   $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || preparing || correcting;
-  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : '创建执行后请在运行面板核对计划，再明确批准。';
+  restoreExecutionReview();
+  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : executionReviewNote();
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
@@ -1607,6 +1609,10 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
           }
         } catch { sessionStorage.removeItem(CONVERSATION_PENDING); }
       }
+    } else {
+      const view = await api<ConversationView>('/conversations', {});
+      if (epoch !== conversationEpoch) return;
+      acceptConversation(view);
     }
     renderConversation();
   } catch (error) {
@@ -1787,6 +1793,10 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
 }
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('execution-review')?.addEventListener('change', () => {
+  localStorage.setItem('aeeis.execution-review', executionReviewValue());
+  updateConversationControls();
+});
 $('conversation-retry').addEventListener('click', () => { void sendConversation('discuss', true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-target').addEventListener('change', () => {
   if ($<HTMLSelectElement>('conversation-target').value === '__new') { conversationReplyId = undefined; openConversationRoute(); }
@@ -2860,6 +2870,22 @@ async function readMaterialFiles(files: FileList | null): Promise<void> {
   renderMaterialFiles();
 });
 renderMaterialFiles();
+function executionReviewValue(): 'required' | 'auto' | 'yolo' {
+  const value = $<HTMLSelectElement>('execution-review')?.value;
+  return value === 'auto' || value === 'yolo' ? value : 'required';
+}
+function restoreExecutionReview(): void {
+  const saved = localStorage.getItem('aeeis.execution-review');
+  const select = $<HTMLSelectElement>('execution-review');
+  if (!select) return;
+  select.value = saved === 'auto' || saved === 'yolo' ? saved : 'required';
+}
+function executionReviewNote(): string {
+  const mode = executionReviewValue();
+  if (mode === 'yolo') return '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。';
+  if (mode === 'auto') return '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。';
+  return '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+}
 function runOptions(includeProjectQuery = true): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
@@ -2886,7 +2912,7 @@ function runOptions(includeProjectQuery = true): Record<string, unknown> {
     ...(content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : []),
     ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
   ];
-  return { ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  return { executionReview: executionReviewValue(), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');

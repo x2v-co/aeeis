@@ -104,6 +104,8 @@ The 2026-10-22 regression for this pass: **2458 passed, 134 skipped, 0 failed**.
 
 An execution request resolves only from an explicit task id, a reply, or a new task. A pure Han title matches only at length 3 or more; a mixed or ASCII title matches only on a letter or number boundary. If preparation fails before a Run exists, the reservation becomes `cancelled` and the task can accept a new request. `model.failed`, `model.unknown`, and `run.failed` events omit `rawOutput` when the call phase is `compaction`.
 
+The owner chooses the plan-review gate when creating a Run. The choice is frozen on that Run. `required` waits for an explicit approval of the exact plan hash. `auto` asks the planner for an untrusted `approvalRequest`; a clear read-only judgment records `plan.auto_approved` and continues, while a request for approval, a missing judgment, or an invalid judgment stays at `needs_approval`. `yolo` records `plan.auto_approved` and continues without consulting that judgment. None of the three modes is implied by discussion, a focus change, or a group or member message. A model judgment cannot add tools, raise budgets, or replace the owner's approval when the gate stays closed. The independent reviewer still runs after execution. The task row shows an auto-mode request as text, not as evidence.
+
 ### Remaining boundaries
 
 - Postgres conversation tests are implemented but were not run against a live database in this local pass.

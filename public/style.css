@@ -882,6 +882,7 @@ body.conversation-mode .composer-route summary { width: fit-content; cursor: poi
 body.conversation-mode .composer-route[open] { display: grid; gap: 6px; }
 body.conversation-mode .composer-route label { margin: 0; }
 body.conversation-mode .conversation-actions { justify-content: flex-start; gap: 8px; }
+body.conversation-mode #execution-review { width: auto; flex: none; min-height: 28px; padding: 4px 8px; font-size: 12px; }
 body.conversation-mode #conversation-execute { min-height: 28px; padding: 4px 8px; }
 body.conversation-mode #conversation-execution-note { flex: 1; min-width: 12rem; }
 body.conversation-mode #bot-note { padding: 14px 22px 0; }
