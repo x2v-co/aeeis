@@ -115,14 +115,34 @@ export class ConversationService {
   constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService) {}
 
   async create(input: unknown, scope: Ownership) {
-    const body = z.object({ title: z.string().trim().min(1).max(200).default('AEEIS') }).strict().parse(input ?? {});
+    const body = z.object({
+      title: z.string().trim().min(1).max(200).default('AEEIS'),
+      agentId: z.string().trim().min(1).max(100).optional(),
+      claimId: z.string().trim().min(1).max(200).optional(),
+    }).strict().parse(input ?? {});
+    if (body.claimId && !body.agentId) throw new Conflict('认领一条生命线需要这个人的标识');
+    if (body.agentId) {
+      const existing = (await this.store.list(scope)).find(item => item.agentId === body.agentId);
+      if (existing) return this.view(existing, scope);
+    }
+    if (body.claimId && body.agentId) {
+      const agentId = body.agentId;
+      const claimed = await this.store.mutate(body.claimId, scope, current => {
+        if (current.agentId && current.agentId !== agentId) throw new Conflict('这条对话已经属于另一个人');
+        current.agentId = agentId;
+      });
+      return this.view(claimed, scope);
+    }
     const at = new Date().toISOString();
-    const conversation: Conversation = { schemaVersion: 'conversation/1', id: `conv_${randomUUID()}`, ...scope, title: body.title, revision: 0, createdAt: at, updatedAt: at, recentTaskIds: [], tasks: [], messages: [] };
+    const conversation: Conversation = {
+      schemaVersion: 'conversation/1', id: `conv_${randomUUID()}`, ...scope, title: body.title, revision: 0, createdAt: at, updatedAt: at, recentTaskIds: [], tasks: [], messages: [],
+      ...(body.agentId ? { agentId: body.agentId } : {}),
+    };
     await this.store.create(conversation);
     return this.view(conversation, scope);
   }
   async list(scope: Ownership) {
-    return (await this.store.list(scope)).map(({ id, title, revision, updatedAt, focusTaskId, tasks }) => ({ id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length }));
+    return (await this.store.list(scope)).map(({ id, title, revision, updatedAt, focusTaskId, tasks, agentId }) => ({ id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, ...(agentId ? { agentId } : {}) }));
   }
   async get(id: string, scope: Ownership) { return this.view(await this.store.get(id, scope), scope); }
 

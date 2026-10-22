@@ -49,6 +49,8 @@ export interface Conversation extends Ownership {
   schemaVersion: 'conversation/1';
   id: string;
   title: string;
+  /** Stable person this life thread belongs to. Missing on conversations created before personal agents. */
+  agentId?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
