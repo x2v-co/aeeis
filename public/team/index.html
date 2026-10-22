@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AEEIS · 多 Bot 工作室</title>
+  <meta name="description" content="AEEIS 多 Bot 团队交互设计 Demo：频道、Bot 名册、交接、任务板与工作室。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/team/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#stream">跳到消息</a>
+
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="工作区导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="3.1"></circle>
+            <ellipse cx="12" cy="12" rx="9" ry="4.4" transform="rotate(-28 12 12)"></ellipse>
+            <ellipse cx="12" cy="12" rx="9" ry="4.4" transform="rotate(38 12 12)"></ellipse>
+          </svg>
+        </span>
+        <span class="brand-copy">
+          <strong>AEEIS</strong>
+          <small>多 Bot 工作室</small>
+        </span>
+      </div>
+      <a class="shell-switch" href="/"><span>样例，刷新会重置</span>当前工作台</a>
+
+      <button class="search-btn" type="button" data-action="open-palette">
+        <span class="icon-slot" data-icon="search"></span>
+        <span>搜索或跳转</span>
+        <kbd>⌘K</kbd>
+      </button>
+
+      <div class="sidebar-scroll">
+        <div id="sidebarNav"></div>
+      </div>
+
+      <div id="sidebarFooter"></div>
+
+      <div class="workspace-card">
+        <span class="avatar avatar-sm avatar-human" aria-hidden="true">K</span>
+        <span class="workspace-copy">
+          <strong>Kai 的工作区</strong>
+          <small>Owner · 7 个 Bot</small>
+        </span>
+        <button class="icon-btn" type="button" aria-label="工作区设置" data-action="settings">
+          <span class="icon-slot" data-icon="dots"></span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="channel-head" id="channelHead"></header>
+
+      <div class="content" id="content">
+        <section class="conversation" aria-label="频道对话">
+          <div class="stream" id="stream" role="log" aria-live="polite" aria-label="频道消息"></div>
+
+          <div class="composer-wrap" id="composerWrap">
+            <form class="composer" id="composerForm">
+              <textarea id="composerInput" rows="1" placeholder="给小安或团队发消息…" aria-label="发消息"></textarea>
+              <div class="composer-tools">
+                <button class="icon-btn" type="button" data-action="insert-at" aria-label="提及 Bot" title="提及 Bot">
+                  <span class="at-mark">@</span>
+                </button>
+                <button class="send-btn" type="submit" aria-label="发送">
+                  <span class="icon-slot" data-icon="send"></span>
+                  <span>发送</span>
+                </button>
+              </div>
+            </form>
+            <div class="composer-hint">
+              <span>直接发送由小安拆解</span>
+              <span class="hint-dot"></span>
+              <span><b>@</b> 指定 Bot</span>
+              <span class="hint-dot"></span>
+              <span><b>Enter</b> 发送 · <b>Shift+Enter</b> 换行</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="rail" id="rail" aria-label="频道上下文"></aside>
+      </div>
+
+      <section class="studio" id="studio" aria-label="工作室视图" hidden></section>
+    </div>
+  </div>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <div class="rail-scrim" id="railScrim" hidden></div>
+  <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
+
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="详情" aria-hidden="true"></aside>
+  <div class="overlay" id="boardOverlay" hidden></div>
+  <div class="overlay palette-overlay" id="paletteOverlay" hidden></div>
+
+  <div class="sr-only" id="liveRegion" aria-live="polite"></div>
+
+  <script src="/team/app.js"></script>
+</body>
+</html>

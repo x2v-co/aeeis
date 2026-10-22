@@ -963,6 +963,8 @@ body.gb #gb-presence[data-state="thinking"]::before { background: var(--ink); }
 body.gb #gb-presence[data-state="waiting"]::before { background: var(--amber); }
 body.gb #gb-presence[data-state="done"]::before { background: var(--cyan); }
 body.gb #gb-presence[data-state="blocked"]::before { background: var(--red); }
+body.gb #gb-alt-ui { flex: none; color: var(--muted); font-size: 12px; text-decoration: none; }
+body.gb #gb-alt-ui:hover { color: var(--ink); }
 body.gb #gb-computer-toggle { flex: none; }
 body.gb .gb-transcript { flex: 1; min-height: 0; overflow: auto; padding: 18px 22px 8px; }
 body.gb .gb-composer { flex: none; padding: 10px 16px 14px; border-top: 1px solid var(--line); background: #fff; }
@@ -1096,11 +1098,13 @@ body.gb.shared-run .gb-composer,
 body.gb.shared-run #gb-computer,
 body.gb.shared-run #gb-back,
 body.gb.shared-run #gb-computer-toggle,
+body.gb.shared-run #gb-alt-ui,
 body.gb.thread-page .gb-roster,
 body.gb.thread-page .gb-composer,
 body.gb.thread-page #gb-computer,
 body.gb.thread-page #gb-back,
-body.gb.thread-page #gb-computer-toggle { display: none !important; }
+body.gb.thread-page #gb-computer-toggle,
+body.gb.thread-page #gb-alt-ui { display: none !important; }
 @keyframes gb-pulse {
   0% { box-shadow: 0 0 0 0 rgba(23, 23, 23, .45); }
   100% { box-shadow: 0 0 0 7px rgba(23, 23, 23, 0); }
