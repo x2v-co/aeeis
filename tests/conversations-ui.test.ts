@@ -921,4 +921,36 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已刷新'));
     expect(field.value).toBe('');
   });
+  it('shows the latest delivery and places it into the standing draft only when asked', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    expect(el('last-delivery').hidden).toBe(true);
+    h.view.lastDelivery = { taskId: 'task_b', taskTitle: '周报', runId, planSummary: '先列已完成的条目', artifactTitles: ['周报稿'] };
+    el('conversation-status').textContent = '';
+    el('conversation-refresh').click();
+    await vi.waitFor(() => {
+      expect(el('last-delivery').hidden).toBe(false);
+      expect(el('last-delivery-copy').textContent).toBe('周报。先列已完成的条目。周报稿');
+      expect(el<HTMLButtonElement>('last-delivery-pin').disabled).toBe(false);
+    });
+    clickText('放进嘱咐');
+    expect(el<HTMLTextAreaElement>('standing-text').value).toBe('周报。先列已完成的条目。周报稿');
+    expect(el('conversation-status').textContent).toContain('还没记住');
+    expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(0);
+    el<HTMLFormElement>('standing-form').requestSubmit();
+    await vi.waitFor(() => {
+      expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(1);
+      expect(el('conversation-status').textContent).toContain('已记住这句话');
+      expect(el<HTMLButtonElement>('standing-save').disabled).toBe(false);
+    });
+    expect(h.posts.find(post => post.url.endsWith('/standing'))?.body).toEqual({ expectedRevision: 1, text: '周报。先列已完成的条目。周报稿' });
+    fill('conversation-text', '讨论不改嘱咐');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(1);
+    expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain('先列已完成的条目');
+    el('gb-new-group').click();
+    expect(el('last-delivery').hidden).toBe(true);
+  });
 });

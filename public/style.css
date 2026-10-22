@@ -894,6 +894,10 @@ body.conversation-mode #standing-form { display: grid; gap: 6px; }
 body.conversation-mode #standing-text { width: 100%; min-height: 44px; resize: vertical; }
 body.conversation-mode .standing-actions { display: flex; gap: 8px; }
 body.conversation-mode .standing-actions button { min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #last-delivery { flex: none; padding: 8px 16px 0; }
+body.conversation-mode #last-delivery h3 { margin: 0 0 4px; font-size: 13px; }
+body.conversation-mode #last-delivery p { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+body.conversation-mode #last-delivery-pin { min-height: 28px; padding: 4px 8px; }
 body.conversation-mode #bot-note { padding: 14px 22px 0; }
 body.conversation-mode #bot-note h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #bot-note p,

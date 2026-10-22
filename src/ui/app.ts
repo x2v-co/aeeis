@@ -93,7 +93,8 @@ interface ConversationMessageView {
   execution?: { runId: string; taskId: string; state: string };
 }
 interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string }
-interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean }
+interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
+interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
@@ -929,6 +930,47 @@ function syncStandingInstruction(): void {
   }
   $<HTMLButtonElement>('standing-save').disabled = locked;
   $<HTMLButtonElement>('standing-clear').disabled = locked || !conversation?.standingInstruction;
+  syncLastDelivery();
+}
+function deliveryDraft(delivery: LastDelivery): string {
+  const parts = [delivery.taskTitle.trim()];
+  if (delivery.planSummary?.trim()) parts.push(delivery.planSummary.trim());
+  if (delivery.artifactTitles?.length) parts.push(delivery.artifactTitles.join('、'));
+  const text = parts.join('。');
+  return text.length > 500 ? `${text.slice(0, 499)}…` : text;
+}
+function syncLastDelivery(): void {
+  const section = $('last-delivery');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  const delivery = life ? conversation?.lastDelivery : undefined;
+  section.hidden = !delivery;
+  const copy = $('last-delivery-copy');
+  if (copy) copy.textContent = delivery ? deliveryDraft(delivery) : '';
+  const pin = $<HTMLButtonElement>('last-delivery-pin');
+  if (pin) pin.disabled = !delivery || conversationBusy || Boolean(conversationAttempt);
+}
+function pinLastDelivery(): void {
+  const surface = rosterView();
+  const delivery = conversation?.lastDelivery;
+  if ((surface !== 'entry' && surface !== 'bot') || !conversation || !delivery || conversationBusy || conversationAttempt) return;
+  const field = $<HTMLTextAreaElement>('standing-text');
+  const draft = deliveryDraft(delivery);
+  const current = field.value.trim();
+  if (current && current !== draft && !current.includes(draft)) {
+    const combined = `${current}\n${draft}`;
+    if (combined.length > 500) {
+      $('conversation-error').textContent = '这句话已经写满。先删短，再放上次的做法。';
+      field.focus();
+      return;
+    }
+    field.value = combined;
+  } else field.value = draft;
+  standingBoundId = conversation.id;
+  field.focus();
+  $('conversation-status').textContent = '已放进嘱咐草稿。还没记住。要点「记住这句」才会留下。';
+  $('conversation-error').textContent = '';
+  updateConversationControls();
 }
 function usingDemoBots(): boolean {
   return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
@@ -2022,6 +2064,7 @@ $('standing-form')?.addEventListener('submit', event => {
 $('standing-clear')?.addEventListener('click', () => {
   void saveStandingInstruction('').catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
+$('last-delivery-pin')?.addEventListener('click', () => pinLastDelivery());
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('execution-review')?.addEventListener('change', () => {
   localStorage.setItem('aeeis.execution-review', executionReviewValue());

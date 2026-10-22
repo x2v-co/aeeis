@@ -200,6 +200,43 @@ describe('single-entry conversation routing', () => {
     expect(afterOverflow.tasks.map((task: { title: string }) => task.title).filter((title: string) => title === '挤满材料')).toEqual(['挤满材料']);
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('shows the latest succeeded delivery on this person and keeps it out of the next Run', async () => {
+    const f = await fixture(), entry = await f.create();
+    const earlier = await f.addTask(entry.id, '发布口径', 'execute');
+    const later = await f.addTask(entry.id, '周报做法', 'execute');
+    const failed = await f.addTask(entry.id, '失败尝试', 'execute');
+    await f.repository.mutate(earlier.runId, run => {
+      run.status = 'succeeded';
+      run.plans = [{ version: 1, hash: 'b'.repeat(64), summary: '先内部核对再交付', nodes: [{ id: 'work', title: 'Work', instruction: 'SECRET INSTRUCTION', dependsOn: [] }], createdAt: run.createdAt }];
+      run.artifacts = [{ id: 'artifact_earlier', taskId: 'work', title: '口径说明', content: 'SECRET ARTIFACT BODY', evidenceRefs: [], hash: 'c'.repeat(64), createdAt: run.createdAt }];
+    });
+    await f.repository.mutate(later.runId, run => {
+      run.status = 'succeeded';
+      run.plans = [{ version: 1, hash: 'd'.repeat(64), summary: '按栏目交周报', nodes: [{ id: 'work', title: 'Work', instruction: 'Complete task', dependsOn: [] }], createdAt: run.createdAt }];
+      run.artifacts = [{ id: 'artifact_later', taskId: 'work', title: '周报稿', content: 'full weekly body', evidenceRefs: [], hash: 'e'.repeat(64), createdAt: run.createdAt }];
+    });
+    await f.repository.mutate(failed.runId, run => {
+      run.status = 'failed';
+      run.plans = [{ version: 1, hash: 'f'.repeat(64), summary: '失败的做法不该记成上次做成', nodes: [{ id: 'work', title: 'Work', instruction: 'Complete task', dependsOn: [] }], createdAt: run.createdAt }];
+    });
+    const seen = await f.fresh(entry.id);
+    expect(seen.lastDelivery).toEqual({ taskId: later.message.route.taskIds[0], taskTitle: '周报做法', runId: later.runId, planSummary: '按栏目交周报', artifactTitles: ['周报稿'] });
+    expect(JSON.stringify(seen.lastDelivery)).not.toContain('SECRET');
+    expect(JSON.stringify(seen.lastDelivery)).not.toContain('失败的做法');
+    expect(await f.store.get(entry.id, scope)).not.toHaveProperty('lastDelivery');
+    expect((await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).body).not.toContain('按栏目交周报');
+    const other = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '研究', agentId: 'demo.research' } })).json();
+    expect((await f.fresh(other.id)).lastDelivery).toBeUndefined();
+    const next = await f.post(entry.id, { text: '做下一件', newTask: { title: '下一件' }, intent: 'execute', focus: 'keep', expectedRevision: seen.revision });
+    expect(next.statusCode, next.body).toBe(202);
+    const context = JSON.stringify((await f.repository.get(next.json().runId)).context);
+    expect(context).not.toContain('按栏目交周报');
+    expect(context).not.toContain('先内部核对再交付');
+    expect(context).not.toContain('SECRET');
+    expect(next.json().conversation.standingInstruction).toBeUndefined();
+    expect(next.json().conversation.lastDelivery.planSummary).toBe('按栏目交周报');
+    expect(f.model.complete).not.toHaveBeenCalled();
+  });
   it('keeps side questions separate from focus and supports explicit focus switching', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, 'AEEIS'), b = await f.addTask(entry.id, 'Grok 迁移');
