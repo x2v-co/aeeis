@@ -51,6 +51,8 @@ export interface Conversation extends Ownership {
   title: string;
   /** Stable person this life thread belongs to. Missing on conversations created before personal agents. */
   agentId?: string;
+  /** Owner-written sentence that stays with this person. Missing when none is pinned. */
+  standingInstruction?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;

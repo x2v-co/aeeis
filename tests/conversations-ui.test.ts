@@ -66,6 +66,17 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       target.revision++; return response(target);
     }
     if (url.endsWith('/focus')) { const target = conversationFor(url) ?? view; const body = JSON.parse(request.body); target.focusTaskId = body.taskId ?? undefined; target.revision++; return response(target); }
+    if (url.endsWith('/standing')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再改这句话' }, 409);
+      const text = String(body.text ?? '').trim();
+      if (text) target.standingInstruction = text;
+      else delete target.standingInstruction;
+      target.revision++;
+      return response(target);
+    }
     if (url.endsWith('/messages')) {
       const target = conversationFor(url);
       if (!target) return response({ error: 'Unknown conversation' }, 404);
@@ -834,5 +845,80 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-messages').textContent).not.toContain('发布口径先记在这里');
     expect(typed.value).toBe('');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+  });
+  it('pins, clears, and keeps a standing sentence on this person without sending it as execution authority', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    const sentence = '口径先内部确认';
+    expect(el('standing-instruction').hidden).toBe(false);
+    expect(el('standing-note').textContent).toContain('不可信');
+    expect(el<HTMLTextAreaElement>('standing-text').value).toBe('');
+    expect(el<HTMLButtonElement>('standing-save').disabled).toBe(false);
+    fill('standing-text', sentence);
+    el<HTMLFormElement>('standing-form').requestSubmit();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url.endsWith('/standing'))).toBe(true));
+    expect(h.posts.find(post => post.url.endsWith('/standing'))?.body).toEqual({ expectedRevision: 1, text: sentence });
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已记住这句话'));
+    fill('conversation-text', '先讨论，不改嘱咐');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(1);
+    expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain(sentence);
+    expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
+    fill('conversation-text', '开始做这一件');
+    el<HTMLButtonElement>('conversation-execute').click();
+    await vi.waitFor(() => {
+      expect(messagePosts(h)).toHaveLength(2);
+      expect(el('conversation-status').textContent).toContain('系统回执');
+      expect(el<HTMLButtonElement>('standing-save').disabled).toBe(false);
+    });
+    const executed = messagePosts(h).at(-1);
+    expect(executed?.body.intent).toBe('execute');
+    expect(JSON.stringify(executed?.body)).not.toContain(sentence);
+    expect(executed?.body.runOptions.materials ?? []).toEqual([]);
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
+    await vi.waitFor(() => {
+      expect(el('entry-title').textContent).toBe('发布');
+      expect(el<HTMLButtonElement>('standing-save').disabled).toBe(false);
+    });
+    expect(el('standing-instruction').hidden).toBe(false);
+    expect(el<HTMLTextAreaElement>('standing-text').value).toBe('');
+    fill('standing-text', '发布单独记住');
+    el<HTMLFormElement>('standing-form').requestSubmit();
+    await vi.waitFor(() => {
+      expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(2);
+      expect(el('conversation-status').textContent).toContain('已记住这句话');
+      expect(el<HTMLButtonElement>('standing-save').disabled).toBe(false);
+    });
+    expect(h.posts.filter(post => post.url.endsWith('/standing')).at(-1)).toMatchObject({ url: '/api/conversations/conv_life_1/standing', body: { expectedRevision: 0, text: '发布单独记住' } });
+    expect(h.view.standingInstruction).toBe(sentence);
+    el('gb-new-group').click();
+    expect(el('standing-instruction').hidden).toBe(true);
+    el('gb-bot').click();
+    await vi.waitFor(() => {
+      expect(el('standing-instruction').hidden).toBe(false);
+      expect(el<HTMLTextAreaElement>('standing-text').value).toBe(sentence);
+      expect(el<HTMLButtonElement>('standing-clear').disabled).toBe(false);
+    });
+    clickText('忘掉');
+    await vi.waitFor(() => {
+      expect(h.posts.filter(post => post.url.endsWith('/standing')).at(-1)?.body.text).toBe('');
+      expect(el<HTMLTextAreaElement>('standing-text').value).toBe('');
+      expect(el('conversation-status').textContent).toContain('已忘掉这句话');
+    });
+    expect(h.view.standingInstruction).toBeUndefined();
+    const field = el<HTMLTextAreaElement>('standing-text');
+    field.focus();
+    field.value = '草稿还没保存';
+    el('conversation-status').textContent = '';
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已刷新'));
+    expect(field.value).toBe('草稿还没保存');
+    field.blur();
+    el('conversation-status').textContent = '';
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已刷新'));
+    expect(field.value).toBe('');
   });
 });

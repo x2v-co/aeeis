@@ -59,6 +59,21 @@ for (const [name, factory] of Object.entries(factories)) describe(`${name} conve
     expect(current.createdAt).toBe(at);
     await expect(store.mutate(value.id, scope, () => {})).resolves.toEqual(current);
   }));
+  it('keeps a missing standing sentence compatible and stores one trimmed sentence', () => using(async store => {
+    const value = conversation();
+    await store.create(value);
+    expect((await store.get(value.id, scope)).standingInstruction).toBeUndefined();
+    const saved = await store.mutate(value.id, scope, draft => { draft.standingInstruction = '先内部确认'; });
+    expect(saved.standingInstruction).toBe('先内部确认');
+    expect(saved.revision).toBe(1);
+    const cleared = await store.mutate(value.id, scope, draft => { delete draft.standingInstruction; });
+    expect(cleared.standingInstruction).toBeUndefined();
+    expect(cleared.revision).toBe(2);
+    await expect(store.mutate(value.id, scope, draft => { draft.standingInstruction = ''; })).rejects.toBeInstanceOf(Conflict);
+    await expect(store.mutate(value.id, scope, draft => { draft.standingInstruction = 'x'.repeat(501); })).rejects.toBeInstanceOf(Conflict);
+    expect((await store.get(value.id, scope)).revision).toBe(2);
+    expect((await store.get(value.id, scope)).standingInstruction).toBeUndefined();
+  }));
   it('rejects duplicate IDs and same-key concurrent appends atomically', () => using(async store => {
     const value = conversation();
     const creates = await Promise.allSettled([store.create(value), store.create(value)]);
