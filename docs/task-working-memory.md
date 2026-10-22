@@ -62,6 +62,7 @@ Implemented as an opt-in v1 for new Runs (`workingMemory: { enabled: true }`). O
 - Ordinary owner/share/debug Run projections omit raw working memory, compaction payloads and context-read results while retaining normal planner/executor/reviewer request diagnostics. The public Run response exposes only `workingMemoryEnabled`.
 - Browser workbench support: task/focus display, discussion-only default, explicit Run creation, ambiguity choices, reply/correction actions, recovery of uncertain submissions and working-memory inspection.
 - Entry task dashboard: one row per task with manual priority, execution status, memory counts, quick approval, an inline answer for `needs_input`, and a retry for `failed`. Approval, answer, and retry use the existing Run commands and do not move discussion focus. Priority also orders which runnable Run the local dispatcher starts next.
+- Entry bot roster and group chats. AEEIS stays the entry that owns tasks and execution. When no external agent is admitted, the roster shows 发布, 研究 and 纪要, already placed in 工作 and 研究. Admitted agents replace that demo roster. Grouping is stored only in this browser. Opening another bot or a group only changes the view: it does not call the model, move discussion focus, or stop a Run. A group is an existing Room of at most six people, AEEIS included. Its message is a session event written after a room-audience context manifest. Approval stays on the AEEIS task row.
 
 ### Automated verification
 
@@ -106,5 +107,5 @@ An execution request resolves only from an explicit task id, a reply, or a new t
 ### Remaining boundaries
 
 - Postgres conversation tests are implemented but were not run against a live database in this local pass.
-- This does not deploy production, evaluate paid-model quality, resume Grok Bot migration, or implement the future Bot/DM/group layer.
+- This does not deploy production, evaluate paid-model quality, or resume Grok Bot migration. Demo bots do not execute or reply, and a group message does not start a Run.
 

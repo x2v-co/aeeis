@@ -177,6 +177,24 @@ let reminderStatusFilter = '';
 let runDockObserver: IntersectionObserver | undefined;
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
+interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
+interface RosterBot { id: string; name: string; note: string; demo: boolean }
+const DEMO_BOTS: RosterBot[] = [
+  { id: 'demo.release', name: '发布', note: '对照发布清单', demo: true },
+  { id: 'demo.research', name: '研究', note: '整理公开资料', demo: true },
+  { id: 'demo.brief', name: '纪要', note: '把讨论收成纪要', demo: true },
+];
+let agentSummaries: AgentSummary[] = [];
+let agentsLoaded = false;
+let roomSummaries: RoomSummary[] = [];
+let botGroups: BotGroups | undefined;
+let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
+let openGroupId = '';
+let groupDraftOpen = false;
+let groupMembers: RoomMemberSummary[] = [];
+let groupEvents: SessionEventSummary[] = [];
+const draftAgents = new Set<string>();
+let draftPeople: string[] = [];
 let timelineFilter = localStorage.getItem('aeeis.timeline-filter') ?? 'all';
 const MAX_MATERIAL_FILES = 8;
 const MAX_MATERIAL_FILE_BYTES = 1_000_000;
@@ -861,6 +879,436 @@ function updateConversationControls(): void {
   $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], textarea[data-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
+  if (rosterView() !== 'entry') {
+    $<HTMLButtonElement>('conversation-send').disabled = true;
+    $<HTMLButtonElement>('conversation-execute').disabled = true;
+    if (rosterView() === 'bot' && !conversationCorrectionId) {
+      $<HTMLButtonElement>('conversation-send').textContent = '先选 AEEIS';
+      $('conversation-execution-note').textContent = '任务仍交给 AEEIS。这位不会单独执行，也不会自己回复。';
+    }
+  }
+  syncEntrySurface();
+}
+function usingDemoBots(): boolean {
+  return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
+}
+function rosterBots(): RosterBot[] {
+  const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
+    id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
+  }));
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+}
+function loadBotGroups(): BotGroups {
+  const raw = localStorage.getItem('aeeis.bot-groups');
+  if (!raw) return usingDemoBots() ? {
+    groups: [{ id: 'work', name: '工作' }, { id: 'research', name: '研究' }],
+    placement: { aeeis: 'work', 'demo.release': 'work', 'demo.research': 'research', 'demo.brief': 'research' },
+  } : { groups: [], placement: {} };
+  try {
+    const parsed = JSON.parse(raw) as BotGroups;
+    if (!parsed || !Array.isArray(parsed.groups) || !parsed.placement || typeof parsed.placement !== 'object') throw new Error('bad');
+    return {
+      groups: parsed.groups.filter(group => group && typeof group.id === 'string' && typeof group.name === 'string' && group.name.trim()).slice(0, 8),
+      placement: Object.fromEntries(Object.entries(parsed.placement).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string')),
+    };
+  } catch {
+    return { groups: [], placement: {} };
+  }
+}
+function ensureBotGroups(): BotGroups {
+  if (!agentsLoaded) return botGroups ?? { groups: [], placement: {} };
+  botGroups ??= loadBotGroups();
+  return botGroups;
+}
+function saveBotGroups(): void {
+  if (!botGroups) return;
+  localStorage.setItem('aeeis.bot-groups', JSON.stringify(botGroups));
+}
+function botById(id: string): RosterBot | undefined {
+  return rosterBots().find(bot => bot.id === id);
+}
+function activeBotId(): string {
+  return rosterBots().some(bot => bot.id === selectedBotId) ? selectedBotId : 'aeeis';
+}
+function rosterView(): 'entry' | 'bot' | 'group' | 'draft' {
+  if (groupDraftOpen) return 'draft';
+  if (openGroupId) return 'group';
+  return activeBotId() === 'aeeis' ? 'entry' : 'bot';
+}
+function botPresence(runs: RunSummary[]): { state: string; label: string } {
+  const statuses = runs.map(run => run.status);
+  if (statuses.some(status => status === 'running' || status === 'queued')) return { state: 'working', label: '执行中' };
+  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return { state: 'thinking', label: '思考中' };
+  if (statuses.some(status => ATTENTION_STATUSES.has(status) || status === 'paused')) return { state: 'waiting', label: '等你' };
+  if (statuses.some(status => status === 'succeeded')) return { state: 'done', label: '完成' };
+  return { state: 'idle', label: '空闲' };
+}
+function participantLabel(principalId: string): string {
+  return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
+}
+function eventAuthor(event: SessionEventSummary): string {
+  if (event.actorType === 'agent') return participantLabel(event.actorId);
+  if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
+  return '你';
+}
+function groupOccupancy(): number {
+  return 1 + draftAgents.size + draftPeople.length;
+}
+function clearOpenGroup(): void {
+  openGroupId = '';
+  groupMembers = [];
+  groupEvents = [];
+  localStorage.removeItem('aeeis.group');
+}
+function syncEntrySurface(): void {
+  const view = rosterView();
+  const discussion = view === 'entry';
+  const messages = $('conversation-messages');
+  const earlier = $('conversation-earlier');
+  const empty = $('conversation-empty');
+  const composer = $('conversation-composer');
+  const note = $('bot-note');
+  const placement = $('bot-placement');
+  const draft = $('group-draft');
+  const panel = $('group-panel');
+  if (messages) messages.hidden = !discussion;
+  if (earlier) earlier.hidden = !discussion || !conversation?.hasEarlierMessages;
+  if (empty) empty.hidden = !discussion || Boolean(conversation?.messages.length);
+  if (composer) composer.hidden = view === 'group' || view === 'draft';
+  if (note) note.hidden = view !== 'bot';
+  if (placement) placement.hidden = view === 'group' || view === 'draft';
+  if (draft) draft.hidden = view !== 'draft';
+  if (panel) panel.hidden = view !== 'group';
+  if (view === 'bot') {
+    const bot = botById(activeBotId());
+    const title = $('bot-note-title');
+    const copy = $('bot-note-copy');
+    if (title) title.textContent = bot?.name ?? 'Bot';
+    if (copy) copy.textContent = bot?.demo
+      ? '这是演示里的一位 Bot。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
+      : '这位已经准入。单独对话还没有接上，可以在群聊里点名。任务仍交给 AEEIS。';
+  }
+  renderBotPlacement();
+}
+function renderBotRoster(): void {
+  const list = $('bots');
+  if (!list) return;
+  const bots = rosterBots();
+  const groups = ensureBotGroups();
+  list.replaceChildren();
+  const renderRow = (bot: RosterBot) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'bot-row';
+    item.dataset.botId = bot.id;
+    if (bot.id === 'aeeis') item.id = 'gb-bot';
+    const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
+    avatar.dataset.state = bot.id === 'aeeis' ? botPresence(runSummaries).state : 'idle';
+    const copy = element('span', '', 'roster-copy');
+    const presence = element('small', bot.id === 'aeeis' ? (runSummaries.length ? `${botPresence(runSummaries).label} · ${runSummaries.length} 项任务` : botPresence(runSummaries).label) : (bot.demo ? '演示' : bot.note));
+    copy.append(element('strong', bot.name), presence);
+    item.append(avatar, copy);
+    list.append(item);
+  };
+  const known = new Set(groups.groups.map(group => group.id));
+  for (const group of groups.groups) {
+    const members = bots.filter(bot => groups.placement[bot.id] === group.id);
+    const heading = document.createElement('button');
+    heading.type = 'button';
+    heading.className = 'bot-group-label';
+    heading.dataset.groupId = group.id;
+    heading.textContent = `${group.name} · ${members.length}`;
+    list.append(heading);
+    for (const bot of members) renderRow(bot);
+  }
+  const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
+  if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
+  for (const bot of loose) renderRow(bot);
+  const viewingBot = rosterView() === 'entry' || rosterView() === 'bot';
+  const visible = activeBotId();
+  list.querySelectorAll<HTMLButtonElement>('[data-bot-id]').forEach(row => {
+    row.setAttribute('aria-pressed', String(viewingBot && row.dataset.botId === visible));
+  });
+}
+function renderBotPlacement(): void {
+  const host = $('bot-placement');
+  if (!host || host.hidden) return;
+  host.replaceChildren();
+  const groups = ensureBotGroups();
+  const botId = activeBotId();
+  const current = groups.groups.some(group => group.id === groups.placement[botId]) ? groups.placement[botId] : '';
+  host.append(element('span', '分组', 'bot-placement-label'));
+  const none = document.createElement('button');
+  none.type = 'button';
+  none.textContent = '未分组';
+  none.setAttribute('aria-pressed', String(!current));
+  none.addEventListener('click', () => placeBot(botId, ''));
+  host.append(none);
+  for (const group of groups.groups) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = group.name;
+    chip.setAttribute('aria-pressed', String(current === group.id));
+    chip.addEventListener('click', () => placeBot(botId, group.id));
+    host.append(chip);
+  }
+}
+function placeBot(botId: string, groupId: string): void {
+  const groups = ensureBotGroups();
+  if (!agentsLoaded) return;
+  if (groupId && !groups.groups.some(group => group.id === groupId)) return;
+  if (groupId) groups.placement[botId] = groupId;
+  else delete groups.placement[botId];
+  saveBotGroups();
+  renderBotRoster();
+  updateConversationControls();
+}
+function createBotGroup(event: Event): void {
+  event.preventDefault();
+  const input = $<HTMLInputElement>('bot-group-name');
+  const name = input?.value.trim().slice(0, 40) ?? '';
+  if (!name) { input?.focus(); return; }
+  const groups = ensureBotGroups();
+  if (!agentsLoaded) return;
+  if (groups.groups.length >= 8) { message('最多 8 个分组。'); return; }
+  if (groups.groups.some(group => group.name === name)) { message('已经有这个分组。'); return; }
+  groups.groups.push({ id: `group_${Date.now().toString(36)}`, name });
+  saveBotGroups();
+  if (input) input.value = '';
+  const draft = $('bot-group-draft');
+  if (draft) draft.hidden = true;
+  renderBotRoster();
+  updateConversationControls();
+}
+function renameBotGroup(id: string): void {
+  const groups = ensureBotGroups();
+  const group = groups.groups.find(item => item.id === id);
+  if (!group) return;
+  const next = window.prompt('分组名称。留空则解散这一组。', group.name);
+  if (next === null) return;
+  const name = next.trim().slice(0, 40);
+  if (!name) {
+    groups.groups = groups.groups.filter(item => item.id !== id);
+    for (const [botId, groupId] of Object.entries(groups.placement)) if (groupId === id) delete groups.placement[botId];
+  } else if (groups.groups.some(item => item.id !== id && item.name === name)) {
+    message('已经有这个分组。');
+    return;
+  } else group.name = name;
+  saveBotGroups();
+  renderBotRoster();
+  updateConversationControls();
+}
+function selectBot(id: string): void {
+  if (!rosterBots().some(bot => bot.id === id)) return;
+  selectedBotId = id;
+  localStorage.setItem('aeeis.bot', id);
+  groupDraftOpen = false;
+  clearOpenGroup();
+  renderBotRoster();
+  renderGroups(roomSummaries);
+  updateConversationControls();
+}
+function renderGroupCandidates(): void {
+  const host = $('group-candidates');
+  const people = $('group-people');
+  const live = $('group-count-live');
+  if (!host || !people || !live) return;
+  host.replaceChildren();
+  for (const bot of rosterBots().filter(item => item.id !== 'aeeis')) {
+    const row = element('label', '', 'group-candidate');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = draftAgents.has(bot.id);
+    box.addEventListener('change', () => {
+      if (box.checked) {
+        if (groupOccupancy() >= 6) { box.checked = false; message('一个群聊最多 6 人。'); return; }
+        draftAgents.add(bot.id);
+      } else draftAgents.delete(bot.id);
+      renderGroupCandidates();
+    });
+    row.append(box, document.createTextNode(` ${bot.name}`));
+    host.append(row);
+  }
+  people.replaceChildren();
+  for (const person of draftPeople) {
+    const row = element('div', '', 'group-person');
+    row.append(element('span', person));
+    const remove = element('button', '移除') as HTMLButtonElement;
+    remove.type = 'button';
+    remove.className = 'quiet-button';
+    remove.addEventListener('click', () => { draftPeople = draftPeople.filter(item => item !== person); renderGroupCandidates(); });
+    row.append(remove);
+    people.append(row);
+  }
+  const names = [...draftAgents].map(participantLabel).concat(draftPeople);
+  live.textContent = `${groupOccupancy()} / 6 · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
+}
+function showGroupDraft(): void {
+  clearOpenGroup();
+  draftAgents.clear();
+  draftPeople = [];
+  groupDraftOpen = true;
+  renderGroupCandidates();
+  renderBotRoster();
+  updateConversationControls();
+  const title = $<HTMLInputElement>('group-title');
+  if (title) { title.value = ''; title.focus(); }
+  const person = $<HTMLInputElement>('group-person');
+  if (person) person.value = '';
+}
+function addDraftPerson(): void {
+  const input = $<HTMLInputElement>('group-person');
+  const person = input?.value.trim() ?? '';
+  if (!person) { input?.focus(); return; }
+  if (draftPeople.includes(person) || draftAgents.has(person) || person === 'aeeis') { message('这位已经在群里。'); return; }
+  if (groupOccupancy() >= 6) { message('一个群聊最多 6 人。'); return; }
+  draftPeople = [...draftPeople, person];
+  if (input) input.value = '';
+  renderGroupCandidates();
+}
+async function createGroup(event: Event): Promise<void> {
+  event.preventDefault();
+  const title = $<HTMLInputElement>('group-title')?.value.trim() ?? '';
+  if (!title) return;
+  if (groupOccupancy() < 2) { message('群聊至少要 AEEIS 和另外一位。'); return; }
+  if (groupOccupancy() > 6) { message('一个群聊最多 6 人。'); return; }
+  const room = await api<RoomSummary>('/rooms', { title, description: '群聊' });
+  try {
+    for (const agentId of draftAgents) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: agentId, role: 'agent' });
+    for (const person of draftPeople) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: person, role: 'editor' });
+  } catch (error) {
+    await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+    throw error;
+  }
+  roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
+  groupDraftOpen = false;
+  message('');
+  await openGroup(room.id);
+  await refresh();
+}
+function renderGroups(rooms: RoomSummary[]): void {
+  roomSummaries = rooms;
+  if (!openGroupId && !groupDraftOpen) {
+    const saved = localStorage.getItem('aeeis.group') ?? '';
+    if (saved && rooms.some(room => room.id === saved && room.status === 'active')) openGroupId = saved;
+    else if (saved) localStorage.removeItem('aeeis.group');
+  }
+  const list = $('groups');
+  if (!list) return;
+  const visible = rooms.filter(room => room.status === 'active');
+  if (openGroupId && !visible.some(room => room.id === openGroupId)) {
+    openGroupId = '';
+    groupMembers = [];
+    groupEvents = [];
+    localStorage.removeItem('aeeis.group');
+  }
+  list.replaceChildren();
+  for (const room of visible) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `group-row${room.id === openGroupId ? ' selected' : ''}`;
+    item.addEventListener('click', () => { void openGroup(room.id).catch(error => message(errorMessage(error))); });
+    const avatar = element('span', room.title.slice(0, 1) || '群', 'roster-avatar');
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', room.title), element('small', '群聊'));
+    item.append(avatar, copy);
+    list.append(item);
+  }
+  const empty = $('groups-empty');
+  if (empty) empty.hidden = visible.length > 0;
+  if (openGroupId) void loadGroup(openGroupId);
+  syncEntrySurface();
+}
+async function openGroup(id: string): Promise<void> {
+  const room = roomSummaries.find(item => item.id === id);
+  if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
+  openGroupId = id;
+  groupDraftOpen = false;
+  localStorage.setItem('aeeis.group', id);
+  renderGroups(roomSummaries);
+  $<HTMLTextAreaElement>('group-text')?.focus();
+}
+async function loadGroup(id: string): Promise<void> {
+  const [members, events] = await Promise.all([
+    api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`).catch(() => [] as RoomMemberSummary[]),
+    api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50`).catch(() => ({ items: [] as SessionEventSummary[] })),
+  ]);
+  if (openGroupId !== id) return;
+  groupMembers = members.filter(member => member.status === 'active');
+  groupEvents = events.items ?? [];
+  renderGroupTranscript();
+}
+function renderGroupTranscript(): void {
+  const list = $('group-transcript');
+  const empty = $('group-thread-empty');
+  const members = $('group-members');
+  if (!list) return;
+  if (members) members.textContent = ['AEEIS', ...groupMembers.map(member => participantLabel(member.principalId))].join('、');
+  list.replaceChildren();
+  for (const event of groupEvents) {
+    if (event.operation === 'retract') continue;
+    const item = element('li', '', 'group-message');
+    const heading = element('header');
+    heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
+    item.append(heading, element('p', event.content));
+    list.append(item);
+  }
+  if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
+  renderMentions();
+}
+function mentionTargets(): Array<{ label: string }> {
+  return [{ label: 'AEEIS' }, { label: '所有人' }, ...groupMembers.map(member => ({ label: participantLabel(member.principalId) }))];
+}
+function renderMentions(): void {
+  const box = $('group-mentions');
+  const input = $<HTMLTextAreaElement>('group-text');
+  if (!box || !input) return;
+  const match = input.value.match(/(?:^|\s)@([^\s@]*)$/);
+  const query = match?.[1]?.toLowerCase();
+  box.replaceChildren();
+  if (query === undefined) { box.hidden = true; return; }
+  const hits = mentionTargets().filter(target => target.label.toLowerCase().includes(query));
+  box.hidden = hits.length === 0;
+  for (const hit of hits) {
+    const choice = element('button', `@${hit.label}`) as HTMLButtonElement;
+    choice.type = 'button';
+    choice.addEventListener('click', () => {
+      input.value = input.value.replace(/(?:^|\s)@([^\s@]*)$/, token => /^\s/.test(token) ? ` @${hit.label} ` : `@${hit.label} `);
+      box.hidden = true;
+      input.focus();
+    });
+    box.append(choice);
+  }
+}
+async function submitGroupMessage(event: Event): Promise<void> {
+  event.preventDefault();
+  const input = $<HTMLTextAreaElement>('group-text');
+  const text = input?.value.trim() ?? '';
+  const roomId = openGroupId;
+  if (!text || !roomId) { input?.focus(); return; }
+  const room = roomSummaries.find(item => item.id === roomId);
+  if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
+  const listed = await api<GoalSummary[] | { goals?: GoalSummary[] }>(`/rooms/${encodeURIComponent(roomId)}/goals`);
+  const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
+  let goal = goals.find(item => item.status === 'active') ?? goals[0];
+  if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
+  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: '群聊消息', audienceMode: 'room' });
+  await api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
+    goalId: goal.id, type: 'message', content: text, contextManifestId: manifest.id,
+    idempotencyKey: `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`,
+  });
+  if (input) input.value = '';
+  await loadGroup(roomId);
+  message('');
+}
+async function renameGroup(): Promise<void> {
+  if (!openGroupId) return;
+  const room = roomSummaries.find(item => item.id === openGroupId);
+  const title = window.prompt('群聊名称', room?.title ?? '')?.trim();
+  if (!title) return;
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(openGroupId)}`, { title }, 'PATCH');
+  roomSummaries = roomSummaries.map(item => item.id === updated.id ? { ...item, ...updated } : item);
+  renderGroups(roomSummaries);
 }
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
@@ -1166,6 +1614,7 @@ async function openConversationRun(runId: string): Promise<void> {
   $('run-title').focus({ preventScroll: true });
 }
 async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
+  if (rosterView() !== 'entry') return;
   if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
   if (!retry) {
     const form = $<HTMLFormElement>('conversation-composer');
@@ -1250,6 +1699,23 @@ $('conversation-new').addEventListener('click', async () => {
   } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
   finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 });
+$('bots')?.addEventListener('click', event => {
+  const target = (event.target as HTMLElement | null)?.closest('button');
+  if (!target || !$('bots')?.contains(target)) return;
+  if (target.dataset.botId) selectBot(target.dataset.botId);
+  else if (target.dataset.groupId) renameBotGroup(target.dataset.groupId);
+});
+$('bot-group-draft')?.addEventListener('submit', createBotGroup);
+$('gb-new-bot-group')?.addEventListener('click', () => {
+  const draft = $('bot-group-draft');
+  if (draft) draft.hidden = !draft.hidden;
+});
+$('gb-new-group')?.addEventListener('click', () => showGroupDraft());
+$('group-add-person')?.addEventListener('click', () => addDraftPerson());
+$('group-create')?.addEventListener('submit', event => { void createGroup(event).catch(error => message(errorMessage(error))); });
+$('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
+$('group-text')?.addEventListener('input', () => renderMentions());
+$('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
 
 function attentionCopy(status: string): [string, string] {
   const copy: Record<string, [string, string]> = {
@@ -1550,7 +2016,12 @@ async function refresh(): Promise<void> {
   runSummaries = runs;
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   renderAttentionInbox(runs);
+  agentSummaries = agents;
+  agentsLoaded = true;
+  roomSummaries = rooms;
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
+  renderBotRoster();
+  renderGroups(rooms);
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
   renderRunQueue(runs);
   renderMinimalRecentRuns(runs);
