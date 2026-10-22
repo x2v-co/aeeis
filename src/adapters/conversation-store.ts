@@ -31,6 +31,7 @@ const schema = z.object({
   }).strict()).max(100),
   messages: z.array(z.object({
     id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']),
+    speaker: z.object({ role: z.enum(['user', 'agent']), id: z.string().trim().min(1).max(200) }).strict().optional(),
     text: z.string(), createdAt: timestamp, replyTo: identifier.optional(), correctsMessageId: identifier.optional(),
     route: z.object({
       status: z.enum(['routed', 'clarify', 'general']),
@@ -123,7 +124,7 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
   assert(draft.messages.length >= before.messages.length, 'Conversation messages are append-only');
   before.messages.forEach((message, index) => {
     const next = draft.messages[index]!;
-    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId'] as const) {
+    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId'] as const) {
       assert(isDeepStrictEqual(message[field], next[field]), `Conversation message ${field} is immutable`);
     }
     if (message.execution) {

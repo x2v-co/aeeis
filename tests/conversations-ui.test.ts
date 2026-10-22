@@ -88,7 +88,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
         if (body.focus === 'switch') target.focusTaskId = created.id;
       }
       const route = { status: 'routed', reason: created ? 'new-task' : body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: created ? [created.id] : body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [target.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
-      const message = { id: `message_${target.messages.length}`, role: 'user', text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
+      const message = { id: `message_${target.messages.length}`, role: 'user', ...(body.speaker ? { speaker: body.speaker } : {}), text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
       if (body.correctsMessageId) target.messages.find((item: { id: string }) => item.id === body.correctsMessageId).effectiveTaskIds = body.taskIds;
       target.messages.push(message); target.revision++;
       return response({ conversation: target, message, response: body.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。' : body.intent === 'execute' ? '已创建执行，仍需计划审批。' : '已记录讨论，未触发执行。', ...(body.intent === 'execute' ? { runId } : {}) });
@@ -845,6 +845,83 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-messages').textContent).not.toContain('发布口径先记在这里');
     expect(typed.value).toBe('');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+  });
+  it('lets a group message name a member bot and copies that speaker onto the AEEIS discussion', async () => {
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; createdAt: string }>>();
+    const membersByRoom = new Map<string, Array<{ id: string; roomId: string; principalId: string; role: string; status: string; invitedBy: string; createdAt: string; updatedAt: string }>>();
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      const roomId = decodeURIComponent(String(url).match(/\/rooms\/([^/?]+)/)?.[1] ?? '');
+      if (url === '/api/rooms' && method === 'POST') {
+        const room = { id: 'room_speaker', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        rooms.unshift(room);
+        return response(room);
+      }
+      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (String(url).endsWith('/members') && method === 'POST') {
+        const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
+        membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
+        return response(member);
+      }
+      if (String(url).endsWith('/members')) return response(membersByRoom.get(roomId) ?? []);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([]);
+      if (String(url).endsWith('/goals') && method === 'POST') return response({ id: 'goal_speaker', title: body.title, status: 'active', createdAt: date, roomId: body.roomId });
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_speaker' });
+      if (String(url).includes('/session-events') && method === 'POST') {
+        const list = events.get(roomId) ?? [];
+        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, createdAt: date };
+        list.push(event);
+        events.set(roomId, list);
+        return response(event);
+      }
+      if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    expect(el<HTMLSelectElement>('group-speaker').hidden).toBe(true);
+    el('gb-new-group').click();
+    const release = [...doc().querySelectorAll('#group-candidates label')].find(label => label.textContent?.includes('发布'));
+    release?.querySelector('input')?.click();
+    el<HTMLInputElement>('group-title').value = '发布协作';
+    el<HTMLFormElement>('group-create').requestSubmit();
+    await vi.waitFor(() => expect([...el<HTMLSelectElement>('group-speaker').options].map(option => option.textContent)).toContain('发布'));
+    expect(el<HTMLSelectElement>('group-speaker').hidden).toBe(false);
+    const speaker = el<HTMLSelectElement>('group-speaker');
+    speaker.value = 'demo.release';
+    el<HTMLTextAreaElement>('group-text').value = '我来对照清单';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('发布'));
+    expect(el('group-transcript').textContent).toContain('我来对照清单');
+    const roomMessage = h.posts.find(post => post.url.endsWith('/session-events'));
+    expect(roomMessage?.body).toMatchObject({ type: 'message', content: '我来对照清单', actor: { type: 'agent', id: 'demo.release' } });
+    expect(roomMessage?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)).toHaveLength(0);
+    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({
+      text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
+      intent: 'discuss',
+      focus: 'keep',
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    speaker.value = '';
+    el<HTMLTextAreaElement>('group-text').value = '这句是我的';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('这句是我的'));
+    const own = h.posts.filter(post => post.url.endsWith('/session-events') && post.body?.type === 'message');
+    expect(own.at(-1)?.body).not.toHaveProperty('actor');
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+    el('gb-bot').click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('AEEIS'));
+    expect(el<HTMLSelectElement>('group-speaker').hidden).toBe(true);
+    expect(el('conversation-messages').textContent).toContain('发布');
+    expect(el('conversation-messages').textContent).toContain('整理发布风险');
   });
   it('pins, clears, and keeps a standing sentence on this person without sending it as execution authority', async () => {
     const h = harness();

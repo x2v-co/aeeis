@@ -26,11 +26,19 @@ export interface ConversationRoute {
   candidateTaskIds: string[];
   focusEffect: 'keep' | 'switch';
 }
+/** Who spoke. `user` is the owner. `agent` is a roster bot. The role names the
+ * speaker; it does not grant tools, budget, or plan approval. */
+export interface ConversationSpeaker {
+  role: 'user' | 'agent';
+  id: string;
+}
 export interface ConversationMessage {
   id: string;
   keyHash: string;
   requestHash: string;
   role: 'user' | 'notification';
+  /** Missing on messages written before speakers. Those are the owner, role user. */
+  speaker?: ConversationSpeaker;
   text: string;
   createdAt: string;
   replyTo?: string;

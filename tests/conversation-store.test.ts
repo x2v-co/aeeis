@@ -59,6 +59,22 @@ for (const [name, factory] of Object.entries(factories)) describe(`${name} conve
     expect(current.createdAt).toBe(at);
     await expect(store.mutate(value.id, scope, () => {})).resolves.toEqual(current);
   }));
+  it('keeps a missing speaker and freezes one once it is written', () => using(async store => {
+    const value = conversation();
+    const older = message();
+    const spoken = message();
+    spoken.speaker = { role: 'agent', id: 'demo.release' };
+    value.messages = [older, spoken];
+    await store.create(value);
+    const loaded = await store.get(value.id, scope);
+    expect(loaded.messages[0]?.speaker).toBeUndefined();
+    expect(loaded.messages[1]?.speaker).toEqual({ role: 'agent', id: 'demo.release' });
+    await expect(store.mutate(value.id, scope, draft => { draft.messages[0]!.speaker = { role: 'user', id: 'alice' }; })).rejects.toBeInstanceOf(Conflict);
+    await expect(store.mutate(value.id, scope, draft => { draft.messages[1]!.speaker = { role: 'agent', id: 'demo.research' }; })).rejects.toBeInstanceOf(Conflict);
+    const kept = await store.get(value.id, scope);
+    expect(kept.revision).toBe(0);
+    expect(kept.messages[1]?.speaker).toEqual({ role: 'agent', id: 'demo.release' });
+  }));
   it('keeps a missing standing sentence compatible and stores one trimmed sentence', () => using(async store => {
     const value = conversation();
     await store.create(value);
