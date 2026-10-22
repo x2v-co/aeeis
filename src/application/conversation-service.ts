@@ -43,11 +43,12 @@ const terminal = new Set(['succeeded', 'failed', 'cancelled']);
 /** Statuses whose next step can still be ordered. Terminal success and cancellation are left alone. */
 const RANKED_RUN_STATUSES = new Set(['queued', 'planning', 'running', 'reviewing', 'needs_approval', 'needs_input', 'paused', 'failed', 'unknown', 'waiting_external']);
 /** Counts only. Summary text and originals stay on the owner memory API. */
-function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: number; hash: string; summary: string }>; approval?: { approved?: boolean; planHash?: string } } | undefined): { planVersion: number; planHash: string; summary: string } | undefined {
+function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: number; hash: string; summary: string }>; approval?: { approved?: boolean; planHash?: string; mode?: string; reason?: string } } | undefined): { planVersion: number; planHash: string; summary: string } | undefined {
   if (!run || run.status !== 'needs_approval' || run.approval?.approved) return;
   const plan = run.plans.at(-1);
   if (!plan || run.approval?.planHash !== plan.hash) return;
-  return { planVersion: plan.version, planHash: plan.hash, summary: plan.summary.slice(0, 240) };
+  const reason = run.approval.mode === 'auto' && run.approval.reason ? `模型请求批准：${run.approval.reason}。` : '';
+  return { planVersion: plan.version, planHash: plan.hash, summary: `${reason}${plan.summary}`.slice(0, 240) };
 }
 function pendingQuestion(run: { status: string; question?: { text?: string } } | undefined): { text: string } | undefined {
   if (!run || run.status !== 'needs_input') return;

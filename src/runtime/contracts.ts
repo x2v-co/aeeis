@@ -80,6 +80,8 @@ export const requestSchema = z.object({
   brainMaxItems: z.number().int().min(1).max(100).default(20),
   skillRuntime: z.string().trim().min(1).max(100).optional(),
   privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
+  /** Plan-review gate chosen by the owner when this Run is created. Missing means required. */
+  executionReview: z.enum(['required', 'auto', 'yolo']).optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -375,7 +377,9 @@ export interface AgentRun {
   reviewRepair?: { issues: Array<{ path: string; code: string; message: string }> };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
-  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string };
+  /** Frozen at creation. Missing means every plan waits for the owner. */
+  executionReview?: 'required' | 'auto' | 'yolo';
+  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;

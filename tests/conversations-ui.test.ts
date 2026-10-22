@@ -150,11 +150,31 @@ describe('single-entry conversation workbench', () => {
     fill('conversation-focus-effect', 'switch'); fill('materials', '资料 <script>unsafe</script>'); fill('allowed-tools', 'read'); fill('model-budget-tokens', '1200');
     el('conversation-execute').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { executionReview: 'required', allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goal');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goalId');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('taskExecution');
     expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
+  });
+
+  it('keeps the chosen execution review on the next explicit run and does not execute discussion', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    fill('execution-review', 'yolo');
+    expect(el('conversation-execution-note').textContent).toContain('自动执行');
+    fill('conversation-text', '只是讨论');
+    submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body.intent).toBe('discuss');
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(false));
+    expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo');
+    fill('conversation-text', '现在执行');
+    el('conversation-execute').click();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', runOptions: { executionReview: 'yolo' } });
+    await vi.waitFor(() => expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo'));
+    expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
+    dom.window.localStorage.removeItem('aeeis.execution-review');
   });
 
   it('blocks execution of nonterminal tasks but still accepts discussion', async () => {
