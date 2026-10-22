@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationStore, type ConversationTask } from '../conversations.js';
 import type { Ownership } from '../security/principal.js';
-import { requestSchema } from '../runtime/contracts.js';
+import { requestSchema, type AgentRun } from '../runtime/contracts.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
@@ -151,14 +151,24 @@ export class ConversationService {
   async get(id: string, scope: Ownership) { return this.view(await this.store.get(id, scope), scope); }
 
   private async view(conversation: Conversation, scope: Ownership) {
-    const tasks = await Promise.all(conversation.tasks.map(async task => {
+    const loaded = await Promise.all(conversation.tasks.map(async task => {
       const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
       const question = pendingQuestion(run);
-      return { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}) };
+      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}) } };
     }));
-    return redactRunData({ ...conversation, tasks, messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+    const tasks = loaded.map(item => item.task);
+    const lastDelivery = this.latestDelivery(loaded);
+    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+  }
+  private latestDelivery(loaded: Array<{ task: ConversationTask; run: AgentRun | undefined }>) {
+    const succeeded = loaded.filter((item): item is { task: ConversationTask; run: AgentRun } => item.run?.status === 'succeeded');
+    const latest = succeeded.reduce<{ task: ConversationTask; run: AgentRun } | undefined>((best, item) => !best || Date.parse(item.run.updatedAt) >= Date.parse(best.run.updatedAt) ? item : best, undefined);
+    if (!latest) return;
+    const summary = latest.run.plans.at(-1)?.summary.trim().slice(0, 240);
+    const artifactTitles = [...new Set(latest.run.artifacts.map(item => item.title.trim()).filter(Boolean))].slice(0, 8).map(title => title.length > 80 ? `${title.slice(0, 79)}…` : title);
+    return { taskId: latest.task.id, taskTitle: latest.task.title, runId: latest.run.id, ...(summary ? { planSummary: summary } : {}), ...(artifactTitles.length ? { artifactTitles } : {}) };
   }
   private messageView(message: ConversationMessage) {
     const { keyHash: _key, requestHash: _hash, execution, ...view } = message;
