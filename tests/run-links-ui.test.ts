@@ -66,6 +66,36 @@ describe('group chat', () => {
     expect(fetch.mock.calls.some(call => String(call[0]) === '/api/rooms' && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
   });
 });
+describe('entry', () => {
+  it('returns 新对话 to the entry and keeps the task in the roster', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
+    const draft = dom.window.document.getElementById('quick-goal') as HTMLInputElement;
+    draft.value = '先别发出去';
+    dom.window.document.getElementById('gb-bot')!.click();
+    expect(draft.value).toBe('先别发出去');
+    dom.window.document.getElementById('gb-new-chat')!.click();
+    const doc = dom.window.document;
+    expect(doc.getElementById('detail')?.hidden).toBe(true);
+    expect(doc.getElementById('empty')?.hidden).toBe(false);
+    expect(doc.body.classList.contains('run-open')).toBe(false);
+    expect(doc.getElementById('gb-title')?.textContent).toBe('AEEIS');
+    expect(doc.getElementById('gb-presence')?.textContent).toContain('任务都还在跑');
+    expect(doc.getElementById('runs')?.textContent).toContain(run.goal);
+    expect((doc.getElementById('quick-goal') as HTMLInputElement).value).toBe('');
+    expect(doc.defaultView!.localStorage.getItem('aeeis.run')).toBeNull();
+  });
+});
 describe('run link workbench', () => {
   it('renders filled PDF fields, unknowns, evidence and a PDF download in the actual workbench', async () => {
     const run = fixture(), output = await fillPdf(formSource, profile);

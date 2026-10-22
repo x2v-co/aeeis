@@ -115,6 +115,7 @@ const linkedThreadId = window.location.pathname.match(/^\/threads\/(thread_[a-f0
 const readOnlyShare = Boolean(shareToken);
 document.body.classList.toggle('shared-run', readOnlyShare);
 let currentId = linkedRunId ?? (readOnlyShare || linkedThreadId ? '' : localStorage.getItem('aeeis.run') ?? '');
+let entryEpoch = 0;
 document.body.classList.toggle('thread-page', Boolean(linkedThreadId));
 let threadPagesAfter = [0];
 let threadNextAfter: number | undefined;
@@ -563,7 +564,8 @@ function showRoster(): void {
   document.body.classList.add('roster-focus');
   document.body.classList.remove('draft-open');
 }
-function startNewChat(): void {
+function showEntry(options?: { resetDraft?: boolean }): void {
+  entryEpoch += 1;
   leaveGroup();
   stopRunEventStream();
   currentId = '';
@@ -574,13 +576,13 @@ function startNewChat(): void {
   setCurrentRunOpen(false);
   if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
   setIntentPresetsOpen(true);
-  const quickGoal = $<HTMLInputElement>('quick-goal');
-  if (quickGoal) {
-    quickGoal.value = '';
-    quickGoal.focus();
+  if (options?.resetDraft) {
+    const quickGoal = $<HTMLInputElement>('quick-goal');
+    if (quickGoal) quickGoal.value = '';
+    const goal = $<HTMLTextAreaElement>('goal');
+    if (goal) goal.value = '';
+    quickGoal?.focus();
   }
-  const goal = $<HTMLTextAreaElement>('goal');
-  if (goal) goal.value = '';
   renderRunQueue(runSummaries);
 }
 document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
@@ -606,7 +608,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(butt
   else setComputerOpen(true, 'setup');
 });
 ($('gb-computer-close') as HTMLButtonElement | null)?.addEventListener('click', () => closeComputer());
-($('gb-new-chat') as HTMLButtonElement | null)?.addEventListener('click', () => startNewChat());
+($('gb-new-chat') as HTMLButtonElement | null)?.addEventListener('click', () => showEntry({ resetDraft: true }));
 ($('gb-new-group') as HTMLButtonElement | null)?.addEventListener('click', () => showGroupDraft());
 ($('group-add-person') as HTMLButtonElement | null)?.addEventListener('click', () => addDraftPerson());
 ($('group-person') as HTMLInputElement | null)?.addEventListener('keydown', event => {
@@ -618,7 +620,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(butt
 ($('group-rename') as HTMLButtonElement | null)?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
 ($('group-composer') as HTMLFormElement | null)?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
 ($('group-text') as HTMLInputElement | null)?.addEventListener('input', () => renderMentions());
-($('gb-bot') as HTMLButtonElement | null)?.addEventListener('click', () => startNewChat());
+($('gb-bot') as HTMLButtonElement | null)?.addEventListener('click', () => showEntry());
 ($('gb-back') as HTMLButtonElement | null)?.addEventListener('click', () => showRoster());
 document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link => {
   link.addEventListener('click', event => {
@@ -676,9 +678,7 @@ function executePaletteCommand(command: string): void {
   if (command === 'new-group') {
     showGroupDraft();
   } else if (command === 'new-run') {
-    leaveGroup();
-    document.body.classList.remove('roster-focus');
-    document.body.classList.add('draft-open');
+    showEntry();
     $('command-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     $<HTMLInputElement>('quick-goal').focus();
   } else if (command === 'attention') {
@@ -1486,23 +1486,30 @@ async function refresh(): Promise<void> {
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
   renderRunQueue(runs);
   renderMinimalRecentRuns(runs);
-  if (!currentId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
+  const requestedId = currentId;
+  const epoch = entryEpoch;
+  if (!requestedId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
   let run: RunView;
-  try { run = await api<RunView>(`/runs/${currentId}`); }
+  try { run = await api<RunView>(`/runs/${requestedId}`); }
   catch (error) {
     // A local data directory or tenant can change between sessions. Do not
     // leave the workbench stuck on a stale selection when its Run disappeared.
     if (error instanceof Error && /Unknown run|HTTP 404/.test(error.message)) {
-      currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true; return;
+      if (currentId === requestedId && entryEpoch === epoch) {
+        currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true;
+      }
+      return;
     }
     throw error;
   }
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
   if (DONE_STATUSES.has(run.status)) stopRunEventStream();
-  else ensureRunEventStream(currentId);
+  else ensureRunEventStream(requestedId);
   const [graphs, explanation] = await Promise.all([
-    api<RunGraphsView>(`/runs/${currentId}/graphs`),
-    api<RunExplanation>(`/runs/${currentId}/explanation`),
+    api<RunGraphsView>(`/runs/${requestedId}/graphs`),
+    api<RunExplanation>(`/runs/${requestedId}/explanation`),
   ]);
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
   const keepGroup = Boolean(openGroupId) || document.body.classList.contains('group-draft');
   if (current?.id === run.id && current.revision === run.revision) {
     if (!currentRunOpen && !keepGroup) {
