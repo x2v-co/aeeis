@@ -49,6 +49,16 @@ function resolveSpeaker(speaker: z.infer<typeof speakerSchema> | undefined, scop
 function spoken(message: ConversationMessage, owner: string): ConversationSpeaker {
   return message.speaker ?? { role: 'user', id: owner };
 }
+/** The private chat's person. Missing on older threads. A value that cannot be a single token is omitted so it cannot reshape the goal. */
+function privatePerson(conversation: Conversation): string | undefined {
+  const person = conversation.agentId;
+  return person && /^[A-Za-z0-9._-]+$/.test(person) ? person : undefined;
+}
+function harnessGoal(conversation: Conversation, title: string, text: string, speaker: ConversationSpeaker): string {
+  const person = privatePerson(conversation);
+  const privacy = person ? `私聊：agent:${person}\n` : '';
+  return `${privacy}说话人：${speaker.role}:${speaker.id}\n任务：${title}\n当前请求：${text}`;
+}
 const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase();
 const sameIds = (left: string[], right: string[]) => [...left].sort().join('\0') === [...right].sort().join('\0');
 /** Pure Han titles match by substring once they are long enough to be distinctive.
@@ -287,9 +297,10 @@ export class ConversationService {
       if (body.intent === 'execute' && route.status === 'routed' && task) {
         if (task.pendingMessageId) throw new Conflict('Task execution is already being prepared');
         if (!newTask && (task.id !== selected?.id || task.latestRunId !== parent?.id)) throw new Conflict('Task changed while routing; refresh before execution');
+        const person = privatePerson(current);
         const notes = current.messages.filter(item => item.role === 'user' && !item.execution && !item.correctsMessageId && effectiveTasks(current, item).includes(task.id)).slice(-8).map(item => {
           const voice = spoken(item, current.owner);
-          return { id: item.id, role: voice.role, speakerId: voice.id, text: item.text };
+          return { id: item.id, role: voice.role, speakerId: voice.id, ...(person ? { privateWith: { role: 'agent' as const, id: person } } : {}), text: item.text };
         }).reverse();
         const selectedNotes: typeof notes = [];
         for (const note of notes) {
@@ -310,7 +321,7 @@ export class ConversationService {
         }
         if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
         if (history) materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
-        const request = requestSchema.parse({ ...options, goal: `说话人：${speaker.role}:${speaker.id}\n任务：${task.title}\n当前请求：${body.text}`, materials, workingMemory: { enabled: true } });
+        const request = requestSchema.parse({ ...options, goal: harnessGoal(current, task.title, body.text, speaker), materials, workingMemory: { enabled: true } });
         const runId = followupRunId(task.threadId, followupHash(message.id), scope);
         message.execution = { taskId: task.id, runId, ...(parent ? { parentRunId: parent.id } : {}), request, state: 'pending' };
         task.pendingMessageId = message.id;

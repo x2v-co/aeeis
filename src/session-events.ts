@@ -280,7 +280,7 @@ export interface CreateSessionEventInput {
   contextManifestId: Id;
   evidenceRefs?: Id[];
   idempotencyKey: string;
-  /** Who spoke. Missing keeps the caller. An agent speaker must be an active bot member of this room and in the manifest audience. It does not grant tools or approval. */
+  /** Who spoke. Missing keeps the caller. An agent speaker must be an active bot member of this room and in the manifest audience. A private room can also name the other active member. It does not grant tools or approval. */
   actor?: { type: 'principal' | 'agent'; id: string };
 }
 
@@ -307,18 +307,25 @@ export class SessionEventService {
     let eventActorId = actorId;
     let eventActorType = actorType;
     if (input.actor) {
-      if (input.type !== 'message') throw new AeeisConflict('只有群聊消息可以指定说话人');
-      if (input.actor.type === 'principal') {
-        if (input.actor.id !== actorId) throw new AeeisConflict('只能以本人的身份说话');
-      } else if (actorType !== 'principal') throw new AeeisConflict('只能由房间里的人代为记下 bot 的发言');
-      else {
-        const members = await this.domain.listRoomMembers(roomId, actorId, tenantId);
+      if (input.type !== 'message') throw new AeeisConflict('只有会话消息可以指定说话人');
+      if (actorType !== 'principal') throw new AeeisConflict('只能由房间里的人代为记下对方的发言');
+      const members = await this.domain.listRoomMembers(roomId, actorId, tenantId);
+      if (input.actor.type === 'principal' && input.actor.id === actorId) {
+        eventActorId = actorId;
+        eventActorType = 'principal';
+      } else if (input.actor.type === 'agent') {
         const member = members.find(item => item.principalId === input.actor!.id && item.status === 'active' && item.role === 'agent');
-        if (!member) throw new AeeisConflict('只能以这个群里的 bot 身份说话');
+        if (!member) throw new AeeisConflict('只能以这个会话里的 bot 身份说话');
         if (!manifest.audience.includes(audienceFor(member.principalId, tenantId))) throw new AeeisConflict('这个 bot 不在这条会话的受众里');
         eventActorId = member.principalId;
         eventActorType = 'agent';
-      }
+      } else if (room.description === '私聊') {
+        const member = members.find(item => item.principalId === input.actor!.id && item.status === 'active' && (item.role === 'editor' || item.role === 'agent'));
+        if (!member || member.principalId === actorId) throw new AeeisConflict('只能以这间私聊里的对方身份说话');
+        if (!manifest.audience.includes(audienceFor(member.principalId, tenantId))) throw new AeeisConflict('对方不在这条会话的受众里');
+        eventActorId = member.principalId;
+        eventActorType = member.role === 'agent' ? 'agent' : 'principal';
+      } else throw new AeeisConflict('只能以本人的身份说话');
     }
     const evidenceRefs = [...new Set(input.evidenceRefs ?? [])];
     const contextManifestHash = contextManifestBindingHash(manifest);

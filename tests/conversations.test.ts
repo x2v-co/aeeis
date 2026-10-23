@@ -667,4 +667,81 @@ describe('single-entry conversation routing', () => {
     expect(replay.json().message.id).toBe(botLine.json().message.id);
     expect(replay.json().message.speaker).toEqual({ role: 'agent', id: 'demo.release' });
   });
+  it('names the private person on the next Run without granting the speaker', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const talk = await f.post(release.id, {
+      text: '先记下口径',
+      newTask: { title: '发布口径' },
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: release.revision,
+    });
+    expect(talk.statusCode, talk.body).toBe(200);
+    expect(talk.json().runId).toBeUndefined();
+    expect(talk.json().message.speaker).toEqual({ role: 'user', id: 'alice' });
+    expect(talk.json().message.execution).toBeUndefined();
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    const started = await f.post(release.id, {
+      text: '按口径执行',
+      taskIds: [talk.json().message.route.taskIds[0]],
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: 0,
+    });
+    expect(started.statusCode, started.body).toBe(202);
+    const run = await f.repository.get(started.json().runId);
+    expect(run.goal.startsWith('私聊：agent:demo.release\n说话人：user:alice\n任务：发布口径\n当前请求：按口径执行')).toBe(true);
+    expect(run.allowedTools).toEqual([]);
+    expect(run.allowedAgents).toEqual([]);
+    expect(run.externalBudget).toBeUndefined();
+    const history = run.context.sources.find(source => source.source === `conversation:${release.id}/task:${talk.json().message.route.taskIds[0]}`);
+    expect(history?.untrusted).toBe(true);
+    expect(JSON.parse(String(history?.content))).toEqual([
+      expect.objectContaining({ role: 'user', speakerId: 'alice', privateWith: { role: 'agent', id: 'demo.release' }, text: '先记下口径' }),
+    ]);
+    const asPerson = await f.post(release.id, {
+      text: '换成这个人再说',
+      newTask: { title: '本人开口' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: started.json().conversation.revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(asPerson.statusCode, asPerson.body).toBe(202);
+    const personRun = await f.repository.get(asPerson.json().runId);
+    expect(personRun.goal.startsWith('私聊：agent:demo.release\n说话人：agent:demo.release\n')).toBe(true);
+    expect(personRun.allowedTools).toEqual([]);
+    expect(personRun.allowedAgents).toEqual([]);
+    const research = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '研究', agentId: 'demo.research' } })).json();
+    const other = await f.post(research.id, {
+      text: '研究单独执行',
+      newTask: { title: '研究口径' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: research.revision,
+    });
+    expect(other.statusCode, other.body).toBe(202);
+    const otherRun = await f.repository.get(other.json().runId);
+    expect(otherRun.goal.startsWith('私聊：agent:demo.research\n说话人：user:alice\n')).toBe(true);
+    expect(otherRun.goal).not.toContain('demo.release');
+    expect(otherRun.allowedTools).toEqual([]);
+    const home = await f.create();
+    const claimed = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: 'AEEIS', agentId: 'aeeis', claimId: home.id } });
+    expect(claimed.statusCode, claimed.body).toBe(201);
+    const onHome = await f.post(home.id, {
+      text: '发布对 AEEIS 说',
+      newTask: { title: '转告' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: claimed.json().revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(onHome.statusCode, onHome.body).toBe(202);
+    const homeRun = await f.repository.get(onHome.json().runId);
+    expect(homeRun.goal.startsWith('私聊：agent:aeeis\n说话人：agent:demo.release\n')).toBe(true);
+    expect(homeRun.allowedTools).toEqual([]);
+    expect(homeRun.allowedAgents).toEqual([]);
+  });
 });

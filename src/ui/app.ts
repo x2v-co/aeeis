@@ -1100,37 +1100,95 @@ function eventAuthor(event: SessionEventSummary): string {
   if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
   return '你';
 }
+function lifePersonId(): string {
+  const view = rosterView();
+  if (view === 'entry') return lifeAgent(conversation) || 'aeeis';
+  if (view === 'bot') return lifeAgent(conversation) || activeBotId();
+  return '';
+}
 function messageAuthor(item: ConversationMessageView): string {
   if (item.role === 'notification') return '任务通知';
-  if (item.speaker?.role === 'agent') return participantLabel(item.speaker.id);
+  const person = lifePersonId();
+  const personLabel = person ? participantLabel(person) : '';
+  if (item.speaker?.role === 'agent') {
+    const who = participantLabel(item.speaker.id);
+    if (person && item.speaker.id !== person) return `${who} · 对${personLabel}`;
+    return who;
+  }
+  if (item.speaker && person && item.speaker.id !== person) return `你 · 对${personLabel}`;
   return '你';
 }
-function selectedGroupSpeaker(): { type: 'agent'; id: string } | undefined {
-  if (rosterView() !== 'group') return;
-  const id = $<HTMLSelectElement>('group-speaker')?.value.trim() ?? '';
-  if (!id) return;
-  const member = groupMembers.find(item => item.principalId === id && item.role === 'agent' && item.status === 'active');
-  if (!member) return;
-  return { type: 'agent', id: member.principalId };
+function selectedLifeSpeaker(): { role: 'agent'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'entry' && view !== 'bot') return;
+  const id = $<HTMLSelectElement>('life-speaker')?.value.trim() ?? '';
+  const person = lifePersonId();
+  if (!id || id !== person || !/^[A-Za-z0-9._-]+$/.test(id)) return;
+  return { role: 'agent', id };
 }
-function syncGroupSpeaker(): void {
-  const select = $<HTMLSelectElement>('group-speaker');
+function syncLifeSpeaker(): void {
+  const select = $<HTMLSelectElement>('life-speaker');
   if (!select) return;
+  const view = rosterView();
+  const person = lifePersonId();
+  const valid = /^[A-Za-z0-9._-]+$/.test(person);
   const previous = select.value;
-  const agents = groupMembers.filter(member => member.role === 'agent' && member.status === 'active');
   select.replaceChildren();
   const you = document.createElement('option');
   you.value = '';
   you.textContent = '你';
   select.append(you);
-  for (const member of agents) {
+  if (valid) {
     const option = document.createElement('option');
-    option.value = member.principalId;
-    option.textContent = participantLabel(member.principalId);
+    option.value = person;
+    option.textContent = participantLabel(person);
     select.append(option);
   }
-  select.value = agents.some(member => member.principalId === previous) ? previous : '';
-  select.hidden = rosterView() !== 'group';
+  select.value = valid && previous === person ? previous : '';
+  select.hidden = view !== 'entry' && view !== 'bot';
+}
+function speakerChoices(): Array<{ id: string; label: string; type: 'agent' | 'principal' }> {
+  const view = rosterView();
+  if (view === 'group') {
+    return groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => ({ id: member.principalId, label: participantLabel(member.principalId), type: 'agent' as const }));
+  }
+  if (view === 'direct') {
+    return groupMembers.filter(member => member.status === 'active').map(member => ({
+      id: member.principalId,
+      label: participantLabel(member.principalId),
+      type: member.role === 'agent' ? 'agent' as const : 'principal' as const,
+    }));
+  }
+  return [];
+}
+function selectedRoomSpeaker(): { type: 'agent' | 'principal'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'group' && view !== 'direct') return;
+  const id = $<HTMLSelectElement>('group-speaker')?.value.trim() ?? '';
+  if (!id) return;
+  const choice = speakerChoices().find(item => item.id === id);
+  if (!choice) return;
+  return { type: choice.type, id: choice.id };
+}
+function syncGroupSpeaker(): void {
+  const select = $<HTMLSelectElement>('group-speaker');
+  if (!select) return;
+  const previous = select.value;
+  const choices = speakerChoices();
+  select.replaceChildren();
+  const you = document.createElement('option');
+  you.value = '';
+  you.textContent = '你';
+  select.append(you);
+  for (const choice of choices) {
+    const option = document.createElement('option');
+    option.value = choice.id;
+    option.textContent = choice.label;
+    select.append(option);
+  }
+  select.value = choices.some(choice => choice.id === previous) ? previous : '';
+  const view = rosterView();
+  select.hidden = view !== 'group' && view !== 'direct';
 }
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
@@ -1177,12 +1235,13 @@ function syncEntrySurface(): void {
   const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
-    ? '这间私聊只保留会话记录。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
+    ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。选一位 bot，只是标明这句话是它说的；它不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。';
   syncGroupSpeaker();
+  syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
   const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
   const entryTitle = $('entry-title');
@@ -1644,7 +1703,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
   const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
-  const spoken = selectedGroupSpeaker();
+  const spoken = selectedRoomSpeaker();
   const postSession = (type: 'message' | 'system', content: string) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
     goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
     ...(type === 'message' && spoken ? { actor: spoken } : {}),
@@ -1671,7 +1730,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
           newTask: { title },
           focus: 'keep',
           intent: 'discuss',
-          ...(spoken ? { speaker: { role: 'agent', id: spoken.id } } : {}),
+          ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
         }, 'POST', groupIdempotencyKey());
         if (epoch === conversationEpoch && result.conversation?.id === id) {
           if (conversation?.id === id) acceptConversation(result.conversation);
@@ -2062,9 +2121,11 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (intent === 'execute' && $<HTMLButtonElement>('conversation-execute').disabled) return;
     const target = $<HTMLSelectElement>('conversation-target').value;
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
+    const lifeSpeaker = selectedLifeSpeaker();
     const body = conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
+        ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
         ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
         focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
