@@ -88,4 +88,21 @@ describe('model routing port', () => {
     expect(decision.candidates).toHaveLength(2);
     expect(() => selectModel([{ model: 'public-only', provider: 'p1', endpoint: 'https://p1.example', capabilities: ['planning'], contextTokens: 1000, privateDataAllowed: false }], { capability: 'planning', privacy: 'private', minContextTokens: 2000 })).toThrow('No model');
   });
+  it('selects an owner-chosen model only from rows that already pass policy', () => {
+    const catalog = [
+      { model: 'cheap', provider: 'p1', endpoint: 'https://p1.example', capabilities: ['agent'], outputPricePerMillion: 1 },
+      { model: 'strong', provider: 'p2', endpoint: 'https://p2.example', capabilities: ['agent'], outputPricePerMillion: 2 },
+    ];
+    expect(selectModel(catalog, { capability: 'agent', privacy: 'internal' }).selected.model).toBe('cheap');
+    const chosen = selectModel(catalog, { capability: 'agent', privacy: 'internal', preferredModel: { model: 'strong' } });
+    expect(chosen.selected).toMatchObject({ model: 'strong', provider: 'p2' });
+    expect(chosen.reason).toContain('owner-selected model within policy');
+    const named = selectModel([
+      { model: 'strong', provider: 'cheap-provider', endpoint: 'https://c.example', capabilities: ['agent'], outputPricePerMillion: 1 },
+      { model: 'strong', provider: 'named-provider', endpoint: 'https://n.example', capabilities: ['agent'], outputPricePerMillion: 9 },
+    ], { capability: 'agent', privacy: 'internal', preferredModel: { model: 'strong', provider: 'named-provider' } });
+    expect(named.selected.provider).toBe('named-provider');
+    expect(() => selectModel(catalog, { capability: 'agent', privacy: 'internal', maxMoney: 1, preferredModel: { model: 'strong' } })).toThrow('不在当前运行时');
+    expect(() => selectModel(catalog, { capability: 'agent', privacy: 'internal', preferredModel: { model: 'absent' } })).toThrow('不在当前运行时');
+  });
 });

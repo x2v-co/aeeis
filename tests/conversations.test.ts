@@ -380,6 +380,160 @@ describe('single-entry conversation routing', () => {
     expect(unplugged.body).toContain('Brain 还没有接上');
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('promotes a skill profile per task kind and freezes that kind\'s model on the next Run', async () => {
+    const brain = new GovernedBrain();
+    const f = await fixture(brain);
+    const actor = { id: 'alice', tenantId: 'team-a', roles: ['owner'] as const };
+    const profileClaims = () => brain.state().claims.filter(claim => claim.kind === 'decision' && claim.sourceRefs.some(ref => ref.startsWith('skill-profile:') || ref.startsWith('task-model:')));
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const research = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '研究', agentId: 'demo.research' } })).json();
+    const home = await f.create();
+    const first = await f.addTask(release.id, '周报做法', 'execute');
+    const second = await f.addTask(release.id, '简报做法', 'execute');
+    const failed = await f.addTask(release.id, '失败尝试', 'execute');
+    await f.repository.mutate(first.runId, run => {
+      run.status = 'succeeded';
+      run.builtinSkill = 'project-pulse/1';
+      run.artifacts = [{ id: 'artifact_pulse', taskId: 'work', title: '周报稿', content: 'SECRET ARTIFACT BODY', evidenceRefs: [], hash: 'e'.repeat(64), createdAt: run.createdAt }];
+    });
+    await f.repository.mutate(second.runId, run => {
+      run.status = 'succeeded';
+      run.skillSelection = { methodId: 'brief-method', version: '2', plan: { steps: ['check'] } };
+      run.artifacts = [{ id: 'artifact_brief', taskId: 'work', title: '简报', content: 'SECRET BRIEF', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt }];
+    });
+    await f.repository.mutate(failed.runId, run => { run.status = 'failed'; run.builtinSkill = 'project-pulse/1'; });
+    const before = await f.fresh(release.id);
+    const discussed = await f.post(release.id, { text: '讨论不晋升', taskKind: '周报', expectedRevision: before.revision });
+    expect(discussed.statusCode, discussed.body).toBe(200);
+    expect(discussed.json().runId).toBeUndefined();
+    expect(profileClaims()).toEqual([]);
+    const rev = discussed.json().conversation.revision as number;
+    const stale = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev + 9, taskKind: '周报', runId: first.runId } });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.body).toContain('请先刷新再晋升');
+    expect(profileClaims()).toEqual([]);
+    await f.repository.mutate(first.runId, run => { delete run.builtinSkill; });
+    const noSkill = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: first.runId } });
+    expect(noSkill.statusCode, noSkill.body).toBe(409);
+    expect(noSkill.body).toContain('还没有可晋升的技能版本');
+    await f.repository.mutate(first.runId, run => {
+      run.builtinSkill = 'project-pulse/1';
+      run.artifacts = [];
+      run.context.sources = [];
+      run.calls = [];
+      run.toolReceipts = [];
+      run.delegationOutcomes = [];
+      run.events = [];
+    });
+    const noEvidence = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: first.runId } });
+    expect(noEvidence.statusCode, noEvidence.body).toBe(409);
+    expect(noEvidence.body).toContain('还没有可引用的证据');
+    await f.repository.mutate(first.runId, run => {
+      run.artifacts = [{ id: 'artifact_pulse', taskId: 'work', title: '周报稿', content: 'SECRET ARTIFACT BODY', evidenceRefs: [], hash: 'e'.repeat(64), createdAt: run.createdAt }];
+    });
+    const wrong = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: failed.runId } });
+    expect(wrong.statusCode, wrong.body).toBe(409);
+    expect(wrong.body).toContain('只能晋升这个人做成过的那一次');
+    const unowned = await f.app.inject({ method: 'POST', url: `/api/conversations/${home.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: home.revision, taskKind: '周报', runId: first.runId } });
+    expect(unowned.statusCode, unowned.body).toBe(409);
+    expect(unowned.body).toContain('这条对话还没有所属的人');
+    const promoted = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: first.runId } });
+    expect(promoted.statusCode, promoted.body).toBe(200);
+    expect(promoted.json().revision).toBe(rev);
+    expect(promoted.json().taskSettings.skills).toEqual([expect.objectContaining({ taskKind: '周报', methodId: 'project-pulse', version: '1', runId: first.runId, evidenceRefs: ['artifact_pulse'] })]);
+    expect(JSON.stringify(promoted.json().taskSettings)).not.toContain('SECRET');
+    expect(await f.store.get(release.id, scope)).not.toHaveProperty('taskSettings');
+    const replaced = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: second.runId } });
+    expect(replaced.statusCode, replaced.body).toBe(200);
+    expect(replaced.json().taskSettings.skills).toEqual([expect.objectContaining({ taskKind: '周报', methodId: 'brief-method', version: '2', runId: second.runId, evidenceRefs: ['artifact_brief'] })]);
+    const active = profileClaims().filter(claim => claim.state === 'active' && claim.sourceRefs.some(ref => ref.startsWith('skill-profile:')));
+    expect(active).toHaveLength(1);
+    expect(active[0]!.sourceRefs).toEqual(expect.arrayContaining([`skill-profile:demo.release:周报`, 'method:brief-method', 'version:2', `run:${second.runId}`, 'artifact_brief']));
+    const noPrevious = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile/rollback`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '纪要', reason: '没有上一版' } });
+    expect(noPrevious.statusCode, noPrevious.body).toBe(409);
+    expect(noPrevious.body).toContain('还没有技能档案');
+    const rolled = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile/rollback`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', reason: '  口径不稳  ' } });
+    expect(rolled.statusCode, rolled.body).toBe(200);
+    expect(rolled.json().revision).toBe(rev);
+    expect(rolled.json().taskSettings.skills).toEqual([expect.objectContaining({ taskKind: '周报', methodId: 'project-pulse', version: '1', runId: first.runId })]);
+    expect(profileClaims().find(claim => claim.state === 'active' && claim.sourceRefs.includes('method:project-pulse'))?.content).toContain('回滚：口径不稳');
+    const model = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', model: ' fixture ' } });
+    expect(model.statusCode, model.body).toBe(200);
+    expect(model.json().revision).toBe(rev);
+    expect(model.json().taskSettings.models).toEqual([expect.objectContaining({ taskKind: '周报', model: 'fixture' })]);
+    const otherModel = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '纪要', model: 'missing-model' } });
+    expect(otherModel.statusCode, otherModel.body).toBe(200);
+    const forgedModel = await f.post(release.id, { text: '请求里另写模型', newTask: { title: '另写模型' }, intent: 'execute', focus: 'keep', expectedRevision: rev, taskKind: '周报', runOptions: { preferredModel: { model: 'missing-model' } } });
+    expect(forgedModel.statusCode, forgedModel.body).toBe(400);
+    const carried = await f.post(release.id, { text: '按周报做', newTask: { title: '下一版周报' }, intent: 'execute', focus: 'keep', expectedRevision: (await f.fresh(release.id)).revision, taskKind: '周报' });
+    expect(carried.statusCode, carried.body).toBe(202);
+    const run = await f.repository.get(carried.json().runId);
+    const setting = run.context.sources.find(source => source.source === `conversation:${release.id}/task-kind/周报`);
+    expect(setting?.untrusted).toBe(true);
+    expect(setting?.content).toContain('方法：project-pulse');
+    expect(setting?.content).toContain('版本：1');
+    expect(setting?.content).toContain(first.runId);
+    expect(setting?.content).toContain('artifact_pulse');
+    expect(setting?.content).toContain('模型：fixture');
+    expect(setting?.content).not.toContain('brief-method');
+    expect(setting?.content).not.toContain('SECRET');
+    expect(run.model.model).toBe('fixture');
+    expect(run.modelDecision).toMatchObject({ reason: expect.stringContaining('owner-selected model within the pinned runtime') });
+    expect(run.skillSelection).toBeUndefined();
+    expect(run.builtinSkill).toBeUndefined();
+    expect(run.allowedTools).toEqual([]);
+    expect(run.allowedAgents).toEqual([]);
+    expect(run.externalBudget).toBeUndefined();
+    expect(run.modelBudget).toBeUndefined();
+    const plain = await f.post(release.id, { text: '不写种类', newTask: { title: '普通一件' }, intent: 'execute', focus: 'keep', expectedRevision: (await f.fresh(release.id)).revision });
+    expect(plain.statusCode, plain.body).toBe(202);
+    const plainRun = await f.repository.get(plain.json().runId);
+    expect(JSON.stringify(plainRun.context)).not.toContain('project-pulse');
+    expect(plainRun.modelDecision).toBeUndefined();
+    const rejected = await f.post(release.id, { text: '纪要用别的模型', newTask: { title: '纪要一件' }, intent: 'execute', focus: 'keep', expectedRevision: (await f.fresh(release.id)).revision, taskKind: '纪要' });
+    expect(rejected.statusCode, rejected.body).toBe(409);
+    expect(rejected.body).toContain('不在当前运行时');
+    const cleared = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: (await f.fresh(release.id)).revision, taskKind: '纪要' } });
+    expect(cleared.statusCode, cleared.body).toBe(200);
+    expect(cleared.json().taskSettings.models.map((item: { taskKind: string }) => item.taskKind)).toEqual(['周报']);
+    const brief = await f.post(release.id, { text: '纪要沿用运行时', newTask: { title: '纪要默认' }, intent: 'execute', focus: 'keep', expectedRevision: cleared.json().revision, taskKind: '纪要' });
+    expect(brief.statusCode, brief.body).toBe(202);
+    const briefContext = JSON.stringify((await f.repository.get(brief.json().runId)).context);
+    expect(briefContext).not.toContain('project-pulse');
+    expect(briefContext).not.toContain('模型：fixture');
+    expect((await f.repository.get(brief.json().runId)).modelDecision).toBeUndefined();
+    brain.addClaim({
+      owner: 'alice', tenantId: 'team-a', scope: 'identity', scopeRef: 'demo.research', classification: 'internal', kind: 'decision',
+      content: '发布的档案不该进研究', sourceRefs: ['skill-profile:demo.research:周报', 'method:project-pulse', 'version:1', `run:${first.runId}`, 'artifact_pulse'], confidence: 1,
+    }, actor);
+    const researchRun = await f.post(research.id, { text: '研究这一件', newTask: { title: '另一项研究' }, intent: 'execute', focus: 'keep', expectedRevision: (await f.fresh(research.id)).revision, taskKind: '周报' });
+    expect(researchRun.statusCode, researchRun.body).toBe(202);
+    const researchContext = JSON.stringify((await f.repository.get(researchRun.json().runId)).context);
+    expect(researchContext).not.toContain('project-pulse');
+    expect(researchContext).not.toContain('发布的档案不该进研究');
+    expect(researchRun.json().conversation.taskSettings).toBeUndefined();
+    const full = await f.fresh(release.id);
+    const overflow = await f.post(release.id, {
+      text: '材料已满', newTask: { title: '设定材料已满' }, intent: 'execute', focus: 'keep', expectedRevision: full.revision, taskKind: '周报',
+      runOptions: { materials: Array.from({ length: 20 }, (_, index) => ({ title: `资料${index}`, source: `user:${index}`, content: `正文 ${index}` })) },
+    });
+    expect(overflow.statusCode, overflow.body).toBe(409);
+    expect(overflow.body).toContain('task setting');
+    const retracted = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile/retract`, headers: f.headers, payload: { expectedRevision: full.revision, taskKind: '周报', claimId: full.taskSettings.skills[0].claimId } });
+    expect(retracted.statusCode, retracted.body).toBe(200);
+    expect(retracted.json().taskSettings.skills).toEqual([]);
+    const after = await f.post(release.id, { text: '撤回后不再带技能', newTask: { title: '撤回后的周报' }, intent: 'execute', focus: 'keep', expectedRevision: retracted.json().revision, taskKind: '周报' });
+    expect(after.statusCode, after.body).toBe(202);
+    const afterContext = JSON.stringify((await f.repository.get(after.json().runId)).context);
+    expect(afterContext).not.toContain('project-pulse');
+    expect(afterContext).toContain('模型：fixture');
+    const bare = await fixture();
+    const barePerson = (await bare.app.inject({ method: 'POST', url: '/api/conversations', headers: bare.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const unplugged = await bare.app.inject({ method: 'POST', url: `/api/conversations/${barePerson.id}/skill-profile`, headers: bare.headers, payload: { expectedRevision: barePerson.revision, taskKind: '周报', runId: first.runId } });
+    expect(unplugged.statusCode, unplugged.body).toBe(409);
+    expect(unplugged.body).toContain('Brain 还没有接上');
+    expect(f.model.complete).not.toHaveBeenCalled();
+  });
   it('keeps side questions separate from focus and supports explicit focus switching', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, 'AEEIS'), b = await f.addTask(entry.id, 'Grok 迁移');
@@ -574,7 +728,7 @@ describe('single-entry conversation routing', () => {
     expect(pinned.statusCode, pinned.body).toBe(200);
     for (const token of ['bob', 'elsewhere', 'agent']) {
       const headers = { authorization: `Bearer ${token}`, 'idempotency-key': 'guess' };
-      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/standing', { expectedRevision: 0, text: 'guess' }], ['POST', '/practice', { expectedRevision: 0, text: 'guess', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/practice/retract', { expectedRevision: 0, claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/tasks/task_missing/priority', { expectedRevision: 0, direction: 'higher' }], ['POST', '/notifications/sync', {}]] as const) {
+      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/standing', { expectedRevision: 0, text: 'guess' }], ['POST', '/practice', { expectedRevision: 0, text: 'guess', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/practice/retract', { expectedRevision: 0, claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile', { expectedRevision: 0, taskKind: '周报', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile/rollback', { expectedRevision: 0, taskKind: '周报', reason: '退回' }], ['POST', '/skill-profile/retract', { expectedRevision: 0, taskKind: '周报', claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/task-model', { expectedRevision: 0, taskKind: '周报', model: 'fixture' }], ['POST', '/tasks/task_missing/priority', { expectedRevision: 0, direction: 'higher' }], ['POST', '/notifications/sync', {}]] as const) {
         const response = await f.app.inject({ method, url: `/api/conversations/${entry.id}${path}`, headers, ...(payload ? { payload } : {}) });
         expect(response.statusCode).toBe(token === 'agent' ? 403 : 404); expect(response.body).not.toContain('私有任务'); expect(response.body).not.toContain(secret);
       }

@@ -31,7 +31,38 @@ const retractPracticeSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   claimId: z.string().regex(/^brain_[a-f0-9-]{36}$/),
 }).strict();
+const taskKindSchema = z.string().trim().min(1, '先写任务种类').max(40, '任务种类最多 40 字').regex(/^[\p{Script=Han}A-Za-z0-9][\p{Script=Han}A-Za-z0-9 ._-]{0,39}$/u, '任务种类只能包含汉字、字母、数字、空格、点、下划线和连字符');
+const skillTokenSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/);
+const modelTokenSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/, '模型标识只能包含字母、数字和 . _ : / -');
+const skillProfileSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  taskKind: taskKindSchema,
+  runId: z.string().regex(/^run_[a-f0-9-]{36}$/),
+}).strict();
+const skillRollbackSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  taskKind: taskKindSchema,
+  reason: z.string().trim().min(1, '先写下回滚原因').max(200, '回滚原因最多 200 字'),
+}).strict();
+const skillRetractSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  taskKind: taskKindSchema,
+  claimId: z.string().regex(/^brain_[a-f0-9-]{36}$/),
+}).strict();
+const taskModelSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  taskKind: taskKindSchema,
+  model: z.string().trim().max(120).optional(),
+  provider: z.string().trim().max(120).optional(),
+}).strict().superRefine((value, context) => {
+  const model = value.model ?? '';
+  const provider = value.provider ?? '';
+  if (!model && provider) context.addIssue({ code: 'custom', message: '没有模型时不能单写提供方' });
+  if (model && !modelTokenSchema.safeParse(model).success) context.addIssue({ code: 'custom', message: '模型标识只能包含字母、数字和 . _ : / -' });
+  if (provider && !modelTokenSchema.safeParse(provider).success) context.addIssue({ code: 'custom', message: '提供方标识只能包含字母、数字和 . _ : / -' });
+});
 const PRACTICE_TITLE = 'Accepted practice (untrusted, not execution authority)';
+const TASK_SETTING_TITLE = 'Task setting (untrusted, not execution authority)';
 const speakerSchema = z.object({
   role: z.enum(['user', 'agent']),
   id: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/, '说话人标识只能包含字母、数字、点、下划线和连字符'),
@@ -47,7 +78,9 @@ const messageSchema = z.object({
   intent: z.enum(['discuss', 'execute']).default('discuss'),
   /** Who is speaking. Missing means the authenticated owner, role user. */
   speaker: speakerSchema.optional(),
-  runOptions: requestSchema.omit({ goal: true, goalId: true, taskExecution: true }).optional(),
+  /** Which kind of work this explicit Run is. Missing keeps the runtime default and carries no skill profile. */
+  taskKind: taskKindSchema.optional(),
+  runOptions: requestSchema.omit({ goal: true, goalId: true, taskExecution: true, preferredModel: true }).optional(),
 }).strict();
 /** The provider turn stays one inbound user message. This names the persona inside that request. */
 function resolveSpeaker(speaker: z.infer<typeof speakerSchema> | undefined, scope: Ownership): ConversationSpeaker {
@@ -163,6 +196,42 @@ function practiceEvidence(run: AgentRun): string[] {
   return (cited.length ? cited : nodes).slice(0, 8);
 }
 function practiceMarker(person: string): string { return `practice:${person}`; }
+function skillMarker(person: string, taskKind: string): string { return `skill-profile:${person}:${taskKind}`; }
+function modelMarker(person: string, taskKind: string): string { return `task-model:${person}:${taskKind}`; }
+interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
+interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
+function kindFromMarker(claim: BrainClaim, prefix: string): string | undefined {
+  const markers = claim.sourceRefs.filter(ref => ref.startsWith(prefix));
+  if (markers.length !== 1) return;
+  const parsed = taskKindSchema.safeParse(markers[0]!.slice(prefix.length));
+  return parsed.success ? parsed.data : undefined;
+}
+function oneRef(refs: readonly string[], prefix: string): string | undefined {
+  const matches = refs.filter(ref => ref.startsWith(prefix));
+  if (matches.length !== 1) return;
+  return matches[0]!.slice(prefix.length);
+}
+function runSkill(run: AgentRun): { methodId: string; version: string } | undefined {
+  const selected = run.skillSelection;
+  if (selected?.methodId && selected.version && skillTokenSchema.safeParse(selected.methodId).success && skillTokenSchema.safeParse(selected.version).success) {
+    return { methodId: selected.methodId, version: selected.version };
+  }
+  if (!run.builtinSkill) return;
+  const slash = run.builtinSkill.lastIndexOf('/');
+  const methodId = run.builtinSkill.slice(0, slash);
+  const version = run.builtinSkill.slice(slash + 1);
+  if (!skillTokenSchema.safeParse(methodId).success || !skillTokenSchema.safeParse(version).success) return;
+  return { methodId, version };
+}
+function settingText(taskKind: string, skill: SkillProfileView | undefined, model: TaskModelView | undefined): string {
+  const lines = [`任务种类：${taskKind}`];
+  if (skill) lines.push(`方法：${skill.methodId}`, `版本：${skill.version}`, `引用：${skill.runId}`, `证据：${skill.evidenceRefs.join('、')}`);
+  if (model) {
+    lines.push(`模型：${model.model}`);
+    if (model.provider) lines.push(`提供方：${model.provider}`);
+  }
+  return lines.join('\n');
+}
 
 export class ConversationService {
   constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined) {}
@@ -213,7 +282,8 @@ export class ConversationService {
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);
     const acceptedPractice = this.ownerActor(actor, scope) ? await this.readPractice(conversation, scope, actor) : undefined;
-    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+    const taskSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
+    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
   }
   /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
   private async readPractice(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ claimId: string; text: string; runId: string; evidenceRefs: string[] } | undefined> {
@@ -324,6 +394,169 @@ export class ConversationService {
     brain.retract(person, claim.id, actor, scope.owner);
     return this.view(conversation, scope, actor);
   }
+  private requirePerson(conversation: Conversation, scope: Ownership, actor: Principal, expectedRevision: number, stale: string) {
+    if (conversation.revision !== expectedRevision) throw new Conflict(stale);
+    const person = privatePerson(conversation);
+    if (!person) throw new Conflict('这条对话还没有所属的人');
+    const brain = this.brain;
+    if (!brain) throw new Conflict('Brain 还没有接上，这次先不记');
+    if (!this.ownerActor(actor, scope)) throw new BrainAccessDenied('Brain access denied');
+    return { person, brain };
+  }
+  private skillClaims(person: string, taskKind: string, scope: Ownership): BrainClaim[] {
+    const brain = this.brain;
+    if (!brain) return [];
+    const marker = skillMarker(person, taskKind);
+    return brain.state().claims.filter(claim => claim.owner === scope.owner && claim.tenantId === scope.tenantId && claim.scope === 'identity' && claim.scopeRef === person && claim.kind === 'decision' && claim.sourceRefs.includes(marker));
+  }
+  private async linkedRun(conversation: Conversation, scope: Ownership, runId: string): Promise<AgentRun | undefined> {
+    const linked = conversation.messages.some(message => message.execution?.runId === runId) || conversation.tasks.some(task => task.latestRunId === runId);
+    if (!linked) return;
+    try { return await this.runs.get(runId, scope); }
+    catch (error) { if (error instanceof NotFound) return; throw error; }
+  }
+  private async verifySkillClaim(conversation: Conversation, scope: Ownership, claim: BrainClaim, person: string, taskKind: string): Promise<SkillProfileView | undefined> {
+    const marker = skillMarker(person, taskKind);
+    if (claim.kind !== 'decision' || !claim.sourceRefs.includes(marker)) return;
+    const methodId = oneRef(claim.sourceRefs, 'method:');
+    const version = oneRef(claim.sourceRefs, 'version:');
+    const runId = oneRef(claim.sourceRefs, 'run:');
+    if (!methodId || !version || !runId || !skillTokenSchema.safeParse(methodId).success || !skillTokenSchema.safeParse(version).success || !/^run_[a-f0-9-]{36}$/.test(runId)) return;
+    const reserved = new Set([marker, `method:${methodId}`, `version:${version}`, `run:${runId}`]);
+    const evidenceRefs = claim.sourceRefs.filter(ref => !reserved.has(ref));
+    if (!evidenceRefs.length) return;
+    const run = await this.linkedRun(conversation, scope, runId);
+    if (!run || run.status !== 'succeeded') return;
+    const skill = runSkill(run);
+    if (!skill || skill.methodId !== methodId || skill.version !== version) return;
+    const nodes = new Set(projectRunGraphs(run).evidence.nodes.map(node => node.id));
+    if (!evidenceRefs.every(ref => nodes.has(ref))) return;
+    return { claimId: claim.id, taskKind, methodId, version, runId, evidenceRefs };
+  }
+  private verifyModelClaim(claim: BrainClaim, person: string, taskKind: string): TaskModelView | undefined {
+    const marker = modelMarker(person, taskKind);
+    if (claim.kind !== 'decision' || !claim.sourceRefs.includes(marker)) return;
+    const modelRefs = claim.sourceRefs.filter(ref => ref.startsWith('model:'));
+    const providerRefs = claim.sourceRefs.filter(ref => ref.startsWith('provider:'));
+    if (modelRefs.length !== 1 || providerRefs.length > 1) return;
+    const model = modelRefs[0]!.slice('model:'.length);
+    const provider = providerRefs[0]?.slice('provider:'.length);
+    if (!modelTokenSchema.safeParse(model).success || (provider !== undefined && !modelTokenSchema.safeParse(provider).success)) return;
+    const allowed = new Set([marker, `model:${model}`, ...(provider ? [`provider:${provider}`] : [])]);
+    if (claim.sourceRefs.some(ref => !allowed.has(ref))) return;
+    return { claimId: claim.id, taskKind, model, ...(provider ? { provider } : {}) };
+  }
+  private async readTaskSettings(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ skills: SkillProfileView[]; models: TaskModelView[] } | undefined> {
+    const person = privatePerson(conversation);
+    if (!person || !this.brain) return;
+    let claims: BrainClaim[];
+    try { claims = this.brain.read(person, actor, 'internal', scope.owner); }
+    catch { return; }
+    const ranked = claims.filter(claim => claim.kind === 'decision').sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0));
+    const skills: SkillProfileView[] = [];
+    const models: TaskModelView[] = [];
+    const seenSkills = new Set<string>();
+    const seenModels = new Set<string>();
+    for (const claim of ranked) {
+      const skillKind = kindFromMarker(claim, `skill-profile:${person}:`);
+      if (skillKind) {
+        if (seenSkills.has(skillKind)) continue;
+        seenSkills.add(skillKind);
+        const verified = await this.verifySkillClaim(conversation, scope, claim, person, skillKind);
+        if (verified) skills.push(verified);
+        continue;
+      }
+      const modelKind = kindFromMarker(claim, `task-model:${person}:`);
+      if (!modelKind || seenModels.has(modelKind)) continue;
+      seenModels.add(modelKind);
+      const verified = this.verifyModelClaim(claim, person, modelKind);
+      if (verified) models.push(verified);
+    }
+    if (!skills.length && !models.length) return;
+    return { skills, models };
+  }
+  private async readTaskKind(conversation: Conversation, scope: Ownership, actor: Principal, taskKind: string): Promise<{ skill?: SkillProfileView; model?: TaskModelView } | undefined> {
+    const settings = await this.readTaskSettings(conversation, scope, actor);
+    if (!settings) return;
+    const skill = settings.skills.find(item => item.taskKind === taskKind);
+    const model = settings.models.find(item => item.taskKind === taskKind);
+    if (!skill && !model) return;
+    return { ...(skill ? { skill } : {}), ...(model ? { model } : {}) };
+  }
+  private async promoteSkill(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = skillProfileSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person, brain } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再晋升');
+    const run = await this.linkedRun(conversation, scope, body.runId);
+    if (!run || run.status !== 'succeeded') throw new Conflict('只能晋升这个人做成过的那一次');
+    const skill = runSkill(run);
+    if (!skill) throw new Conflict('这次做成还没有可晋升的技能版本');
+    const evidenceRefs = practiceEvidence(run);
+    if (!evidenceRefs.length) throw new Conflict('这次做成还没有可引用的证据');
+    const marker = skillMarker(person, body.taskKind);
+    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker))) {
+      brain.retract(person, claim.id, actor, scope.owner);
+    }
+    brain.addClaim({
+      owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
+      content: `任务种类：${body.taskKind}\n方法：${skill.methodId}\n版本：${skill.version}\n引用：${run.id}`,
+      sourceRefs: [marker, `method:${skill.methodId}`, `version:${skill.version}`, `run:${run.id}`, ...evidenceRefs], confidence: 1,
+    }, actor);
+    return this.view(conversation, scope, actor);
+  }
+  async promoteSkillProfile(id: string, input: unknown, scope: Ownership, actor: Principal) { return this.promoteSkill(id, input, scope, actor); }
+  async rollbackSkillProfile(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = skillRollbackSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person, brain } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再回滚');
+    const marker = skillMarker(person, body.taskKind);
+    const active = brain.read(person, actor, 'internal', scope.owner)
+      .filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0))[0];
+    if (!active) throw new Conflict('这个任务种类还没有技能档案');
+    const previous = this.skillClaims(person, body.taskKind, scope).filter(claim => claim.id !== active.id && claim.version < active.version).sort((left, right) => right.version - left.version)[0];
+    if (!previous) throw new Conflict('这个任务种类还没有可回滚的上一版');
+    const verified = await this.verifySkillClaim(conversation, scope, previous, person, body.taskKind);
+    if (!verified) throw new Conflict('上一版做法已经不能再核对');
+    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker))) {
+      brain.retract(person, claim.id, actor, scope.owner);
+    }
+    brain.addClaim({
+      owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
+      content: `任务种类：${body.taskKind}\n方法：${verified.methodId}\n版本：${verified.version}\n引用：${verified.runId}\n回滚：${body.reason}`,
+      sourceRefs: [marker, `method:${verified.methodId}`, `version:${verified.version}`, `run:${verified.runId}`, ...verified.evidenceRefs], confidence: 1,
+    }, actor);
+    return this.view(conversation, scope, actor);
+  }
+  async retractSkillProfile(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = skillRetractSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person, brain } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再撤回这份档案');
+    const marker = skillMarker(person, body.taskKind);
+    const claim = brain.read(person, actor, 'internal', scope.owner).find(item => item.id === body.claimId && item.kind === 'decision' && item.sourceRefs.includes(marker));
+    if (!claim) throw new Conflict('这个任务种类还没有技能档案');
+    brain.retract(person, claim.id, actor, scope.owner);
+    return this.view(conversation, scope, actor);
+  }
+  async setTaskModel(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = taskModelSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person, brain } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再改这个任务种类的模型');
+    const marker = modelMarker(person, body.taskKind);
+    const model = body.model ?? '';
+    const provider = body.provider ?? '';
+    const active = brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker));
+    if (!model && !active.length) throw new Conflict('这个任务种类还没有选定模型');
+    for (const claim of active) brain.retract(person, claim.id, actor, scope.owner);
+    if (model) {
+      brain.addClaim({
+        owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
+        content: `任务种类：${body.taskKind}\n模型：${model}${provider ? `\n提供方：${provider}` : ''}`,
+        sourceRefs: [marker, `model:${model}`, ...(provider ? [`provider:${provider}`] : [])], confidence: 1,
+      }, actor);
+    }
+    return this.view(conversation, scope, actor);
+  }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
@@ -386,6 +619,10 @@ export class ConversationService {
     const newTask: ConversationTask | undefined = body.newTask ? { id: `task_${randomUUID()}`, threadId: `thread_${randomUUID()}`, title: body.newTask.title, createdAt: at } : undefined;
     const practice = body.intent === 'execute' && this.ownerActor(actor, scope) ? await this.readPractice(snapshot, scope, actor) : undefined;
     const practiceContent = practice ? `${practice.text}\n引用：${practice.runId}\n证据：${practice.evidenceRefs.join('、')}` : '';
+    const taskKind = body.intent === 'execute' ? body.taskKind : undefined;
+    const taskSetting = taskKind && this.ownerActor(actor, scope) ? await this.readTaskKind(snapshot, scope, actor, taskKind) : undefined;
+    const settingContent = taskKind && taskSetting ? settingText(taskKind, taskSetting.skill, taskSetting.model) : '';
+    const preferredModel = taskSetting?.model ? { model: taskSetting.model.model, ...(taskSetting.model.provider ? { provider: taskSetting.model.provider } : {}) } : undefined;
     const updated = await this.store.mutate(id, scope, current => {
       const duplicate = current.messages.find(message => message.keyHash === keyHash);
       if (duplicate) {
@@ -415,16 +652,17 @@ export class ConversationService {
         const materials = [...(body.runOptions?.materials ?? [])];
         const standing = current.standingInstruction?.trim() ?? '';
         const history = selectedNotes.length > 0;
-        const reserved = (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0);
+        const reserved = (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0) + (settingContent ? 1 : 0);
         if (materials.length + reserved > 20) {
-          const slots = [standing ? 'the standing instruction' : '', practiceContent ? 'the accepted practice' : '', history ? 'task discussion history' : ''].filter(Boolean);
+          const slots = [standing ? 'the standing instruction' : '', practiceContent ? 'the accepted practice' : '', settingContent ? 'the task setting' : '', history ? 'task discussion history' : ''].filter(Boolean);
           const label = slots[0] ?? 'task discussion history';
           throw new Conflict(slots.length > 1 ? `Leave material slots for ${slots.join(' and ')}` : `Leave one material slot for ${label}`);
         }
         if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
         if (practiceContent) materials.push({ title: PRACTICE_TITLE, source: `conversation:${id}/practice`, content: practiceContent });
+        if (settingContent && taskKind) materials.push({ title: TASK_SETTING_TITLE, source: `conversation:${id}/task-kind/${taskKind}`, content: settingContent });
         if (history) materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
-        const request = requestSchema.parse({ ...options, goal: harnessGoal(current, task.title, body.text, speaker), materials, workingMemory: { enabled: true } });
+        const request = requestSchema.parse({ ...options, goal: harnessGoal(current, task.title, body.text, speaker), materials, workingMemory: { enabled: true }, ...(preferredModel ? { preferredModel } : {}) });
         const runId = followupRunId(task.threadId, followupHash(message.id), scope);
         message.execution = { taskId: task.id, runId, ...(parent ? { parentRunId: parent.id } : {}), request, state: 'pending' };
         task.pendingMessageId = message.id;

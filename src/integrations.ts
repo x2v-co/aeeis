@@ -142,6 +142,8 @@ export interface ModelSelectionRequest {
   minContextTokens?: number;
   /** Timestamp captured immediately before the catalog was read. */
   catalogRetrievedAt?: string;
+  /** Owner choice for one task kind. It can only select a row that already passes capability, privacy, and price policy. */
+  preferredModel?: { model: string; provider?: string };
 }
 export interface ModelDecision {
   schemaVersion: 'model-decision/1'; selected: { model: string; provider: string; endpoint: string; inputPricePerMillion?: number; outputPricePerMillion?: number; priceCurrency?: string; offeringId?: string };
@@ -161,12 +163,19 @@ export function selectModel(catalog: ModelCatalogRow[], request: ModelSelectionR
     && (request.maxMoney === undefined || model.outputPricePerMillion === undefined || model.outputPricePerMillion <= request.maxMoney),
   );
   if (candidates.length === 0) throw new Error('No model satisfies the requested capability and policy');
-  const priced = candidates.filter(item => item.outputPricePerMillion !== undefined && Number.isFinite(item.outputPricePerMillion));
+  const preferred = request.preferredModel
+    ? candidates.filter(item => item.model === request.preferredModel!.model && (request.preferredModel!.provider === undefined || item.provider === request.preferredModel!.provider))
+    : undefined;
+  if (preferred && preferred.length === 0) throw new Error('这个任务种类选定的模型不在当前运行时里');
+  const pool = preferred ?? candidates;
+  const priced = pool.filter(item => item.outputPricePerMillion !== undefined && Number.isFinite(item.outputPricePerMillion));
   const currencies = new Set(priced.map(item => item.priceCurrency ?? 'USD'));
   const comparable = priced.length > 0 && currencies.size === 1;
-  const ranked = (comparable ? priced : candidates).slice().sort((a, b) => comparable ? (a.outputPricePerMillion! - b.outputPricePerMillion!) : a.model.localeCompare(b.model) || a.provider.localeCompare(b.provider));
+  const ranked = (comparable ? priced : pool).slice().sort((a, b) => comparable ? (a.outputPricePerMillion! - b.outputPricePerMillion!) : a.model.localeCompare(b.model) || a.provider.localeCompare(b.provider));
   const selected = ranked[0]!;
-  const selectionReason = comparable ? 'lowest known output price within policy' : priced.length > 0 ? 'deterministic eligible choice; catalog prices use incomparable currencies' : 'deterministic eligible choice; catalog supplied no comparable output price';
+  const selectionReason = preferred
+    ? 'owner-selected model within policy'
+    : comparable ? 'lowest known output price within policy' : priced.length > 0 ? 'deterministic eligible choice; catalog prices use incomparable currencies' : 'deterministic eligible choice; catalog supplied no comparable output price';
   const catalogHash = digestCatalog(candidates);
   return {
     schemaVersion: 'model-decision/1',

@@ -14,14 +14,14 @@ import { z } from 'zod';
 import { principalAudience, validatePrincipal, type Ownership } from '../security/principal.js';
 import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSchema, decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema, fillablePdfArtifactSchema } from './contracts.js';
 import { directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
-import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
+import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
 import { ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected } from './model.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
-import type { ToolDescriptor, ToolGateway, SkillGovernance, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
+import type { ToolDescriptor, ToolGateway, SkillGovernance, ModelDecision, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
 import type { ModelResolution, ModelResolver } from './model-router.js';
 import { AgentGateway, AgentOutcomeUnknown } from '../agent-gateway.js';
 import type { AgentCallbackAuthentication, AgentProgressEvent, AgentTransportResponse, DelegationReceipt, DelegationOutcome, DelegationRequest } from '../agent-gateway.js';
@@ -761,6 +761,18 @@ function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
   }
 }
 
+function pinnedTaskKindDecision(pin: ModelPin, privacy: TaskRequest['privacy']): ModelDecision {
+  const provider = pin.provider ?? 'pinned';
+  const selectionReason = 'owner-selected model within the pinned runtime';
+  return {
+    schemaVersion: 'model-decision/1',
+    selected: { model: pin.model, provider, endpoint: pin.endpoint },
+    candidates: [{ model: pin.model, provider, reason: selectionReason, accepted: true }],
+    reason: `Selected ${pin.model} for agent; privacy=${privacy}; ${selectionReason}`,
+    decidedAt: new Date().toISOString(),
+  };
+}
+
 export class AgentEngine {
   private executionLimits: ExecutionLimits;
   private active = new Set<string>();
@@ -921,15 +933,28 @@ export class AgentEngine {
       const toolId = at > 0 ? requested.slice(0, at) : requested;
       if (toolPolicy?.deny.includes(toolId) || (toolPolicy?.allow.length && !toolPolicy.allow.includes(toolId))) throw new Error(`Active tool policy denies requested capability ${toolId}`);
     }
-    const selection: ModelSelectionRequest = { capability: 'agent', privacy: request.privacy, ...(modelPolicy?.maxOutputPricePerMillion === undefined ? {} : { maxMoney: modelPolicy.maxOutputPricePerMillion }) };
+    const selection: ModelSelectionRequest = {
+      capability: 'agent', privacy: request.privacy,
+      ...(modelPolicy?.maxOutputPricePerMillion === undefined ? {} : { maxMoney: modelPolicy.maxOutputPricePerMillion }),
+      ...(request.preferredModel ? { preferredModel: { model: request.preferredModel.model, ...(request.preferredModel.provider ? { provider: request.preferredModel.provider } : {}) } } : {}),
+    };
     const resolveModel = (): Promise<ModelResolution> => this.resolver ? this.resolver.resolve(selection) : Promise.resolve({ adapter: this.defaultModel! });
     const modelSelection = checkpoint && this.resolver ? await prepare('model-selection', async () => {
       const resolved = await this.resolver!.resolve(selection);
       return { pin: resolved.adapter.pin, ...(resolved.decision ? { decision: resolved.decision } : {}) };
     }) : undefined;
-    const resolution = modelSelection
+    let resolution = modelSelection
       ? { adapter: this.resolver!.forPin(modelSelection.pin), ...(modelSelection.decision ? { decision: modelSelection.decision } : {}) }
       : await resolveModel();
+    if (request.preferredModel) {
+      const pin = resolution.adapter.pin;
+      const selectedName = resolution.decision?.selected.model ?? pin.model;
+      const selectedProvider = resolution.decision?.selected.provider ?? pin.provider ?? '';
+      const modelOk = selectedName === request.preferredModel.model || pin.model === request.preferredModel.model;
+      const providerOk = request.preferredModel.provider === undefined || request.preferredModel.provider === selectedProvider || request.preferredModel.provider === (pin.provider ?? '');
+      if (!modelOk || !providerOk) throw new Conflict('这个任务种类选定的模型不在当前运行时里');
+      if (!resolution.decision) resolution = { ...resolution, decision: pinnedTaskKindDecision(pin, request.privacy) };
+    }
     const selectedModel = resolution.adapter;
     if (request.modelBudget?.moneyUsd !== undefined && selectedModel.pin.usageAccounting === 'tokens-only') throw new Conflict('Selected model adapter cannot enforce USD budgets');
     if (request.modelBudget?.moneyUsd !== undefined && !modelPrices(resolution.decision)) {
