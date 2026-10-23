@@ -28,6 +28,8 @@ type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
 }
+/** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
+export type RunMachineRecord = { state: 'present'; ready: boolean } | { state: 'released'; ready: false };
 export function dockerContextArgs(config: SandboxConfig, platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
   if (config.context !== 'auto') return ['--context', config.context];
   if (env.DOCKER_HOST) return ['--host', env.DOCKER_HOST];
@@ -111,6 +113,18 @@ export class DockerSandbox {
   private name(runId: string) {
     if (!/^run_[a-f0-9-]{36}$/.test(runId)) throw new SandboxError('Invalid Run sandbox identity');
     return `aeeis-${this.owner}-${runId.slice(4)}`;
+  }
+  /** Read the state file for this Run. A missing file or an invalid id is absent. Identity mismatch still throws. */
+  async describe(runId: string): Promise<RunMachineRecord | undefined> {
+    let record: State | undefined;
+    try { record = await this.state(runId); }
+    catch (error) {
+      if (error instanceof SandboxError && error.message === 'Invalid Run sandbox identity') return undefined;
+      throw error;
+    }
+    if (!record) return undefined;
+    if (record.released) return { state: 'released', ready: false };
+    return { state: 'present', ready: record.ready };
   }
   private async state(runId: string): Promise<State | undefined> {
     const name = this.name(runId);

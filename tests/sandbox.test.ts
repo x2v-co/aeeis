@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, writeFile, mkdir, rm, symlink, link, rename } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, rm, symlink, link, rename, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DockerSandbox, SandboxError, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs } from '../src/docker-sandbox.js';
 import { commitSnapshot, readSnapshot, validateSnapshot } from '../src/sandbox-workspace.js';
 import { LocalToolGateway } from '../src/local-tools.js';
@@ -150,6 +150,30 @@ describe('persistent Docker execution boundary (mocked transport)', () => {
     await expect(sandbox.release(runId,async()=>{throw new Error('disk full');})).rejects.toThrow('disk full');
     expect(command.mock.calls.some(c=>c[0][0]==='rm')).toBe(false);
   });
+  it('reads whether this Run still has a machine without creating or starting one', async () => {
+    const sandbox = new DockerSandbox(config, root);
+    const command = vi.spyOn(sandbox as any, 'command').mockRejectedValue(new Error('describe must not call docker'));
+    const owner = createHash('sha256').update(root).digest('hex').slice(0, 16);
+    const name = `aeeis-${owner}-${runId.slice(4)}`;
+    const file = join(root, 'sandboxes', `${runId}.json`);
+    const record = { runId, name, network: `${name}-net`, image, policy: 'policy', createdAt: Date.now(), ready: true, released: false };
+    expect(await sandbox.describe(runId)).toBeUndefined();
+    expect(await sandbox.describe('not-a-run')).toBeUndefined();
+    await expect(stat(join(root, 'sandboxes'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await mkdir(join(root, 'sandboxes'), { recursive: true });
+    await writeFile(file, JSON.stringify(record));
+    expect(await sandbox.describe(runId)).toEqual({ state: 'present', ready: true });
+    expect(await sandbox.pendingRuns()).toEqual([{ runId, expired: false }]);
+    await writeFile(file, JSON.stringify({ ...record, ready: false }));
+    expect(await sandbox.describe(runId)).toEqual({ state: 'present', ready: false });
+    await writeFile(file, JSON.stringify({ ...record, ready: true, released: true }));
+    expect(await sandbox.describe(runId)).toEqual({ state: 'released', ready: false });
+    expect(await sandbox.pendingRuns()).toEqual([]);
+    await writeFile(file, JSON.stringify({ ...record, name: 'aeeis-other' }));
+    await expect(sandbox.describe(runId)).rejects.toThrow(/identity mismatch/);
+    expect(JSON.parse(await readFile(file, 'utf8')).name).toBe('aeeis-other');
+    expect(command).not.toHaveBeenCalled();
+  });
 });
 
 describe('gateway persistence and receipts (mocked sandbox)', () => {
@@ -199,6 +223,13 @@ describe('gateway persistence and receipts (mocked sandbox)', () => {
     const config = JSON.parse(await readFile(filename, 'utf8')); config.pythonCommand = 'python3';
     await writeFile(filename, JSON.stringify(config));
     await expect(LocalToolGateway.load(filename)).rejects.toThrow();
+  });
+  it('describes a Run machine through the gateway without executing it', async () => {
+    const described = vi.spyOn(DockerSandbox.prototype, 'describe').mockResolvedValue({ state: 'present', ready: true });
+    const execute = vi.spyOn(DockerSandbox.prototype, 'execute');
+    expect(await gateway.describe(runId)).toEqual({ state: 'present', ready: true });
+    expect(described).toHaveBeenCalledWith(runId);
+    expect(execute).not.toHaveBeenCalled();
   });
   it('keeps HTTPS allowlist validation independent of Python networking', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response('weather')); vi.stubGlobal('fetch', fetcher);

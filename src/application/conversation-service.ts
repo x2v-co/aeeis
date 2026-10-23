@@ -133,6 +133,11 @@ function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: 
   const reason = run.approval.mode === 'auto' && run.approval.reason ? `模型请求批准：${run.approval.reason}。` : '';
   return { planVersion: plan.version, planHash: plan.hash, summary: `${reason}${plan.summary}`.slice(0, 240) };
 }
+function machineView(record: { state: string; ready?: boolean } | undefined): { state: 'absent' | 'present' | 'released'; ready: boolean } {
+  if (record?.state === 'released') return { state: 'released', ready: false };
+  if (record?.state === 'present') return { state: 'present', ready: record.ready === true };
+  return { state: 'absent', ready: false };
+}
 function pendingQuestion(run: { status: string; question?: { text?: string } } | undefined): { text: string } | undefined {
   if (!run || run.status !== 'needs_input') return;
   const text = run.question?.text?.trim();
@@ -285,7 +290,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 }
 
 export class ConversationService {
-  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined) {}
+  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({
@@ -328,7 +333,8 @@ export class ConversationService {
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
       const question = pendingQuestion(run);
-      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}) } };
+      const machine = this.machines && task.latestRunId ? machineView(await this.machines(task.latestRunId)) : undefined;
+      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(machine ? { machine } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);

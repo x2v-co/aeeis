@@ -1406,4 +1406,32 @@ describe('entry bots and group chats', () => {
     expect(el('task-kind-compare').hidden).toBe(true);
     expect(el('task-kind-compare').textContent).not.toContain('brief-method');
   });
+
+  it('shows this task machine and does not start it', async () => {
+    const view = fixture();
+    const absent = 'run_00000000-0000-4000-8000-000000000002';
+    view.tasks.push({ id: 'task_c', title: '还没机器', threadId: 'thread_c', status: 'running', runId: absent, latestRunId: absent, machine: { state: 'absent', ready: false } });
+    view.tasks[1] = { ...view.tasks[1]!, machine: { state: 'present', ready: true } };
+    const h = harness(view);
+    start(h.fetch); await ready();
+    const week = doc().querySelector('[data-task-id="task_b"]')!;
+    expect(week.querySelector('.conversation-machine')?.textContent).toBe('这件工作有一台机器，还在。看一眼不会执行。');
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('机器');
+    expect(doc().querySelector('[data-task-id="task_c"]')!.textContent).toContain('这件工作还没有机器。');
+    expect(doc().querySelector('[data-task-id="task_b"] button')?.textContent).not.toContain('机器');
+    view.tasks[1]!.machine = { state: 'present', ready: false };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器还没准备好。看一眼不会启动它。'));
+    view.tasks[1]!.machine = { state: 'released', ready: false };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器已经收掉。'));
+    expect(h.posts).toEqual([]);
+    expect(h.fetch.mock.calls.some(([url]) => /sandbox|docker|ensure/.test(String(url)))).toBe(false);
+    fill('conversation-text', '讨论不启动机器');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
+    expect(h.posts.every(post => !/sandbox|docker|ensure/.test(post.url))).toBe(true);
+    expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器已经收掉。');
+  });
 });

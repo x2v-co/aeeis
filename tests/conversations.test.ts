@@ -17,7 +17,7 @@ import type { ModelAdapter } from '../src/runtime/model.js';
 const scope = { owner: 'alice', tenantId: 'team-a' };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); vi.restoreAllMocks(); });
-async function fixture(brain?: GovernedBrain, rsi?: RsiService) {
+async function fixture(brain?: GovernedBrain, rsi?: RsiService, machines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-conversations-'));
   const repository = new FileRunRepository(join(directory, 'runs')); await repository.init();
   const store = new FileConversationStore(join(directory, 'conversations')); await store.init();
@@ -30,7 +30,7 @@ async function fixture(brain?: GovernedBrain, rsi?: RsiService) {
     const entries = await store.list(scope);
     expect(entries.some(entry => entry.messages.some(message => message.execution?.runId === id && message.execution.state === 'completed'))).toBe(true);
   });
-  const app = buildApp({ repository, engine, conversationStore: store, ...(brain ? { brain } : {}), ...(rsi ? { rsi } : {}), dispatcher: { notify, close: async () => undefined }, principalTokens: {
+  const app = buildApp({ repository, engine, conversationStore: store, ...(brain ? { brain } : {}), ...(rsi ? { rsi } : {}), ...(machines ? { runMachines: machines } : {}), dispatcher: { notify, close: async () => undefined }, principalTokens: {
     alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
     bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] },
     elsewhere: { id: 'alice', tenantId: 'team-b', roles: ['owner'] },
@@ -1325,5 +1325,47 @@ describe('single-entry conversation routing', () => {
     expect(homeRun.goal.startsWith('私聊：agent:aeeis\n说话人：agent:demo.release\n')).toBe(true);
     expect(homeRun.allowedTools).toEqual([]);
     expect(homeRun.allowedAgents).toEqual([]);
+  });
+  it('shows this Run machine on the life thread without starting it or changing the Run', async () => {
+    const seen: string[] = [];
+    const records = new Map<string, { state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>();
+    const f = await fixture(undefined, undefined, async runId => { seen.push(runId); return records.get(runId); });
+    const entry = await f.create();
+    const talked = await f.addTask(entry.id, '只讨论');
+    expect(talked.conversation.tasks.find((task: { title: string }) => task.title === '只讨论')?.machine).toBeUndefined();
+    expect(seen).toEqual([]);
+    const started = await f.addTask(entry.id, '要机器的工作', 'execute');
+    const runId = started.runId as string;
+    const task = (body: { tasks: Array<{ title: string; machine?: { state: string; ready: boolean } }> }) => body.tasks.find(item => item.title === '要机器的工作');
+    expect(task(started.conversation)?.machine).toEqual({ state: 'absent', ready: false });
+    expect(started.conversation.tasks.find((item: { title: string }) => item.title === '只讨论')?.machine).toBeUndefined();
+    expect(seen).toEqual([runId]);
+    const before = await f.repository.get(runId);
+    const fingerprint = { revision: before.revision, status: before.status, allowedTools: before.allowedTools, allowedAgents: before.allowedAgents, maxModelCalls: before.maxModelCalls, modelBudget: before.modelBudget, externalBudget: before.externalBudget };
+    const conversationRevision = started.conversation.revision;
+    records.set(runId, { state: 'present', ready: true });
+    const present = await f.fresh(entry.id);
+    expect(task(present)?.machine).toEqual({ state: 'present', ready: true });
+    records.set(runId, { state: 'present', ready: false });
+    expect(task(await f.fresh(entry.id))?.machine).toEqual({ state: 'present', ready: false });
+    records.set(runId, { state: 'released', ready: false });
+    expect(task(await f.fresh(entry.id))?.machine).toEqual({ state: 'released', ready: false });
+    records.set(runId, { state: 'present', ready: true });
+    const discussed = await f.post(entry.id, { text: '讨论不启动机器', expectedRevision: conversationRevision, intent: 'discuss' });
+    expect(discussed.statusCode, discussed.body).toBe(200);
+    expect(discussed.json().runId).toBeUndefined();
+    expect(task(discussed.json().conversation)?.machine).toEqual({ state: 'present', ready: true });
+    const after = await f.repository.get(runId);
+    expect({ revision: after.revision, status: after.status, allowedTools: after.allowedTools, allowedAgents: after.allowedAgents, maxModelCalls: after.maxModelCalls, modelBudget: after.modelBudget, externalBudget: after.externalBudget }).toEqual(fingerprint);
+    expect((await f.fresh(entry.id)).revision).toBe(discussed.json().conversation.revision);
+    const other = await f.app.inject({ method: 'GET', url: `/api/conversations/${entry.id}`, headers: { authorization: 'Bearer bob' } });
+    expect(other.statusCode).toBe(404);
+    expect(other.body).not.toContain(runId);
+    expect(other.body).not.toContain('present');
+    const plain = await fixture();
+    const quiet = await plain.create();
+    const unmarked = await plain.addTask(quiet.id, '没有机器读口', 'execute');
+    expect(unmarked.conversation.tasks.find((item: { title: string }) => item.title === '没有机器读口')).not.toHaveProperty('machine');
+    expect(seen.every(id => id === runId)).toBe(true);
   });
 });
