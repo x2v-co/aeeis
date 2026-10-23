@@ -86,6 +86,17 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       delete target.acceptedPractice;
       return response(target);
     }
+    if (url.endsWith('/task-kind/keep')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再留下这份档案' }, 409);
+      const compare = target.taskSettings?.comparisons?.find((item: { taskKind: string; differs?: boolean; profileMethodId?: string; profileModel?: string; kept?: boolean }) => item.taskKind === body.taskKind);
+      if (!compare || (!compare.profileMethodId && !compare.profileModel)) return response({ error: '这个任务种类还没有可留下的档案' }, 409);
+      if (!compare.differs) return response({ error: '这次做成和档案一样，不用留下' }, 409);
+      compare.kept = true;
+      return response(target);
+    }
     if (url.endsWith('/skill-profile/rollback')) {
       const target = conversationFor(url);
       if (!target) return response({ error: 'Unknown conversation' }, 404);
@@ -115,7 +126,8 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       if (!target) return response({ error: 'Unknown conversation' }, 404);
       const body = JSON.parse(request.body);
       if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再晋升' }, 409);
-      if (!target.lastDelivery || body.runId !== target.lastDelivery.runId) return response({ error: '只能晋升这个人做成过的那一次' }, 409);
+      const compared = target.taskSettings?.comparisons?.some((item: { taskKind: string; runId: string }) => item.taskKind === body.taskKind && item.runId === body.runId);
+      if ((!target.lastDelivery || body.runId !== target.lastDelivery.runId) && !compared) return response({ error: '只能晋升这个人做成过的那一次' }, 409);
       target.taskSettings ??= { skills: [], models: target.taskSettings?.models ?? [] };
       const existing = target.taskSettings.skills.find((item: { taskKind: string }) => item.taskKind === body.taskKind);
       const next = { claimId: 'brain_skill', taskKind: body.taskKind, methodId: 'project-pulse', version: existing ? '2' : '1', runId: body.runId, evidenceRefs: ['artifact_later'], ...(existing ? { previous: { methodId: existing.methodId, version: existing.version, runId: existing.runId } } : {}) };
@@ -1325,5 +1337,44 @@ describe('entry bots and group chats', () => {
     expect(el('skill-profile-copy').textContent).not.toContain('project-pulse');
     el('gb-new-group').click();
     expect(el('task-settings').hidden).toBe(true);
+  });
+  it('lines up a later success with the saved profile and keeps that profile', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    const later = 'run_00000000-0000-4000-8000-000000000002';
+    h.view.taskSettings = {
+      skills: [{ claimId: 'brain_skill', taskKind: '周报', methodId: 'project-pulse', version: '1', runId, evidenceRefs: ['artifact_pulse'] }],
+      models: [{ claimId: 'brain_model', taskKind: '周报', model: 'fixture' }],
+      comparisons: [{ taskKind: '周报', runId: later, taskTitle: '第二份周报', methodId: 'brief-method', version: '2', model: 'other-model', profileMethodId: 'project-pulse', profileVersion: '1', profileRunId: runId, profileModel: 'fixture', differs: true, kept: false }],
+    };
+    el('conversation-refresh').click();
+    fill('task-kind', '周报');
+    await vi.waitFor(() => {
+      expect(el('task-kind-compare').textContent).toContain('brief-method · 2');
+      expect(el<HTMLButtonElement>('skill-promote').disabled).toBe(false);
+      expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(false);
+    });
+    expect(el('task-kind-compare').textContent).toContain('brief-method · 2');
+    expect(el('task-kind-compare').textContent).toContain('project-pulse · 1');
+    expect(el('task-kind-compare').textContent).toContain('不点就不动');
+    el('skill-promote').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已晋升这次技能'));
+    expect(h.posts.find(post => post.url.endsWith('/skill-profile'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报', runId: later });
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(false));
+    el('task-kind-keep').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已留下这份档案'));
+    expect(h.posts.find(post => post.url.endsWith('/task-kind/keep'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报' });
+    expect(el('task-kind-compare').textContent).toContain('已留下这份档案');
+    expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(true);
+    fill('conversation-text', '讨论不留下');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(h.posts.filter(post => post.url.endsWith('/task-kind/keep'))).toHaveLength(1);
+    expect(messagePosts(h).at(-1)?.body.taskKind).toBeUndefined();
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.research"]')!.click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('研究'));
+    expect(el('task-kind-compare').hidden).toBe(true);
+    expect(el('task-kind-compare').textContent).not.toContain('brief-method');
   });
 });

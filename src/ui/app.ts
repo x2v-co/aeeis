@@ -97,7 +97,13 @@ interface LastDelivery { taskId: string; taskTitle: string; runId: string; planS
 interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
 interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
-interface TaskSettingsView { skills: SkillProfileView[]; models: TaskModelView[] }
+interface TaskKindComparison {
+  taskKind: string; runId: string; taskTitle: string;
+  methodId?: string; version?: string; model?: string; provider?: string;
+  profileMethodId?: string; profileVersion?: string; profileRunId?: string; profileModel?: string; profileProvider?: string;
+  differs: boolean; kept: boolean;
+}
+interface TaskSettingsView { skills: SkillProfileView[]; models: TaskModelView[]; comparisons?: TaskKindComparison[] }
 interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice; taskSettings?: TaskSettingsView }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
@@ -1025,12 +1031,36 @@ function syncTaskSettings(): void {
   $<HTMLInputElement>('task-kind').disabled = locked;
   if (modelField) modelField.disabled = locked;
   if (providerField) providerField.disabled = locked;
-  $<HTMLButtonElement>('skill-promote').disabled = kindLocked || !conversation?.lastDelivery;
+  const compare = kind ? settings?.comparisons?.find(item => item.taskKind === kind) : undefined;
+  const compareCopy = $('task-kind-compare');
+  if (compareCopy) {
+    compareCopy.hidden = !compare;
+    compareCopy.textContent = compare ? taskKindCompareText(compare) : '';
+  }
+  $<HTMLButtonElement>('skill-promote').disabled = kindLocked || !promotionRunId();
+  $<HTMLButtonElement>('task-kind-keep').disabled = kindLocked || !compare?.differs || compare.kept;
   $<HTMLButtonElement>('skill-rollback').disabled = kindLocked || !skill;
   $<HTMLButtonElement>('skill-retract').disabled = kindLocked || !skill;
   $<HTMLInputElement>('skill-rollback-reason').disabled = kindLocked || !skill;
   $<HTMLButtonElement>('task-model-save').disabled = kindLocked;
   $<HTMLButtonElement>('task-model-clear').disabled = kindLocked || !model;
+}
+function taskKindCompareText(compare: TaskKindComparison): string {
+  const usedSkill = compare.methodId ? `${compare.methodId} · ${compare.version}` : '没有技能版本';
+  const usedModel = compare.model ?? '当前运行时';
+  const used = `这次做成：${usedSkill}，模型 ${usedModel}，引用 ${compare.runId}`;
+  if (!compare.profileMethodId && !compare.profileModel) return `${used}。这个种类还没有档案。`;
+  const profileSkill = compare.profileMethodId ? `${compare.profileMethodId} · ${compare.profileVersion}` : '没有技能档案';
+  const profileModel = compare.profileModel ?? '未指定模型';
+  if (compare.kept) return `已留下这份档案。${used}。档案：${profileSkill}，模型 ${profileModel}。`;
+  if (!compare.differs) return `这次做成和档案一致：${profileSkill}，模型 ${profileModel}。`;
+  return `${used}。档案：${profileSkill}，模型 ${profileModel}。可以晋升这次技能，也可以留下档案。不点就不动。`;
+}
+function promotionRunId(): string {
+  const kind = currentTaskKind();
+  const compare = kind ? conversation?.taskSettings?.comparisons?.find(item => item.taskKind === kind) : undefined;
+  if (compare) return compare.methodId ? compare.runId : '';
+  return conversation?.lastDelivery?.runId ?? '';
 }
 function pinLastDelivery(): void {
   const surface = rosterView();
@@ -2264,13 +2294,18 @@ async function clearTaskModel(): Promise<void> {
 }
 async function promoteSkillProfile(): Promise<void> {
   const taskKind = currentTaskKind();
-  const delivery = conversation?.lastDelivery;
+  const runId = promotionRunId();
   if (!taskKind) {
     $('conversation-error').textContent = '先写任务种类。';
     return;
   }
-  if (!delivery) return;
-  await postTaskSetting('skill-profile', { taskKind, runId: delivery.runId }, '已晋升这次技能。讨论不会改它。下一次明确创建这种任务的 Run 时，会作为不可信材料带进去。', '请先刷新，再晋升。');
+  if (!runId) return;
+  await postTaskSetting('skill-profile', { taskKind, runId }, '已晋升这次技能。讨论不会改它。下一次明确创建这种任务的 Run 时，会作为不可信材料带进去。', '请先刷新，再晋升。');
+}
+async function keepTaskProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) return;
+  await postTaskSetting('task-kind/keep', { taskKind }, '已留下这份档案。这次做成不会替换它。讨论不会改它。', '请先刷新，再留下这份档案。');
 }
 async function rollbackSkillProfile(): Promise<void> {
   const taskKind = currentTaskKind();
@@ -2381,6 +2416,7 @@ $('task-kind')?.addEventListener('input', () => { taskModelBound = ''; syncTaskS
 $('task-model-save')?.addEventListener('click', () => { void saveTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('task-model-clear')?.addEventListener('click', () => { void clearTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('skill-promote')?.addEventListener('click', () => { void promoteSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('task-kind-keep')?.addEventListener('click', () => { void keepTaskProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('skill-rollback')?.addEventListener('click', () => { void rollbackSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('skill-retract')?.addEventListener('click', () => { void retractSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('accepted-practice-retract')?.addEventListener('click', () => {
