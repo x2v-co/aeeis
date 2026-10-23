@@ -10,12 +10,14 @@ import { AgentEngine, Conflict } from '../src/runtime/engine.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import { buildApp } from '../src/runtime/http.js';
 import { GovernedBrain } from '../src/brain.js';
+import { evolutionContentHash } from '../src/evolution-activation.js';
+import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 
 const scope = { owner: 'alice', tenantId: 'team-a' };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); vi.restoreAllMocks(); });
-async function fixture(brain?: GovernedBrain) {
+async function fixture(brain?: GovernedBrain, rsi?: RsiService) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-conversations-'));
   const repository = new FileRunRepository(join(directory, 'runs')); await repository.init();
   const store = new FileConversationStore(join(directory, 'conversations')); await store.init();
@@ -28,7 +30,7 @@ async function fixture(brain?: GovernedBrain) {
     const entries = await store.list(scope);
     expect(entries.some(entry => entry.messages.some(message => message.execution?.runId === id && message.execution.state === 'completed'))).toBe(true);
   });
-  const app = buildApp({ repository, engine, conversationStore: store, ...(brain ? { brain } : {}), dispatcher: { notify, close: async () => undefined }, principalTokens: {
+  const app = buildApp({ repository, engine, conversationStore: store, ...(brain ? { brain } : {}), ...(rsi ? { rsi } : {}), dispatcher: { notify, close: async () => undefined }, principalTokens: {
     alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
     bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] },
     elsewhere: { id: 'alice', tenantId: 'team-b', roles: ['owner'] },
@@ -621,6 +623,202 @@ describe('single-entry conversation routing', () => {
     expect(unplugged.body).toContain('Brain 还没有接上');
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('sends one verified skill change to RSI and leaves the candidate proposed', async () => {
+    const brain = new GovernedBrain();
+    const evoDir = await mkdtemp(join(tmpdir(), 'aeeis-lineup-rsi-'));
+    const evolution = new FileEvolutionRepository(evoDir);
+    await evolution.init();
+    cleanup.push(async () => { await evolution.close(); await rm(evoDir, { recursive: true, force: true }); });
+    const rsi = new RsiService(evolution);
+    const f = await fixture(brain, rsi);
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const research = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '研究', agentId: 'demo.research' } })).json();
+    const home = await f.create();
+    const propose = (revision: number, taskKind = '周报', extra: object = {}) => f.app.inject({
+      method: 'POST', url: `/api/conversations/${release.id}/task-kind/propose`, headers: f.headers,
+      payload: { expectedRevision: revision, taskKind, ...extra },
+    });
+    const first = await f.post(release.id, { text: '做第一份周报', newTask: { title: '第一份周报' }, intent: 'execute', focus: 'keep', expectedRevision: release.revision, taskKind: '周报' });
+    expect(first.statusCode, first.body).toBe(202);
+    await f.repository.mutate(first.json().runId, run => {
+      run.status = 'succeeded';
+      run.builtinSkill = 'project-pulse/1';
+      run.artifacts = [{ id: 'artifact_pulse', taskId: 'work', title: '周报稿', content: 'SECRET ARTIFACT BODY', evidenceRefs: [], hash: 'e'.repeat(64), createdAt: run.createdAt }];
+    });
+    const promoted = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: first.json().conversation.revision, taskKind: '周报', runId: first.json().runId } });
+    expect(promoted.statusCode, promoted.body).toBe(200);
+    const second = await f.post(release.id, { text: '做第二份周报', newTask: { title: '第二份周报' }, intent: 'execute', focus: 'keep', expectedRevision: promoted.json().revision, taskKind: '周报' });
+    expect(second.statusCode, second.body).toBe(202);
+    const secondId = second.json().runId as string;
+    await f.repository.mutate(secondId, run => {
+      run.status = 'succeeded';
+      run.skillSelection = { methodId: 'brief-method', version: '2', plan: { steps: ['check'] } };
+      run.artifacts = [{ id: 'artifact_brief', taskId: 'work', title: '简报', content: 'SECRET BRIEF', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt }];
+      run.evolution = [{
+        schemaVersion: 1, owner: 'alice', tenantId: 'team-a', target: 'profile', candidateId: 'evo_00000000-0000-4000-8000-000000000001',
+        baseVersion: 'profile/1', version: 'profile/4', change: '先前的个人档案',
+        contentHash: evolutionContentHash({ target: 'profile', version: 'profile/4', change: '先前的个人档案' }),
+        activationRef: 'prior', activatedAt: run.createdAt,
+      }];
+    });
+    const notes = await f.post(release.id, { text: '做一份纪要', newTask: { title: '一份纪要' }, intent: 'execute', focus: 'keep', expectedRevision: second.json().conversation.revision, taskKind: '纪要' });
+    expect(notes.statusCode, notes.body).toBe(202);
+    await f.repository.mutate(notes.json().runId, run => {
+      run.status = 'succeeded';
+      run.skillSelection = { methodId: 'minutes-method', version: '1', plan: { steps: ['check'] } };
+      run.artifacts = [{ id: 'artifact_notes', taskId: 'work', title: '纪要', content: 'SECRET NOTES', evidenceRefs: [], hash: 'c'.repeat(64), createdAt: run.createdAt }];
+    });
+    const chosen = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: notes.json().conversation.revision, taskKind: '周报', model: 'owner-picked-model' } });
+    expect(chosen.statusCode, chosen.body).toBe(200);
+    const openRevision = chosen.json().revision as number;
+    const noProfile = await propose(openRevision, '纪要');
+    expect(noProfile.statusCode, noProfile.body).toBe(409);
+    expect(noProfile.body).toContain('这个任务种类还没有可对照的技能档案');
+    await f.repository.mutate(secondId, run => {
+      run.artifacts = [];
+      run.calls = [];
+      run.context.sources = [];
+      run.toolReceipts = [];
+      run.delegationOutcomes = [];
+    });
+    const noEvidence = await propose(openRevision);
+    expect(noEvidence.statusCode, noEvidence.body).toBe(409);
+    expect(noEvidence.body).toContain('这次做成还没有可引用的证据');
+    await f.repository.mutate(secondId, run => {
+      delete run.skillSelection;
+      delete run.builtinSkill;
+      run.artifacts = [{ id: 'artifact_brief', taskId: 'work', title: '简报', content: 'SECRET BRIEF', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt }];
+    });
+    const noSkill = await propose(openRevision);
+    expect(noSkill.statusCode, noSkill.body).toBe(409);
+    expect(noSkill.body).toContain('这次做成还没有可评测的技能版本');
+    await f.repository.mutate(secondId, run => {
+      run.skillSelection = { methodId: 'brief-method', version: '2', plan: { steps: ['check'] } };
+    });
+    const forged = await propose(openRevision, '周报', { change: '让模型自己写', risk: 'high', sourceReceiptRefs: ['not-on-the-run'] });
+    expect(forged.statusCode, forged.body).toBe(400);
+    const stale = await propose(openRevision + 9);
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.body).toContain('请先刷新再送去评测');
+    const discussed = await f.post(release.id, { text: '讨论不送去评测', taskKind: '周报', expectedRevision: openRevision });
+    expect(discussed.statusCode, discussed.body).toBe(200);
+    expect(await rsi.list(scope)).toEqual([]);
+    const rev = discussed.json().conversation.revision as number;
+    const frozen = await f.repository.get(secondId);
+    const sent = await propose(rev);
+    expect(sent.statusCode, sent.body).toBe(200);
+    expect(sent.json().revision).toBe(rev);
+    const comparison = sent.json().taskSettings.comparisons.find((item: { taskKind: string }) => item.taskKind === '周报');
+    const candidate = (await rsi.list(scope))[0]!;
+    expect(comparison).toMatchObject({
+      runId: secondId, methodId: 'brief-method', version: '2', profileMethodId: 'project-pulse', profileVersion: '1',
+      proposal: { candidateId: candidate.id, status: 'proposed' },
+    });
+    expect(candidate).toMatchObject({
+      target: 'profile', baseVersion: 'profile/4', proposedVersion: 'brief-method/2', risk: 'low', status: 'proposed', evaluations: [],
+      sourceReceiptRefs: ['artifact_brief'], proposalSignalId: `task-kind-rsi:demo.release:周报:${secondId}`,
+    });
+    expect(candidate.change).toContain('任务种类：周报');
+    expect(candidate.change).toContain('从：project-pulse/1');
+    expect(candidate.change).toContain('到：brief-method/2');
+    expect(candidate.change).toContain(`引用：${secondId}`);
+    const candidateText = JSON.stringify(candidate);
+    expect(candidateText).not.toContain('owner-picked-model');
+    expect(candidateText).not.toContain('model-policy');
+    expect(candidateText).not.toContain('SECRET');
+    expect(candidate.evaluationAttempts).toBeUndefined();
+    expect(candidate.approvalRef).toBeUndefined();
+    const afterRun = await f.repository.get(secondId);
+    expect(afterRun.revision).toBe(frozen.revision);
+    expect(afterRun.allowedTools).toEqual(frozen.allowedTools);
+    expect(afterRun.modelBudget).toEqual(frozen.modelBudget);
+    expect(afterRun.externalBudget).toEqual(frozen.externalBudget);
+    expect(afterRun.skillSelection).toEqual(frozen.skillSelection);
+    expect(brain.state().claims.filter(claim => claim.state === 'active' && claim.sourceRefs.includes('skill-profile:demo.release:周报'))).toEqual([
+      expect.objectContaining({ sourceRefs: expect.arrayContaining(['method:project-pulse', 'version:1', `run:${first.json().runId}`]) }),
+    ]);
+    const again = await propose(rev);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().taskSettings.comparisons.find((item: { taskKind: string }) => item.taskKind === '周报').proposal.candidateId).toBe(candidate.id);
+    expect(await rsi.list(scope)).toHaveLength(1);
+    expect((await rsi.get(candidate.id, scope)).status).toBe('proposed');
+    expect((await rsi.get(candidate.id, scope)).evaluations).toEqual([]);
+    const kept = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-kind/keep`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报' } });
+    expect(kept.statusCode, kept.body).toBe(200);
+    expect(kept.json().taskSettings.skills).toEqual([expect.objectContaining({ methodId: 'project-pulse', version: '1' })]);
+    expect(await rsi.list(scope)).toHaveLength(1);
+    const cleared = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报' } });
+    expect(cleared.statusCode, cleared.body).toBe(200);
+    const third = await f.post(release.id, { text: '做第三份周报', newTask: { title: '第三份周报' }, intent: 'execute', focus: 'keep', expectedRevision: rev, taskKind: '周报' });
+    expect(third.statusCode, third.body).toBe(202);
+    const thirdId = third.json().runId as string;
+    const thirdRev = third.json().conversation.revision as number;
+    const thirdContext = JSON.stringify((await f.repository.get(thirdId)).context);
+    expect(thirdContext).toContain('方法：project-pulse');
+    expect(thirdContext).not.toContain('owner-picked-model');
+    expect(thirdContext).not.toContain('brief-method');
+    await f.repository.mutate(thirdId, run => {
+      run.status = 'succeeded';
+      run.skillSelection = { methodId: 'weekly-brief', version: '3', plan: { steps: ['check'] } };
+      run.artifacts = [{ id: 'artifact_third', taskId: 'work', title: '第三稿', content: 'SECRET THIRD', evidenceRefs: [], hash: 'd'.repeat(64), createdAt: run.createdAt }];
+    });
+    const sentAgain = await propose(thirdRev);
+    expect(sentAgain.statusCode, sentAgain.body).toBe(200);
+    const listed = await rsi.list(scope);
+    expect(listed).toHaveLength(2);
+    expect(listed.every(item => item.status === 'proposed' && item.evaluations.length === 0 && item.target === 'profile' && item.risk === 'low')).toBe(true);
+    expect(listed.map(item => item.id)).toContain(candidate.id);
+    const newer = listed.find(item => item.proposedVersion === 'weekly-brief/3')!;
+    expect(newer.baseVersion).toBe('profile/1');
+    expect(newer.sourceReceiptRefs).toEqual(['artifact_third']);
+    expect(newer.proposalSignalId).toBe(`task-kind-rsi:demo.release:周报:${thirdId}`);
+    expect(JSON.stringify(newer)).not.toContain('owner-picked-model');
+    const aligned = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: thirdRev, taskKind: '周报', runId: thirdId } });
+    expect(aligned.statusCode, aligned.body).toBe(200);
+    const same = await propose(thirdRev);
+    expect(same.statusCode, same.body).toBe(409);
+    expect(same.body).toContain('这次做成的技能和档案一样，不用送去评测');
+    expect(await rsi.list(scope)).toHaveLength(2);
+    expect((await f.fresh(research.id)).taskSettings).toBeUndefined();
+    const foreign = await f.app.inject({ method: 'POST', url: `/api/conversations/${research.id}/task-kind/propose`, headers: f.headers, payload: { expectedRevision: research.revision, taskKind: '周报' } });
+    expect(foreign.statusCode, foreign.body).toBe(409);
+    expect(foreign.body).toContain('这种任务还没有做成过');
+    const missing = await propose((await f.fresh(release.id)).revision, '发布');
+    expect(missing.statusCode, missing.body).toBe(409);
+    expect(missing.body).toContain('这种任务还没有做成过');
+    const unowned = await f.app.inject({ method: 'POST', url: `/api/conversations/${home.id}/task-kind/propose`, headers: f.headers, payload: { expectedRevision: home.revision, taskKind: '周报' } });
+    expect(unowned.statusCode, unowned.body).toBe(409);
+    expect(unowned.body).toContain('这条对话还没有所属的人');
+    const aliceCandidates = await f.app.inject({ method: 'GET', url: '/api/evolution/candidates', headers: f.headers });
+    expect(aliceCandidates.json().map((item: { id: string }) => item.id).sort()).toEqual(listed.map(item => item.id).sort());
+    expect((await f.app.inject({ method: 'GET', url: '/api/evolution/candidates', headers: { authorization: 'Bearer bob' } })).json()).toEqual([]);
+    expect((await f.app.inject({ method: 'GET', url: '/api/evolution/candidates', headers: { authorization: 'Bearer elsewhere' } })).json()).toEqual([]);
+    const bareBrain = new GovernedBrain();
+    const bare = await fixture(bareBrain);
+    const barePerson = (await bare.app.inject({ method: 'POST', url: '/api/conversations', headers: bare.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const bareFirst = await bare.post(barePerson.id, { text: '做第一份周报', newTask: { title: '第一份周报' }, intent: 'execute', focus: 'keep', expectedRevision: barePerson.revision, taskKind: '周报' });
+    await bare.repository.mutate(bareFirst.json().runId, run => {
+      run.status = 'succeeded';
+      run.builtinSkill = 'project-pulse/1';
+      run.artifacts = [{ id: 'artifact_pulse', taskId: 'work', title: '周报稿', content: '正文', evidenceRefs: [], hash: 'e'.repeat(64), createdAt: run.createdAt }];
+    });
+    const barePromoted = await bare.app.inject({ method: 'POST', url: `/api/conversations/${barePerson.id}/skill-profile`, headers: bare.headers, payload: { expectedRevision: bareFirst.json().conversation.revision, taskKind: '周报', runId: bareFirst.json().runId } });
+    const bareSecond = await bare.post(barePerson.id, { text: '做第二份周报', newTask: { title: '第二份周报' }, intent: 'execute', focus: 'keep', expectedRevision: barePromoted.json().revision, taskKind: '周报' });
+    await bare.repository.mutate(bareSecond.json().runId, run => {
+      run.status = 'succeeded';
+      run.skillSelection = { methodId: 'brief-method', version: '2', plan: { steps: ['check'] } };
+      run.artifacts = [{ id: 'artifact_brief', taskId: 'work', title: '简报', content: '正文', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt }];
+    });
+    const unplugged = await bare.app.inject({ method: 'POST', url: `/api/conversations/${barePerson.id}/task-kind/propose`, headers: bare.headers, payload: { expectedRevision: bareSecond.json().conversation.revision, taskKind: '周报' } });
+    expect(unplugged.statusCode, unplugged.body).toBe(409);
+    expect(unplugged.body).toContain('自进化还没有接上');
+    expect(bareBrain.state().claims.filter(claim => claim.state === 'active' && claim.sourceRefs.includes('skill-profile:demo.release:周报'))).toEqual([
+      expect.objectContaining({ sourceRefs: expect.arrayContaining(['method:project-pulse', 'version:1']) }),
+    ]);
+    expect(bareSecond.json().conversation.revision).toBe((await bare.fresh(barePerson.id)).revision);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    expect(bare.model.complete).not.toHaveBeenCalled();
+  });
   it('keeps side questions separate from focus and supports explicit focus switching', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, 'AEEIS'), b = await f.addTask(entry.id, 'Grok 迁移');
@@ -815,7 +1013,7 @@ describe('single-entry conversation routing', () => {
     expect(pinned.statusCode, pinned.body).toBe(200);
     for (const token of ['bob', 'elsewhere', 'agent']) {
       const headers = { authorization: `Bearer ${token}`, 'idempotency-key': 'guess' };
-      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/standing', { expectedRevision: 0, text: 'guess' }], ['POST', '/practice', { expectedRevision: 0, text: 'guess', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/practice/retract', { expectedRevision: 0, claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile', { expectedRevision: 0, taskKind: '周报', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile/rollback', { expectedRevision: 0, taskKind: '周报', reason: '退回' }], ['POST', '/skill-profile/retract', { expectedRevision: 0, taskKind: '周报', claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/task-kind/keep', { expectedRevision: 0, taskKind: '周报' }], ['POST', '/task-model', { expectedRevision: 0, taskKind: '周报', model: 'fixture' }], ['POST', '/tasks/task_missing/priority', { expectedRevision: 0, direction: 'higher' }], ['POST', '/notifications/sync', {}]] as const) {
+      for (const [method, path, payload] of [['GET', '', undefined], ['POST', '/messages', { text: '继续', expectedRevision: 0 }], ['POST', '/focus', { taskId: null, expectedRevision: 0 }], ['POST', '/standing', { expectedRevision: 0, text: 'guess' }], ['POST', '/practice', { expectedRevision: 0, text: 'guess', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/practice/retract', { expectedRevision: 0, claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile', { expectedRevision: 0, taskKind: '周报', runId: 'run_00000000-0000-4000-8000-000000000000' }], ['POST', '/skill-profile/rollback', { expectedRevision: 0, taskKind: '周报', reason: '退回' }], ['POST', '/skill-profile/retract', { expectedRevision: 0, taskKind: '周报', claimId: 'brain_00000000-0000-4000-8000-000000000000' }], ['POST', '/task-kind/keep', { expectedRevision: 0, taskKind: '周报' }], ['POST', '/task-kind/propose', { expectedRevision: 0, taskKind: '周报' }], ['POST', '/task-model', { expectedRevision: 0, taskKind: '周报', model: 'fixture' }], ['POST', '/tasks/task_missing/priority', { expectedRevision: 0, direction: 'higher' }], ['POST', '/notifications/sync', {}]] as const) {
         const response = await f.app.inject({ method, url: `/api/conversations/${entry.id}${path}`, headers, ...(payload ? { payload } : {}) });
         expect(response.statusCode).toBe(token === 'agent' ? 403 : 404); expect(response.body).not.toContain('私有任务'); expect(response.body).not.toContain(secret);
       }

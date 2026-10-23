@@ -86,6 +86,17 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       delete target.acceptedPractice;
       return response(target);
     }
+    if (url.endsWith('/task-kind/propose')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (Object.keys(body).sort().join() !== 'expectedRevision,taskKind') return response({ error: 'Invalid request' }, 400);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再送去评测' }, 409);
+      const compare = target.taskSettings?.comparisons?.find((item: { taskKind: string; methodId?: string; version?: string; profileMethodId?: string; profileVersion?: string }) => item.taskKind === body.taskKind);
+      if (!compare?.methodId || !compare.profileMethodId || (compare.methodId === compare.profileMethodId && compare.version === compare.profileVersion)) return response({ error: '这次做成的技能和档案一样，不用送去评测' }, 409);
+      compare.proposal = { candidateId: 'evo_lineup', status: 'proposed' };
+      return response(target);
+    }
     if (url.endsWith('/task-kind/keep')) {
       const target = conversationFor(url);
       if (!target) return response({ error: 'Unknown conversation' }, 404);
@@ -1346,18 +1357,35 @@ describe('entry bots and group chats', () => {
     h.view.taskSettings = {
       skills: [{ claimId: 'brain_skill', taskKind: '周报', methodId: 'project-pulse', version: '1', runId, evidenceRefs: ['artifact_pulse'] }],
       models: [{ claimId: 'brain_model', taskKind: '周报', model: 'fixture' }],
-      comparisons: [{ taskKind: '周报', runId: later, taskTitle: '第二份周报', methodId: 'brief-method', version: '2', model: 'other-model', profileMethodId: 'project-pulse', profileVersion: '1', profileRunId: runId, profileModel: 'fixture', differs: true, kept: false }],
+      comparisons: [
+        { taskKind: '周报', runId: later, taskTitle: '第二份周报', methodId: 'brief-method', version: '2', model: 'other-model', profileMethodId: 'project-pulse', profileVersion: '1', profileRunId: runId, profileModel: 'fixture', differs: true, kept: false },
+        { taskKind: '纪要', runId: 'run_00000000-0000-4000-8000-000000000003', taskTitle: '一份纪要', methodId: 'project-pulse', version: '1', model: 'fixture', profileMethodId: 'project-pulse', profileVersion: '1', profileModel: 'other-model', differs: true, kept: false },
+      ],
     };
     el('conversation-refresh').click();
+    fill('task-kind', '纪要');
+    await vi.waitFor(() => {
+      expect(el('task-kind-compare').textContent).toContain('other-model');
+      expect(el<HTMLButtonElement>('task-kind-propose').disabled).toBe(true);
+      expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(false);
+    });
+    expect(el('task-kind-compare').textContent).not.toContain('可以送去评测');
     fill('task-kind', '周报');
     await vi.waitFor(() => {
       expect(el('task-kind-compare').textContent).toContain('brief-method · 2');
       expect(el<HTMLButtonElement>('skill-promote').disabled).toBe(false);
       expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(false);
+      expect(el<HTMLButtonElement>('task-kind-propose').disabled).toBe(false);
     });
     expect(el('task-kind-compare').textContent).toContain('brief-method · 2');
     expect(el('task-kind-compare').textContent).toContain('project-pulse · 1');
+    expect(el('task-kind-compare').textContent).toContain('可以送去评测');
     expect(el('task-kind-compare').textContent).toContain('不点就不动');
+    el('task-kind-propose').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已送去评测'));
+    expect(h.posts.find(post => post.url.endsWith('/task-kind/propose'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报' });
+    expect(el('task-kind-compare').textContent).toContain('候选停在 proposed');
+    expect(el<HTMLButtonElement>('task-kind-propose').disabled).toBe(true);
     el('skill-promote').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已晋升这次技能'));
     expect(h.posts.find(post => post.url.endsWith('/skill-profile'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报', runId: later });
@@ -1371,6 +1399,7 @@ describe('entry bots and group chats', () => {
     submit();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.endsWith('/task-kind/keep'))).toHaveLength(1);
+    expect(h.posts.filter(post => post.url.endsWith('/task-kind/propose'))).toHaveLength(1);
     expect(messagePosts(h).at(-1)?.body.taskKind).toBeUndefined();
     doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.research"]')!.click();
     await vi.waitFor(() => expect(el('entry-title').textContent).toBe('研究'));

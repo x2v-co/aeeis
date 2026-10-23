@@ -8,6 +8,8 @@ import { projectRunGraphs } from '../runtime/graphs.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
+import { baselineVersions } from '../evolution-activation.js';
+import type { RsiService } from '../rsi.js';
 
 /** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
 export class ReplayablePreparationError extends Conflict {
@@ -199,10 +201,26 @@ function practiceEvidence(run: AgentRun): string[] {
   const cited = nodes.filter(id => artifacts.has(id));
   return (cited.length ? cited : nodes).slice(0, 8);
 }
+/** Refs the correction path already accepts as evidence on this Run. Thread-history nodes stay out. */
+function runEvidenceRefs(run: AgentRun): Set<string> {
+  return new Set([
+    ...run.context.sources.map(source => source.id),
+    ...run.artifacts.map(artifact => artifact.id),
+    ...(run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated').map(receipt => receipt.receiptId),
+    ...(run.delegationOutcomes ?? []).filter(item => item.disposition !== 'isolated').map(outcome => outcome.receiptRef),
+    ...run.calls.map(call => call.id),
+  ]);
+}
+function profileBaseVersion(run: AgentRun): string {
+  const snapshot = run.evolution?.find(item => item.target === 'profile')?.version?.trim();
+  if (snapshot && snapshot.length <= 200) return snapshot;
+  return baselineVersions.profile;
+}
 function practiceMarker(person: string): string { return `practice:${person}`; }
 function skillMarker(person: string, taskKind: string): string { return `skill-profile:${person}:${taskKind}`; }
 function modelMarker(person: string, taskKind: string): string { return `task-model:${person}:${taskKind}`; }
 function keepMarker(person: string, taskKind: string): string { return `task-kind-kept:${person}:${taskKind}`; }
+function lineupSignal(person: string, taskKind: string, runId: string): string { return `task-kind-rsi:${person}:${taskKind}:${runId}`; }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
 interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
 interface TaskKindComparison {
@@ -210,6 +228,7 @@ interface TaskKindComparison {
   methodId?: string; version?: string; model?: string; provider?: string;
   profileMethodId?: string; profileVersion?: string; profileRunId?: string; profileModel?: string; profileProvider?: string;
   differs: boolean; kept: boolean;
+  proposal?: { candidateId: string; status: string };
 }
 function kindFromMarker(claim: BrainClaim, prefix: string): string | undefined {
   const markers = claim.sourceRefs.filter(ref => ref.startsWith(prefix));
@@ -266,7 +285,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 }
 
 export class ConversationService {
-  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined) {}
+  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({
@@ -564,6 +583,7 @@ export class ConversationService {
     if (!person) return;
     const deliveries = await this.taskKindDeliveries(conversation, scope);
     if (!deliveries.length) return;
+    const proposals = await this.lineupProposals(scope);
     const comparisons: TaskKindComparison[] = [];
     for (const delivery of deliveries) {
       const skill = settings?.skills.find(item => item.taskKind === delivery.taskKind);
@@ -571,15 +591,27 @@ export class ConversationService {
       const used = runSkill(delivery.run);
       const usedModel = runModel(delivery.run);
       const differs = profilesDiffer(delivery.run, skill, model);
+      const proposal = proposals.get(lineupSignal(person, delivery.taskKind, delivery.run.id));
       comparisons.push({
         taskKind: delivery.taskKind, runId: delivery.run.id, taskTitle: delivery.taskTitle, differs, kept: differs && this.keepStillCovers(person, delivery.taskKind, scope, actor, delivery.run.id),
         ...(used ? { methodId: used.methodId, version: used.version } : {}),
         ...(usedModel ? { model: usedModel.model, ...(usedModel.provider ? { provider: usedModel.provider } : {}) } : {}),
         ...(skill ? { profileMethodId: skill.methodId, profileVersion: skill.version, profileRunId: skill.runId } : {}),
         ...(model ? { profileModel: model.model, ...(model.provider ? { profileProvider: model.provider } : {}) } : {}),
+        ...(proposal ? { proposal } : {}),
       });
     }
     return comparisons;
+  }
+  private async lineupProposals(scope: Ownership): Promise<Map<string, { candidateId: string; status: string }>> {
+    const found = new Map<string, { candidateId: string; status: string }>();
+    if (!this.rsi) return found;
+    for (const candidate of await this.rsi.list(scope)) {
+      const signal = candidate.proposalSignalId;
+      if (!signal?.startsWith('task-kind-rsi:')) continue;
+      found.set(signal, { candidateId: candidate.id, status: candidate.status });
+    }
+    return found;
   }
   private async promoteSkill(id: string, input: unknown, scope: Ownership, actor: Principal) {
     const body = skillProfileSchema.parse(input);
@@ -675,6 +707,35 @@ export class ConversationService {
       content: `任务种类：${body.taskKind}\n留下：${delivery.run.id}`,
       sourceRefs: [marker, `run:${delivery.run.id}`], confidence: 1,
     }, actor);
+    return this.view(conversation, scope, actor);
+  }
+  async proposeTaskKind(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = taskKindKeepSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再送去评测');
+    const delivery = (await this.taskKindDeliveries(conversation, scope)).find(item => item.taskKind === body.taskKind);
+    if (!delivery) throw new Conflict('这种任务还没有做成过');
+    const settings = await this.readTaskSettings(conversation, scope, actor);
+    const skill = settings?.skills.find(item => item.taskKind === body.taskKind);
+    if (!skill) throw new Conflict('这个任务种类还没有可对照的技能档案');
+    const used = runSkill(delivery.run);
+    if (!used) throw new Conflict('这次做成还没有可评测的技能版本');
+    if (used.methodId === skill.methodId && used.version === skill.version) throw new Conflict('这次做成的技能和档案一样，不用送去评测');
+    const evidence = runEvidenceRefs(delivery.run);
+    const sourceReceiptRefs = practiceEvidence(delivery.run).filter(ref => evidence.has(ref));
+    if (!sourceReceiptRefs.length) throw new Conflict('这次做成还没有可引用的证据');
+    const baseVersion = profileBaseVersion(delivery.run);
+    const proposedVersion = `${used.methodId}/${used.version}`;
+    if (proposedVersion === baseVersion) throw new Conflict('这次技能版本和当前自进化基线相同，不能送去评测');
+    const rsi = this.rsi;
+    if (!rsi) throw new Conflict('自进化还没有接上，这次先不送');
+    const from = `${skill.methodId}/${skill.version}`;
+    const change = [`个人技能档案`, `人：${person}`, `任务种类：${body.taskKind}`, `从：${from}`, `到：${proposedVersion}`, `引用：${delivery.run.id}`].join('\n');
+    const reason = `主人把${body.taskKind}后来做成的技能从 ${from} 送到 ${proposedVersion} 去评测。引用 ${delivery.run.id}。候选停在 proposed。`;
+    await rsi.propose({
+      target: 'profile', baseVersion, proposedVersion, change, reason, risk: 'low', sourceReceiptRefs,
+      proposalSignalId: lineupSignal(person, body.taskKind, delivery.run.id),
+    }, { owner: scope.owner, tenantId: scope.tenantId });
     return this.view(conversation, scope, actor);
   }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
