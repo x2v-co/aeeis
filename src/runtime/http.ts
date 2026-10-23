@@ -133,7 +133,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
 }
 export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
-  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain) : undefined;
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
@@ -1683,6 +1683,9 @@ export function buildApp(options: Options) {
     const view = await conversationService().keepTaskKind(request.params.id, request.body, conversationScope(request), principalOf(request));
     if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
     return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-kind/propose', async request => {
+    return conversationService().proposeTaskKind(request.params.id, request.body, conversationScope(request), principalOf(request));
   });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/task-model', async request => {
     const view = await conversationService().setTaskModel(request.params.id, request.body, conversationScope(request), principalOf(request));
