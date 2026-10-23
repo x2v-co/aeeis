@@ -188,4 +188,82 @@ describe('Shared Session canonical events', () => {
       expect(projectionResult.json().payload.contextManifestId).toBe(sessionManifestId);
     } finally { await app.close(); await projection.close(); await runs.close(); }
   });
+
+  it('attributes a group message to a member bot and keeps that role off the caller', async () => {
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships);
+    const room = await domain.createRoom({ title: 'Release group' }, undefined, 'alice', 'team-a');
+    await domain.addRoomMember(room.id, 'demo.release', 'agent', 'alice', 'team-a');
+    await domain.addRoomMember(room.id, 'member.editor', 'editor', 'alice', 'team-a');
+    const goal = await domain.createGoal({ title: '群聊', roomId: room.id }, undefined, 'alice', 'team-a');
+    const manifest = await domain.createContextManifest(goal.id, { purpose: '群聊消息', audienceMode: 'room' }, undefined, 'alice', 'team-a');
+    const events = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const spoken = await events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '我来对照清单', contextManifestId: manifest.id, idempotencyKey: 'bot-1',
+      actor: { type: 'agent', id: 'demo.release' },
+    }, 'alice', 'team-a');
+    expect(spoken).toMatchObject({ actorType: 'agent', actorId: 'demo.release', type: 'message', content: '我来对照清单' });
+    const ownerLine = await events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '我来说', contextManifestId: manifest.id, idempotencyKey: 'owner-1',
+    }, 'alice', 'team-a');
+    expect(ownerLine).toMatchObject({ actorType: 'principal', actorId: 'alice' });
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '冒充', contextManifestId: manifest.id, idempotencyKey: 'fake-1',
+      actor: { type: 'agent', id: 'demo.research' },
+    }, 'alice', 'team-a')).rejects.toThrow('只能以这个会话里的 bot 身份说话');
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '冒充本人', contextManifestId: manifest.id, idempotencyKey: 'fake-user-1',
+      actor: { type: 'principal', id: 'bob' },
+    }, 'alice', 'team-a')).rejects.toThrow('只能以本人的身份说话');
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '编辑不是 bot', contextManifestId: manifest.id, idempotencyKey: 'editor-1',
+      actor: { type: 'agent', id: 'member.editor' },
+    }, 'alice', 'team-a')).rejects.toThrow('只能以这个会话里的 bot 身份说话');
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'system', content: '系统行', contextManifestId: manifest.id, idempotencyKey: 'system-1',
+      actor: { type: 'agent', id: 'demo.release' },
+    }, 'alice', 'team-a')).rejects.toThrow('只有会话消息可以指定说话人');
+    await domain.addRoomMember(room.id, 'demo.research', 'agent', 'alice', 'team-a');
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '后加入的 bot', contextManifestId: manifest.id, idempotencyKey: 'late-1',
+      actor: { type: 'agent', id: 'demo.research' },
+    }, 'alice', 'team-a')).rejects.toThrow('这个 bot 不在这条会话的受众里');
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '换一句', contextManifestId: manifest.id, idempotencyKey: 'bot-1',
+      actor: { type: 'agent', id: 'demo.release' },
+    }, 'alice', 'team-a')).rejects.toBeInstanceOf(SessionEventConflict);
+    const replay = await events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '我来对照清单', contextManifestId: manifest.id, idempotencyKey: 'bot-1',
+      actor: { type: 'agent', id: 'demo.release' },
+    }, 'alice', 'team-a');
+    expect(replay.id).toBe(spoken.id);
+    expect((await events.page(room.id, 'alice', 'team-a')).items.map(item => `${item.actorType}:${item.actorId}`)).toEqual(['agent:demo.release', 'principal:alice']);
+  });
+
+  it('attributes a private-room message to the other member and refuses that on a group', async () => {
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships);
+    const room = await domain.createRoom({ title: 'member.editor', description: '私聊' }, undefined, 'alice', 'team-a');
+    await domain.addRoomMember(room.id, 'member.editor', 'editor', 'alice', 'team-a');
+    const goal = await domain.createGoal({ title: '私聊', roomId: room.id }, undefined, 'alice', 'team-a');
+    const manifest = await domain.createContextManifest(goal.id, { purpose: '私聊消息', audienceMode: 'room' }, undefined, 'alice', 'team-a');
+    const events = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const spoken = await events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '对方先说', contextManifestId: manifest.id, idempotencyKey: 'direct-1',
+      actor: { type: 'principal', id: 'member.editor' },
+    }, 'alice', 'team-a');
+    expect(spoken).toMatchObject({ actorType: 'principal', actorId: 'member.editor', type: 'message', content: '对方先说' });
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '当成 bot', contextManifestId: manifest.id, idempotencyKey: 'direct-agent',
+      actor: { type: 'agent', id: 'member.editor' },
+    }, 'alice', 'team-a')).rejects.toThrow('只能以这个会话里的 bot 身份说话');
+    const group = await domain.createRoom({ title: 'Release group' }, undefined, 'alice', 'team-a');
+    await domain.addRoomMember(group.id, 'member.editor', 'editor', 'alice', 'team-a');
+    const groupGoal = await domain.createGoal({ title: '群聊', roomId: group.id }, undefined, 'alice', 'team-a');
+    const groupManifest = await domain.createContextManifest(groupGoal.id, { purpose: '群聊消息', audienceMode: 'room' }, undefined, 'alice', 'team-a');
+    await expect(events.create(group.id, {
+      goalId: groupGoal.id, type: 'message', content: '群里冒充', contextManifestId: groupManifest.id, idempotencyKey: 'group-editor',
+      actor: { type: 'principal', id: 'member.editor' },
+    }, 'alice', 'team-a')).rejects.toThrow('只能以本人的身份说话');
+  });
 });

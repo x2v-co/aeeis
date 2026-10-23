@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationStore, type ConversationTask } from '../conversations.js';
+import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
 import type { Ownership } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
@@ -20,6 +20,10 @@ const standingSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   text: z.string().max(5000).transform(value => value.trim()).refine(value => value.length <= 500, '这句话最多 500 字'),
 }).strict();
+const speakerSchema = z.object({
+  role: z.enum(['user', 'agent']),
+  id: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/, '说话人标识只能包含字母、数字、点、下划线和连字符'),
+}).strict();
 const messageSchema = z.object({
   text: z.string().trim().min(1).max(7000),
   expectedRevision: z.number().int().nonnegative(),
@@ -29,8 +33,32 @@ const messageSchema = z.object({
   newTask: z.object({ title: z.string().trim().min(2).max(200) }).strict().optional(),
   focus: z.enum(['keep', 'switch']).default('keep'),
   intent: z.enum(['discuss', 'execute']).default('discuss'),
+  /** Who is speaking. Missing means the authenticated owner, role user. */
+  speaker: speakerSchema.optional(),
   runOptions: requestSchema.omit({ goal: true, goalId: true, taskExecution: true }).optional(),
 }).strict();
+/** The provider turn stays one inbound user message. This names the persona inside that request. */
+function resolveSpeaker(speaker: z.infer<typeof speakerSchema> | undefined, scope: Ownership): ConversationSpeaker {
+  if (!speaker || speaker.role === 'user') {
+    if (speaker && speaker.id !== scope.owner) throw new Conflict('只能以本人的身份说话');
+    return { role: 'user', id: scope.owner };
+  }
+  if (speaker.id === scope.owner) throw new Conflict('本人的发言角色是 user');
+  return { role: 'agent', id: speaker.id };
+}
+function spoken(message: ConversationMessage, owner: string): ConversationSpeaker {
+  return message.speaker ?? { role: 'user', id: owner };
+}
+/** The private chat's person. Missing on older threads. A value that cannot be a single token is omitted so it cannot reshape the goal. */
+function privatePerson(conversation: Conversation): string | undefined {
+  const person = conversation.agentId;
+  return person && /^[A-Za-z0-9._-]+$/.test(person) ? person : undefined;
+}
+function harnessGoal(conversation: Conversation, title: string, text: string, speaker: ConversationSpeaker): string {
+  const person = privatePerson(conversation);
+  const privacy = person ? `私聊：agent:${person}\n` : '';
+  return `${privacy}说话人：${speaker.role}:${speaker.id}\n任务：${title}\n当前请求：${text}`;
+}
 const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase();
 const sameIds = (left: string[], right: string[]) => [...left].sort().join('\0') === [...right].sort().join('\0');
 /** Pure Han titles match by substring once they are long enough to be distinctive.
@@ -264,11 +292,16 @@ export class ConversationService {
       if ((body.correctsMessageId || route.reason === 'focus' || !body.taskIds && !body.replyTo && !body.newTask || body.focus === 'switch') && current.revision !== body.expectedRevision) throw new Conflict('Discussion focus changed; refresh before sending this message');
       if (newTask) { current.tasks.push(newTask); route.taskIds = [newTask.id]; }
       const task = current.tasks.find(task => task.id === route.taskIds[0]);
-      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route };
+      const speaker = resolveSpeaker(body.speaker, scope);
+      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', speaker, text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route };
       if (body.intent === 'execute' && route.status === 'routed' && task) {
         if (task.pendingMessageId) throw new Conflict('Task execution is already being prepared');
         if (!newTask && (task.id !== selected?.id || task.latestRunId !== parent?.id)) throw new Conflict('Task changed while routing; refresh before execution');
-        const notes = current.messages.filter(item => item.role === 'user' && !item.execution && !item.correctsMessageId && effectiveTasks(current, item).includes(task.id)).slice(-8).map(item => ({ id: item.id, text: item.text })).reverse();
+        const person = privatePerson(current);
+        const notes = current.messages.filter(item => item.role === 'user' && !item.execution && !item.correctsMessageId && effectiveTasks(current, item).includes(task.id)).slice(-8).map(item => {
+          const voice = spoken(item, current.owner);
+          return { id: item.id, role: voice.role, speakerId: voice.id, ...(person ? { privateWith: { role: 'agent' as const, id: person } } : {}), text: item.text };
+        }).reverse();
         const selectedNotes: typeof notes = [];
         for (const note of notes) {
           if (JSON.stringify([...selectedNotes, note]).length > 12000) break;
@@ -288,7 +321,7 @@ export class ConversationService {
         }
         if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
         if (history) materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
-        const request = requestSchema.parse({ ...options, goal: `任务：${task.title}\n当前请求：${body.text}`, materials, workingMemory: { enabled: true } });
+        const request = requestSchema.parse({ ...options, goal: harnessGoal(current, task.title, body.text, speaker), materials, workingMemory: { enabled: true } });
         const runId = followupRunId(task.threadId, followupHash(message.id), scope);
         message.execution = { taskId: task.id, runId, ...(parent ? { parentRunId: parent.id } : {}), request, state: 'pending' };
         task.pendingMessageId = message.id;

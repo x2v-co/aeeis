@@ -87,7 +87,7 @@ type ProjectPulseArtifact = {
 };
 interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string } }
 interface ConversationMessageView {
-  id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
+  id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
@@ -1100,6 +1100,96 @@ function eventAuthor(event: SessionEventSummary): string {
   if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
   return '你';
 }
+function lifePersonId(): string {
+  const view = rosterView();
+  if (view === 'entry') return lifeAgent(conversation) || 'aeeis';
+  if (view === 'bot') return lifeAgent(conversation) || activeBotId();
+  return '';
+}
+function messageAuthor(item: ConversationMessageView): string {
+  if (item.role === 'notification') return '任务通知';
+  const person = lifePersonId();
+  const personLabel = person ? participantLabel(person) : '';
+  if (item.speaker?.role === 'agent') {
+    const who = participantLabel(item.speaker.id);
+    if (person && item.speaker.id !== person) return `${who} · 对${personLabel}`;
+    return who;
+  }
+  if (item.speaker && person && item.speaker.id !== person) return `你 · 对${personLabel}`;
+  return '你';
+}
+function selectedLifeSpeaker(): { role: 'agent'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'entry' && view !== 'bot') return;
+  const id = $<HTMLSelectElement>('life-speaker')?.value.trim() ?? '';
+  const person = lifePersonId();
+  if (!id || id !== person || !/^[A-Za-z0-9._-]+$/.test(id)) return;
+  return { role: 'agent', id };
+}
+function syncLifeSpeaker(): void {
+  const select = $<HTMLSelectElement>('life-speaker');
+  if (!select) return;
+  const view = rosterView();
+  const person = lifePersonId();
+  const valid = /^[A-Za-z0-9._-]+$/.test(person);
+  const previous = select.value;
+  select.replaceChildren();
+  const you = document.createElement('option');
+  you.value = '';
+  you.textContent = '你';
+  select.append(you);
+  if (valid) {
+    const option = document.createElement('option');
+    option.value = person;
+    option.textContent = participantLabel(person);
+    select.append(option);
+  }
+  select.value = valid && previous === person ? previous : '';
+  select.hidden = view !== 'entry' && view !== 'bot';
+}
+function speakerChoices(): Array<{ id: string; label: string; type: 'agent' | 'principal' }> {
+  const view = rosterView();
+  if (view === 'group') {
+    return groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => ({ id: member.principalId, label: participantLabel(member.principalId), type: 'agent' as const }));
+  }
+  if (view === 'direct') {
+    return groupMembers.filter(member => member.status === 'active').map(member => ({
+      id: member.principalId,
+      label: participantLabel(member.principalId),
+      type: member.role === 'agent' ? 'agent' as const : 'principal' as const,
+    }));
+  }
+  return [];
+}
+function selectedRoomSpeaker(): { type: 'agent' | 'principal'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'group' && view !== 'direct') return;
+  const id = $<HTMLSelectElement>('group-speaker')?.value.trim() ?? '';
+  if (!id) return;
+  const choice = speakerChoices().find(item => item.id === id);
+  if (!choice) return;
+  return { type: choice.type, id: choice.id };
+}
+function syncGroupSpeaker(): void {
+  const select = $<HTMLSelectElement>('group-speaker');
+  if (!select) return;
+  const previous = select.value;
+  const choices = speakerChoices();
+  select.replaceChildren();
+  const you = document.createElement('option');
+  you.value = '';
+  you.textContent = '你';
+  select.append(you);
+  for (const choice of choices) {
+    const option = document.createElement('option');
+    option.value = choice.id;
+    option.textContent = choice.label;
+    select.append(option);
+  }
+  select.value = choices.some(choice => choice.id === previous) ? previous : '';
+  const view = rosterView();
+  select.hidden = view !== 'group' && view !== 'direct';
+}
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
 }
@@ -1145,11 +1235,13 @@ function syncEntrySurface(): void {
   const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
-    ? '这间私聊只保留会话记录。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
+    ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。选一位 bot，只是标明这句话是它说的；它不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。';
+  syncGroupSpeaker();
+  syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
   const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
   const entryTitle = $('entry-title');
@@ -1506,6 +1598,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -1551,6 +1644,7 @@ function renderGroupTranscript(): void {
     list.append(item);
   }
   if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
+  syncGroupSpeaker();
   renderMentions();
 }
 function mentionTargets(): Array<{ label: string }> {
@@ -1609,8 +1703,10 @@ async function submitGroupMessage(event: Event): Promise<void> {
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
   const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
+  const spoken = selectedRoomSpeaker();
   const postSession = (type: 'message' | 'system', content: string) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
     goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
+    ...(type === 'message' && spoken ? { actor: spoken } : {}),
   });
   await postSession('message', text);
   if (input) input.value = '';
@@ -1634,6 +1730,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
           newTask: { title },
           focus: 'keep',
           intent: 'discuss',
+          ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
         }, 'POST', groupIdempotencyKey());
         if (epoch === conversationEpoch && result.conversation?.id === id) {
           if (conversation?.id === id) acceptConversation(result.conversation);
@@ -1749,7 +1846,8 @@ function renderConversation(): void {
     const messages = $('conversation-messages'); messages.replaceChildren();
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
-      row.append(element('small', `${item.role === 'notification' ? '任务通知' : '你'} · ${formatTime(item.createdAt)}`), element('p', item.text));
+      if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
+      row.append(element('small', `${messageAuthor(item)} · ${formatTime(item.createdAt)}`), element('p', item.text));
       if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`));
       const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
       if (corrected) row.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
@@ -2023,9 +2121,11 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (intent === 'execute' && $<HTMLButtonElement>('conversation-execute').disabled) return;
     const target = $<HTMLSelectElement>('conversation-target').value;
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
+    const lifeSpeaker = selectedLifeSpeaker();
     const body = conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
+        ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
         ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
         focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;

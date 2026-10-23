@@ -879,6 +879,10 @@ body.conversation-mode #conversation-composer .quick-input-row button,
 body.conversation-mode #group-composer .quick-input-row button { height: 46px; min-width: 96px; padding-inline: 14px; color: #fff; border-color: var(--ink); background: var(--ink); white-space: nowrap; }
 body.conversation-mode #conversation-composer .quick-input-row button:hover,
 body.conversation-mode #group-composer .quick-input-row button:hover { color: #fff; border-color: var(--ink); background: #2a2a2a; }
+body.conversation-mode #group-speaker,
+body.conversation-mode #life-speaker { height: 46px; width: auto; flex: none; min-width: 88px; }
+body.conversation-mode #group-speaker[hidden],
+body.conversation-mode #life-speaker[hidden] { display: none; }
 body.conversation-mode .composer-route { color: var(--muted); font-size: 12px; }
 body.conversation-mode .composer-route summary { width: fit-content; cursor: pointer; }
 body.conversation-mode .composer-route[open] { display: grid; gap: 6px; }

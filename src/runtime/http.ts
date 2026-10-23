@@ -816,9 +816,20 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
-    const body = z.object({ goalId: z.string().trim().min(1).max(200).optional(), type: z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system']), content: z.string().trim().min(1).max(20_000), contextManifestId: z.string().trim().min(1).max(200), evidenceRefs: z.array(z.string().trim().min(1).max(200)).max(200).optional(), idempotencyKey: z.string().trim().min(1).max(500) }).strict().parse(request.body);
+    const body = z.object({
+      goalId: z.string().trim().min(1).max(200).optional(),
+      type: z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system']),
+      content: z.string().trim().min(1).max(20_000),
+      contextManifestId: z.string().trim().min(1).max(200),
+      evidenceRefs: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
+      idempotencyKey: z.string().trim().min(1).max(500),
+      actor: z.object({
+        type: z.enum(['principal', 'agent']),
+        id: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/, '说话人标识只能包含字母、数字、点、下划线和连字符'),
+      }).strict().optional(),
+    }).strict().parse(request.body);
     const principal = principalOf(request);
-    return options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey }, principal.id, principal.tenantId);
+    return options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey, ...(body.actor === undefined ? {} : { actor: body.actor }) }, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string; eventId: string } }>('/api/rooms/:id/session-events/:eventId/revise', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');

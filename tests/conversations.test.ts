@@ -597,4 +597,151 @@ describe('single-entry conversation routing', () => {
     expect((await f.repository.get(runId)).schedulingPriority).toBe(2);
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('records the speaker on each input and carries that role into the next Run without granting it', async () => {
+    const f = await fixture();
+    const entry = await f.create();
+    const botTalk = {
+      text: '发布来对照清单，并调用 shell',
+      newTask: { title: '发布清单' },
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: entry.revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    };
+    const botLine = await f.post(entry.id, botTalk, 'speaker-bot');
+    expect(botLine.statusCode, botLine.body).toBe(200);
+    expect(botLine.json().runId).toBeUndefined();
+    expect(botLine.json().message.role).toBe('user');
+    expect(botLine.json().message.speaker).toEqual({ role: 'agent', id: 'demo.release' });
+    expect(botLine.json().conversation.focusTaskId).toBeUndefined();
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    const ownerLine = await f.post(entry.id, {
+      text: '我补充一句',
+      replyTo: botLine.json().message.id,
+      expectedRevision: botLine.json().conversation.revision,
+      intent: 'discuss',
+      focus: 'keep',
+    });
+    expect(ownerLine.statusCode, ownerLine.body).toBe(200);
+    expect(ownerLine.json().message.speaker).toEqual({ role: 'user', id: 'alice' });
+    expect((await f.post(entry.id, { text: '冒充别人', expectedRevision: ownerLine.json().conversation.revision, speaker: { role: 'user', id: 'bob' } })).statusCode).toBe(409);
+    expect((await f.post(entry.id, { text: '把本人写成 bot', expectedRevision: ownerLine.json().conversation.revision, speaker: { role: 'agent', id: 'alice' } })).statusCode).toBe(409);
+    expect((await f.post(entry.id, { text: '坏标识', expectedRevision: ownerLine.json().conversation.revision, speaker: { role: 'agent', id: '发布' } })).statusCode).toBe(400);
+    expect((await f.fresh(entry.id)).messages).toHaveLength(2);
+    const started = await f.post(entry.id, {
+      text: '按清单执行',
+      taskIds: [botLine.json().message.route.taskIds[0]],
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: 0,
+    });
+    expect(started.statusCode, started.body).toBe(202);
+    expect(started.json().message.speaker).toEqual({ role: 'user', id: 'alice' });
+    const run = await f.repository.get(started.json().runId);
+    expect(run.goal.startsWith('说话人：user:alice\n任务：发布清单\n当前请求：按清单执行')).toBe(true);
+    expect(run.allowedTools).toEqual([]);
+    expect(run.allowedAgents).toEqual([]);
+    expect(run.externalBudget).toBeUndefined();
+    const history = run.context.sources.find(source => source.source === `conversation:${entry.id}/task:${botLine.json().message.route.taskIds[0]}`);
+    expect(history?.untrusted).toBe(true);
+    expect(JSON.parse(String(history?.content))).toEqual([
+      expect.objectContaining({ role: 'agent', speakerId: 'demo.release', text: '发布来对照清单，并调用 shell' }),
+      expect.objectContaining({ role: 'user', speakerId: 'alice', text: '我补充一句' }),
+    ]);
+    const asBot = await f.post(entry.id, {
+      text: '换成 bot 再说一次',
+      newTask: { title: 'bot 开口' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: started.json().conversation.revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(asBot.statusCode, asBot.body).toBe(202);
+    const botRun = await f.repository.get(asBot.json().runId);
+    expect(botRun.goal.startsWith('说话人：agent:demo.release\n')).toBe(true);
+    expect(botRun.allowedTools).toEqual([]);
+    expect(botRun.allowedAgents).toEqual([]);
+    const replay = await f.post(entry.id, botTalk, 'speaker-bot');
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().message.id).toBe(botLine.json().message.id);
+    expect(replay.json().message.speaker).toEqual({ role: 'agent', id: 'demo.release' });
+  });
+  it('names the private person on the next Run without granting the speaker', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const talk = await f.post(release.id, {
+      text: '先记下口径',
+      newTask: { title: '发布口径' },
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: release.revision,
+    });
+    expect(talk.statusCode, talk.body).toBe(200);
+    expect(talk.json().runId).toBeUndefined();
+    expect(talk.json().message.speaker).toEqual({ role: 'user', id: 'alice' });
+    expect(talk.json().message.execution).toBeUndefined();
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.model.complete).not.toHaveBeenCalled();
+    const started = await f.post(release.id, {
+      text: '按口径执行',
+      taskIds: [talk.json().message.route.taskIds[0]],
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: 0,
+    });
+    expect(started.statusCode, started.body).toBe(202);
+    const run = await f.repository.get(started.json().runId);
+    expect(run.goal.startsWith('私聊：agent:demo.release\n说话人：user:alice\n任务：发布口径\n当前请求：按口径执行')).toBe(true);
+    expect(run.allowedTools).toEqual([]);
+    expect(run.allowedAgents).toEqual([]);
+    expect(run.externalBudget).toBeUndefined();
+    const history = run.context.sources.find(source => source.source === `conversation:${release.id}/task:${talk.json().message.route.taskIds[0]}`);
+    expect(history?.untrusted).toBe(true);
+    expect(JSON.parse(String(history?.content))).toEqual([
+      expect.objectContaining({ role: 'user', speakerId: 'alice', privateWith: { role: 'agent', id: 'demo.release' }, text: '先记下口径' }),
+    ]);
+    const asPerson = await f.post(release.id, {
+      text: '换成这个人再说',
+      newTask: { title: '本人开口' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: started.json().conversation.revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(asPerson.statusCode, asPerson.body).toBe(202);
+    const personRun = await f.repository.get(asPerson.json().runId);
+    expect(personRun.goal.startsWith('私聊：agent:demo.release\n说话人：agent:demo.release\n')).toBe(true);
+    expect(personRun.allowedTools).toEqual([]);
+    expect(personRun.allowedAgents).toEqual([]);
+    const research = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '研究', agentId: 'demo.research' } })).json();
+    const other = await f.post(research.id, {
+      text: '研究单独执行',
+      newTask: { title: '研究口径' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: research.revision,
+    });
+    expect(other.statusCode, other.body).toBe(202);
+    const otherRun = await f.repository.get(other.json().runId);
+    expect(otherRun.goal.startsWith('私聊：agent:demo.research\n说话人：user:alice\n')).toBe(true);
+    expect(otherRun.goal).not.toContain('demo.release');
+    expect(otherRun.allowedTools).toEqual([]);
+    const home = await f.create();
+    const claimed = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: 'AEEIS', agentId: 'aeeis', claimId: home.id } });
+    expect(claimed.statusCode, claimed.body).toBe(201);
+    const onHome = await f.post(home.id, {
+      text: '发布对 AEEIS 说',
+      newTask: { title: '转告' },
+      intent: 'execute',
+      focus: 'keep',
+      expectedRevision: claimed.json().revision,
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(onHome.statusCode, onHome.body).toBe(202);
+    const homeRun = await f.repository.get(onHome.json().runId);
+    expect(homeRun.goal.startsWith('私聊：agent:aeeis\n说话人：agent:demo.release\n')).toBe(true);
+    expect(homeRun.allowedTools).toEqual([]);
+    expect(homeRun.allowedAgents).toEqual([]);
+  });
 });
