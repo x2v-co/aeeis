@@ -49,6 +49,10 @@ const skillRetractSchema = z.object({
   taskKind: taskKindSchema,
   claimId: z.string().regex(/^brain_[a-f0-9-]{36}$/),
 }).strict();
+const taskKindKeepSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  taskKind: taskKindSchema,
+}).strict();
 const taskModelSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   taskKind: taskKindSchema,
@@ -198,8 +202,15 @@ function practiceEvidence(run: AgentRun): string[] {
 function practiceMarker(person: string): string { return `practice:${person}`; }
 function skillMarker(person: string, taskKind: string): string { return `skill-profile:${person}:${taskKind}`; }
 function modelMarker(person: string, taskKind: string): string { return `task-model:${person}:${taskKind}`; }
+function keepMarker(person: string, taskKind: string): string { return `task-kind-kept:${person}:${taskKind}`; }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
 interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
+interface TaskKindComparison {
+  taskKind: string; runId: string; taskTitle: string;
+  methodId?: string; version?: string; model?: string; provider?: string;
+  profileMethodId?: string; profileVersion?: string; profileRunId?: string; profileModel?: string; profileProvider?: string;
+  differs: boolean; kept: boolean;
+}
 function kindFromMarker(claim: BrainClaim, prefix: string): string | undefined {
   const markers = claim.sourceRefs.filter(ref => ref.startsWith(prefix));
   if (markers.length !== 1) return;
@@ -222,6 +233,27 @@ function runSkill(run: AgentRun): { methodId: string; version: string } | undefi
   const version = run.builtinSkill.slice(slash + 1);
   if (!skillTokenSchema.safeParse(methodId).success || !skillTokenSchema.safeParse(version).success) return;
   return { methodId, version };
+}
+function taskKindOfRequest(conversationId: string, request: { materials?: ReadonlyArray<{ title: string; source: string }> } | undefined): string | undefined {
+  const prefix = `conversation:${conversationId}/task-kind/`;
+  const kinds = [...new Set((request?.materials ?? []).filter(item => item.title === TASK_SETTING_TITLE && item.source.startsWith(prefix)).map(item => item.source.slice(prefix.length)))];
+  if (kinds.length !== 1) return;
+  const parsed = taskKindSchema.safeParse(kinds[0]);
+  return parsed.success ? parsed.data : undefined;
+}
+function runModel(run: AgentRun): { model: string; provider?: string } | undefined {
+  const model = run.model.model;
+  if (!modelTokenSchema.safeParse(model).success) return;
+  const provider = run.model.provider;
+  if (provider && modelTokenSchema.safeParse(provider).success) return { model, provider };
+  return { model };
+}
+function profilesDiffer(run: AgentRun, skill: SkillProfileView | undefined, model: TaskModelView | undefined): boolean {
+  const used = runSkill(run);
+  const skillDiffers = Boolean(used) !== Boolean(skill) || Boolean(used && skill && (used.methodId !== skill.methodId || used.version !== skill.version));
+  const usedModel = runModel(run);
+  const modelDiffers = Boolean(model && (!usedModel || usedModel.model !== model.model || (model.provider !== undefined && model.provider !== (usedModel.provider ?? ''))));
+  return skillDiffers || modelDiffers;
 }
 function settingText(taskKind: string, skill: SkillProfileView | undefined, model: TaskModelView | undefined): string {
   const lines = [`任务种类：${taskKind}`];
@@ -282,7 +314,9 @@ export class ConversationService {
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);
     const acceptedPractice = this.ownerActor(actor, scope) ? await this.readPractice(conversation, scope, actor) : undefined;
-    const taskSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
+    const storedSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
+    const comparisons = this.ownerActor(actor, scope) ? await this.readTaskComparisons(conversation, scope, actor, storedSettings) : undefined;
+    const taskSettings = storedSettings || comparisons?.length ? { skills: storedSettings?.skills ?? [], models: storedSettings?.models ?? [], ...(comparisons?.length ? { comparisons } : {}) } : undefined;
     return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
   }
   /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
@@ -483,6 +517,70 @@ export class ConversationService {
     if (!skill && !model) return;
     return { ...(skill ? { skill } : {}), ...(model ? { model } : {}) };
   }
+  private latestDecision(person: string, scope: Ownership, actor: Principal, marker: string): BrainClaim | undefined {
+    const brain = this.brain;
+    if (!brain) return;
+    let claims: BrainClaim[];
+    try { claims = brain.read(person, actor, 'internal', scope.owner); }
+    catch { return; }
+    return claims.filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker)).sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0))[0];
+  }
+  /** A keep settles the profile that was already stored. A newer skill or model claim opens the lineup again. */
+  private keepStillCovers(person: string, taskKind: string, scope: Ownership, actor: Principal, runId: string): boolean {
+    const keep = this.latestDecision(person, scope, actor, keepMarker(person, taskKind));
+    if (!keep) return false;
+    const cited = oneRef(keep.sourceRefs, 'run:');
+    const marker = keepMarker(person, taskKind);
+    if (cited !== runId || keep.sourceRefs.some(ref => ref !== marker && ref !== `run:${runId}`)) return false;
+    const skillClaim = this.latestDecision(person, scope, actor, skillMarker(person, taskKind));
+    const modelClaim = this.latestDecision(person, scope, actor, modelMarker(person, taskKind));
+    const profileAt = Math.max(skillClaim ? Date.parse(skillClaim.updatedAt) : 0, modelClaim ? Date.parse(modelClaim.updatedAt) : 0);
+    return profileAt > 0 && Date.parse(keep.updatedAt) >= profileAt;
+  }
+  private async taskKindDeliveries(conversation: Conversation, scope: Ownership): Promise<Array<{ taskKind: string; taskTitle: string; run: AgentRun }>> {
+    const candidates = conversation.messages.flatMap(message => {
+      if (message.execution?.state !== 'completed') return [];
+      const taskKind = taskKindOfRequest(conversation.id, message.execution.request);
+      if (!taskKind) return [];
+      return [{ taskKind, taskId: message.execution.taskId, runId: message.execution.runId }];
+    });
+    const runs = new Map<string, AgentRun>();
+    for (const runId of new Set(candidates.map(item => item.runId))) {
+      try { runs.set(runId, await this.runs.get(runId, scope)); }
+      catch (error) { if (!(error instanceof NotFound)) throw error; }
+    }
+    const best = new Map<string, { taskKind: string; taskTitle: string; run: AgentRun }>();
+    for (const item of candidates) {
+      const run = runs.get(item.runId);
+      if (!run || run.status !== 'succeeded') continue;
+      const taskTitle = conversation.tasks.find(task => task.id === item.taskId)?.title ?? item.taskKind;
+      const current = best.get(item.taskKind);
+      if (!current || Date.parse(run.updatedAt) >= Date.parse(current.run.updatedAt)) best.set(item.taskKind, { taskKind: item.taskKind, taskTitle, run });
+    }
+    return [...best.values()];
+  }
+  private async readTaskComparisons(conversation: Conversation, scope: Ownership, actor: Principal, settings: { skills: SkillProfileView[]; models: TaskModelView[] } | undefined): Promise<TaskKindComparison[] | undefined> {
+    const person = privatePerson(conversation);
+    if (!person) return;
+    const deliveries = await this.taskKindDeliveries(conversation, scope);
+    if (!deliveries.length) return;
+    const comparisons: TaskKindComparison[] = [];
+    for (const delivery of deliveries) {
+      const skill = settings?.skills.find(item => item.taskKind === delivery.taskKind);
+      const model = settings?.models.find(item => item.taskKind === delivery.taskKind);
+      const used = runSkill(delivery.run);
+      const usedModel = runModel(delivery.run);
+      const differs = profilesDiffer(delivery.run, skill, model);
+      comparisons.push({
+        taskKind: delivery.taskKind, runId: delivery.run.id, taskTitle: delivery.taskTitle, differs, kept: differs && this.keepStillCovers(person, delivery.taskKind, scope, actor, delivery.run.id),
+        ...(used ? { methodId: used.methodId, version: used.version } : {}),
+        ...(usedModel ? { model: usedModel.model, ...(usedModel.provider ? { provider: usedModel.provider } : {}) } : {}),
+        ...(skill ? { profileMethodId: skill.methodId, profileVersion: skill.version, profileRunId: skill.runId } : {}),
+        ...(model ? { profileModel: model.model, ...(model.provider ? { profileProvider: model.provider } : {}) } : {}),
+      });
+    }
+    return comparisons;
+  }
   private async promoteSkill(id: string, input: unknown, scope: Ownership, actor: Principal) {
     const body = skillProfileSchema.parse(input);
     const conversation = await this.store.get(id, scope);
@@ -557,6 +655,28 @@ export class ConversationService {
     }
     return this.view(conversation, scope, actor);
   }
+  async keepTaskKind(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = taskKindKeepSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    const { person, brain } = this.requirePerson(conversation, scope, actor, body.expectedRevision, '对话已变化，请先刷新再留下这份档案');
+    const delivery = (await this.taskKindDeliveries(conversation, scope)).find(item => item.taskKind === body.taskKind);
+    if (!delivery) throw new Conflict('这种任务还没有做成过');
+    const settings = await this.readTaskSettings(conversation, scope, actor);
+    const skill = settings?.skills.find(item => item.taskKind === body.taskKind);
+    const model = settings?.models.find(item => item.taskKind === body.taskKind);
+    if (!skill && !model) throw new Conflict('这个任务种类还没有可留下的档案');
+    if (!profilesDiffer(delivery.run, skill, model)) throw new Conflict('这次做成和档案一样，不用留下');
+    const marker = keepMarker(person, body.taskKind);
+    const active = brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker));
+    if (active.length === 1 && active[0]!.sourceRefs.includes(`run:${delivery.run.id}`) && active[0]!.sourceRefs.every(ref => ref === marker || ref === `run:${delivery.run.id}`)) return this.view(conversation, scope, actor);
+    for (const claim of active) brain.retract(person, claim.id, actor, scope.owner);
+    brain.addClaim({
+      owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
+      content: `任务种类：${body.taskKind}\n留下：${delivery.run.id}`,
+      sourceRefs: [marker, `run:${delivery.run.id}`], confidence: 1,
+    }, actor);
+    return this.view(conversation, scope, actor);
+  }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
@@ -621,7 +741,7 @@ export class ConversationService {
     const practiceContent = practice ? `${practice.text}\n引用：${practice.runId}\n证据：${practice.evidenceRefs.join('、')}` : '';
     const taskKind = body.intent === 'execute' ? body.taskKind : undefined;
     const taskSetting = taskKind && this.ownerActor(actor, scope) ? await this.readTaskKind(snapshot, scope, actor, taskKind) : undefined;
-    const settingContent = taskKind && taskSetting ? settingText(taskKind, taskSetting.skill, taskSetting.model) : '';
+    const settingContent = taskKind ? settingText(taskKind, taskSetting?.skill, taskSetting?.model) : '';
     const preferredModel = taskSetting?.model ? { model: taskSetting.model.model, ...(taskSetting.model.provider ? { provider: taskSetting.model.provider } : {}) } : undefined;
     const updated = await this.store.mutate(id, scope, current => {
       const duplicate = current.messages.find(message => message.keyHash === keyHash);

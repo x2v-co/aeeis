@@ -1679,6 +1679,11 @@ export function buildApp(options: Options) {
     if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
     return view;
   });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-kind/keep', async request => {
+    const view = await conversationService().keepTaskKind(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/task-model', async request => {
     const view = await conversationService().setTaskModel(request.params.id, request.body, conversationScope(request), principalOf(request));
     if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
