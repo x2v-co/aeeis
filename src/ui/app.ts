@@ -94,7 +94,8 @@ interface ConversationMessageView {
 }
 interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string }
 interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
-interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery }
+interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
+interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
@@ -150,6 +151,7 @@ let conversationCorrectionId: string | undefined;
 let conversationAttempt: ConversationAttempt | undefined;
 let conversationRenderSignature = '';
 let standingBoundId = '';
+let practiceBoundRunId = '';
 const CONVERSATION_SELECTION = 'aeeis.conversation';
 const CONVERSATION_SCOPE = 'aeeis.conversation-scope';
 const CONVERSATION_PENDING = 'aeeis.conversation-pending';
@@ -949,6 +951,34 @@ function syncLastDelivery(): void {
   if (copy) copy.textContent = delivery ? deliveryDraft(delivery) : '';
   const pin = $<HTMLButtonElement>('last-delivery-pin');
   if (pin) pin.disabled = !delivery || conversationBusy || Boolean(conversationAttempt);
+  syncPracticeDraft(delivery);
+  syncAcceptedPractice();
+}
+function syncPracticeDraft(delivery: LastDelivery | undefined): void {
+  const field = $<HTMLTextAreaElement>('practice-text');
+  const accept = $<HTMLButtonElement>('practice-accept');
+  const locked = !delivery || conversationBusy || Boolean(conversationAttempt);
+  if (field) {
+    const nextRun = delivery?.runId ?? '';
+    const focused = document.activeElement === field;
+    if (!delivery || nextRun !== practiceBoundRunId || !focused) {
+      field.value = delivery ? deliveryDraft(delivery) : '';
+      practiceBoundRunId = nextRun;
+    }
+    field.disabled = locked;
+  }
+  if (accept) accept.disabled = locked;
+}
+function syncAcceptedPractice(): void {
+  const section = $('accepted-practice');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  const practice = life ? conversation?.acceptedPractice : undefined;
+  section.hidden = !practice;
+  const copy = $('accepted-practice-copy');
+  if (copy) copy.textContent = practice?.text ?? '';
+  const retract = $<HTMLButtonElement>('accepted-practice-retract');
+  if (retract) retract.disabled = !practice || conversationBusy || Boolean(conversationAttempt);
 }
 function pinLastDelivery(): void {
   const surface = rosterView();
@@ -2080,6 +2110,63 @@ async function openConversationRun(runId: string): Promise<void> {
   $('run-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   $('run-title').focus({ preventScroll: true });
 }
+async function acceptPractice(text: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  const delivery = conversation?.lastDelivery;
+  if (!conversation || !delivery || conversationBusy || conversationAttempt) return;
+  const trimmed = text.trim();
+  if (!trimmed) {
+    $('conversation-error').textContent = '先写下这句做法。';
+    return;
+  }
+  if (trimmed.length > 500) {
+    $('conversation-error').textContent = '这句话最多 500 字。';
+    return;
+  }
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/practice`, { expectedRevision: conversation.revision, text: trimmed, runId: delivery.runId });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    $('conversation-status').textContent = '已收下这句做法。讨论不会改它。下一次明确创建 Run 时，会作为不可信材料带进去。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再收下这句。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+async function retractPractice(): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  const practice = conversation?.acceptedPractice;
+  if (!conversation || !practice || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/practice/retract`, { expectedRevision: conversation.revision, claimId: practice.claimId });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    $('conversation-status').textContent = '已撤回这句做法。之后的 Run 不再带上它。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再撤回这句。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
 async function saveStandingInstruction(text: string): Promise<void> {
   const surface = rosterView();
   if (surface !== 'entry' && surface !== 'bot') return;
@@ -2165,6 +2252,12 @@ $('standing-clear')?.addEventListener('click', () => {
   void saveStandingInstruction('').catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
 $('last-delivery-pin')?.addEventListener('click', () => pinLastDelivery());
+$('practice-accept')?.addEventListener('click', () => {
+  void acceptPractice($<HTMLTextAreaElement>('practice-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
+$('accepted-practice-retract')?.addEventListener('click', () => {
+  void retractPractice().catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('execution-review')?.addEventListener('change', () => {
   localStorage.setItem('aeeis.execution-review', executionReviewValue());

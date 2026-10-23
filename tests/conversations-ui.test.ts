@@ -77,6 +77,25 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       target.revision++;
       return response(target);
     }
+    if (url.endsWith('/practice/retract')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再撤回这句' }, 409);
+      if (!target.acceptedPractice || target.acceptedPractice.claimId !== body.claimId) return response({ error: '这个人还没有收下的做法' }, 409);
+      delete target.acceptedPractice;
+      return response(target);
+    }
+    if (url.endsWith('/practice')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再收下这句' }, 409);
+      const text = String(body.text ?? '').trim();
+      if (!target.lastDelivery || body.runId !== target.lastDelivery.runId) return response({ error: '只能收下这个人上次做成的那一次' }, 409);
+      target.acceptedPractice = { claimId: 'brain_practice', text, runId: body.runId, evidenceRefs: ['artifact_later'] };
+      return response(target);
+    }
     if (url.endsWith('/messages')) {
       const target = conversationFor(url);
       if (!target) return response({ error: 'Unknown conversation' }, 404);
@@ -1149,5 +1168,59 @@ describe('entry bots and group chats', () => {
     expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain('先列已完成的条目');
     el('gb-new-group').click();
     expect(el('last-delivery').hidden).toBe(true);
+  });
+  it('accepts one practice sentence from the latest delivery and keeps discussion from saving it', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    expect(el('last-delivery').hidden).toBe(true);
+    expect(el('accepted-practice').hidden).toBe(true);
+    h.view.lastDelivery = { taskId: 'task_b', taskTitle: '周报', runId, planSummary: '先列已完成的条目', artifactTitles: ['周报稿'] };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => {
+      expect(el('last-delivery').hidden).toBe(false);
+      expect(el<HTMLTextAreaElement>('practice-text').value).toBe('周报。先列已完成的条目。周报稿');
+      expect(el<HTMLButtonElement>('practice-accept').disabled).toBe(false);
+    });
+    fill('practice-text', '先核对栏目再交周报');
+    el('practice-accept').click();
+    await vi.waitFor(() => {
+      expect(el('conversation-status').textContent).toContain('已收下这句做法');
+      expect(el('accepted-practice').hidden).toBe(false);
+      expect(el('accepted-practice-copy').textContent).toBe('先核对栏目再交周报');
+      expect(el<HTMLButtonElement>('practice-accept').disabled).toBe(false);
+    });
+    const accepted = h.posts.find(post => post.url.endsWith('/practice'));
+    expect(accepted?.body).toEqual({ expectedRevision: 1, text: '先核对栏目再交周报', runId });
+    expect(accepted?.body).not.toHaveProperty('runOptions');
+    fill('conversation-text', '讨论不改做法');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(h.posts.filter(post => post.url.endsWith('/practice'))).toHaveLength(1);
+    expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain('先核对栏目再交周报');
+    await vi.waitFor(() => expect(doc().querySelector('[data-bot-id="demo.research"]')).toBeTruthy());
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.research"]')!.click();
+    await vi.waitFor(() => {
+      expect(el('entry-title').textContent).toBe('研究');
+      expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
+    });
+    expect(el('accepted-practice').hidden).toBe(true);
+    expect(el('last-delivery').hidden).toBe(true);
+    el('gb-new-group').click();
+    expect(el('entry-title').textContent).toBe('新建群聊');
+    expect(el('accepted-practice').hidden).toBe(true);
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="aeeis"]')!.click();
+    await vi.waitFor(() => {
+      expect(el('entry-title').textContent).toBe('AEEIS');
+      expect(el('accepted-practice').hidden).toBe(false);
+      expect(el<HTMLButtonElement>('accepted-practice-retract').disabled).toBe(false);
+    });
+    clickText('撤回这句');
+    await vi.waitFor(() => {
+      expect(el('conversation-status').textContent).toContain('已撤回这句做法');
+      expect(el('accepted-practice').hidden).toBe(true);
+    });
+    expect(h.posts.find(post => post.url.endsWith('/practice/retract'))?.body).toEqual({ expectedRevision: 2, claimId: 'brain_practice' });
+    expect(h.view.acceptedPractice).toBeUndefined();
   });
 });
