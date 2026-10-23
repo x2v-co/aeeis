@@ -85,7 +85,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released'; ready: boolean } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -1885,6 +1885,12 @@ async function renameGroup(): Promise<void> {
   roomSummaries = roomSummaries.map(item => item.id === updated.id ? { ...item, ...updated } : item);
   renderGroups(roomSummaries);
 }
+function machineLine(machine: { state: 'absent' | 'present' | 'released'; ready: boolean }): string {
+  if (machine.state === 'released') return '这件工作的机器已经收掉。';
+  if (machine.state === 'present' && machine.ready) return '这件工作有一台机器，还在。看一眼不会执行。';
+  if (machine.state === 'present') return '这件工作的机器还没准备好。看一眼不会启动它。';
+  return '这件工作还没有机器。';
+}
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
   document.body.classList.toggle('conversation-mode', conversationEnabled);
@@ -1930,6 +1936,7 @@ function renderConversation(): void {
         name.append(preview);
       }
       if (task.pendingQuestion) name.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
+      if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
       const status = document.createElement('td');
       status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
       const actions = document.createElement('td');

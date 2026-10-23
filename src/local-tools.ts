@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, realpath, rename } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
-import { DockerSandbox, SandboxError, sandboxConfigSchema } from './docker-sandbox.js';
+import { DockerSandbox, SandboxError, sandboxConfigSchema, type RunMachineRecord } from './docker-sandbox.js';
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
@@ -75,6 +75,7 @@ export class LocalToolGateway implements ToolGateway {
       if (run.expired || ['succeeded', 'failed', 'cancelled'].includes(await status(run.runId))) await this.release(run.runId);
     }
   }
+  describe(runId: string): Promise<RunMachineRecord | undefined> { return this.sandbox.describe(runId); }
   static async load(filename: string): Promise<LocalToolGateway> {
     const config = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
     config.workspaceRoot = resolve(dirname(filename), config.workspaceRoot);
