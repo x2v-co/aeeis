@@ -133,7 +133,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
 }
 export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
-  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads) : undefined;
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
@@ -1650,12 +1650,22 @@ export function buildApp(options: Options) {
   }
   const conversationScope = (request: FastifyRequest) => ({ owner: principalOf(request).id, tenantId: principalOf(request).tenantId });
   app.get('/api/conversations', async request => conversationService().list(conversationScope(request)));
-  app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request))));
-  app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request)));
-  app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request)));
-  app.post<{ Params: { id: string } }>('/api/conversations/:id/standing', async request => conversationService().setStanding(request.params.id, request.body, conversationScope(request)));
+  app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request), principalOf(request))));
+  app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/standing', async request => conversationService().setStanding(request.params.id, request.body, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/practice/retract', async request => {
+    const view = await conversationService().retractPractice(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/practice', async request => {
+    const view = await conversationService().acceptPractice(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
   app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
-    const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request));
+    const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request), principalOf(request));
     // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.
     if (options.dispatcher?.setSchedulingRank) {
       for (const task of view.tasks) {
@@ -1667,10 +1677,10 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/notifications/sync', async request => {
     z.object({}).strict().parse(request.body ?? {});
-    return conversationService().syncNotifications(request.params.id, conversationScope(request));
+    return conversationService().syncNotifications(request.params.id, conversationScope(request), principalOf(request));
   });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/messages', async (request, reply) => {
-    const result = await conversationService().post(request.params.id, request.body, conversationScope(request), request.headers['idempotency-key'], Boolean(options.engine && options.dispatcher));
+    const result = await conversationService().post(request.params.id, request.body, conversationScope(request), request.headers['idempotency-key'], Boolean(options.engine && options.dispatcher), principalOf(request));
     if (result.runId) {
       const run = await options.repository.get(result.runId, conversationScope(request));
       if (isBootRecoverableRun(run.status)) await notify(run.id);

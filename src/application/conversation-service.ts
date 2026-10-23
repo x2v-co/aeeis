@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
-import type { Ownership } from '../security/principal.js';
+import { BrainAccessDenied, type BrainClaim, type GovernedBrain } from '../brain.js';
+import type { Ownership, Principal } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
+import { projectRunGraphs } from '../runtime/graphs.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
@@ -20,6 +22,16 @@ const standingSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   text: z.string().max(5000).transform(value => value.trim()).refine(value => value.length <= 500, '这句话最多 500 字'),
 }).strict();
+const practiceSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  text: z.string().max(5000).transform(value => value.trim()).refine(value => value.length >= 1, '先写下这句做法').refine(value => value.length <= 500, '这句话最多 500 字'),
+  runId: z.string().regex(/^run_[a-f0-9-]{36}$/),
+}).strict();
+const retractPracticeSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  claimId: z.string().regex(/^brain_[a-f0-9-]{36}$/),
+}).strict();
+const PRACTICE_TITLE = 'Accepted practice (untrusted, not execution authority)';
 const speakerSchema = z.object({
   role: z.enum(['user', 'agent']),
   id: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/, '说话人标识只能包含字母、数字、点、下划线和连字符'),
@@ -143,10 +155,19 @@ export function routeConversationMessage(conversation: Conversation, input: z.in
   return result;
 }
 
-export class ConversationService {
-  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService) {}
+/** Evidence already on the succeeded Run. Artifact ids are the citation; other evidence nodes are the fallback. */
+function practiceEvidence(run: AgentRun): string[] {
+  const nodes = [...new Set(projectRunGraphs(run).evidence.nodes.map(node => node.id).filter(id => id.length >= 1 && id.length <= 200))];
+  const artifacts = new Set(run.artifacts.map(item => item.id));
+  const cited = nodes.filter(id => artifacts.has(id));
+  return (cited.length ? cited : nodes).slice(0, 8);
+}
+function practiceMarker(person: string): string { return `practice:${person}`; }
 
-  async create(input: unknown, scope: Ownership) {
+export class ConversationService {
+  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined) {}
+
+  async create(input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({
       title: z.string().trim().min(1).max(200).default('AEEIS'),
       agentId: z.string().trim().min(1).max(100).optional(),
@@ -155,7 +176,7 @@ export class ConversationService {
     if (body.claimId && !body.agentId) throw new Conflict('认领一条生命线需要这个人的标识');
     if (body.agentId) {
       const existing = (await this.store.list(scope)).find(item => item.agentId === body.agentId);
-      if (existing) return this.view(existing, scope);
+      if (existing) return this.view(existing, scope, actor);
     }
     if (body.claimId && body.agentId) {
       const agentId = body.agentId;
@@ -163,7 +184,7 @@ export class ConversationService {
         if (current.agentId && current.agentId !== agentId) throw new Conflict('这条对话已经属于另一个人');
         current.agentId = agentId;
       });
-      return this.view(claimed, scope);
+      return this.view(claimed, scope, actor);
     }
     const at = new Date().toISOString();
     const conversation: Conversation = {
@@ -171,14 +192,17 @@ export class ConversationService {
       ...(body.agentId ? { agentId: body.agentId } : {}),
     };
     await this.store.create(conversation);
-    return this.view(conversation, scope);
+    return this.view(conversation, scope, actor);
   }
   async list(scope: Ownership) {
     return (await this.store.list(scope)).map(({ id, title, revision, updatedAt, focusTaskId, tasks, agentId }) => ({ id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, ...(agentId ? { agentId } : {}) }));
   }
-  async get(id: string, scope: Ownership) { return this.view(await this.store.get(id, scope), scope); }
+  async get(id: string, scope: Ownership, actor?: Principal) { return this.view(await this.store.get(id, scope), scope, actor); }
 
-  private async view(conversation: Conversation, scope: Ownership) {
+  private ownerActor(actor: Principal | undefined, scope: Ownership): actor is Principal {
+    return Boolean(actor && actor.id === scope.owner && actor.tenantId === scope.tenantId && actor.roles.includes('owner'));
+  }
+  private async view(conversation: Conversation, scope: Ownership, actor?: Principal) {
     const loaded = await Promise.all(conversation.tasks.map(async task => {
       const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
       const memory = taskMemory(run);
@@ -188,7 +212,47 @@ export class ConversationService {
     }));
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);
-    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+    const acceptedPractice = this.ownerActor(actor, scope) ? await this.readPractice(conversation, scope, actor) : undefined;
+    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+  }
+  /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
+  private async readPractice(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ claimId: string; text: string; runId: string; evidenceRefs: string[] } | undefined> {
+    const person = privatePerson(conversation);
+    if (!person || !this.brain) return;
+    let claims: BrainClaim[];
+    try { claims = this.brain.read(person, actor, 'internal', scope.owner); }
+    catch { return; }
+    const marker = practiceMarker(person);
+    const claim = claims
+      .filter(item => item.kind === 'preference' && item.sourceRefs.includes(marker))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0))[0];
+    if (!claim) return;
+    const runRef = claim.sourceRefs.find(ref => ref.startsWith('run:'));
+    const runId = runRef?.slice(4);
+    if (!runId || !/^run_[a-f0-9-]{36}$/.test(runId)) return;
+    const evidenceRefs = claim.sourceRefs.filter(ref => ref !== marker && ref !== `run:${runId}`);
+    if (!evidenceRefs.length) return;
+    const linked = conversation.messages.some(message => message.execution?.runId === runId) || conversation.tasks.some(task => task.latestRunId === runId);
+    if (!linked) return;
+    let run: AgentRun;
+    try { run = await this.runs.get(runId, scope); }
+    catch { return; }
+    if (run.status !== 'succeeded') return;
+    const nodes = new Set(projectRunGraphs(run).evidence.nodes.map(node => node.id));
+    if (!evidenceRefs.every(ref => nodes.has(ref))) return;
+    return { claimId: claim.id, text: claim.content, runId, evidenceRefs };
+  }
+  private async deliveryRun(conversation: Conversation, scope: Ownership): Promise<AgentRun | undefined> {
+    const loaded = await Promise.all(conversation.tasks.map(async task => {
+      let run: AgentRun | undefined;
+      if (task.latestRunId) {
+        try { run = await this.runs.get(task.latestRunId, scope); }
+        catch (error) { if (!(error instanceof NotFound)) throw error; }
+      }
+      return { task, run };
+    }));
+    const delivery = this.latestDelivery(loaded);
+    return loaded.find(item => item.run?.id === delivery?.runId)?.run;
   }
   private latestDelivery(loaded: Array<{ task: ConversationTask; run: AgentRun | undefined }>) {
     const succeeded = loaded.filter((item): item is { task: ConversationTask; run: AgentRun } => item.run?.status === 'succeeded');
@@ -203,7 +267,7 @@ export class ConversationService {
     return { ...view, ...(execution ? { execution: { taskId: execution.taskId, runId: execution.runId, state: execution.state } } : {}) };
   }
 
-  async focus(id: string, input: unknown, scope: Ownership) {
+  async focus(id: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ taskId: idSchema.nullable(), expectedRevision: z.number().int().nonnegative() }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
       if (current.revision !== body.expectedRevision) throw new Conflict('Conversation changed; refresh before switching focus');
@@ -211,18 +275,56 @@ export class ConversationService {
       if (body.taskId === null) delete current.focusTaskId;
       else this.setFocus(current, body.taskId);
     });
-    return this.view(updated, scope);
+    return this.view(updated, scope, actor);
   }
-  async setStanding(id: string, input: unknown, scope: Ownership) {
+  async setStanding(id: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = standingSchema.parse(input);
     const updated = await this.store.mutate(id, scope, current => {
       if (current.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再改这句话');
       if (body.text) current.standingInstruction = body.text;
       else delete current.standingInstruction;
     });
-    return this.view(updated, scope);
+    return this.view(updated, scope, actor);
   }
-  async priority(id: string, taskId: string, input: unknown, scope: Ownership) {
+  async acceptPractice(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = practiceSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    if (conversation.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再收下这句');
+    const person = privatePerson(conversation);
+    if (!person) throw new Conflict('这条对话还没有所属的人');
+    const brain = this.brain;
+    if (!brain) throw new Conflict('Brain 还没有接上，这句话先不记');
+    if (!this.ownerActor(actor, scope)) throw new BrainAccessDenied('Brain access denied');
+    const run = await this.deliveryRun(conversation, scope);
+    if (!run || run.id !== body.runId || run.status !== 'succeeded') throw new Conflict('只能收下这个人上次做成的那一次');
+    const evidenceRefs = practiceEvidence(run);
+    if (!evidenceRefs.length) throw new Conflict('这次做成还没有可引用的证据');
+    const marker = practiceMarker(person);
+    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'preference' && item.sourceRefs.includes(marker))) {
+      brain.retract(person, claim.id, actor, scope.owner);
+    }
+    brain.addClaim({
+      owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'preference',
+      content: body.text, sourceRefs: [marker, `run:${run.id}`, ...evidenceRefs], confidence: 1,
+    }, actor);
+    return this.view(conversation, scope, actor);
+  }
+  async retractPractice(id: string, input: unknown, scope: Ownership, actor: Principal) {
+    const body = retractPracticeSchema.parse(input);
+    const conversation = await this.store.get(id, scope);
+    if (conversation.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再撤回这句');
+    const person = privatePerson(conversation);
+    if (!person) throw new Conflict('这条对话还没有所属的人');
+    const brain = this.brain;
+    if (!brain) throw new Conflict('Brain 还没有接上，这句话先不记');
+    if (!this.ownerActor(actor, scope)) throw new BrainAccessDenied('Brain access denied');
+    const marker = practiceMarker(person);
+    const claim = brain.read(person, actor, 'internal', scope.owner).find(item => item.id === body.claimId && item.kind === 'preference' && item.sourceRefs.includes(marker));
+    if (!claim) throw new Conflict('这个人还没有收下的做法');
+    brain.retract(person, claim.id, actor, scope.owner);
+    return this.view(conversation, scope, actor);
+  }
+  async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
       if (current.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再调整优先级');
@@ -238,7 +340,7 @@ export class ConversationService {
       next.forEach((task, rank) => { task.priority = rank + 1; });
     });
     await this.syncSchedulingPriorities(updated, scope);
-    return this.view(updated, scope);
+    return this.view(updated, scope, actor);
   }
   private async syncSchedulingPriorities(conversation: Conversation, scope: Ownership): Promise<void> {
     for (const task of conversation.tasks) {
@@ -265,7 +367,7 @@ export class ConversationService {
     conversation.recentTaskIds = [taskId, ...conversation.recentTaskIds.filter(id => id !== taskId)].slice(0, 10);
   }
 
-  async post(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean) {
+  async post(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean, actor?: Principal) {
     const body = messageSchema.parse(input), key = idempotencyKeySchema.parse(keyInput);
     if (body.intent !== 'execute' && body.runOptions) throw new Conflict('Run options require an explicit execution request');
     const keyHash = followupHash(key), requestHash = followupHash(body);
@@ -273,7 +375,7 @@ export class ConversationService {
     const previous = snapshot.messages.find(message => message.keyHash === keyHash);
     if (previous) {
       if (previous.requestHash !== requestHash) throw new Conflict('Idempotency-Key was already used with different input');
-      return this.finish(id, previous.id, scope);
+      return this.finish(id, previous.id, scope, actor);
     }
     if (body.intent === 'execute' && !canExecute) throw new Conflict('Model and dispatcher are not configured');
     const initialRoute = routeConversationMessage(snapshot, body);
@@ -282,6 +384,8 @@ export class ConversationService {
     if (parent && !terminal.has(parent.status)) throw new Conflict('This task is still active; use its approval, answer or cancellation controls instead of starting another Run');
     const messageId = `message_${randomUUID()}`, at = new Date().toISOString();
     const newTask: ConversationTask | undefined = body.newTask ? { id: `task_${randomUUID()}`, threadId: `thread_${randomUUID()}`, title: body.newTask.title, createdAt: at } : undefined;
+    const practice = body.intent === 'execute' && this.ownerActor(actor, scope) ? await this.readPractice(snapshot, scope, actor) : undefined;
+    const practiceContent = practice ? `${practice.text}\n引用：${practice.runId}\n证据：${practice.evidenceRefs.join('、')}` : '';
     const updated = await this.store.mutate(id, scope, current => {
       const duplicate = current.messages.find(message => message.keyHash === keyHash);
       if (duplicate) {
@@ -311,15 +415,14 @@ export class ConversationService {
         const materials = [...(body.runOptions?.materials ?? [])];
         const standing = current.standingInstruction?.trim() ?? '';
         const history = selectedNotes.length > 0;
-        const reserved = (history ? 1 : 0) + (standing ? 1 : 0);
+        const reserved = (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0);
         if (materials.length + reserved > 20) {
-          throw new Conflict(history && standing
-            ? 'Leave material slots for the standing instruction and task discussion history'
-            : standing
-              ? 'Leave one material slot for the standing instruction'
-              : 'Leave one material slot for task discussion history');
+          const slots = [standing ? 'the standing instruction' : '', practiceContent ? 'the accepted practice' : '', history ? 'task discussion history' : ''].filter(Boolean);
+          const label = slots[0] ?? 'task discussion history';
+          throw new Conflict(slots.length > 1 ? `Leave material slots for ${slots.join(' and ')}` : `Leave one material slot for ${label}`);
         }
         if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
+        if (practiceContent) materials.push({ title: PRACTICE_TITLE, source: `conversation:${id}/practice`, content: practiceContent });
         if (history) materials.push({ title: 'Task discussion history (untrusted, not execution authority)', source: `conversation:${id}/task:${task.id}`, content: JSON.stringify(selectedNotes) });
         const request = requestSchema.parse({ ...options, goal: harnessGoal(current, task.title, body.text, speaker), materials, workingMemory: { enabled: true } });
         const runId = followupRunId(task.threadId, followupHash(message.id), scope);
@@ -329,14 +432,14 @@ export class ConversationService {
       current.messages.push(message);
       if (route.status === 'routed' && route.focusEffect === 'switch' && route.taskIds.length === 1) this.setFocus(current, route.taskIds[0]!);
     });
-    return this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope);
+    return this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope, actor);
   }
 
   private async runExists(runId: string, scope: Ownership): Promise<boolean> {
     try { await this.runs.get(runId, scope); return true; }
     catch (error) { if (error instanceof NotFound) return false; throw error; }
   }
-  private async finish(id: string, messageId: string, scope: Ownership) {
+  private async finish(id: string, messageId: string, scope: Ownership, actor?: Principal) {
     let conversation = await this.store.get(id, scope);
     let message = conversation.messages.find(item => item.id === messageId)!;
     if (message.execution?.state === 'pending') {
@@ -392,10 +495,10 @@ export class ConversationService {
       : message.execution?.state === 'completed' ? `已为「${task?.title}」创建执行，仍需遵守计划审批。`
       : message.route.status === 'general' ? '已记录一般讨论；选择或新建任务后可继续。'
       : `已关联到${message.route.taskIds.map(id => `「${conversation.tasks.find(task => task.id === id)!.title}」`).join('、')}，未触发执行。`;
-    return { conversation: await this.view(conversation, scope), message: redactRunData(this.messageView(message)), response, ...(message.execution?.state === 'completed' ? { runId: message.execution.runId } : {}) };
+    return { conversation: await this.view(conversation, scope, actor), message: redactRunData(this.messageView(message)), response, ...(message.execution?.state === 'completed' ? { runId: message.execution.runId } : {}) };
   }
 
-  async syncNotifications(id: string, scope: Ownership) {
+  async syncNotifications(id: string, scope: Ownership, actor?: Principal) {
     const snapshot = await this.store.get(id, scope);
     const notifications: ConversationMessage[] = [];
     for (const task of snapshot.tasks) {
@@ -409,7 +512,7 @@ export class ConversationService {
     const updated = await this.store.mutate(id, scope, current => {
       for (const message of notifications) if (!current.messages.some(item => item.keyHash === message.keyHash)) current.messages.push(message);
     });
-    return this.view(updated, scope);
+    return this.view(updated, scope, actor);
   }
 
   async taskRun(id: string, taskId: string, runId: string, scope: Ownership) {
