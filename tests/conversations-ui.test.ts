@@ -86,6 +86,58 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       delete target.acceptedPractice;
       return response(target);
     }
+    if (url.endsWith('/skill-profile/rollback')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再回滚' }, 409);
+      const skill = target.taskSettings?.skills?.find((item: { taskKind: string; previous?: { methodId: string; version: string; runId: string }; methodId: string; version: string; runId: string }) => item.taskKind === body.taskKind);
+      if (!skill?.previous) return response({ error: '这个任务种类还没有可回滚的上一版' }, 409);
+      skill.methodId = skill.previous.methodId;
+      skill.version = skill.previous.version;
+      skill.runId = skill.previous.runId;
+      delete skill.previous;
+      return response(target);
+    }
+    if (url.endsWith('/skill-profile/retract')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再撤回这份档案' }, 409);
+      const skills = target.taskSettings?.skills ?? [];
+      if (!skills.some((item: { claimId: string }) => item.claimId === body.claimId)) return response({ error: '这个任务种类还没有技能档案' }, 409);
+      target.taskSettings.skills = skills.filter((item: { claimId: string }) => item.claimId !== body.claimId);
+      if (!target.taskSettings.skills.length && !(target.taskSettings.models?.length)) delete target.taskSettings;
+      return response(target);
+    }
+    if (url.endsWith('/skill-profile')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再晋升' }, 409);
+      if (!target.lastDelivery || body.runId !== target.lastDelivery.runId) return response({ error: '只能晋升这个人做成过的那一次' }, 409);
+      target.taskSettings ??= { skills: [], models: target.taskSettings?.models ?? [] };
+      const existing = target.taskSettings.skills.find((item: { taskKind: string }) => item.taskKind === body.taskKind);
+      const next = { claimId: 'brain_skill', taskKind: body.taskKind, methodId: 'project-pulse', version: existing ? '2' : '1', runId: body.runId, evidenceRefs: ['artifact_later'], ...(existing ? { previous: { methodId: existing.methodId, version: existing.version, runId: existing.runId } } : {}) };
+      target.taskSettings.skills = [next, ...target.taskSettings.skills.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind)];
+      return response(target);
+    }
+    if (url.endsWith('/task-model')) {
+      const target = conversationFor(url);
+      if (!target) return response({ error: 'Unknown conversation' }, 404);
+      const body = JSON.parse(request.body);
+      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再改这个任务种类的模型' }, 409);
+      target.taskSettings ??= { skills: target.taskSettings?.skills ?? [], models: [] };
+      if (!body.model) {
+        if (!target.taskSettings.models.some((item: { taskKind: string }) => item.taskKind === body.taskKind)) return response({ error: '这个任务种类还没有选定模型' }, 409);
+        target.taskSettings.models = target.taskSettings.models.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind);
+      } else {
+        const model = { claimId: 'brain_model', taskKind: body.taskKind, model: body.model, ...(body.provider ? { provider: body.provider } : {}) };
+        target.taskSettings.models = [model, ...target.taskSettings.models.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind)];
+      }
+      if (!target.taskSettings.skills.length && !target.taskSettings.models.length) delete target.taskSettings;
+      return response(target);
+    }
     if (url.endsWith('/practice')) {
       const target = conversationFor(url);
       if (!target) return response({ error: 'Unknown conversation' }, 404);
@@ -1222,5 +1274,56 @@ describe('entry bots and group chats', () => {
     });
     expect(h.posts.find(post => post.url.endsWith('/practice/retract'))?.body).toEqual({ expectedRevision: 2, claimId: 'brain_practice' });
     expect(h.view.acceptedPractice).toBeUndefined();
+  });
+  it('keeps a skill profile and a model on the task kind', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    expect(el('task-settings').hidden).toBe(false);
+    expect(el<HTMLButtonElement>('skill-promote').disabled).toBe(true);
+    h.view.lastDelivery = { taskId: 'task_b', taskTitle: '周报', runId, planSummary: '先列已完成的条目', artifactTitles: ['周报稿'] };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(el('last-delivery').hidden).toBe(false));
+    fill('task-kind', '周报');
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('skill-promote').disabled).toBe(false));
+    el('skill-promote').click();
+    await vi.waitFor(() => expect(el('skill-profile-copy').textContent).toContain('project-pulse · 1'));
+    expect(h.posts.find(post => post.url.endsWith('/skill-profile'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报', runId });
+    el('skill-promote').click();
+    await vi.waitFor(() => expect(el('skill-profile-copy').textContent).toContain('project-pulse · 2'));
+    fill('skill-rollback-reason', '口径不稳');
+    el('skill-rollback').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已回滚到上一版'));
+    expect(el('skill-profile-copy').textContent).toContain('project-pulse · 1');
+    expect(h.posts.find(post => post.url.endsWith('/skill-profile/rollback'))?.body).toEqual({ expectedRevision: 1, taskKind: '周报', reason: '口径不稳' });
+    fill('task-model', 'fixture');
+    el('task-model-save').click();
+    await vi.waitFor(() => expect(el('task-model-copy').textContent).toContain('fixture'));
+    const saved = h.posts.find(post => post.url.endsWith('/task-model'));
+    expect(saved?.body).toEqual({ expectedRevision: 1, taskKind: '周报', model: 'fixture' });
+    expect(saved?.body).not.toHaveProperty('runOptions');
+    fill('conversation-text', '讨论不晋升');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(h.posts.filter(post => post.url.includes('/skill-profile'))).toHaveLength(3);
+    expect(h.posts.filter(post => post.url.endsWith('/task-model'))).toHaveLength(1);
+    expect(messagePosts(h).at(-1)?.body.taskKind).toBeUndefined();
+    fill('conversation-target', '__new');
+    fill('conversation-task-title', '下一版周报');
+    fill('conversation-text', '按这个种类做');
+    el('conversation-execute').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    const executed = messagePosts(h).at(-1)?.body;
+    expect(executed.taskKind).toBe('周报');
+    expect(executed.intent).toBe('execute');
+    expect(executed.runOptions.preferredModel).toBeUndefined();
+    expect(JSON.stringify(executed.runOptions)).not.toContain('fixture');
+    await vi.waitFor(() => expect(doc().querySelector('[data-bot-id="demo.research"]')).toBeTruthy());
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.research"]')!.click();
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false));
+    expect(el('task-settings').hidden).toBe(false);
+    expect(el('skill-profile-copy').textContent).not.toContain('project-pulse');
+    el('gb-new-group').click();
+    expect(el('task-settings').hidden).toBe(true);
   });
 });

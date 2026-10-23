@@ -95,7 +95,10 @@ interface ConversationMessageView {
 interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string }
 interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
 interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
-interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice }
+interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
+interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
+interface TaskSettingsView { skills: SkillProfileView[]; models: TaskModelView[] }
+interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice; taskSettings?: TaskSettingsView }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
@@ -173,6 +176,8 @@ let currentRunOpen = !minimalMode;
 let polling = false;
 let goalViewSignature = '';
 let modelConfigured = false;
+let runtimeModel = '';
+let taskModelBound = '';
 let evolutionConfigured = false;
 let taskSchedulerConfigured = false;
 let eventStreamRunId = '';
@@ -979,6 +984,53 @@ function syncAcceptedPractice(): void {
   if (copy) copy.textContent = practice?.text ?? '';
   const retract = $<HTMLButtonElement>('accepted-practice-retract');
   if (retract) retract.disabled = !practice || conversationBusy || Boolean(conversationAttempt);
+  syncTaskSettings();
+}
+function currentTaskKind(): string {
+  return $<HTMLInputElement>('task-kind')?.value.trim() ?? '';
+}
+function syncTaskSettings(): void {
+  const section = $('task-settings');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  section.hidden = !life;
+  const kind = currentTaskKind();
+  const settings = life ? conversation?.taskSettings : undefined;
+  const skill = kind ? settings?.skills.find(item => item.taskKind === kind) : undefined;
+  const model = kind ? settings?.models.find(item => item.taskKind === kind) : undefined;
+  const copy = $('skill-profile-copy');
+  if (copy) {
+    if (skill) copy.textContent = `${skill.methodId} · ${skill.version}，引用 ${skill.runId}`;
+    else if (!kind && settings?.skills.length) copy.textContent = settings.skills.map(item => `${item.taskKind}：${item.methodId} · ${item.version}`).join('；');
+    else copy.textContent = kind ? '这个种类还没有技能档案。' : '这个人还没有按任务种类留下技能档案。';
+  }
+  const modelCopy = $('task-model-copy');
+  if (modelCopy) {
+    if (model) modelCopy.textContent = model.provider ? `${model.model} · ${model.provider}` : model.model;
+    else if (!kind && settings?.models.length) modelCopy.textContent = settings.models.map(item => `${item.taskKind}：${item.model}`).join('；');
+    else modelCopy.textContent = kind ? '这个种类沿用当前运行时。' : '还没有哪个种类单独选了模型。';
+  }
+  const runtime = $('task-runtime-model');
+  if (runtime) runtime.textContent = runtimeModel ? `当前运行时：${runtimeModel}。留空就用它。` : '当前按目录选择模型。留空就继续按目录。';
+  const modelField = $<HTMLInputElement>('task-model');
+  const providerField = $<HTMLInputElement>('task-model-provider');
+  const bound = `${conversation?.id ?? ''}:${kind}`;
+  if (modelField && document.activeElement !== modelField && bound !== taskModelBound) {
+    modelField.value = model?.model ?? '';
+    if (providerField && document.activeElement !== providerField) providerField.value = model?.provider ?? '';
+    taskModelBound = bound;
+  }
+  const locked = !life || !conversation || conversationBusy || Boolean(conversationAttempt);
+  const kindLocked = locked || !kind;
+  $<HTMLInputElement>('task-kind').disabled = locked;
+  if (modelField) modelField.disabled = locked;
+  if (providerField) providerField.disabled = locked;
+  $<HTMLButtonElement>('skill-promote').disabled = kindLocked || !conversation?.lastDelivery;
+  $<HTMLButtonElement>('skill-rollback').disabled = kindLocked || !skill;
+  $<HTMLButtonElement>('skill-retract').disabled = kindLocked || !skill;
+  $<HTMLInputElement>('skill-rollback-reason').disabled = kindLocked || !skill;
+  $<HTMLButtonElement>('task-model-save').disabled = kindLocked;
+  $<HTMLButtonElement>('task-model-clear').disabled = kindLocked || !model;
 }
 function pinLastDelivery(): void {
   const surface = rosterView();
@@ -2167,6 +2219,75 @@ async function retractPractice(): Promise<void> {
     if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
   }
 }
+async function postTaskSetting(path: string, body: Record<string, unknown>, success: string, refreshHint: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  if (!conversation || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/${path}`, { expectedRevision: conversation.revision, ...body });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    taskModelBound = '';
+    acceptConversation(view);
+    $('conversation-status').textContent = success;
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? `。${refreshHint}` : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+async function saveTaskModel(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) {
+    $('conversation-error').textContent = '先写任务种类。';
+    return;
+  }
+  const model = $<HTMLInputElement>('task-model').value.trim();
+  const provider = $<HTMLInputElement>('task-model-provider').value.trim();
+  if (!model) {
+    $('conversation-error').textContent = '先写下这种任务要用的模型，或改回默认。';
+    return;
+  }
+  await postTaskSetting('task-model', { taskKind, model, ...(provider ? { provider } : {}) }, '已记下这个任务种类的模型。讨论不会改它。下一次明确创建这种任务的 Run 时，会冻进那次模型决定。', '请先刷新，再改这个模型。');
+}
+async function clearTaskModel(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) return;
+  await postTaskSetting('task-model', { taskKind }, '已改回默认。这个任务种类不再指定模型。', '请先刷新，再改这个模型。');
+}
+async function promoteSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const delivery = conversation?.lastDelivery;
+  if (!taskKind) {
+    $('conversation-error').textContent = '先写任务种类。';
+    return;
+  }
+  if (!delivery) return;
+  await postTaskSetting('skill-profile', { taskKind, runId: delivery.runId }, '已晋升这次技能。讨论不会改它。下一次明确创建这种任务的 Run 时，会作为不可信材料带进去。', '请先刷新，再晋升。');
+}
+async function rollbackSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const reason = $<HTMLInputElement>('skill-rollback-reason').value.trim();
+  if (!taskKind) return;
+  if (!reason) {
+    $('conversation-error').textContent = '先写下回滚原因。';
+    return;
+  }
+  await postTaskSetting('skill-profile/rollback', { taskKind, reason }, '已回滚到上一版技能。之后这种任务带上的是上一版。', '请先刷新，再回滚。');
+}
+async function retractSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const skill = conversation?.taskSettings?.skills.find(item => item.taskKind === taskKind);
+  if (!taskKind || !skill) return;
+  await postTaskSetting('skill-profile/retract', { taskKind, claimId: skill.claimId }, '已撤回这份技能档案。之后这种任务不再带上它。', '请先刷新，再撤回这份档案。');
+}
 async function saveStandingInstruction(text: string): Promise<void> {
   const surface = rosterView();
   if (surface !== 'entry' && surface !== 'bot') return;
@@ -2214,7 +2335,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
         ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
         ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
-        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
+        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { ...(currentTaskKind() ? { taskKind: currentTaskKind() } : {}), runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
     saveConversationAttempt();
@@ -2255,6 +2376,13 @@ $('last-delivery-pin')?.addEventListener('click', () => pinLastDelivery());
 $('practice-accept')?.addEventListener('click', () => {
   void acceptPractice($<HTMLTextAreaElement>('practice-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
+$('task-kind')?.addEventListener('change', () => { taskModelBound = ''; syncTaskSettings(); });
+$('task-kind')?.addEventListener('input', () => { taskModelBound = ''; syncTaskSettings(); });
+$('task-model-save')?.addEventListener('click', () => { void saveTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('task-model-clear')?.addEventListener('click', () => { void clearTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-promote')?.addEventListener('click', () => { void promoteSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-rollback')?.addEventListener('click', () => { void rollbackSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-retract')?.addEventListener('click', () => { void retractSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('accepted-practice-retract')?.addEventListener('click', () => {
   void retractPractice().catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
@@ -4526,6 +4654,7 @@ async function initialize(): Promise<void> {
     }
     evolutionConfigured = status.evolutionConfigured;
     modelConfigured = status.modelConfigured;
+    runtimeModel = status.model?.model ?? '';
     taskSchedulerConfigured = status.taskSchedulerConfigured;
     authRequired = false;
     quickRunReady = status.modelConfigured && status.modelHealth?.ready !== false;

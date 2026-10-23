@@ -1664,6 +1664,26 @@ export function buildApp(options: Options) {
     if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
     return view;
   });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile/rollback', async request => {
+    const view = await conversationService().rollbackSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile/retract', async request => {
+    const view = await conversationService().retractSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile', async request => {
+    const view = await conversationService().promoteSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-model', async request => {
+    const view = await conversationService().setTaskModel(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
   app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
     const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request), principalOf(request));
     // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.

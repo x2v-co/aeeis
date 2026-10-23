@@ -84,6 +84,11 @@ export const requestSchema = z.object({
   executionReview: z.enum(['required', 'auto', 'yolo']).optional(),
   /** Who proposes the first plan. Missing means the planner. `direct` is admitted only for one read-only deliverable. */
   planning: z.enum(['direct', 'dag']).optional(),
+  /** Owner-selected model for this task kind. The runtime accepts it only when that model is already selectable. */
+  preferredModel: z.object({
+    model: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/),
+    provider: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/).optional(),
+  }).strict().optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),

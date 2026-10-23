@@ -857,7 +857,8 @@ body.conversation-mode #entry-computer { flex: none; white-space: nowrap; }
 body.conversation-mode .conversation-layout { grid-template-columns: 272px minmax(0, 1fr); gap: 0; flex: 1; min-height: 0; height: 100%; }
 body.conversation-mode .conversation-task-pane { overflow: auto; background: #fafafa; border-right: 1px solid var(--line); padding: 8px; }
 body.conversation-mode .conversation-task-pane h3 { margin: 8px 8px 4px; color: var(--muted); font-size: 12px; font-weight: 650; }
-body.conversation-mode .conversation-discussion { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; background: #fff; }
+body.conversation-mode .conversation-discussion { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow-y: auto; background: #fff; }
+body.conversation-mode #conversation-error:not(:empty) { display: block; margin: 8px 16px 64px; }
 body.conversation-mode .entry-bar { display: flex; align-items: center; gap: 12px; flex: none; min-height: 56px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 body.conversation-mode #entry-back { display: none; }
 body.conversation-mode .entry-titles { flex: 1; min-width: 0; }
@@ -908,6 +909,14 @@ body.conversation-mode #practice-text { width: 100%; min-height: 44px; resize: v
 body.conversation-mode #accepted-practice { flex: none; padding: 8px 16px 0; }
 body.conversation-mode #accepted-practice h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #accepted-practice p { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+body.conversation-mode #task-settings { flex: none; padding: 8px 16px 0; }
+body.conversation-mode #task-settings h3 { margin: 0 0 4px; font-size: 13px; }
+body.conversation-mode #task-settings p,
+body.conversation-mode #task-settings label { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+body.conversation-mode #task-settings input { width: 100%; margin: 0 0 6px; }
+body.conversation-mode #task-settings .standing-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+body.conversation-mode #task-settings .standing-actions button,
+body.conversation-mode #task-settings .standing-actions input { width: auto; min-height: 28px; margin: 0; padding: 4px 8px; }
 body.conversation-mode #bot-note { padding: 14px 22px 0; }
 body.conversation-mode #bot-note h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #bot-note p,
