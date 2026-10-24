@@ -85,7 +85,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released'; ready: boolean } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -1891,6 +1891,10 @@ function machineLine(machine: { state: 'absent' | 'present' | 'released'; ready:
   if (machine.state === 'present') return '这件工作的机器还没准备好。看一眼不会启动它。';
   return '这件工作还没有机器。';
 }
+function executionLine(execution: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }> }): string {
+  const label = (state: 'done' | 'current' | 'waiting') => state === 'done' ? '已完成' : state === 'current' ? '正在做' : '还没到';
+  return `执行步骤：${execution.steps.map(step => `${step.title} ${label(step.state)}`).join(' · ')}`;
+}
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
   document.body.classList.toggle('conversation-mode', conversationEnabled);
@@ -1936,6 +1940,10 @@ function renderConversation(): void {
         name.append(preview);
       }
       if (task.pendingQuestion) name.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
+      if (task.execution?.steps.length) {
+        name.append(element('small', executionLine(task.execution), 'conversation-steps'));
+        if (task.execution.evidence?.length) name.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
+      }
       if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
       const status = document.createElement('td');
       status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));

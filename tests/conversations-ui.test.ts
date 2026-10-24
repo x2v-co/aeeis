@@ -1434,4 +1434,28 @@ describe('entry bots and group chats', () => {
     expect(h.posts.every(post => !/sandbox|docker|ensure/.test(post.url))).toBe(true);
     expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器已经收掉。');
   });
+
+  it('shows this Run steps and evidence and does not start work', async () => {
+    const view = fixture();
+    view.tasks[1] = { ...view.tasks[1]!, status: 'needs_approval', execution: { steps: [{ title: '核对证据', state: 'waiting' }, { title: '写下结论', state: 'waiting' }] } };
+    const h = harness(view);
+    start(h.fetch); await ready();
+    const week = doc().querySelector('[data-task-id="task_b"]')!;
+    expect(week.querySelector('.conversation-steps')?.textContent).toBe('执行步骤：核对证据 还没到 · 写下结论 还没到');
+    expect(week.querySelector('.conversation-evidence')).toBeNull();
+    expect(week.textContent).not.toContain('Complete task');
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('执行步骤');
+    view.tasks[1]!.execution = { steps: [{ title: '核对证据', state: 'done' }, { title: '写下结论', state: 'current' }], evidence: ['工作区清单', '已收到补充信息'] };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"] .conversation-steps')?.textContent).toBe('执行步骤：核对证据 已完成 · 写下结论 正在做'));
+    expect(doc().querySelector('[data-task-id="task_b"] .conversation-evidence')?.textContent).toBe('证据：工作区清单、已收到补充信息');
+    expect(h.posts).toEqual([]);
+    expect(h.fetch.mock.calls.some(([url]) => /sandbox|docker|ensure|approve/.test(String(url)))).toBe(false);
+    fill('conversation-text', '讨论不推进步骤');
+    submit();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
+    expect(doc().querySelector('[data-task-id="task_b"] .conversation-steps')?.textContent).toContain('正在做');
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('执行步骤');
+  });
 });

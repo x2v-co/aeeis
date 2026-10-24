@@ -1368,4 +1368,68 @@ describe('single-entry conversation routing', () => {
     expect(unmarked.conversation.tasks.find((item: { title: string }) => item.title === '没有机器读口')).not.toHaveProperty('machine');
     expect(seen.every(id => id === runId)).toBe(true);
   });
+  it('shows this Run plan steps and artifact titles without starting work or copying instructions', async () => {
+    const f = await fixture(), entry = await f.create();
+    const talked = await f.addTask(entry.id, '只讨论');
+    const discussionId = talked.message.route.taskIds[0] as string;
+    expect(talked.conversation.tasks.find((task: { id: string }) => task.id === discussionId)).not.toHaveProperty('execution');
+    const started = await f.addTask(entry.id, '要步骤的工作', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.message.route.taskIds[0] as string;
+    const taskOf = (body: { tasks: Array<{ id: string; execution?: { steps: Array<{ title: string; state: string }>; evidence?: string[] } }> }) => body.tasks.find(item => item.id === taskId);
+    expect(taskOf(started.conversation)).not.toHaveProperty('execution');
+    expect(started.conversation.tasks.find((task: { id: string }) => task.id === discussionId)).not.toHaveProperty('execution');
+    await f.engine.advance(runId);
+    const calls = f.model.complete.mock.calls.length;
+    const waiting = await f.fresh(entry.id);
+    expect(taskOf(waiting)?.execution).toEqual({ steps: [{ title: 'Work', state: 'waiting' }] });
+    expect(JSON.stringify(waiting)).not.toContain('Complete task');
+    expect(waiting.tasks.find((task: { id: string }) => task.id === discussionId)).not.toHaveProperty('execution');
+    const before = await f.repository.get(runId);
+    const fingerprint = { revision: before.revision, status: before.status, allowedTools: before.allowedTools, allowedAgents: before.allowedAgents, maxModelCalls: before.maxModelCalls, modelBudget: before.modelBudget, externalBudget: before.externalBudget };
+    const again = await f.fresh(entry.id);
+    expect(again.revision).toBe(waiting.revision);
+    expect(f.model.complete.mock.calls.length).toBe(calls);
+    expect(taskOf(again)?.execution).toEqual({ steps: [{ title: 'Work', state: 'waiting' }] });
+    const afterRead = await f.repository.get(runId);
+    expect({ revision: afterRead.revision, status: afterRead.status, allowedTools: afterRead.allowedTools, allowedAgents: afterRead.allowedAgents, maxModelCalls: afterRead.maxModelCalls, modelBudget: afterRead.modelBudget, externalBudget: afterRead.externalBudget }).toEqual(fingerprint);
+    await f.repository.mutate(runId, run => {
+      const plan = run.plans.at(-1);
+      if (!plan) throw new Error('missing plan');
+      plan.nodes.push({ id: 'write', title: '写下结论', instruction: 'Do not show this instruction', dependsOn: ['work'] });
+      const current = run.steps.find(item => item.taskId === 'work');
+      if (current) current.status = 'succeeded';
+      run.steps.push({ taskId: 'write', status: 'running', attempts: 1, observations: [] });
+      run.artifacts.push(
+        { id: 'artifact_workspace', taskId: 'work', title: '工作区清单', content: 'Do not show this instruction', evidenceRefs: ['src'], hash: 'ab'.repeat(32), createdAt: run.createdAt },
+        { id: 'artifact_dup', taskId: 'work', title: '  工作区清单  ', content: 'duplicate title', evidenceRefs: [], hash: 'cd'.repeat(32), createdAt: run.createdAt },
+        { id: 'artifact_long', taskId: 'write', title: '证'.repeat(90), content: 'long body', evidenceRefs: [], hash: 'ef'.repeat(32), createdAt: run.createdAt },
+        { id: 'artifact_blank', taskId: 'write', title: '   ', content: 'blank title', evidenceRefs: [], hash: '12'.repeat(32), createdAt: run.createdAt },
+      );
+    });
+    const moved = await f.fresh(entry.id);
+    expect(moved.revision).toBe(waiting.revision);
+    expect(taskOf(moved)?.execution).toEqual({
+      steps: [{ title: 'Work', state: 'done' }, { title: '写下结论', state: 'current' }],
+      evidence: ['工作区清单', `${'证'.repeat(79)}…`],
+    });
+    expect(JSON.stringify(moved)).not.toContain('Do not show this instruction');
+    expect(JSON.stringify(moved)).not.toContain('Complete task');
+    expect(JSON.stringify(moved)).not.toContain('long body');
+    const held = await f.repository.get(runId);
+    const heldPrint = { revision: held.revision, status: held.status, allowedTools: held.allowedTools, allowedAgents: held.allowedAgents, maxModelCalls: held.maxModelCalls, modelBudget: held.modelBudget, externalBudget: held.externalBudget };
+    const discussed = await f.post(entry.id, { text: '讨论不启动步骤', expectedRevision: moved.revision, intent: 'discuss' });
+    expect(discussed.statusCode, discussed.body).toBe(200);
+    expect(discussed.json().runId).toBeUndefined();
+    expect(taskOf(discussed.json().conversation)?.execution).toEqual(taskOf(moved)?.execution);
+    expect(discussed.json().conversation.tasks.find((task: { id: string }) => task.id === discussionId)).not.toHaveProperty('execution');
+    expect(f.model.complete.mock.calls.length).toBe(calls);
+    const after = await f.repository.get(runId);
+    expect({ revision: after.revision, status: after.status, allowedTools: after.allowedTools, allowedAgents: after.allowedAgents, maxModelCalls: after.maxModelCalls, modelBudget: after.modelBudget, externalBudget: after.externalBudget }).toEqual(heldPrint);
+    const other = await f.app.inject({ method: 'GET', url: `/api/conversations/${entry.id}`, headers: { authorization: 'Bearer bob' } });
+    expect(other.statusCode).toBe(404);
+    expect(other.body).not.toContain(runId);
+    expect(other.body).not.toContain('工作区清单');
+    expect(other.body).not.toContain('写下结论');
+  });
 });
