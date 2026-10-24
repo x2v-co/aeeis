@@ -881,8 +881,10 @@ body.conversation-mode #group-composer .quick-input-row button { height: 46px; m
 body.conversation-mode #conversation-composer .quick-input-row button:hover,
 body.conversation-mode #group-composer .quick-input-row button:hover { color: #fff; border-color: var(--ink); background: #2a2a2a; }
 body.conversation-mode #group-speaker,
+body.conversation-mode #group-handoff,
 body.conversation-mode #life-speaker { height: 46px; width: auto; flex: none; min-width: 88px; }
 body.conversation-mode #group-speaker[hidden],
+body.conversation-mode #group-handoff[hidden],
 body.conversation-mode #life-speaker[hidden] { display: none; }
 body.conversation-mode .composer-route { color: var(--muted); font-size: 12px; }
 body.conversation-mode .composer-route summary { width: fit-content; cursor: pointer; }
@@ -1025,6 +1027,10 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-message header { display: flex; gap: 8px; align-items: baseline; }
 .group-message p { margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
 .group-message[data-type="system"] p { padding-left: 0; color: var(--muted); background: transparent; }
+.group-run-card { display: grid; gap: 4px; max-width: 46ch; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.group-run-card strong, .group-run-card small { display: block; }
+.group-run-card small { font-size: 12px; white-space: pre-wrap; }
+.group-run-card button { justify-self: start; margin-top: 4px; }
 .group-mentions { display: flex; flex-wrap: wrap; gap: 6px; }
 .group-mentions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 12px; }
 #group-composer { display: grid; gap: 8px; }

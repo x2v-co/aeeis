@@ -213,6 +213,9 @@ let openGroupId = '';
 let groupDraftOpen = false;
 let groupMembers: RoomMemberSummary[] = [];
 let groupEvents: SessionEventSummary[] = [];
+const handoffViews = new Map<string, ConversationView>();
+let handoffEpoch = 0;
+const CITATION_ID = /^[a-z][a-z0-9_.-]{1,127}$/;
 const draftAgents = new Set<string>();
 let draftPeople: string[] = [];
 const directMembers = new Map<string, string>();
@@ -1312,6 +1315,91 @@ function syncGroupSpeaker(): void {
   select.value = choices.some(choice => choice.id === previous) ? previous : '';
   const view = rosterView();
   select.hidden = view !== 'group' && view !== 'direct';
+  syncGroupHandoff();
+}
+function handoffChoices(): RosterBot[] {
+  const members = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
+  return rosterBots().filter(bot => bot.id === 'aeeis' || members.has(bot.id));
+}
+function syncGroupHandoff(): void {
+  const select = $<HTMLSelectElement>('group-handoff');
+  if (!select) return;
+  const previous = select.value;
+  const choices = handoffChoices();
+  select.replaceChildren();
+  const stay = document.createElement('option');
+  stay.value = '';
+  stay.textContent = '只留在会话里';
+  select.append(stay);
+  for (const bot of choices) {
+    const option = document.createElement('option');
+    option.value = bot.id;
+    option.textContent = `交给${bot.name}`;
+    select.append(option);
+  }
+  select.value = choices.some(bot => bot.id === previous) ? previous : '';
+  select.hidden = rosterView() !== 'group';
+}
+function handoffCitation(event: SessionEventSummary): { conversationId: string; taskId: string; agentId?: string } | undefined {
+  const refs = event.evidenceRefs ?? [];
+  const conversationId = refs.find(id => id.startsWith('conv_') && CITATION_ID.test(id));
+  const taskId = refs.find(id => id.startsWith('task_') && CITATION_ID.test(id));
+  if (!conversationId || !taskId) return;
+  const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && botById(id));
+  return agentId ? { conversationId, taskId, agentId } : { conversationId, taskId };
+}
+function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void {
+  const cite = handoffCitation(event);
+  if (!cite) return;
+  const view = handoffViews.get(cite.conversationId);
+  const task = view?.tasks.find(candidate => candidate.id === cite.taskId);
+  const card = element('div', '', 'group-run-card');
+  card.dataset.handoff = cite.taskId;
+  const named = cite.agentId ? botById(cite.agentId) : undefined;
+  const viewed = !named && view?.agentId ? botById(view.agentId) : undefined;
+  const person = named?.name ?? cite.agentId ?? viewed?.name ?? view?.agentId ?? '这个人';
+  card.append(element('strong', `交给${person}`));
+  if (!view) card.append(element('small', '正在读取这件事。看一眼不会执行。'));
+  else if (!task) card.append(element('small', '这条讨论不在这个人的对话里。'));
+  else {
+    card.append(element('small', task.title));
+    const state = task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status);
+    card.append(element('small', state));
+    if (task.pendingApproval) card.append(element('small', `待批准：${task.pendingApproval.summary}`, 'conversation-plan'));
+    if (task.pendingQuestion) card.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
+    if (task.execution?.steps.length) {
+      card.append(element('small', executionLine(task.execution), 'conversation-steps'));
+      if (task.execution.evidence?.length) card.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
+    }
+  }
+  const bot = named ?? viewed;
+  if (bot) {
+    const open = element('button', `打开${bot.name}`) as HTMLButtonElement;
+    open.type = 'button';
+    open.dataset.openLife = bot.id;
+    open.addEventListener('click', () => { void openLifeThread(bot.id).catch(error => message(errorMessage(error))); });
+    card.append(open);
+  }
+  item.append(card);
+}
+async function refreshHandoffViews(): Promise<void> {
+  const epoch = ++handoffEpoch;
+  const roomId = openGroupId;
+  const ids = [...new Set(groupEvents.flatMap(event => {
+    const cite = handoffCitation(event);
+    return cite ? [cite.conversationId] : [];
+  }))];
+  if (!ids.length || !roomId) return;
+  const views = await Promise.all(ids.map(async id => {
+    try { return await api<ConversationView>(`/conversations/${encodeURIComponent(id)}`); }
+    catch { return undefined; }
+  }));
+  if (epoch !== handoffEpoch || openGroupId !== roomId) return;
+  ids.forEach((id, index) => {
+    const view = views[index];
+    if (view) handoffViews.set(id, view);
+  });
+  renderGroupTranscript();
 }
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
@@ -1359,10 +1447,14 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。选一位 bot，只是标明这句话是它说的；它不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
+    : '这是群聊。选一位 bot，只是标明这句话是它说的；它不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。选「交给」会把这句话记成那个人的一条讨论，不执行，对方不回复。频道接着只读这件事的批准、提问、步骤和证据标题。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。';
+  const sendNote = $('group-send-note');
+  if (sendNote) sendNote.textContent = view === 'direct'
+    ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选「交给」会把这句话记成那个人的一条讨论，不执行，对方不回复。频道接着只读这件事的批准、提问、步骤和证据标题。选一位说话人，只是标明这句话是谁说的。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -1738,6 +1830,7 @@ async function loadGroup(id: string): Promise<void> {
   groupMembers = members.filter(member => member.status === 'active');
   groupEvents = events.items ?? [];
   renderGroupTranscript();
+  void refreshHandoffViews();
 }
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
@@ -1764,6 +1857,7 @@ function renderGroupTranscript(): void {
     const heading = element('header');
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
     item.append(heading, element('p', event.content));
+    appendHandoffCard(item, event);
     list.append(item);
   }
   if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
@@ -1813,6 +1907,79 @@ function entryMentionTitle(text: string, roomTitle: string, kind: string): strin
 function groupIdempotencyKey(): string {
   return `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`;
 }
+function selectedHandoffBot(): RosterBot | undefined {
+  if (rosterView() !== 'group') return;
+  const id = $<HTMLSelectElement>('group-handoff')?.value.trim() ?? '';
+  if (!id) return;
+  return handoffChoices().find(bot => bot.id === id);
+}
+async function recordRosterHandoff(
+  bot: RosterBot,
+  text: string,
+  room: RoomSummary | undefined,
+  spoken: { type: 'agent' | 'principal'; id: string } | undefined,
+  postSession: (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => Promise<unknown>,
+  receipt: (title: string) => string,
+): Promise<string> {
+  const kind = room?.description === '私聊' ? '私聊' : '群聊';
+  const roomTitle = room?.title || kind;
+  const title = entryMentionTitle(text, roomTitle, kind);
+  const known = bot.id === 'aeeis' ? aeeisThread() : lifeSummary(bot.id);
+  if (bot.id === 'aeeis') {
+    if (!conversationEnabled || !known) return '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
+    if (conversationBusy || conversationAttempt) return '入口正在发送另一条讨论，这条点名只留在会话里。';
+  } else if (!conversationEnabled) return `还没打开${bot.name}的对话，这句话只留在会话里。`;
+  else if (conversationBusy || conversationAttempt) return `${bot.name}正在发送另一条讨论，这句话只留在会话里。`;
+  const epoch = conversationEpoch;
+  conversationBusy = true;
+  updateConversationControls();
+  let conversationId = known?.id ?? '';
+  let taskId = '';
+  let handoffError = '';
+  let recorded = false;
+  try {
+    let target = known;
+    if (!target) {
+      const created = await api<ConversationView>('/conversations', { title: bot.name, agentId: bot.id });
+      if (epoch !== conversationEpoch) return '';
+      rememberLifeSummary(created);
+      target = created;
+    }
+    conversationId = target.id;
+    const expectedRevision = conversation?.id === conversationId ? conversation.revision : target.revision;
+    const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      text: clipEntryText(`来自${kind}「${roomTitle}」：${text}`, 7000),
+      expectedRevision,
+      newTask: { title },
+      focus: 'keep',
+      intent: 'discuss',
+      ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
+    }, 'POST', groupIdempotencyKey());
+    taskId = result.message.route.taskIds.find(item => CITATION_ID.test(item)) ?? '';
+    if (epoch === conversationEpoch && result.conversation?.id === conversationId) {
+      handoffViews.set(conversationId, result.conversation);
+      if (conversation?.id === conversationId) acceptConversation(result.conversation);
+      else rememberLifeSummary(result.conversation);
+    }
+    recorded = epoch === conversationEpoch;
+  } catch (error) {
+    handoffError = bot.id === 'aeeis'
+      ? `会话已留下，入口讨论没有记上。${errorMessage(error)}`
+      : `会话已留下，${bot.name}的讨论没有记上。${errorMessage(error)}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+  if (handoffError || !recorded) return handoffError;
+  const cited = CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
+  try {
+    await postSession('system', receipt(title), cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : undefined);
+  } catch (error) {
+    return bot.id === 'aeeis'
+      ? `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`
+      : `已交给${bot.name}，回执没有写进会话。${errorMessage(error)}`;
+  }
+  return '';
+}
 async function submitGroupMessage(event: Event): Promise<void> {
   event.preventDefault();
   const input = $<HTMLTextAreaElement>('group-text');
@@ -1827,51 +1994,24 @@ async function submitGroupMessage(event: Event): Promise<void> {
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
   const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
   const spoken = selectedRoomSpeaker();
-  const postSession = (type: 'message' | 'system', content: string) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
+  const postSession = (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
     goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
     ...(type === 'message' && spoken ? { actor: spoken } : {}),
+    ...(evidenceRefs?.length ? { evidenceRefs } : {}),
   });
   await postSession('message', text);
   if (input) input.value = '';
   let handoffError = '';
-  if (mentionsAeeis(text)) {
-    const kind = room?.description === '私聊' ? '私聊' : '群聊';
-    const title = entryMentionTitle(text, room?.title || kind, kind);
-    const target = aeeisThread();
-    if (!conversationEnabled || !target) handoffError = '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
-    else if (conversationBusy || conversationAttempt) handoffError = '入口正在发送另一条讨论，这条点名只留在会话里。';
-    else {
-      const epoch = conversationEpoch;
-      const id = target.id;
-      const expectedRevision = conversation?.id === id ? conversation.revision : target.revision;
-      conversationBusy = true;
-      updateConversationControls();
-      try {
-        const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(id)}/messages`, {
-          text: clipEntryText(`来自${kind}「${room?.title || kind}」：${text}`, 7000),
-          expectedRevision,
-          newTask: { title },
-          focus: 'keep',
-          intent: 'discuss',
-          ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
-        }, 'POST', groupIdempotencyKey());
-        if (epoch === conversationEpoch && result.conversation?.id === id) {
-          if (conversation?.id === id) acceptConversation(result.conversation);
-          else rememberLifeSummary(result.conversation);
-        }
-      } catch (error) {
-        handoffError = `会话已留下，入口讨论没有记上。${errorMessage(error)}`;
-      } finally {
-        if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
-      }
-      if (!handoffError) {
-        try {
-          await postSession('system', `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
-        } catch (error) {
-          handoffError = `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`;
-        }
-      }
+  const chosen = selectedHandoffBot();
+  if (chosen) {
+    handoffError = await recordRosterHandoff(chosen, text, room, spoken, postSession, title => `已交给${chosen.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
+    if (!handoffError) {
+      const select = $<HTMLSelectElement>('group-handoff');
+      if (select) select.value = '';
     }
+  } else if (mentionsAeeis(text)) {
+    const home = botById('aeeis');
+    if (home) handoffError = await recordRosterHandoff(home, text, room, spoken, postSession, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
   }
   await loadGroup(roomId);
   message(handoffError);
