@@ -85,7 +85,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -217,6 +217,8 @@ let groupDraftOpen = false;
 let groupMembers: RoomMemberSummary[] = [];
 let groupEvents: SessionEventSummary[] = [];
 const handoffViews = new Map<string, ConversationView>();
+let channelBoardOpen = false;
+let channelBoardEpoch = 0;
 let handoffEpoch = 0;
 const CITATION_ID = /^[a-z][a-z0-9_.-]{1,127}$/;
 const draftAgents = new Set<string>();
@@ -1619,6 +1621,156 @@ function handoffCitation(event: SessionEventSummary): { conversationId: string; 
   const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && botById(id));
   return agentId ? { conversationId, taskId, agentId } : { conversationId, taskId };
 }
+type BoardColumn = 'capture' | 'ready' | 'doing' | 'blocked' | 'review' | 'done';
+const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
+  { id: 'capture', title: '待整理' },
+  { id: 'ready', title: '待领取' },
+  { id: 'doing', title: '进行中' },
+  { id: 'blocked', title: '阻塞' },
+  { id: 'review', title: '待验收' },
+  { id: 'done', title: '完成' },
+];
+function boardColumn(status: string): BoardColumn | 'failed' {
+  if (status === 'failed' || status === 'cancelled' || status === 'unreadable') return 'failed';
+  if (status === 'discussion') return 'capture';
+  if (status === 'preparing' || status === 'queued') return 'ready';
+  if (status === 'planning' || status === 'running' || status === 'reviewing') return 'doing';
+  if (status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused' || status === 'unknown') return 'blocked';
+  if (status === 'succeeded') return 'review';
+  return 'capture';
+}
+function taskAgeLabel(createdAt: string | undefined): string | undefined {
+  if (!createdAt) return;
+  const hours = (Date.now() - Date.parse(createdAt)) / 3_600_000;
+  if (!Number.isFinite(hours) || hours < 24) return;
+  return `从记下起已停留 ${Math.floor(hours / 24)} 天`;
+}
+function blockedCaption(status: string): string {
+  if (status === 'waiting_external') return '等外部';
+  if (status === 'unknown') return '待核查';
+  if (status === 'needs_approval' || status === 'needs_input' || status === 'paused') return '需要你';
+  return '';
+}
+function taskStateLabel(task: ConversationTaskView): string {
+  if (task.status === 'discussion') return '仅讨论，未执行';
+  if (task.status === 'preparing') return '正在准备执行';
+  return runStatusLabel(task.status);
+}
+function hideChannelBoard(): void {
+  channelBoardOpen = false;
+  channelBoardEpoch += 1;
+  const board = $('channel-board');
+  const task = $('channel-task');
+  const transcript = $('group-transcript');
+  if (board) board.hidden = true;
+  if (task) task.hidden = true;
+  $('channel-task-body')?.replaceChildren();
+  if (transcript) transcript.hidden = false;
+}
+function channelCitations(): Array<{ conversationId: string; taskId: string; agentId?: string }> {
+  const seen = new Set<string>();
+  const citations: Array<{ conversationId: string; taskId: string; agentId?: string }> = [];
+  for (const event of groupEvents) {
+    const cite = handoffCitation(event);
+    if (!cite || seen.has(`${cite.conversationId}\0${cite.taskId}`)) continue;
+    seen.add(`${cite.conversationId}\0${cite.taskId}`);
+    citations.push(cite);
+  }
+  return citations;
+}
+function channelBoardIds(): string[] {
+  return [...new Set(channelCitations().map(cite => cite.conversationId))];
+}
+async function showChannelBoard(): Promise<void> {
+  const roomId = openGroupId;
+  if (!roomId) return;
+  channelBoardOpen = true;
+  const epoch = ++channelBoardEpoch;
+  renderChannelBoard();
+  const loaded = await Promise.all(channelBoardIds().map(async id => {
+    try { return await api<ConversationView>(`/conversations/${encodeURIComponent(id)}`); }
+    catch { return handoffViews.get(id); }
+  }));
+  if (epoch !== channelBoardEpoch || openGroupId !== roomId || !channelBoardOpen) return;
+  for (const view of loaded) if (view) handoffViews.set(view.id, view);
+  renderChannelBoard();
+}
+function renderChannelBoard(): void {
+  const board = $('channel-board');
+  const columns = $('channel-board-columns');
+  const failures = $('channel-board-failures');
+  const note = $('channel-board-note');
+  const transcript = $('group-transcript');
+  const empty = $('group-thread-empty');
+  if (board) board.hidden = !channelBoardOpen;
+  if (transcript) transcript.hidden = channelBoardOpen;
+  if (empty) empty.hidden = channelBoardOpen || groupEvents.some(event => event.operation !== 'retract');
+  if (!channelBoardOpen || !columns || !failures) return;
+  const cards = channelCitations().flatMap(cite => {
+    const view = handoffViews.get(cite.conversationId);
+    const task = view?.tasks.find(item => item.id === cite.taskId);
+    if (!view || !task) return [];
+    const owner = botById(cite.agentId ?? view.agentId ?? '')?.name ?? cite.agentId ?? view.agentId ?? '这个人';
+    return [{ view, task, owner }];
+  });
+  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status) }));
+  const failed = placed.filter(card => card.column === 'failed');
+  failures.replaceChildren();
+  failures.append(document.createTextNode(failed.length ? `有 ${failed.length} 件失败或读不到` : '没有失败或读不到的事'));
+  for (const card of failed) failures.append(boardCard(card.view, card.task, card.owner, 'channel-failure-card'));
+  const doing = placed.filter(card => card.column === 'doing');
+  const loads = new Map<string, number>();
+  for (const card of doing) loads.set(card.owner, (loads.get(card.owner) ?? 0) + 1);
+  const wip = [...loads.entries()].filter(([, count]) => count > 3).map(([owner, count]) => `${owner}进行中已有 ${count} 件。先完成或转交。`);
+  if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip].join(' ');
+  columns.replaceChildren();
+  for (const column of BOARD_COLUMNS) {
+    const section = element('section', '', 'channel-board-column');
+    section.dataset.column = column.id;
+    const items = placed.filter(card => card.column === column.id);
+    section.append(element('h3', `${column.title} ${items.length}`));
+    if (!items.length) section.append(element('small', '这一列还空着'));
+    for (const card of items) section.append(boardCard(card.view, card.task, card.owner, 'channel-board-card'));
+    columns.append(section);
+  }
+  if (!cards.length) columns.append(element('p', '这个频道还没有记下的事。'));
+}
+function boardCard(view: ConversationView, task: ConversationTaskView, owner: string, className: string): HTMLButtonElement {
+  const button = element('button', '', className) as HTMLButtonElement;
+  button.type = 'button';
+  button.dataset.boardTask = task.id;
+  button.dataset.boardOwner = view.agentId ?? '';
+  button.append(element('strong', task.title), element('small', owner), element('small', taskStateLabel(task)));
+  const blocked = blockedCaption(task.status);
+  if (blocked) button.append(element('small', blocked));
+  const age = taskAgeLabel(task.createdAt);
+  if (age) button.append(element('small', age));
+  button.addEventListener('click', () => openChannelTask(view, task, owner));
+  return button;
+}
+function openChannelTask(view: ConversationView, task: ConversationTaskView, owner: string): void {
+  const panel = $('channel-task');
+  const title = $('channel-task-title');
+  const body = $('channel-task-body');
+  if (!panel || !body) return;
+  if (title) title.textContent = task.title;
+  body.replaceChildren();
+  body.append(element('p', `${owner} · ${taskStateLabel(task)}`));
+  const blocked = blockedCaption(task.status);
+  if (blocked) body.append(element('small', blocked));
+  const steps = task.execution?.steps ?? [];
+  body.append(element('small', steps.length ? steps.map(step => `${step.title}（${step.state === 'done' ? '已完成' : step.state === 'current' ? '正在做' : '还没开始'}）`).join('、') : '还没有执行步骤。'));
+  const evidence = task.execution?.evidence ?? (view.lastDelivery?.taskId === task.id ? view.lastDelivery.artifactTitles : undefined) ?? [];
+  body.append(element('small', evidence.length ? `证据：${evidence.join('、')}` : '未验证'));
+  body.append(element('small', '看一眼不会执行，也不会改讨论焦点。'));
+  const runId = task.runId ?? task.latestRunId ?? (view.lastDelivery?.taskId === task.id ? view.lastDelivery.runId : undefined);
+  if (runId) {
+    const read = dashboardButton('阅读全文', () => openChannelArtifact(runId));
+    read.dataset.readArtifact = runId;
+    body.append(read);
+  }
+  panel.hidden = false;
+}
 function hideChannelArtifact(): void {
   const panel = $('channel-artifact');
   const body = $('channel-artifact-body');
@@ -1779,8 +1931,10 @@ function leaveGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  handoffViews.clear();
   groupDraftOpen = false;
   hideChannelArtifact();
+  hideChannelBoard();
   localStorage.removeItem('aeeis.group');
   document.body.classList.remove('group-open', 'group-draft');
   const panel = $('group-panel');
@@ -1795,6 +1949,8 @@ function clearOpenGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  handoffViews.clear();
+  hideChannelBoard();
   localStorage.removeItem('aeeis.group');
 }
 function showRoster(focused = true): void {
@@ -2249,7 +2405,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; groupEvents = []; hideChannelArtifact(); }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; handoffViews.clear(); hideChannelArtifact(); hideChannelBoard(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -2305,7 +2461,9 @@ function renderGroupTranscript(): void {
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
     list.append(item);
   }
-  if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
+  if (empty) empty.hidden = channelBoardOpen || groupEvents.some(event => event.operation !== 'retract');
+  const transcript = $('group-transcript');
+  if (transcript) transcript.hidden = channelBoardOpen;
   syncGroupSpeaker();
   renderMentions();
 }
@@ -3234,6 +3392,13 @@ $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-create')?.addEventListener('submit', event => { void createGroup(event).catch(error => message(errorMessage(error))); });
 $('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
 $('channel-artifact-close')?.addEventListener('click', () => hideChannelArtifact());
+$('channel-board-open')?.addEventListener('click', () => { void showChannelBoard().catch(error => message(errorMessage(error))); });
+$('channel-board-close')?.addEventListener('click', () => { hideChannelBoard(); renderGroupTranscript(); });
+$('channel-task-close')?.addEventListener('click', () => {
+  const task = $('channel-task');
+  if (task) task.hidden = true;
+  $('channel-task-body')?.replaceChildren();
+});
 $('group-text')?.addEventListener('input', () => renderMentions());
 $('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
 $('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });

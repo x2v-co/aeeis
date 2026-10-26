@@ -1430,6 +1430,17 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-run-card strong, .group-run-card small { display: block; }
 .group-run-card small { font-size: 12px; white-space: pre-wrap; }
 .group-run-card button { justify-self: start; margin-top: 4px; }
+#channel-board, #channel-task { display: grid; gap: 8px; }
+#channel-board-columns { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(180px, 1fr); gap: 8px; overflow-x: auto; padding-bottom: 8px; }
+.channel-board-column { display: grid; align-content: start; gap: 8px; min-width: 180px; }
+.channel-board-column h3 { margin: 0; font-size: 13px; }
+.channel-board-card, .channel-failure-card { display: grid; gap: 2px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; text-align: left; }
+.channel-board-card small, .channel-failure-card small { color: var(--muted); font-size: 12px; }
+#channel-task { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+#channel-task h3 { margin: 0; font-size: 14px; }
+#channel-task-body { display: grid; gap: 6px; }
+#channel-task-body p, #channel-task-body small { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#channel-task-body small { color: var(--muted); font-size: 12px; }
 #channel-artifact { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
 #channel-artifact h3 { margin: 0; font-size: 14px; }
 #channel-artifact-body { display: grid; gap: 10px; }
@@ -1441,6 +1452,7 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 #group-composer { display: grid; gap: 8px; }
 #conversation-error { color: #a33f4b; }
 @media (max-width: 780px) {
+  #channel-board-columns { grid-auto-columns: 78%; }
   body.conversation-mode #command-center { padding: 16px 12px; }
   .conversation-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .conversation-task-pane { border-bottom: 1px solid var(--line); padding: 0 0 12px; }

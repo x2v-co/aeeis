@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AEEIS · 项目 Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23171717'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-family='Arial' font-size='32' fill='%23ffffff'%3EA%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=20261026-artifact">
+<link rel="stylesheet" href="/style.css?v=20261026-board">
 </head>
 <body class="gb">
 <a class="skip-link" href="#quick-goal">跳到消息</a>
@@ -393,6 +393,7 @@
 <div class="group-head">
 <p id="group-members" class="muted"></p>
 <span class="group-head-actions">
+<button id="channel-board-open" type="button" class="quiet-button">任务板</button>
 <button id="group-rename" type="button" class="quiet-button">改名</button>
 <button id="chat-archive" type="button" class="quiet-button">归档</button>
 </span>
@@ -404,6 +405,22 @@
 <button id="channel-artifact-close" type="button" class="quiet-button">收起</button>
 </div>
 <div id="channel-artifact-body"></div>
+</section>
+<section id="channel-board" hidden>
+<div class="group-head">
+<h3>任务板</h3>
+<button id="channel-board-close" type="button" class="quiet-button">回到消息</button>
+</div>
+<p id="channel-board-note" class="muted">这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。</p>
+<div id="channel-board-failures" class="muted"></div>
+<div id="channel-board-columns"></div>
+</section>
+<section id="channel-task" hidden>
+<div class="group-head">
+<h3 id="channel-task-title">这件事</h3>
+<button id="channel-task-close" type="button" class="quiet-button">收起</button>
+</div>
+<div id="channel-task-body"></div>
 </section>
 <ol id="group-transcript" aria-label="会话记录"></ol>
 <p id="group-thread-empty" class="muted">还没有消息。写下共同要完成的事，并用 @ 点名下一步交给谁。</p>
