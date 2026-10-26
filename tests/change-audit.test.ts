@@ -187,6 +187,17 @@ describe('Brain and knowledge mutation hooks', () => {
     expect(brain.changeAudit.list()).toHaveLength(changes);
     expect(brain.state().audit.filter(item => item.action === 'retract')).toHaveLength(0);
   });
+  it('records the retraction before the replacement create audit', () => {
+    const brain = new GovernedBrain();
+    const claim = brain.addClaim(claimInput, 'owner');
+    const created = brain.replaceClaims(claim.scopeRef, [claim.id], { ...claimInput, content: 'replacement' }, 'owner');
+    expect(created.content).toBe('replacement');
+    expect(created.state).toBe('active');
+    expect(brain.changeAudit.list().map(entry => entry.reason.trigger)).toEqual(['brain.addClaim', 'brain.retract', 'brain.addClaim']);
+    expect(brain.state().audit.map(item => item.action)).toEqual(['write', 'retract', 'write']);
+    expect(brain.state().claims.find(item => item.id === claim.id)?.state).toBe('retracted');
+    expect(brain.read(claim.scopeRef, 'owner').map(item => item.content)).toEqual(['replacement']);
+  });
   it('rejects tampered Brain checkpoint history', () => {
     const brain = new GovernedBrain(); brain.addClaim(claimInput, 'owner');
     const state = brain.state(); state.changes![0]!.after = { content: 'tampered' };

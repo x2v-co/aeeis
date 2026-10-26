@@ -397,7 +397,13 @@ export class ConversationService {
   }
   private async view(conversation: Conversation, scope: Ownership, actor?: Principal) {
     const loaded = await Promise.all(conversation.tasks.map(async task => {
-      const run = task.latestRunId ? await this.runs.get(task.latestRunId, scope) : undefined;
+      let run: AgentRun | undefined;
+      if (task.latestRunId) {
+        try { run = await this.runs.get(task.latestRunId, scope); }
+        catch (error) {
+          if (!(error instanceof NotFound)) return { run: undefined, task: { ...task, status: 'unreadable' } };
+        }
+      }
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
       const question = pendingQuestion(run);

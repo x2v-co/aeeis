@@ -127,7 +127,8 @@ function frozenRunCanClear(current: AgentRun): boolean {
 function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model', holdForOwner = false): void {
   const mode = current.executionReview ?? 'required';
   if (holdForOwner) {
-    const reason = '主人拒绝了上一份计划，新计划仍等待批准';
+    // 拒绝和「补充要求并重新规划」都走 revise-plan。新计划在 required、auto、yolo 下都停在等待批准。
+    const reason = '主人要求修改计划，新计划仍等待批准';
     current.approval = { planHash: hash, planVersion: version, approved: false, ...(mode === 'required' ? {} : { mode }), reason };
     current.status = 'needs_approval';
     event(current, 'plan.approval_requested', { planHash: hash, planVersion: version, mode, reason });

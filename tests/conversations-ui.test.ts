@@ -252,6 +252,15 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.at(-1)?.body).toEqual({ taskId: 'task_b', expectedRevision: h.view.revision - 1 });
   });
 
+  it('labels an unreadable task as 读不到', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'unreadable' };
+    const h = harness(view);
+    start(h.fetch); await ready();
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('读不到');
+    expect(h.posts).toHaveLength(0);
+  });
+
   it('shows ambiguous choices without executing or silently making a new task', async () => {
     const view = fixture();
     view.messages.push({ id: 'ambiguous', role: 'user', text: '继续那个任务', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a', 'task_b'], focusEffect: 'keep' } });

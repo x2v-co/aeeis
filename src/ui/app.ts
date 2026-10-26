@@ -239,7 +239,7 @@ const DONE_STATUSES = new Set(['succeeded', 'cancelled']);
 function runStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     queued: '排队中', planning: '规划中', needs_approval: '待批准', running: '执行中', reviewing: '复核中',
-    needs_input: '待补充', waiting_external: '待回执', unknown: '待核查', paused: '已暂停', succeeded: '已完成', failed: '失败', cancelled: '已取消',
+    needs_input: '待补充', waiting_external: '待回执', unknown: '待核查', unreadable: '读不到', paused: '已暂停', succeeded: '已完成', failed: '失败', cancelled: '已取消',
     pending: '待处理', ready: '可执行', active: '进行中', in_progress: '进行中', completed: '已完成', done: '已完成', started: '执行中', accepted: '已接收',
     collecting: '收集中', held: '已暂停', approved: '已批准', evaluating: '评估中', shadowing: '影子验证中', canarying: '灰度验证中', promoted: '已晋升', rolled_back: '已回滚',
     scheduled: '已排程', firing: '触发中', projected: '已投影', discovered: '已发现', admitted: '已批准', revoked: '已撤销', archived: '已归档', stopped: '已停止',

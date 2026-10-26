@@ -115,8 +115,24 @@ describe('execution review', () => {
     expect(await engine.advance(planned.id)).toBe('needs_approval');
     const revised = await repository.get(planned.id);
     expect(revised.plans).toHaveLength(2);
-    expect(revised.approval).toMatchObject({ approved: false, mode: 'auto', reason: '主人拒绝了上一份计划，新计划仍等待批准' });
+    expect(revised.approval).toMatchObject({ approved: false, mode: 'auto', reason: '主人要求修改计划，新计划仍等待批准' });
     expect(revised.events.some(event => event.type === 'plan.auto_approved')).toBe(false);
+  });
+
+  it('keeps an owner revision waiting in yolo after the first plan already ran', async () => {
+    const repository = new InMemoryRunRepository();
+    const engine = new AgentEngine(repository, new Fixture('ask'));
+    const created = await engine.create({ goal: '读这张纸条', executionReview: 'yolo' });
+    expect(await engine.advance(created.id)).toBe('running');
+    const running = await repository.get(created.id);
+    expect(running.events.filter(event => event.type === 'plan.auto_approved')).toHaveLength(1);
+    await repository.mutate(created.id, run => { run.status = 'needs_approval'; });
+    await engine.command(created.id, 'revise-plan', { planVersion: running.plans.at(-1)!.version, feedback: '补充一条范围' });
+    expect(await engine.advance(created.id)).toBe('needs_approval');
+    const revised = await repository.get(created.id);
+    expect(revised.plans).toHaveLength(2);
+    expect(revised.approval).toMatchObject({ approved: false, mode: 'yolo', reason: '主人要求修改计划，新计划仍等待批准' });
+    expect(revised.events.filter(event => event.type === 'plan.auto_approved')).toHaveLength(1);
   });
 
   it('lets yolo execute without treating the model judgment as a stop', async () => {
