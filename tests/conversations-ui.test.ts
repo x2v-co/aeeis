@@ -2015,4 +2015,195 @@ describe('entry bots and group chats', () => {
     expect(doc().querySelectorAll('.group-run-card')).toHaveLength(2);
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/messages$/.test(post.url))).toBe(false);
   });
+  it('claims, accepts, and remembers inside the channel without starting a run', async () => {
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; evidenceRefs?: string[]; createdAt: string }>>();
+    const membersByRoom = new Map<string, Array<{ id: string; roomId: string; principalId: string; role: string; status: string; invitedBy: string; createdAt: string; updatedAt: string }>>();
+    const goals: Array<{ id: string; title: string; status: string; createdAt: string; roomId?: string }> = [];
+    const memories: Array<{ id: string; kind: string; scope: string; classification: string; content: string; source: string; confidence: number; state: string }> = [];
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', focusTaskId: undefined as string | undefined, tasks: [] as any[], messages: [] as any[], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      const roomId = decodeURIComponent(String(url).match(/\/rooms\/([^/?]+)/)?.[1] ?? '');
+      if (url === '/api/rooms' && method === 'POST') {
+        const room = { id: 'room_phase', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        rooms.unshift(room);
+        return response(room);
+      }
+      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (String(url).endsWith('/members') && method === 'POST') {
+        const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
+        membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
+        return response(member);
+      }
+      if (String(url).endsWith('/members')) return response(membersByRoom.get(roomId) ?? []);
+      if (String(url).endsWith('/goals') && method === 'GET') return response(goals);
+      if (url === '/api/goals' && method === 'POST') {
+        const goal = { id: 'goal_phase', title: body.title, status: 'active', createdAt: date, roomId: body.roomId };
+        goals.push(goal);
+        return response(goal);
+      }
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_phase' });
+      if (String(url).includes('/memories/') && String(url).endsWith('/correct') && method === 'POST') {
+        const memory = memories.find(item => String(url).includes(item.id));
+        if (memory) { memory.content = body.content; memory.state = 'active'; }
+        return response(memory ?? {});
+      }
+      if (String(url).includes('/memories/') && String(url).endsWith('/retract') && method === 'POST') {
+        const memory = memories.find(item => String(url).includes(item.id));
+        if (memory) memory.state = 'retracted';
+        return response(memory ?? {});
+      }
+      if (String(url).includes('/memories') && method === 'POST') {
+        const memory = { id: `memory_${memories.length}`, kind: body.kind, scope: body.scope, classification: body.classification, content: body.content, source: body.source, confidence: body.confidence, state: 'active' };
+        memories.push(memory);
+        return response(memory);
+      }
+      if (String(url).includes('/memories')) return response(memories);
+      if (String(url).includes('/session-events') && method === 'POST') {
+        const list = events.get(roomId) ?? [];
+        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        list.push(event);
+        events.set(roomId, list);
+        return response(event);
+      }
+      if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
+      if (url === '/api/conversations' && method === 'POST' && body?.agentId === 'demo.release') return response(release);
+      if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
+      if (url === '/api/conversations/conv_release/messages' && method === 'POST') {
+        const created = body.newTask ? { id: `task_new_${release.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${release.tasks.length}`, status: 'discussion' } : undefined;
+        if (created) release.tasks.push(created);
+        const route = { status: 'routed', reason: 'new-task', taskIds: created ? [created.id] : [], candidateTaskIds: [], focusEffect: body.focus };
+        release.messages.push({ id: `message_${release.messages.length}`, role: 'user', text: body.text, createdAt: date, route });
+        release.revision++;
+        return response({ conversation: release, message: release.messages.at(-1), response: '已记录讨论，未触发执行。' });
+      }
+      if (url === '/api/runs/run_pause/pause' && method === 'POST') {
+        const task = release.tasks.find(item => item.id === 'task_run');
+        if (task) task.status = 'paused';
+        return response({ id: 'run_pause', status: 'paused' });
+      }
+      if (url === `/api/runs/${runId}` && method === 'GET') return response({
+        id: runId, status: 'succeeded', calls: [], plans: [], artifacts: [], context: { sources: [] }, toolReceipts: [],
+        modelUsage: { tokens: 7, unreportedCalls: 0 },
+      });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    expect(css).toContain('#channel-inbox');
+    expect(css).toContain('.attention-quick-action');
+    el('gb-new-group').click();
+    for (const name of ['发布', '研究']) [...doc().querySelectorAll('#group-candidates label')].find(label => label.textContent?.includes(name))?.querySelector('input')?.click();
+    el<HTMLInputElement>('group-title').value = '阶段二';
+    el<HTMLFormElement>('group-create').requestSubmit();
+    await vi.waitFor(() => expect(el('group-members').textContent).toContain('发布'));
+    release.tasks.push(
+      { id: 'task_ready', title: '待领取的对照', threadId: 'thread_ready', status: 'queued', createdAt: date },
+      { id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } },
+      { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: date, runId: 'run_pause', latestRunId: 'run_pause' },
+    );
+    events.set('room_phase', ['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_ready'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
+    const postsBefore = h.posts.length;
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
+    clickText('领取', el('channel-task-body'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('发布已领取'));
+    expect(h.posts.filter(post => post.body?.type === 'task_update').map(post => post.body.content)).toEqual(['领取：发布']);
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+    const picker = el('channel-task-body').querySelector<HTMLSelectElement>('select')!;
+    picker.value = 'demo.research';
+    clickText('领取', el('channel-task-body'));
+    expect(el('error').textContent).toContain('发布已领取');
+    expect(h.posts.filter(post => post.body?.content === '领取：发布')).toHaveLength(1);
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_done"]')!.click();
+    await vi.waitFor(() => expect(el('channel-task-body').textContent).toContain('花费：7 已报告 tokens'));
+    expect(el('channel-task-body').textContent).toContain('交接：交给发布');
+    expect(el('channel-task-body').textContent).toContain('证据：清单');
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-revise-task]')!.value = '补上回滚';
+    clickText('要求修改', el('channel-task-body'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="capture"]')?.textContent).toContain('补上回滚'));
+    expect(doc().querySelector('[data-column="review"]')?.textContent).toContain('待验收的清单');
+    expect(h.posts.find(post => post.url.endsWith('/messages'))?.body).toMatchObject({ focus: 'keep', intent: 'discuss' });
+    expect(h.posts.find(post => post.url.endsWith('/messages'))?.body).not.toHaveProperty('runOptions');
+    clickText('验收', el('channel-task-body'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="done"]')?.textContent).toContain('待验收的清单'));
+    expect(doc().querySelector('[data-column="review"]')?.textContent).toContain('待验收 0');
+    expect(h.posts.some(post => post.body?.content === '验收通过')).toBe(true);
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_run"]')!.click();
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!.value = '等权限';
+    clickText('标成阻塞', el('channel-task-body'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"]')?.textContent).toContain('正在核对'));
+    expect(h.posts.some(post => post.url.endsWith('/pause'))).toBe(true);
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    for (let index = 0; index < 4; index += 1) {
+      release.tasks.push({ id: `task_busy_${index}`, title: `忙碌 ${index}`, threadId: `thread_busy_${index}`, status: 'running', createdAt: date });
+      events.get('room_phase')!.push({ id: `evt_busy_${index}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `忙碌 ${index}`, evidenceRefs: ['conv_release', `task_busy_${index}`, 'demo.release'], createdAt: date });
+    }
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('忙碌 2'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(el('channel-board-note').textContent).toContain('发布进行中已有'));
+    const beforeAssign = h.posts.filter(post => post.url.endsWith('/messages')).length;
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
+    const assignPicker = el('channel-task-body').querySelector<HTMLSelectElement>('select')!;
+    assignPicker.value = 'demo.release';
+    clickText('分派', el('channel-task-body'));
+    expect(el('error').textContent).toContain('进行中已有');
+    expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(beforeAssign);
+    doc().querySelector<HTMLButtonElement>('[data-bot-profile="demo.release"]')!.click();
+    await vi.waitFor(() => expect(el('channel-bot-body').textContent).toContain('职责：对照发布清单'));
+    expect(el('channel-bot-body').textContent).toContain('权限仍是现在这套');
+    expect(el('channel-bot-body').textContent).toContain('待领取的对照');
+    el('channel-memory-open').click();
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('这个频道还没有记下的事实'));
+    el<HTMLTextAreaElement>('channel-memory-text').value = '供应商只签年付';
+    el<HTMLInputElement>('channel-memory-source').value = '这次讨论';
+    el<HTMLFormElement>('channel-memory-form').requestSubmit();
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('供应商只签年付'));
+    expect(el('channel-memory-list').textContent).toContain('来源：这次讨论');
+    expect(el('channel-memory-list').textContent).toContain('内部');
+    let row = el('channel-memory-list').querySelector('article')!;
+    row.querySelector('textarea')!.value = '供应商改成季付';
+    clickText('修正', row);
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('供应商改成季付'));
+    row = el('channel-memory-list').querySelector('article')!;
+    row.querySelector('input')!.value = '写错了';
+    clickText('撤回', row);
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('这个频道还没有记下的事实'));
+    el('channel-inbox').click();
+    expect(el('error').textContent).toContain('现在没有待处理的事');
+    expect(h.posts.some(post => /\/approve$|\/focus$|\/retry$/.test(post.url))).toBe(false);
+    expect(h.posts.length).toBeGreaterThan(postsBefore);
+  });
+  it('reads handoffs past the first page of channel events', async () => {
+    const first = Array.from({ length: 50 }, (_, index) => ({ id: `evt_old_${index}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'message', content: `旧消息 ${index}`, createdAt: date }));
+    const later = { id: 'evt_later', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '后面的交接', evidenceRefs: ['conv_release', 'task_later', 'demo.release'], createdAt: date };
+    const room = { id: 'room_page', title: '翻页', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_later', title: '后面才记下', threadId: 'thread_later', status: 'discussion', createdAt: date }], messages: [], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_page/members')) return response([{ id: 'member_release', roomId: 'room_page', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_page/session-events')) {
+        if (String(url).includes('cursor=')) return response({ items: [later] });
+        if (String(url).includes('limit=50')) return response({ items: first, nextCursor: '50' });
+        return response({ items: [] });
+      }
+      if (url === '/api/conversations/conv_release') return response(release);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('翻页'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('旧消息 0'));
+    expect(el('group-transcript').textContent).not.toContain('后面才记下');
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(el('channel-board').textContent).toContain('后面才记下'));
+    expect(el('channel-board-note').textContent).not.toContain('还有没读到的交接');
+    expect(h.posts).toHaveLength(0);
+  });
 });

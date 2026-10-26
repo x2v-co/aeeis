@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AEEIS · 项目 Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23171717'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-family='Arial' font-size='32' fill='%23ffffff'%3EA%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=20261026-board">
+<link rel="stylesheet" href="/style.css?v=20261026-phase2">
 </head>
 <body class="gb">
 <a class="skip-link" href="#quick-goal">跳到消息</a>
@@ -394,6 +394,8 @@
 <p id="group-members" class="muted"></p>
 <span class="group-head-actions">
 <button id="channel-board-open" type="button" class="quiet-button">任务板</button>
+<button id="channel-memory-open" type="button" class="quiet-button">频道记忆</button>
+<button id="channel-inbox" type="button" class="quiet-button">收件箱</button>
 <button id="group-rename" type="button" class="quiet-button">改名</button>
 <button id="chat-archive" type="button" class="quiet-button">归档</button>
 </span>
@@ -412,8 +414,45 @@
 <button id="channel-board-close" type="button" class="quiet-button">回到消息</button>
 </div>
 <p id="channel-board-note" class="muted">这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。</p>
+<button id="channel-board-more" type="button" class="quiet-button" hidden>继续读</button>
 <div id="channel-board-failures" class="muted"></div>
 <div id="channel-board-columns"></div>
+</section>
+<section id="channel-memory" hidden>
+<div class="group-head">
+<h3>频道记忆</h3>
+<button id="channel-memory-close" type="button" class="quiet-button">收起</button>
+</div>
+<p class="muted">这些事实属于这个频道。写入带来源和隐私级别。修正留下新的一版，撤回要写原因。看一眼不会执行。</p>
+<div id="channel-memory-list"></div>
+<form id="channel-memory-form">
+<label for="channel-memory-kind">种类</label>
+<select id="channel-memory-kind">
+<option value="fact">事实</option>
+<option value="preference">偏好</option>
+<option value="decision">决定</option>
+<option value="note">备注</option>
+</select>
+<label for="channel-memory-class">隐私</label>
+<select id="channel-memory-class">
+<option value="internal">内部</option>
+<option value="public">公开</option>
+<option value="confidential">机密</option>
+<option value="private">私密</option>
+</select>
+<label for="channel-memory-source">来源</label>
+<input id="channel-memory-source" maxlength="200" placeholder="例如：这次讨论">
+<label for="channel-memory-text">内容</label>
+<textarea id="channel-memory-text" maxlength="2000" required placeholder="写下要记住的事实"></textarea>
+<button type="submit">记下</button>
+</form>
+</section>
+<section id="channel-bot" hidden>
+<div class="group-head">
+<h3 id="channel-bot-title">档案</h3>
+<button id="channel-bot-close" type="button" class="quiet-button">收起</button>
+</div>
+<div id="channel-bot-body"></div>
 </section>
 <section id="channel-task" hidden>
 <div class="group-head">
