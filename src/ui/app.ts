@@ -1619,6 +1619,40 @@ function handoffCitation(event: SessionEventSummary): { conversationId: string; 
   const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && botById(id));
   return agentId ? { conversationId, taskId, agentId } : { conversationId, taskId };
 }
+function hideChannelArtifact(): void {
+  const panel = $('channel-artifact');
+  const body = $('channel-artifact-body');
+  if (panel) panel.hidden = true;
+  if (body) body.replaceChildren();
+}
+async function openChannelArtifact(runId: string): Promise<void> {
+  const panel = $('channel-artifact');
+  const body = $('channel-artifact-body');
+  const roomId = openGroupId;
+  if (!panel || !body || !roomId) return;
+  body.replaceChildren(element('p', '正在读取产物。看一眼不会执行。'));
+  panel.hidden = false;
+  try {
+    const run = await api<RunView>(`/runs/${encodeURIComponent(runId)}`);
+    if (openGroupId !== roomId) return;
+    body.replaceChildren();
+    const artifacts = (run.artifacts ?? []).slice(0, 8);
+    if (!artifacts.length) {
+      body.append(element('p', '这件 Run 还没有写下产物。'));
+      return;
+    }
+    for (const artifact of artifacts) {
+      const block = element('article', '', 'channel-artifact-item');
+      block.append(element('strong', artifact.title.trim() || '未命名产物'));
+      const text = artifact.content.trim();
+      block.append(element('p', text ? (text.length > 4000 ? `${text.slice(0, 4000)}…` : text) : '这篇产物还没有正文。'));
+      if (artifact.evidenceRefs?.length) block.append(element('small', `证据：${artifact.evidenceRefs.slice(0, 8).join('、')}`));
+      body.append(block);
+    }
+  } catch (error) {
+    body.replaceChildren(element('p', errorMessage(error)));
+  }
+}
 function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts: { answer: Map<string, string>; reject: Map<string, string> } = { answer: new Map(), reject: new Map() }): void {
   const cite = handoffCitation(event);
   if (!cite) return;
@@ -1633,15 +1667,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
   card.append(element('strong', `交给${person}`));
   if (!view) card.append(element('small', '正在读取这件事。看一眼不会执行。'));
   else if (!task) card.append(element('small', '这条讨论不在这个人的对话里。'));
-  else {
-    card.append(element('small', task.title));
-    const state = task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status);
-    card.append(element('small', state));
-    if (task.execution?.steps.length) {
-      card.append(element('small', executionLine(task.execution), 'conversation-steps'));
-      if (task.execution.evidence?.length) card.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
-    }
-  }
+  else card.append(element('small', task.title));
   const bot = named ?? viewed;
   if (bot) {
     const open = element('button', `打开${bot.name}`) as HTMLButtonElement;
@@ -1652,6 +1678,32 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
   }
   item.append(card);
   if (!task) return;
+  const taskCard = element('div', '', 'group-run-card');
+  taskCard.dataset.card = 'task';
+  taskCard.dataset.handoff = cite.taskId;
+  const state = task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status);
+  taskCard.append(element('strong', '任务'), element('small', task.title), element('small', state));
+  if (task.execution?.steps.length) taskCard.append(element('small', executionLine(task.execution), 'conversation-steps'));
+  taskCard.append(element('small', '这张卡只描述这件事。看一眼不会执行。'));
+  item.append(taskCard);
+  const delivery = view?.lastDelivery?.taskId === task.id ? view.lastDelivery : undefined;
+  const artifactTitles = task.execution?.evidence?.length ? task.execution.evidence : (delivery?.artifactTitles ?? []);
+  if (artifactTitles.length || delivery?.planSummary) {
+    const artifact = element('div', '', 'group-run-card');
+    artifact.dataset.card = 'artifact';
+    artifact.dataset.handoff = cite.taskId;
+    artifact.append(element('strong', '产物'));
+    if (delivery?.planSummary) artifact.append(element('small', `结论：${delivery.planSummary}`));
+    if (artifactTitles.length) artifact.append(element('small', artifactTitles.join('、')));
+    artifact.append(element('small', '在频道里阅读。不会改讨论焦点，也不会另开一件 Run。'));
+    const artifactRunId = task.runId ?? task.latestRunId ?? delivery?.runId;
+    if (artifactRunId) {
+      const read = dashboardButton('阅读全文', () => openChannelArtifact(artifactRunId));
+      read.dataset.readArtifact = artifactRunId;
+      artifact.append(read);
+    }
+    item.append(artifact);
+  }
   const decision = (kind: string, title: string, copy: string) => {
     const extra = element('div', '', 'group-run-card');
     extra.dataset.card = kind;
@@ -1727,6 +1779,7 @@ function leaveGroup(): void {
   groupMembers = [];
   groupEvents = [];
   groupDraftOpen = false;
+  hideChannelArtifact();
   localStorage.removeItem('aeeis.group');
   document.body.classList.remove('group-open', 'group-draft');
   const panel = $('group-panel');
@@ -1799,7 +1852,7 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。没选说话人时，入口收下这句话，记成一条讨论。@一个人则交给那个人；@所有人或点到多个人时，仍只记成入口的一条讨论。选一位说话人，只是标明这句话是谁说的。都不会执行，也不会调用模型。选「交给」同样只记成讨论。频道里可以批准或拒绝已经摆出来的计划。归档后从群聊列表撤下。';
+    : '这是群聊。没选说话人时，入口收下这句话，记成一条讨论。@一个人则交给那个人；@所有人或点到多个人时，仍只记成入口的一条讨论。选一位说话人，只是标明这句话是谁说的。都不会执行，也不会调用模型。选「交给」同样只记成讨论。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写给入口。@AEEIS 或没点名，都记成一条讨论。@一个人交给那个人。@所有人仍由入口记成一条。不执行，也不调用模型。';
@@ -2195,7 +2248,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; groupEvents = []; }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; hideChannelArtifact(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -3178,6 +3231,7 @@ $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-create')?.addEventListener('submit', event => { void createGroup(event).catch(error => message(errorMessage(error))); });
 $('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
+$('channel-artifact-close')?.addEventListener('click', () => hideChannelArtifact());
 $('group-text')?.addEventListener('input', () => renderMentions());
 $('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
 $('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });

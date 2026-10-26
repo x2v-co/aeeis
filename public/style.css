@@ -1430,6 +1430,12 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-run-card strong, .group-run-card small { display: block; }
 .group-run-card small { font-size: 12px; white-space: pre-wrap; }
 .group-run-card button { justify-self: start; margin-top: 4px; }
+#channel-artifact { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+#channel-artifact h3 { margin: 0; font-size: 14px; }
+#channel-artifact-body { display: grid; gap: 10px; }
+.channel-artifact-item { display: grid; gap: 4px; }
+.channel-artifact-item p, .channel-artifact-item small { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.channel-artifact-item small { color: var(--muted); font-size: 12px; }
 .group-mentions { display: flex; flex-wrap: wrap; gap: 6px; }
 .group-mentions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 12px; }
 #group-composer { display: grid; gap: 8px; }

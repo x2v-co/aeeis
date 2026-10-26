@@ -1132,6 +1132,11 @@ describe('entry bots and group chats', () => {
       }
       if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
       if (url === '/api/conversations' && method === 'POST' && body?.agentId === 'demo.release') return response(release);
+      if (url === `/api/runs/${runId}` && method === 'GET') return response({
+        id: runId, revision: 1, goal: '核对发布说明', status: 'needs_approval', canEdit: true, privacy: 'internal',
+        plans: [], steps: [], events: [], calls: [], context: { sources: [] },
+        artifacts: [{ id: 'artifact_note', title: '工作区清单', content: '周三那一版可以发。', evidenceRefs: ['清单'] }],
+      });
       if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
       if (method === 'POST' && String(url).endsWith('/answer')) {
         const task = release.tasks.find(item => item.pendingQuestion);
@@ -1176,7 +1181,7 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('group-text').value = '请核对发布说明';
     el<HTMLFormElement>('group-composer').requestSubmit();
     const cards = () => [...doc().querySelectorAll<HTMLElement>('.group-run-card')];
-    await vi.waitFor(() => expect(cards().find(item => item.dataset.handoff === 'task_new_1')?.textContent).toContain('仅讨论，未执行'));
+    await vi.waitFor(() => expect(cards().find(item => item.dataset.card === 'task' && item.dataset.handoff === 'task_new_1')?.textContent).toContain('仅讨论，未执行'));
     const posted = messagePosts(h);
     expect(posted).toHaveLength(2);
     expect(h.posts.find(post => post.url === '/api/conversations' && post.body?.agentId === 'demo.release')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
@@ -1217,10 +1222,21 @@ describe('entry bots and group chats', () => {
     groupRow?.click();
     await vi.waitFor(() => expect(cards().find(item => item.dataset.card === 'approval')?.textContent).toContain('待批准：核对发布说明'));
     const updated = cards().find(item => item.dataset.handoff === 'task_new_1' && item.dataset.card === 'handoff');
+    const taskCard = cards().find(item => item.dataset.card === 'task' && item.dataset.handoff === 'task_new_1');
+    const artifact = cards().find(item => item.dataset.card === 'artifact' && item.dataset.handoff === 'task_new_1');
     const approval = cards().find(item => item.dataset.card === 'approval');
     const question = cards().find(item => item.dataset.card === 'question');
-    expect(updated?.textContent).toContain('执行步骤：核对清单 还没到 · 写下结论 正在做');
-    expect(updated?.textContent).toContain('证据：工作区清单');
+    expect(taskCard?.textContent).toContain('执行步骤：核对清单 还没到 · 写下结论 正在做');
+    expect(artifact?.textContent).toContain('工作区清单');
+    expect(artifact?.textContent).toContain('在频道里阅读');
+    clickText('阅读全文', artifact!);
+    await vi.waitFor(() => expect(el('channel-artifact-body').textContent).toContain('周三那一版可以发。'));
+    expect(el('channel-artifact').hidden).toBe(false);
+    expect(el('channel-artifact-body').textContent).toContain('证据：清单');
+    expect(el('detail').hidden).toBe(true);
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    el('channel-artifact-close').click();
+    expect(el('channel-artifact').hidden).toBe(true);
     expect(approval?.textContent).toContain('不会改讨论焦点');
     expect(approval?.querySelector('[data-approve]')).not.toBeNull();
     expect(approval?.querySelector('[data-approve-once]')).not.toBeNull();
@@ -1849,7 +1865,9 @@ describe('entry bots and group chats', () => {
     const owner = row('房主自己的交接');
     expect(owner?.querySelector('strong')?.textContent).toBe('记录');
     await vi.waitFor(() => expect(owner?.querySelector('.group-run-card')?.textContent).toContain('真实交接'));
-    expect(doc().querySelectorAll('.group-run-card')).toHaveLength(1);
+    expect(owner?.querySelectorAll('.group-run-card')).toHaveLength(2);
+    expect(owner?.querySelector('[data-card="task"]')?.textContent).toContain('仅讨论，未执行');
+    expect(doc().querySelectorAll('.group-run-card')).toHaveLength(2);
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/messages$/.test(post.url))).toBe(false);
   });
 });
