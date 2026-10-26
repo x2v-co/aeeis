@@ -157,9 +157,14 @@ export function lifePresence(items: ReadonlyArray<{ id: string; title: string; s
     : status === 'paused' ? 3
     : status === 'planning' || status === 'reviewing' ? 4
     : status === 'running' || status === 'queued' || status === 'preparing' ? 5
+    : status === 'unreadable' ? 8
     : 9;
   const lead = items.filter(item => rank(item.status) < 9).sort((left, right) => rank(left.status) - rank(right.status))[0];
   if (!lead) return { state: 'idle', label: '空闲' };
+  if (lead.status === 'unreadable') {
+    const taskTitle = clipTitle(lead.title);
+    return { state: 'unknown', label: '读不到', taskId: lead.id, ...(taskTitle ? { taskTitle } : {}) };
+  }
   const ranked = rank(lead.status);
   const state = ranked === 0 ? 'waiting' as const : ranked === 1 ? 'unknown' as const : ranked === 2 ? 'blocked' as const : ranked === 3 ? 'paused' as const : ranked === 4 ? 'thinking' as const : 'working' as const;
   const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
@@ -379,7 +384,7 @@ export class ConversationService {
           return { id: task.id, title: task.title, status: run.status };
         } catch (error) {
           if (error instanceof NotFound) return { id: task.id, title: task.title, status: 'discussion' };
-          throw error;
+          return { id: task.id, title: task.title, status: 'unreadable' };
         }
       }));
       return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}) };

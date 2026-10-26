@@ -366,6 +366,19 @@ const migration = `CREATE TABLE IF NOT EXISTS aeeis_conversations (
 CREATE INDEX IF NOT EXISTS aeeis_conversations_scope_idx ON aeeis_conversations(owner, tenant_id, id);
 CREATE INDEX IF NOT EXISTS aeeis_conversations_pending_idx ON aeeis_conversations(id)
   WHERE state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb;
+UPDATE aeeis_conversations AS conversation
+SET state = conversation.state - 'agentId'
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, row_number() OVER (
+      PARTITION BY owner, tenant_id, (state->>'agentId')
+      ORDER BY updated_at DESC, id DESC
+    ) AS n
+    FROM aeeis_conversations
+    WHERE COALESCE(state->>'agentId', '') <> ''
+  ) ranked
+  WHERE n > 1
+);
 CREATE UNIQUE INDEX IF NOT EXISTS aeeis_conversations_agent_uidx ON aeeis_conversations(owner, tenant_id, (state->>'agentId'))
   WHERE state->>'agentId' IS NOT NULL AND state->>'agentId' <> '';`;
 const pendingPredicate = `state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb`;

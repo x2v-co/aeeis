@@ -140,6 +140,22 @@ describe('single-entry conversation routing', () => {
     expect(body).not.toContain(sentence);
     expect(body).not.toContain('还缺发布窗口');
   });
+  it('lists the roster when one run cannot be read', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const started = await f.addTask(release.id, '发布口径', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
+    const get = f.repository.get.bind(f.repository);
+    vi.spyOn(f.repository, 'get').mockImplementation(async (id: string, scope?: { owner: string; tenantId: string }) => {
+      if (id === runId) throw new Error('disk unreadable');
+      return get(id, scope);
+    });
+    const response = await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers });
+    expect(response.statusCode).toBe(200);
+    const listed = response.json() as Array<{ agentId?: string; presence: { state: string; label: string; taskId?: string; taskTitle?: string } }>;
+    expect(listed.find(item => item.agentId === 'demo.release')?.presence).toEqual({ state: 'unknown', label: '读不到', taskId, taskTitle: '发布口径' });
+  });
   it('pins a standing sentence on one person and freezes it only into that person\'s next Run', async () => {
     const f = await fixture();
     const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();

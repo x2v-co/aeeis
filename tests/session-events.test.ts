@@ -203,6 +203,10 @@ describe('Shared Session canonical events', () => {
       actor: { type: 'agent', id: 'demo.release' },
     }, 'alice', 'team-a');
     expect(spoken).toMatchObject({ actorType: 'agent', actorId: 'demo.release', type: 'message', content: '我来对照清单' });
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '编辑代 bot 说', contextManifestId: manifest.id, idempotencyKey: 'editor-bot',
+      actor: { type: 'agent', id: 'demo.release' },
+    }, 'member.editor', 'team-a')).rejects.toThrow('只能由房间主人以 bot 的身份记下这句话');
     const ownerLine = await events.create(room.id, {
       goalId: goal.id, type: 'message', content: '我来说', contextManifestId: manifest.id, idempotencyKey: 'owner-1',
     }, 'alice', 'team-a');

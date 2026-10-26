@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -174,6 +174,18 @@ describe('Brain and knowledge mutation hooks', () => {
       expect(restored.changeAudit.verifyChain()).toBe(true);
       expect(GovernedBrain.fromState({ schemaVersion: 1, claims: [], grants: [], audit: [] }).changeAudit.list()).toEqual([]);
     } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+  it('keeps the previous claim and writes no retract audit when the replacement cannot be saved', () => {
+    const brain = new GovernedBrain();
+    const claim = brain.addClaim(claimInput, 'owner');
+    const changes = brain.changeAudit.list().length;
+    vi.spyOn(brain, 'addClaim').mockImplementation(() => { throw new Error('save failed'); });
+    expect(() => brain.replaceClaims(claim.scopeRef, [claim.id], { ...claimInput, content: 'replacement' }, 'owner')).toThrow('save failed');
+    const active = brain.read(claim.scopeRef, 'owner');
+    expect(active.map(item => item.content)).toEqual(['first']);
+    expect(active[0]?.state).toBe('active');
+    expect(brain.changeAudit.list()).toHaveLength(changes);
+    expect(brain.state().audit.filter(item => item.action === 'retract')).toHaveLength(0);
   });
   it('rejects tampered Brain checkpoint history', () => {
     const brain = new GovernedBrain(); brain.addClaim(claimInput, 'owner');

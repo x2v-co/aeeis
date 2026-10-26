@@ -68,11 +68,16 @@ export class GovernedBrain {
     try {
       for (const claim of targets) {
         const after = { ...claim, state: 'retracted' as const, updatedAt: new Date().toISOString() };
-        this.recordChange(claim, after, principal, 'brain.retract');
         Object.assign(claim, after);
+      }
+      const created = this.addClaim(parsed, actor);
+      for (const snapshot of snapshots) {
+        const claim = (this.claims.get(key) ?? []).find(item => item.id === snapshot.id);
+        if (!claim) continue;
+        this.recordChange(snapshot, claim, principal, 'brain.retract');
         this.record('retract', principal, owner, scopeRef, claim.id, claim);
       }
-      return this.addClaim(parsed, actor);
+      return created;
     } catch (error) {
       const current = this.claims.get(key) ?? [];
       const kept = current.filter(item => beforeIds.has(item.id));
