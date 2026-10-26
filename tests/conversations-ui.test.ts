@@ -252,6 +252,15 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.at(-1)?.body).toEqual({ taskId: 'task_b', expectedRevision: h.view.revision - 1 });
   });
 
+  it('labels an unreadable task as 读不到', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'unreadable' };
+    const h = harness(view);
+    start(h.fetch); await ready();
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('读不到');
+    expect(h.posts).toHaveLength(0);
+  });
+
   it('shows ambiguous choices without executing or silently making a new task', async () => {
     const view = fixture();
     view.messages.push({ id: 'ambiguous', role: 'user', text: '继续那个任务', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a', 'task_b'], focusEffect: 'keep' } });
@@ -611,7 +620,8 @@ describe('single-entry conversation workbench', () => {
     clickText('仅这一次', row);
     await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('执行中'));
     expect(h.posts.find(post => post.url.endsWith('/approve'))?.body).toEqual({ planHash: 'plan-hash', planVersion: 1, duration: 'once' });
-    expect(el('conversation-status').textContent).toContain('这一次不会写成长期做法');
+    expect(el('conversation-status').textContent).toContain('批准记录标为仅这一次');
+    expect(el('conversation-status').textContent).toContain('以后的计划仍要再批');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus') || post.url.endsWith('/revise-plan'))).toHaveLength(0);
     view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', pendingApproval: { planVersion: 2, planHash: 'plan-hash', summary: '第二版' } };
@@ -730,8 +740,10 @@ describe('single-entry conversation workbench', () => {
     expect(paused.textContent).toContain('已暂停');
     expect(paused.querySelector('[data-run-resume]')).not.toBeNull();
     expect(unknown.querySelector('textarea[data-reconcile]')).not.toBeNull();
-    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('提交核查');
-    clickText('提交核查', unknown);
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('提交核查并继续');
+    expect(unknown.querySelector('textarea[data-reconcile]')?.getAttribute('placeholder')).toContain('这件 Run 会继续');
+    expect(unknown.querySelector('textarea[data-reconcile]')?.getAttribute('placeholder')).toContain('再发一遍');
+    clickText('提交核查并继续', unknown);
     expect(el('conversation-error').textContent).toContain('请先写下核查说明');
     expect(h.posts).toHaveLength(0);
     clickText('暂停', active);
@@ -744,9 +756,11 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.find(post => post.url.endsWith('/resume'))?.body).toEqual({});
     const field = doc().querySelector<HTMLTextAreaElement>('[data-task-id="task_c"] textarea[data-reconcile]')!;
     field.value = '供应商已完成';
-    clickText('提交核查', doc().querySelector('[data-task-id="task_c"]')!);
+    clickText('提交核查并继续', doc().querySelector('[data-task-id="task_c"]')!);
     await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_c"]')!.textContent).toContain('执行中'));
     expect(h.posts.find(post => post.url.endsWith('/reconcile'))?.body).toEqual({ reason: '供应商已完成' });
+    expect(el('conversation-status').textContent).toContain('并继续这件 Run');
+    expect(el('conversation-status').textContent).toContain('再发一遍');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus') || post.url.endsWith('/approve'))).toHaveLength(0);
   });

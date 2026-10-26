@@ -316,6 +316,7 @@ export class SessionEventService {
         eventActorId = actorId;
         eventActorType = 'principal';
       } else if (input.actor.type === 'agent') {
+        if ((room.owner ?? 'owner') !== actorId) throw new AeeisConflict('只能由房间主人以 bot 的身份记下这句话');
         const member = members.find(item => item.principalId === input.actor!.id && item.status === 'active' && item.role === 'agent');
         if (!member) throw new AeeisConflict('只能以这个会话里的 bot 身份说话');
         if (!manifest.audience.includes(audienceFor(member.principalId, tenantId))) throw new AeeisConflict('这个 bot 不在这条会话的受众里');

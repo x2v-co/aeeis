@@ -124,8 +124,16 @@ function frozenRunCanClear(current: AgentRun): boolean {
     planText,
   });
 }
-function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model'): void {
+function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model', holdForOwner = false): void {
   const mode = current.executionReview ?? 'required';
+  if (holdForOwner) {
+    // 拒绝和「补充要求并重新规划」都走 revise-plan。新计划在 required、auto、yolo 下都停在等待批准。
+    const reason = '主人要求修改计划，新计划仍等待批准';
+    current.approval = { planHash: hash, planVersion: version, approved: false, ...(mode === 'required' ? {} : { mode }), reason };
+    current.status = 'needs_approval';
+    event(current, 'plan.approval_requested', { planHash: hash, planVersion: version, mode, reason });
+    return;
+  }
   if (mode === 'yolo') {
     current.approval = { planHash: hash, planVersion: version, approved: true, actor: 'policy:yolo', at: now(), mode };
     current.status = 'running';
@@ -2045,11 +2053,12 @@ export class AgentEngine {
       const version = (current.plans.at(-1)?.version ?? 0) + 1;
       current.plans.push({ ...draft, version, hash, createdAt: now(), modelCallOffset: current.calls.length, author: { type: 'model', ...(feedback ? { provenanceRef: feedback.id } : {}) } });
       const feedbackRecord = feedback && current.planProvenance?.find(record => record.id === feedback.id);
+      const awaitingOwner = Boolean(feedbackRecord && feedbackRecord.planVersion === undefined);
       if (feedbackRecord && feedbackRecord.planVersion === undefined) { feedbackRecord.planVersion = version; feedbackRecord.planHash = hash; }
       current.sourceReadUsage = runSourceReadUsage(current);
       current.steps = draft.nodes.map(n => ({ taskId: n.id, status: 'pending', attempts: 0, observations: [] }));
       delete current.plannerRepair;
-      settlePlanApproval(current, hash, version, judgment);
+      settlePlanApproval(current, hash, version, judgment, 'model', awaitingOwner);
       event(current, 'plan.proposed', { version: current.plans.length, hash });
     }, undefined, legacyRequests);
     const planned = await this.repository.get(run.id);

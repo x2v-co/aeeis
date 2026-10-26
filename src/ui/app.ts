@@ -239,7 +239,7 @@ const DONE_STATUSES = new Set(['succeeded', 'cancelled']);
 function runStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     queued: '排队中', planning: '规划中', needs_approval: '待批准', running: '执行中', reviewing: '复核中',
-    needs_input: '待补充', waiting_external: '待回执', unknown: '待核查', paused: '已暂停', succeeded: '已完成', failed: '失败', cancelled: '已取消',
+    needs_input: '待补充', waiting_external: '待回执', unknown: '待核查', unreadable: '读不到', paused: '已暂停', succeeded: '已完成', failed: '失败', cancelled: '已取消',
     pending: '待处理', ready: '可执行', active: '进行中', in_progress: '进行中', completed: '已完成', done: '已完成', started: '执行中', accepted: '已接收',
     collecting: '收集中', held: '已暂停', approved: '已批准', evaluating: '评估中', shadowing: '影子验证中', canarying: '灰度验证中', promoted: '已晋升', rolled_back: '已回滚',
     scheduled: '已排程', firing: '触发中', projected: '已投影', discovered: '已发现', admitted: '已批准', revoked: '已撤销', archived: '已归档', stopped: '已停止',
@@ -1720,9 +1720,10 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     approve.dataset.approve = task.id;
     const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
     once.dataset.approveOnce = task.id;
+    once.title = '记在这次批准记录上。这次仍按当前计划执行，以后的计划仍要再批。';
     const field = document.createElement('textarea');
     field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
-    field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+    field.placeholder = '写下拒绝原因。拒绝后重新规划，新计划仍停在等待批准，不会按这份计划执行。';
     field.dataset.reject = task.id;
     const rejectDraft = drafts.reject.get(task.id);
     if (rejectDraft) field.value = rejectDraft;
@@ -2584,9 +2585,10 @@ function renderConversation(): void {
         approve.dataset.approve = task.id; approve.className = 'decision-primary';
         const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
         once.dataset.approveOnce = task.id;
+        once.title = '记在这次批准记录上。这次仍按当前计划执行，以后的计划仍要再批。';
         const field = document.createElement('textarea');
         field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
-        field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+        field.placeholder = '写下拒绝原因。拒绝后重新规划，新计划仍停在等待批准，不会按这份计划执行。';
         field.dataset.reject = task.id;
         const draft = rejectDrafts.get(task.id);
         if (draft) field.value = draft;
@@ -2623,11 +2625,11 @@ function renderConversation(): void {
       if (runId && (task.status === 'unknown' || task.status === 'waiting_external')) {
         const field = document.createElement('textarea');
         field.className = 'conversation-answer'; field.maxLength = 2000; field.rows = 2;
-        field.placeholder = '写下你确认的结果。核查后才会决定是否恢复。'; field.dataset.reconcile = task.id;
+        field.placeholder = '写下你确认的结果。提交后这件 Run 会继续；如果有一次结果未知的模型调用，会把那次调用再发一遍。'; field.dataset.reconcile = task.id;
         field.setAttribute('aria-label', `核查「${task.title}」`);
         const draft = reconcileDrafts.get(task.id);
         if (draft) field.value = draft;
-        const submit = dashboardButton('提交核查', () => controlConversationRun(task, 'reconcile', { reason: field.value.trim() }));
+        const submit = dashboardButton('提交核查并继续', () => controlConversationRun(task, 'reconcile', { reason: field.value.trim() }));
         submit.dataset.reconcileSubmit = task.id;
         actions.append(field, submit);
       }
@@ -2828,7 +2830,7 @@ async function controlConversationRun(task: ConversationTaskView, action: 'pause
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
     if (epoch !== conversationEpoch) return;
-    const receipt = action === 'pause' ? `已暂停「${task.title}」。讨论焦点没有改变。` : action === 'resume' ? `已继续「${task.title}」。讨论焦点没有改变。` : `已记下「${task.title}」的核查。讨论焦点没有改变。`;
+    const receipt = action === 'pause' ? `已暂停「${task.title}」。讨论焦点没有改变。` : action === 'resume' ? `已继续「${task.title}」。讨论焦点没有改变。` : `已核查「${task.title}」并继续这件 Run。若有一次结果未知的模型调用，会再发一遍。讨论焦点没有改变。`;
     $('conversation-status').textContent = receipt;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '这一步之后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
@@ -2869,7 +2871,7 @@ async function approveConversationTask(task: ConversationTaskView, duration: 'ta
     void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
     $('conversation-status').textContent = duration === 'once'
-      ? `已批准这一次「${task.title}」。这一次不会写成长期做法。讨论焦点没有改变。`
+      ? `已批准「${task.title}」的当前计划并开始执行。这次批准记录标为仅这一次，以后的计划仍要再批。讨论焦点没有改变。`
       : `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '批准后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {

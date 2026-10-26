@@ -47,7 +47,7 @@ export class GovernedBrain {
   private audit: BrainAudit[] = [];
   private key(owner: string, tenantId: string, scopeRef: string): string { return JSON.stringify([tenantId, owner, scopeRef]); }
 
-  /** Retract the named claims and add the replacement. A failed add restores the claims it retracted. */
+  /** Retract the named claims and add the replacement. The replacement is stored before either audit; the retraction audit is written before the replacement's create audit. A failed add restores the claims and writes no retract audit. */
   replaceClaims(scopeRef: string, claimIds: string[], input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, resourceOwner?: string): BrainClaim {
     const principal = brainActor(actor);
     const parsed = brainClaimInputSchema.parse(input);
@@ -68,11 +68,20 @@ export class GovernedBrain {
     try {
       for (const claim of targets) {
         const after = { ...claim, state: 'retracted' as const, updatedAt: new Date().toISOString() };
-        this.recordChange(claim, after, principal, 'brain.retract');
         Object.assign(claim, after);
+      }
+      const created = this.addClaim(parsed, actor, undefined, false);
+      const stored = [...this.claims.values()].flat().find(item => item.id === created.id);
+      if (!stored) throw new Error('Replacement claim was not stored');
+      for (const snapshot of snapshots) {
+        const claim = (this.claims.get(key) ?? []).find(item => item.id === snapshot.id);
+        if (!claim) continue;
+        this.recordChange(snapshot, claim, principal, 'brain.retract');
         this.record('retract', principal, owner, scopeRef, claim.id, claim);
       }
-      return this.addClaim(parsed, actor);
+      this.recordChange(null, stored, principal, 'brain.addClaim');
+      this.record('write', principal, stored.owner, stored.scopeRef, stored.id, stored);
+      return created;
     } catch (error) {
       const current = this.claims.get(key) ?? [];
       const kept = current.filter(item => beforeIds.has(item.id));
@@ -84,7 +93,7 @@ export class GovernedBrain {
       throw error;
     }
   }
-  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext): BrainClaim {
+  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext, recordAudit = true): BrainClaim {
     const principal = brainActor(actor);
     const parsed = brainClaimInputSchema.parse(input);
     const tenantId = parsed.tenantId ?? principal.tenantId;
@@ -93,9 +102,9 @@ export class GovernedBrain {
     const key = this.key(parsed.owner, tenantId, parsed.scopeRef);
     const history = this.claims.get(key) ?? [];
     const claim = claimSchema.parse({ ...parsed, tenantId, schemaVersion: 1, id: 'brain_' + randomUUID(), version: history.length + 1, state: 'active', createdAt: at, updatedAt: at });
-    this.recordChange(null, claim, principal, 'brain.addClaim', context);
+    if (recordAudit) this.recordChange(null, claim, principal, 'brain.addClaim', context);
     this.claims.set(key, [...history, claim]);
-    this.record('write', principal, parsed.owner, parsed.scopeRef, claim.id, claim);
+    if (recordAudit) this.record('write', principal, parsed.owner, parsed.scopeRef, claim.id, claim);
     return structuredClone(claim);
   }
   grant(input: z.input<typeof brainGrantInputSchema>, actor: Principal | string): BrainGrant {
