@@ -8,6 +8,8 @@ export interface Room {
   tenantId?: string;
   title: string;
   description?: string;
+  /** Frozen at creation. Later edits to description cannot change it. */
+  chat?: 'direct' | 'group';
   status: 'active' | 'archived';
   createdAt: string;
   updatedAt: string;

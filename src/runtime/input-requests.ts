@@ -26,10 +26,8 @@ export function inputQuestion(run: AgentRun, taskId: string, text: string, exter
   return { taskId, text, kind, missing };
 }
 
-/** Conservative live-data goals; ordinary writing/intent questions still wait. */
-export function needsExternalLiveData(goal: string): boolean {
-  return /天气|气温|降雨|weather|forecast|实时|最新(?:新闻|消息|数据|价格)|今日(?:新闻|股价|汇率)|股价|汇率|live\s+data|real[ -]?time|current\s+(?:weather|price|news|exchange\s+rate)|latest\s+(?:news|price|data)/i.test(goal);
-}
+import { needsExternalLiveData } from './planning-shape.js';
+export { needsExternalLiveData };
 
 /** Supplied observations may be summarized; this notice applies without a data source. */
 export function unsupportedWeatherNotice(run: AgentRun): string | undefined {

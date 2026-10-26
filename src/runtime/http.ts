@@ -62,7 +62,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -133,7 +133,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
 }
 export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
-  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads) : undefined;
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
@@ -564,6 +564,16 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
+  const teamAssets: Record<string, [string, string]> = {
+    '/team': ['index.html', 'text/html; charset=utf-8'],
+    '/team/': ['index.html', 'text/html; charset=utf-8'],
+    '/team/index.html': ['index.html', 'text/html; charset=utf-8'],
+    '/team/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+    '/team/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  };
+  for (const [route, [file, type]] of Object.entries(teamAssets)) {
+    app.get(route, async (_request, reply) => reply.type(type).send(await readFile(new URL(`../../public/team/${file}`, import.meta.url), 'utf8')));
+  }
   app.get('/api/tools', async () => ({
     tools: options.tools ? await options.tools.listTools() : [],
     defaultAllowedTools: options.localToolDefaults ?? [],
@@ -806,9 +816,20 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
-    const body = z.object({ goalId: z.string().trim().min(1).max(200).optional(), type: z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system']), content: z.string().trim().min(1).max(20_000), contextManifestId: z.string().trim().min(1).max(200), evidenceRefs: z.array(z.string().trim().min(1).max(200)).max(200).optional(), idempotencyKey: z.string().trim().min(1).max(500) }).strict().parse(request.body);
+    const body = z.object({
+      goalId: z.string().trim().min(1).max(200).optional(),
+      type: z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system']),
+      content: z.string().trim().min(1).max(20_000),
+      contextManifestId: z.string().trim().min(1).max(200),
+      evidenceRefs: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
+      idempotencyKey: z.string().trim().min(1).max(500),
+      actor: z.object({
+        type: z.enum(['principal', 'agent']),
+        id: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._-]+$/, '说话人标识只能包含字母、数字、点、下划线和连字符'),
+      }).strict().optional(),
+    }).strict().parse(request.body);
     const principal = principalOf(request);
-    return options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey }, principal.id, principal.tenantId);
+    return options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey, ...(body.actor === undefined ? {} : { actor: body.actor }) }, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string; eventId: string } }>('/api/rooms/:id/session-events/:eventId/revise', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
@@ -1629,11 +1650,50 @@ export function buildApp(options: Options) {
   }
   const conversationScope = (request: FastifyRequest) => ({ owner: principalOf(request).id, tenantId: principalOf(request).tenantId });
   app.get('/api/conversations', async request => conversationService().list(conversationScope(request)));
-  app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request))));
-  app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request)));
-  app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request)));
+  app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request), principalOf(request))));
+  app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => conversationService().get(request.params.id, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/standing', async request => conversationService().setStanding(request.params.id, request.body, conversationScope(request), principalOf(request)));
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/practice/retract', async request => {
+    const view = await conversationService().retractPractice(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/practice', async request => {
+    const view = await conversationService().acceptPractice(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile/rollback', async request => {
+    const view = await conversationService().rollbackSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile/retract', async request => {
+    const view = await conversationService().retractSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/skill-profile', async request => {
+    const view = await conversationService().promoteSkillProfile(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-kind/keep', async request => {
+    const view = await conversationService().keepTaskKind(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-kind/propose', async request => {
+    return conversationService().proposeTaskKind(request.params.id, request.body, conversationScope(request), principalOf(request));
+  });
+  app.post<{ Params: { id: string } }>('/api/conversations/:id/task-model', async request => {
+    const view = await conversationService().setTaskModel(request.params.id, request.body, conversationScope(request), principalOf(request));
+    if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
+    return view;
+  });
   app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
-    const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request));
+    const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request), principalOf(request));
     // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.
     if (options.dispatcher?.setSchedulingRank) {
       for (const task of view.tasks) {
@@ -1645,10 +1705,10 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/notifications/sync', async request => {
     z.object({}).strict().parse(request.body ?? {});
-    return conversationService().syncNotifications(request.params.id, conversationScope(request));
+    return conversationService().syncNotifications(request.params.id, conversationScope(request), principalOf(request));
   });
   app.post<{ Params: { id: string } }>('/api/conversations/:id/messages', async (request, reply) => {
-    const result = await conversationService().post(request.params.id, request.body, conversationScope(request), request.headers['idempotency-key'], Boolean(options.engine && options.dispatcher));
+    const result = await conversationService().post(request.params.id, request.body, conversationScope(request), request.headers['idempotency-key'], Boolean(options.engine && options.dispatcher), principalOf(request));
     if (result.runId) {
       const run = await options.repository.get(result.runId, conversationScope(request));
       if (isBootRecoverableRun(run.status)) await notify(run.id);

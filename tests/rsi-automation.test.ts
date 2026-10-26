@@ -46,4 +46,24 @@ describe('RSI internal-test automation', () => {
       expect((await activation.list()).find(item => item.target === 'prompt')?.candidateId).toBe(base.id);
     } finally { await repository.close(); await activation.close(); await rm(dir, { recursive: true, force: true }); }
   });
+
+  it('evaluates an owner task-kind candidate without auto-approving it', async () => {
+    const dir = await mkdtemp(`${tmpdir()}/aeeis-rsi-auto-task-kind-`);
+    const repository = new FileEvolutionRepository(`${dir}/candidates`);
+    const activation = new FileEvolutionActivationStore(`${dir}/activation`);
+    await repository.init(); await activation.init();
+    try {
+      const rsi = new RsiService(repository, activation);
+      const candidate = await rsi.propose({
+        target: 'profile', baseVersion: 'profile/1', proposedVersion: 'brief-method/2', change: '个人技能档案', sourceReceiptRefs: ['artifact_brief'],
+        reason: '主人送去评测', risk: 'low', proposalSignalId: 'task-kind-rsi:demo.release:周报:run_00000000-0000-4000-8000-000000000001',
+      }, { owner: 'owner', tenantId: 'local' });
+      const pump = new RsiAutomationPump(rsi, { evaluate: async (_candidate, mode, testCase) => ({ passed: true, score: 1, evidenceRefs: [`fixed:${mode}:${testCase.id}`] }) }, {
+        enabled: true, autoApproveLowRisk: true, autoRollout: true, autoActivate: true, intervalMs: 30_000, maxCandidatesPerPass: 10, suiteVersion: 'test-v1',
+        suite: { replay: [{ id: 'r', input: {} }], holdout: [{ id: 'h', input: {} }], safety: [{ id: 's', input: {} }] },
+      });
+      expect(await pump.pump()).toMatchObject({ inspected: 1, evaluated: 1, approved: 0, failed: 0 });
+      expect((await rsi.get(candidate.id)).status).toBe('evaluating');
+    } finally { await repository.close(); await activation.close(); await rm(dir, { recursive: true, force: true }); }
+  });
 });

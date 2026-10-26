@@ -191,6 +191,17 @@ function responseFor(system, input) {
     const evidenceRefs = [observation.receiptRef, ...(observation.result?.claims ?? []).flatMap((claim) => claim.evidenceRefs ?? [])].filter(Boolean);
     return { type: 'finish', title: 'External Agent result', content: 'Completed the result using the admitted external Agent.', evidenceRefs };
   }
+  const workspaceGlob = String(input.goal ?? '').includes('工作区') && input.task?.id === 'inspect'
+    ? catalogTools.find((tool) => tool?.id === 'glob')
+    : undefined;
+  if (workspaceGlob && !(input.observations?.length)) {
+    return { type: 'capability', toolId: workspaceGlob.id, toolVersion: String(workspaceGlob.version), input: { pattern: '**/*', limit: 20 }, purpose: 'Look through this Run workspace.' };
+  }
+  if (workspaceGlob && input.observations?.length) {
+    const observation = input.observations.at(-1)?.result ?? {};
+    const evidenceRefs = Array.isArray(observation.outputRefs) ? observation.outputRefs.filter(Boolean) : [];
+    return { type: 'finish', title: '工作区已看过', content: '已在这件工作的机器里看过工作区。', evidenceRefs };
+  }
   if (String(input.goal ?? '').includes('WORKING-MEMORY-COMPACTION') && input.task?.id === 'inspect') {
     const catalog = Array.isArray(input.sourceCatalog) ? input.sourceCatalog : [];
     const alpha = catalog.find((item) => String(item?.title ?? '').includes('任务甲原文')) ?? catalog[0];

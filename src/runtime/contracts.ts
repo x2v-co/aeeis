@@ -80,6 +80,15 @@ export const requestSchema = z.object({
   brainMaxItems: z.number().int().min(1).max(100).default(20),
   skillRuntime: z.string().trim().min(1).max(100).optional(),
   privacy: z.enum(['public', 'internal', 'confidential', 'private']).default('internal'),
+  /** Plan-review gate chosen by the owner when this Run is created. Missing means required. */
+  executionReview: z.enum(['required', 'auto', 'yolo']).optional(),
+  /** Who proposes the first plan. Missing means the planner. `direct` is admitted only for one read-only deliverable. */
+  planning: z.enum(['direct', 'dag']).optional(),
+  /** Owner-selected model for this task kind. The runtime accepts it only when that model is already selectable. */
+  preferredModel: z.object({
+    model: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/),
+    provider: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/).optional(),
+  }).strict().optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -100,7 +109,7 @@ export const approvalBudgetsSchema = z.object({
   modelBudget: modelBudgetSchema.nullable().optional(),
   externalBudget: externalBudgetSchema.nullable().optional(),
 }).strict();
-export const approvePlanSchema = approvalBudgetsSchema.extend({ planHash: z.string().min(1) });
+export const approvePlanSchema = approvalBudgetsSchema.extend({ planHash: z.string().min(1), duration: z.enum(['task', 'once']).optional() });
 export const revisePlanSchema = z.object({ planVersion: planVersionSchema, feedback: z.string().trim().min(1).max(8000) }).strict();
 export const editPlanSchema = z.object({
   planVersion: planVersionSchema,
@@ -362,7 +371,7 @@ export interface AgentRun {
   agentProgress?: Array<{ idempotencyKey: string; progress: AgentProgressEvent }>;
   delegationOutcomes?: Array<{ idempotencyKey: string; status: string; receiptRef: string; contextVersion: string; receipt: DelegationReceipt; result?: unknown; disposition?: 'isolated'; isolatedCost?: { tokens?: number | undefined; money?: number | undefined; currency?: string | undefined } }>;
   plans: Array<PlanDraft & { version: number; hash: string; createdAt: string;
-    author?: { type: 'user' | 'model'; actor?: string; provenanceRef?: string };
+    author?: { type: 'user' | 'model' | 'policy'; actor?: string; provenanceRef?: string };
     /** Number of model calls already reserved when this revision was proposed. */
     modelCallOffset?: number;
   }>;
@@ -375,7 +384,11 @@ export interface AgentRun {
   reviewRepair?: { issues: Array<{ path: string; code: string; message: string }> };
   steps: Step[]; artifacts: Artifact[]; events: Event[];
   corrections?: RunCorrection[];
-  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string };
+  /** Frozen at creation. Missing means every plan waits for the owner. */
+  executionReview?: 'required' | 'auto' | 'yolo';
+  /** Frozen at creation. Missing means the planner proposes the task graph. */
+  planning?: 'direct' | 'dag';
+  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string; grant?: 'once' };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;

@@ -77,7 +77,10 @@ function countState(counter: Counter, state: string): void {
 }
 
 function attentionFor(run: AgentRun): RunExplanation['attention'] {
-  if (run.status === 'needs_approval') return { kind: 'approve_plan', nextAction: '核对并批准当前计划的精确 hash 后继续执行。', blockers: [{ kind: 'approval', detail: run.approval ? `等待批准计划 ${run.approval.planHash}` : '当前计划尚未批准', refs: run.approval?.planHash ? [run.approval.planHash] : [] }] };
+  if (run.status === 'needs_approval') {
+    const asked = run.executionReview === 'auto' && run.approval?.reason ? `模型请求批准（不可信判断）：${run.approval.reason.slice(0, 240)}。` : '';
+    return { kind: 'approve_plan', nextAction: `${asked}核对并批准当前计划的精确 hash 后继续执行。`, blockers: [{ kind: 'approval', detail: run.approval ? `等待批准计划 ${run.approval.planHash}` : '当前计划尚未批准', refs: run.approval?.planHash ? [run.approval.planHash] : [] }] };
+  }
   if (run.status === 'needs_input') {
     const request = runInputRequest(run);
     const detail = request ? `${request.question} (kind=${request.kind}; missing=${request.missing.join(', ') || 'none'})` : '等待用户输入';

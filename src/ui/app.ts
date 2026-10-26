@@ -1,4 +1,5 @@
 import type { PlanComparison } from '../runtime/graphs.js';
+import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder } from '../conversations.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
@@ -15,7 +16,7 @@ interface RoomMemberSummary { id: string; roomId: string; principalId: string; r
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
   sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system';
-  actorId: string; actorType: 'principal' | 'agent' | 'system'; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
+  actorId: string; actorType: 'principal' | 'agent' | 'system'; recordedBy?: { id: string; type: 'principal' | 'agent' | 'system' }; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
   audienceSnapshot: { digest: string; members: Array<{ principalId: string; role: string; status: string }> };
   content: string; contentHash: string; evidenceRefs: string[]; idempotencyKey: string; createdAt: string;
 }
@@ -52,7 +53,7 @@ interface RunView extends RunSummary {
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
   privacy?: string; skillRuntime?: string; skillSelection?: { methodId?: string; version?: string; plan: unknown; receiptRef?: string }; skillOutcome?: { outcome: 'success' | 'failure'; receiptRef?: string; error?: string }; approvedTools?: Array<{ id: string; version: string; capabilities: string[]; description?: string }>; toolManifestDigest?: string; resourceSnapshot?: { plugin?: { id: string; version: string; interface: string; digest: string; channel?: string }; skill?: { id: string; version: string; interface: string; digest: string; channel?: string }; workflow?: { id: string; version: string; interface: string; digest: string; channel?: string }; tools?: Array<{ id: string; version: string; interface: string; digest: string; channel?: string }>; lockfileDigest: string; policyDigest: string; resolvedAt: string; resolverVersion: string }; modelDecision?: { selected?: { model?: string; provider?: string }; catalogHash?: string; catalogRetrievedAt?: string; reason?: string }; context?: { id?: string; manifestHash?: string; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[]; sources: Array<{ id: string; title: string; content: string; source: string; hash: string; contentHash?: string; kind?: string; untrusted?: boolean; classification?: string; origin?: { runId: string; ref: string } }> };
-  plans: Array<{ hash: string; version: number; summary: string; author?: { type: 'user' | 'model' }; nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
+  plans: Array<{ hash: string; version: number; summary: string; author?: { type: 'user' | 'model' | 'policy' }; nodes: Array<{ id: string; title: string; instruction?: string; evidenceRequirements?: string; dependsOn: string[]; evidenceRefs?: string[]; evidenceRunId?: string }> }>;
   steps: Array<{ taskId: string; status: string; error?: string; failureReason?: string }>;
   artifacts: Array<{ id: string; title: string; content: string; evidenceRefs: string[]; artifactType?: string; structured?: unknown }>;
   model?: { model?: string; provider?: string; endpoint?: string; promptVersion?: string; routingMode?: string };
@@ -84,15 +85,28 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
-  id: string; role: 'user' | 'notification'; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
+  id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
 }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number }
-interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean }
+interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; presence?: LifePresence }
+interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
+interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
+interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
+interface TaskModelView { claimId: string; taskKind: string; model: string; provider?: string }
+interface TaskKindComparison {
+  taskKind: string; runId: string; taskTitle: string;
+  methodId?: string; version?: string; model?: string; provider?: string;
+  profileMethodId?: string; profileVersion?: string; profileRunId?: string; profileModel?: string; profileProvider?: string;
+  differs: boolean; kept: boolean;
+  proposal?: { candidateId: string; status: string };
+}
+interface TaskSettingsView { skills: SkillProfileView[]; models: TaskModelView[]; comparisons?: TaskKindComparison[] }
+interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice; taskSettings?: TaskSettingsView }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
@@ -129,6 +143,7 @@ const linkedThreadId = window.location.pathname.match(/^\/threads\/(thread_[a-f0
 const readOnlyShare = Boolean(shareToken);
 document.body.classList.toggle('shared-run', readOnlyShare);
 let currentId = linkedRunId ?? (readOnlyShare || linkedThreadId ? '' : localStorage.getItem('aeeis.run') ?? '');
+let entryEpoch = 0;
 document.body.classList.toggle('thread-page', Boolean(linkedThreadId));
 let threadPagesAfter = [0];
 let threadNextAfter: number | undefined;
@@ -147,9 +162,14 @@ let conversationReplyId: string | undefined;
 let conversationCorrectionId: string | undefined;
 let conversationAttempt: ConversationAttempt | undefined;
 let conversationRenderSignature = '';
+let standingBoundId = '';
+let practiceBoundRunId = '';
 const CONVERSATION_SELECTION = 'aeeis.conversation';
 const CONVERSATION_SCOPE = 'aeeis.conversation-scope';
 const CONVERSATION_PENDING = 'aeeis.conversation-pending';
+const LIFE_HOME = 'aeeis.life.aeeis';
+let aeeisConversationId = linkedRunId || linkedThreadId || readOnlyShare ? '' : (localStorage.getItem(LIFE_HOME) ?? '');
+const lifeOpening = new Set<string>();
 let selectedCandidateId = localStorage.getItem('aeeis.candidate') ?? '';
 let current: RunView | undefined;
 type InputPanelMode = 'answer' | 'reconcile' | 'reconcile-cancelled';
@@ -161,12 +181,15 @@ let quickRunReady = false;
 let intentPresetsOpen = false;
 let recentRunsOpen = false;
 let attentionInboxOpen = false;
-let currentRunOpen = !minimalMode;
+let currentRunOpen = !minimalMode || Boolean(currentId);
 let polling = false;
 let goalViewSignature = '';
 let modelConfigured = false;
+let runtimeModel = '';
+let taskModelBound = '';
 let evolutionConfigured = false;
 let taskSchedulerConfigured = false;
+let sessionPrincipal = '';
 let eventStreamRunId = '';
 let eventStreamAbort: AbortController | undefined;
 let eventStreamCursor: string | undefined;
@@ -177,6 +200,32 @@ let reminderStatusFilter = '';
 let runDockObserver: IntersectionObserver | undefined;
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
+interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
+interface RosterBot { id: string; name: string; note: string; demo: boolean }
+const DEMO_BOTS: RosterBot[] = [
+  { id: 'demo.release', name: '发布', note: '对照发布清单', demo: true },
+  { id: 'demo.research', name: '研究', note: '整理公开资料', demo: true },
+  { id: 'demo.brief', name: '纪要', note: '把讨论收成纪要', demo: true },
+];
+let agentSummaries: AgentSummary[] = [];
+let agentsLoaded = false;
+let roomSummaries: RoomSummary[] = [];
+let botGroups: BotGroups | undefined;
+let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
+let openGroupId = '';
+let groupDraftOpen = false;
+let groupMembers: RoomMemberSummary[] = [];
+let groupEvents: SessionEventSummary[] = [];
+const handoffViews = new Map<string, ConversationView>();
+let handoffEpoch = 0;
+const CITATION_ID = /^[a-z][a-z0-9_.-]{1,127}$/;
+const draftAgents = new Set<string>();
+let draftPeople: string[] = [];
+const directMembers = new Map<string, string>();
+const directOpening = new Set<string>();
+let directIndexKey = '';
+let directIndexPromise: Promise<void> = Promise.resolve();
+const AEEIS_EMPTY_COPY = '这是一个 Bot，可以同时推进多项任务。点开左侧任务只是查看这次执行，其他任务不会因此停掉。';
 let timelineFilter = localStorage.getItem('aeeis.timeline-filter') ?? 'all';
 const MAX_MATERIAL_FILES = 8;
 const MAX_MATERIAL_FILE_BYTES = 1_000_000;
@@ -216,6 +265,7 @@ function eventLabel(type: string): string {
     'run.started': '开始执行', 'task.started': '任务开始', 'task.completed': '任务完成', 'run.reviewed': '审核完成',
     'run.completed': '运行完成', 'run.failed': '运行异常', 'run.cancelled': '运行已取消',
     'plan.budgets_updated': '预算已更新', 'plan.proposed': '计划已生成', 'plan.approved': '计划已批准', 'plan.revised': '计划已更新',
+    'plan.auto_approved': '计划已按审核档自动放行', 'plan.approval_requested': '模型请求批准',
     'model.selected': '模型已选择', 'model.started': '模型开始调用', 'model.completed': '模型调用完成', 'model.usage.recorded': '模型用量已记录',
     'skill.selected': '工作方式已选择', 'skill.completed': '工作方式已完成',
     'tool.requested': '等待工具回执', 'tool.completed': '工具已返回', 'tool.failed': '工具调用失败', 'tool.unknown': '工具结果待核查', 'tool.reconciled': '工具结果已核查',
@@ -234,7 +284,9 @@ function eventLabel(type: string): string {
   const normalized = type.trim().replace(/\s+/g, '.');
   return labels[type] ?? labels[normalized] ?? normalized.replace(/^run\./, '').replace(/[._-]+/g, ' ');
 }
-function describeEvent(type: string, data?: { phase?: string; reason?: string }, verbose = false): string {
+function describeEvent(type: string, data?: { phase?: string; reason?: string; source?: string; actor?: string }, verbose = false): string {
+  if (type === 'plan.proposed' && data?.source === 'direct') return '直接计划已写入';
+  if (type === 'plan.auto_approved' && data?.actor === 'policy:direct') return '直接计划已按边界放行';
   const compaction = data?.phase === 'compaction' || (typeof data?.reason === 'string' && data.reason.startsWith('compaction'));
   if (compaction) {
     const short: Record<string, string> = {
@@ -309,22 +361,195 @@ function setupMinimalSections(): void {
   for (const selector of secondarySelectors) document.querySelector(selector)?.closest('section')?.classList.add('run-secondary');
 }
 setupMinimalSections();
+type ComputerTab = 'run' | 'setup' | 'goals' | 'govern' | 'status';
+let computerOpen = false;
+let computerTab: ComputerTab = 'setup';
+const COMPUTER_TITLES: Record<ComputerTab, string> = {
+  run: '这次运行', setup: '设置', goals: '目标与提醒', govern: '治理', status: '运行状态',
+};
+function presenceOf(status?: string): { state: string; label: string } {
+  if (!status) return { state: 'idle', label: '空闲' };
+  if (status === 'planning' || status === 'reviewing') return { state: 'thinking', label: '思考中' };
+  if (status === 'running' || status === 'queued') return { state: 'working', label: status === 'queued' ? '排队' : '执行中' };
+  if (status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused') return { state: 'waiting', label: '等你' };
+  if (status === 'succeeded') return { state: 'done', label: '完成' };
+  if (status === 'failed' || status === 'unknown' || status === 'cancelled') return { state: 'blocked', label: runStatusLabel(status) };
+  return { state: 'idle', label: runStatusLabel(status) };
+}
+function botPresence(runs: RunSummary[]): { state: string; label: string } {
+  const statuses = runs.map(run => run.status);
+  if (statuses.some(status => status === 'running' || status === 'queued')) return presenceOf('running');
+  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return presenceOf('planning');
+  if (statuses.some(status => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused')) return presenceOf('needs_approval');
+  if (statuses.some(status => status === 'failed' || status === 'unknown')) return presenceOf('failed');
+  if (statuses.some(status => status === 'succeeded')) return presenceOf('succeeded');
+  return presenceOf(undefined);
+}
+function entryShowsBot(): boolean {
+  return !currentRunOpen && !openGroupId && !document.body.classList.contains('group-draft') && !readOnlyShare && !linkedThreadId;
+}
+function syncBotRow(): void {
+  if (conversationEnabled) return;
+  const state = botPresence(runSummaries);
+  const label = $('gb-bot-presence');
+  if (label) label.textContent = runSummaries.length ? `${state.label} · ${runSummaries.length} 项任务` : state.label;
+  const avatar = document.querySelector<HTMLElement>('#gb-bot .roster-avatar');
+  if (avatar) avatar.dataset.state = state.state;
+  const pressed = entryShowsBot();
+  const visible = activeBotId();
+  document.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]').forEach(row => {
+    row.setAttribute('aria-pressed', String(pressed && row.dataset.botId === visible));
+  });
+  syncComposerForBot();
+}
+function syncEmptyCopy(): void {
+  const empty = $('empty');
+  const heading = empty?.querySelector('h2');
+  const copy = empty?.querySelector('p');
+  const bot = botById(activeBotId());
+  if (heading) heading.textContent = entryShowsBot() && bot ? bot.name : 'AEEIS';
+  if (copy) {
+    copy.textContent = !entryShowsBot() || !bot || bot.id === 'aeeis'
+      ? AEEIS_EMPTY_COPY
+      : bot.demo
+        ? '这是演示里的一位 Bot。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
+        : '这位已经准入。单独对话还没有接上，可以在群聊里点名。';
+  }
+}
+function syncComposerForBot(): void {
+  const other = entryShowsBot() && activeBotId() !== 'aeeis';
+  const form = $('quick-run');
+  const input = $<HTMLInputElement>('quick-goal');
+  const submit = document.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]');
+  const busy = form?.dataset.busy === 'true';
+  if (input) {
+    if (!busy) input.disabled = other;
+    input.placeholder = other ? '任务仍交给 AEEIS' : '写下要这个 Bot 推进的结果，然后发送';
+  }
+  if (!submit || busy) return;
+  if (other) {
+    submit.disabled = true;
+    submit.title = '先点回 AEEIS';
+    if (submit.childNodes[0]) submit.childNodes[0].textContent = '先选 AEEIS ';
+    return;
+  }
+  submit.disabled = !quickRunReady;
+  submit.title = quickRunReady ? '发送' : '请先连接模型';
+  if (submit.childNodes[0]) submit.childNodes[0].textContent = quickRunReady ? '发送 ' : '等待连接 ';
+}
+function syncComposerHeading(): void {
+  const heading = document.querySelector('.command-context h2');
+  if (!heading) return;
+  if (openGroupId) heading.textContent = '发到群里';
+  else if (entryShowsBot() && activeBotId() !== 'aeeis') heading.textContent = '任务交给 AEEIS';
+  else heading.textContent = '给 AEEIS 发消息';
+}
+function mirrorShell(titleText: string, presenceText: string, state?: string): void {
+  const title = $('gb-title');
+  const presence = $('gb-presence');
+  const entryTitle = $('entry-title');
+  const entryPresence = $('entry-presence');
+  if (title) title.textContent = titleText;
+  if (entryTitle) entryTitle.textContent = titleText;
+  if (presence) {
+    if (state) presence.dataset.state = state;
+    presence.textContent = presenceText;
+  }
+  if (entryPresence) entryPresence.textContent = presenceText;
+}
+function syncPresence(run?: RunView): void {
+  const title = $('gb-title');
+  const presence = $('gb-presence');
+  syncBotRow();
+  syncComposerHeading();
+  if (conversationEnabled) { syncEntrySurface(); return; }
+  if (!title || !presence) return;
+  if (document.body.classList.contains('group-draft') || groupDraftOpen) {
+    mirrorShell('新建群聊', '2 到 6 人 · AEEIS 始终在场', 'idle');
+    return;
+  }
+  if (openGroupId) {
+    const room = roomSummaries.find(item => item.id === openGroupId);
+    const names = ['AEEIS', ...groupMembers.map(member => participantLabel(member.principalId))];
+    mirrorShell(room?.title ?? '群聊', `${names.length} 人 · ${names.join('、')}`, 'idle');
+    return;
+  }
+  const bot = botById(activeBotId());
+  if (entryShowsBot() && bot && bot.id !== 'aeeis') {
+    mirrorShell(bot.name, bot.demo ? '演示 · 不会单独执行' : '已准入 · 单独对话还没接上', 'idle');
+    syncEmptyCopy();
+    renderBotPlacement();
+    syncShellClasses();
+    return;
+  }
+  const active = Boolean(run && currentRunOpen);
+  const state = presenceOf(active ? run?.status : undefined);
+  const presenceState = active ? state.state : botPresence(runSummaries).state;
+  mirrorShell('AEEIS', active && run ? `${state.label} · ${run.goal}` : (runSummaries.length ? '入口 · 任务都还在跑' : '空闲 · 可以同时交给它几件事'), presenceState);
+  syncEmptyCopy();
+  renderBotPlacement();
+}
+function syncTranscriptEmpty(): void {
+  const empty = $('empty');
+  if (!empty) return;
+  empty.hidden = readOnlyShare || Boolean(linkedThreadId) || currentRunOpen || Boolean(current) || Boolean(openGroupId) || document.body.classList.contains('group-draft');
+  syncEmptyCopy();
+  renderBotPlacement();
+}
+function setComputerOpen(open: boolean, tab?: ComputerTab): void {
+  if (tab) computerTab = tab;
+  computerOpen = open;
+  const panel = $('gb-computer');
+  if (panel) {
+    panel.hidden = !open;
+    panel.dataset.tab = computerTab;
+  }
+  document.body.classList.toggle('computer-open', open);
+  const toggle = $('gb-computer-toggle') as HTMLButtonElement | null;
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', String(open));
+    toggle.textContent = open ? '收起工作台' : '打开它的工作台';
+  }
+  const entryComputer = $('entry-computer') as HTMLButtonElement | null;
+  if (entryComputer) {
+    entryComputer.setAttribute('aria-pressed', String(open));
+    entryComputer.textContent = open ? '关上工作台' : '打开它的工作台';
+  }
+  const title = $('gb-computer-title');
+  if (title) title.textContent = COMPUTER_TITLES[computerTab];
+  document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
+    const selected = open && button.dataset.computerTab === computerTab;
+    button.setAttribute('aria-pressed', String(selected));
+    button.classList.toggle('is-selected', selected);
+  });
+}
+function closeComputer(): void {
+  const tab = computerTab;
+  setComputerOpen(false);
+  if (tab === 'run' && runDetailsMode) setRunDetailsMode(false);
+  if (tab === 'setup' && detailsMode) setDetailsMode(false);
+}
 let runDetailsMode = localStorage.getItem('aeeis.run-details-mode') === '1';
 function syncRunDetailsToggleLabel(): void {
   const control = $('run-details-toggle') as HTMLButtonElement | null;
   if (!control) return;
-  control.textContent = runDetailsMode ? '收起执行详情' : '展开执行详情';
+  control.textContent = runDetailsMode ? '收起工作台' : '打开它的工作台';
   control.setAttribute('aria-expanded', String(runDetailsMode));
-  control.title = runDetailsMode ? '收起证据、图表和事件记录' : '查看证据、图表和事件记录';
+  control.title = runDetailsMode ? '收起图、证据和事件' : '打开它的工作台，查看图、证据和事件';
 }
 function setRunDetailsMode(enabled: boolean): void {
   runDetailsMode = enabled;
   document.body.classList.toggle('run-details-mode', enabled);
   syncRunDetailsToggleLabel();
   localStorage.setItem('aeeis.run-details-mode', enabled ? '1' : '0');
+  if (enabled) setComputerOpen(true, 'run');
 }
 setRunDetailsMode(runDetailsMode);
-($('run-details-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => setRunDetailsMode(!runDetailsMode));
+($('run-details-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  const next = !runDetailsMode;
+  setRunDetailsMode(next);
+  if (!next && computerTab === 'run') setComputerOpen(false);
+});
 function syncCurrentRunToggle(run?: RunView): void {
   const control = $('current-run-toggle') as HTMLButtonElement | null;
   if (!control) return;
@@ -338,14 +563,17 @@ function syncCurrentRunToggle(run?: RunView): void {
   control.dataset.state = currentRunOpen ? 'expanded' : 'ready';
 }
 function setCurrentRunOpen(enabled: boolean): void {
+  const opening = enabled && !currentRunOpen;
   currentRunOpen = enabled;
   if (!enabled && runDetailsMode) setRunDetailsMode(false);
+  if (!enabled && computerTab === 'run') setComputerOpen(false);
   const detail = $('detail');
-  const empty = $('empty');
   if (detail) detail.hidden = !enabled || !current;
   document.body.classList.toggle('run-open', enabled && Boolean(current || currentId));
-  if (empty) empty.hidden = minimalMode || enabled || Boolean(current);
+  if (opening) document.body.classList.remove('roster-focus');
+  syncTranscriptEmpty();
   syncCurrentRunToggle(current);
+  syncPresence(current);
   if (!enabled) $('run-dock').hidden = true;
 }
 setCurrentRunOpen(currentRunOpen);
@@ -426,34 +654,11 @@ function syncDetailsToggleLabel(): void {
   control.dataset.state = detailsMode ? 'expanded' : quickRunReady ? 'ready' : 'attention';
   control.setAttribute('aria-expanded', String(detailsMode));
 }
-function setDetailsMode(enabled: boolean): void {
+function setDetailsMode(enabled: boolean, options?: { reveal?: boolean }): void {
   detailsMode = enabled;
   document.body.classList.toggle('details-mode', enabled);
-  if (!enabled && minimalMode) {
-    // Returning to the minimal surface must clear every secondary disclosure.
-    // Otherwise a previously opened run-details state can keep plan/evidence
-    // sections visible after the settings rail has been hidden.
-    setRunDetailsMode(false);
-    setCurrentRunOpen(false);
-    intentPresetsOpen = false;
-    recentRunsOpen = false;
-    attentionInboxOpen = false;
-    const presets = $('intent-presets');
-    if (presets) presets.hidden = true;
-    const intentToggle = $('intent-toggle') as HTMLButtonElement | null;
-    if (intentToggle) {
-      intentToggle.textContent = '示例';
-      intentToggle.setAttribute('aria-expanded', 'false');
-    }
-    const recentRuns = $('minimal-recent-runs');
-    if (recentRuns) recentRuns.hidden = true;
-    const recentToggle = $('recent-runs-toggle') as HTMLButtonElement | null;
-    if (recentToggle) recentToggle.setAttribute('aria-expanded', 'false');
-    const attentionInbox = $('attention-inbox');
-    if (attentionInbox) attentionInbox.hidden = true;
-    const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;
-    if (attentionToggle) attentionToggle.setAttribute('aria-expanded', 'false');
-  }
+  if (enabled && options?.reveal) setComputerOpen(true, 'setup');
+  if (!enabled && options?.reveal && computerTab === 'setup' && !runDetailsMode) setComputerOpen(false);
   syncDetailsToggleLabel();
   localStorage.setItem('aeeis.details-mode', enabled ? '1' : '0');
   syncConfigurationNotice();
@@ -464,14 +669,14 @@ setDetailsMode(detailsMode);
     openConfiguration();
     return;
   }
-  setDetailsMode(!detailsMode);
+  setDetailsMode(!detailsMode, { reveal: true });
   if (detailsMode) {
     setFocusMode(false);
     $('new-run-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 });
 function openConfiguration(): void {
-  setDetailsMode(true);
+  setDetailsMode(true, { reveal: true });
   setFocusMode(false);
   $('access-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   window.requestAnimationFrame(() => $<HTMLInputElement>('token')?.focus());
@@ -489,7 +694,7 @@ function setIntentPresetsOpen(enabled: boolean): void {
     control.setAttribute('aria-expanded', String(enabled));
   }
 }
-setIntentPresetsOpen(false);
+setIntentPresetsOpen(!currentId && !readOnlyShare && !linkedThreadId);
 ($('intent-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
   const presets = $('intent-presets');
   setIntentPresetsOpen(Boolean(presets?.hidden));
@@ -528,6 +733,77 @@ setAttentionInboxOpen(false);
     window.requestAnimationFrame(() => $('attention-inbox')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
 });
+function showEntry(): void {
+  selectedBotId = 'aeeis';
+  localStorage.setItem('aeeis.bot', 'aeeis');
+  entryEpoch += 1;
+  leaveGroup();
+  stopRunEventStream();
+  currentId = '';
+  current = undefined;
+  localStorage.removeItem('aeeis.run');
+  document.body.classList.remove('roster-focus');
+  document.body.classList.add('draft-open');
+  setCurrentRunOpen(false);
+  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  setIntentPresetsOpen(true);
+  renderBotRoster();
+  renderRunQueue(runSummaries);
+}
+document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
+  button.addEventListener('click', () => {
+    const tab = button.dataset.computerTab as ComputerTab | undefined;
+    if (!tab) return;
+    if (computerOpen && computerTab === tab) {
+      closeComputer();
+      return;
+    }
+    if (tab === 'run') {
+      if (!current && !currentId) return;
+      setRunDetailsMode(true);
+      return;
+    }
+    if (tab === 'setup') setDetailsMode(true, { reveal: true });
+    else setComputerOpen(true, tab);
+  });
+});
+($('gb-computer-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  if (computerOpen) closeComputer();
+  else if (current || currentId) setRunDetailsMode(true);
+  else setComputerOpen(true, 'setup');
+});
+($('gb-computer-close') as HTMLButtonElement | null)?.addEventListener('click', () => closeComputer());
+($('group-person') as HTMLInputElement | null)?.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  addDraftPerson();
+});
+($('gb-back') as HTMLButtonElement | null)?.addEventListener('click', () => showRoster());
+document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link => {
+  link.addEventListener('click', event => {
+    const href = link.getAttribute('href') ?? '';
+    const tabs: Record<string, ComputerTab | 'conversation'> = {
+      '#new-run-panel': 'setup',
+      '#run-workspace': 'conversation',
+      '#goals-panel': 'goals',
+      '#reminders-panel': 'goals',
+      '#rsi-panel': 'govern',
+      '#collaboration-panel': 'govern',
+      '#system-status': 'status',
+    };
+    const target = tabs[href];
+    if (!target) return;
+    event.preventDefault();
+    if (target === 'conversation') {
+      if (current || currentId) setCurrentRunOpen(true);
+      $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    if (target === 'setup') setDetailsMode(true, { reveal: true });
+    else setComputerOpen(true, target);
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  });
+});
 let commandPaletteOpen = false;
 let commandPaletteReturnFocus: HTMLElement | null = null;
 function setCommandPalette(open: boolean, restoreFocus = true): void {
@@ -556,7 +832,10 @@ function executePaletteCommand(command: string): void {
   // A command owns the next focus target. Do not let the palette's close
   // animation restore the element that opened it after the command runs.
   setCommandPalette(false, false);
-  if (command === 'new-run') {
+  if (command === 'new-group') {
+    showGroupDraft();
+  } else if (command === 'new-run') {
+    showEntry();
     $('command-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
     else $<HTMLInputElement>('quick-goal').focus();
@@ -566,13 +845,14 @@ function executePaletteCommand(command: string): void {
       localStorage.setItem('aeeis.run-filter', runFilter);
       renderRunQueue(runSummaries);
       $('run-queue')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      $<HTMLElement>('#runs button')?.focus({ preventScroll: true });
+      document.querySelector<HTMLElement>('#runs button')?.focus({ preventScroll: true });
     } else {
       setAttentionInboxOpen(true);
       $('attention-inbox')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       $<HTMLElement>('#attention-items .is-selected, #attention-items [role="button"]')?.focus({ preventScroll: true });
     }
   } else if (command === 'current') {
+    leaveGroup();
     setCurrentRunOpen(true);
     $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     $<HTMLElement>('#run-title')?.focus({ preventScroll: true });
@@ -581,7 +861,7 @@ function executePaletteCommand(command: string): void {
   } else if (command === 'details') {
     if (!quickRunReady) openConfiguration();
     else {
-      setDetailsMode(true);
+      setDetailsMode(true, { reveal: true });
       setFocusMode(false);
       $('new-run-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -678,6 +958,7 @@ function setQuickRunBusy(busy: boolean, text = ''): void {
 }
 ($('quick-run') as HTMLFormElement | null)?.addEventListener('submit', event => {
   event.preventDefault();
+  if (entryShowsBot() && activeBotId() !== 'aeeis') { message('任务交给 AEEIS。先点回左边的 AEEIS。'); return; }
   const value = $<HTMLInputElement>('quick-goal').value.trim();
   if (!value) { $<HTMLInputElement>('quick-goal').focus(); return; }
   const submit = $('submit') as HTMLButtonElement;
@@ -725,6 +1006,7 @@ window.addEventListener('keydown', event => {
     if (!typing) {
       const key = event.key.toLowerCase();
       if (key === 'n') { event.preventDefault(); executePaletteCommand('new-run'); }
+      else if (key === 'g') { event.preventDefault(); executePaletteCommand('new-group'); }
       else if (key === 'r') { event.preventDefault(); executePaletteCommand('current'); }
       else if (key === 'f') { event.preventDefault(); executePaletteCommand('focus'); }
       else if (key === 'd') { event.preventDefault(); executePaletteCommand('details'); }
@@ -818,7 +1100,10 @@ function resetConversation(clearStorage = true): void {
   $<HTMLFormElement>('conversation-composer').reset();
   $('conversation-status').textContent = ''; $('conversation-error').textContent = ''; $('conversation-reply-label').textContent = ''; $('conversation-correction-label').textContent = '';
   $('working-memory-content').replaceChildren(); delete $('working-memory-content').dataset.signature; $('working-memory-panel').hidden = true;
-  if (clearStorage) { localStorage.removeItem(CONVERSATION_SELECTION); localStorage.removeItem(CONVERSATION_SCOPE); sessionStorage.removeItem(CONVERSATION_PENDING); }
+  if (clearStorage) {
+    localStorage.removeItem(CONVERSATION_SELECTION); localStorage.removeItem(CONVERSATION_SCOPE); localStorage.removeItem(LIFE_HOME); sessionStorage.removeItem(CONVERSATION_PENDING);
+    aeeisConversationId = '';
+  }
   renderConversation();
 }
 function saveConversationAttempt(): void {
@@ -832,6 +1117,10 @@ function conversationTargetTask(): ConversationTaskView | undefined {
   const replyTasks = reply?.effectiveTaskIds ?? reply?.route.taskIds;
   const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : conversation?.focusTaskId);
   return conversation?.tasks.find(task => task.id === id);
+}
+function openConversationRoute(): void {
+  const route = document.querySelector<HTMLDetailsElement>('#conversation-route');
+  if (route) route.open = true;
 }
 function updateConversationControls(): void {
   const locked = conversationBusy || Boolean(conversationAttempt);
@@ -854,13 +1143,1373 @@ function updateConversationControls(): void {
   $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : '发送讨论';
   $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
   $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || preparing || correcting;
-  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : '创建执行后请在运行面板核对计划，再明确批准。';
+  restoreExecutionReview();
+  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : executionReviewNote();
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], textarea[data-answer]').forEach(control => {
+  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
+  const surface = rosterView();
+  if (surface === 'group' || surface === 'draft' || surface === 'direct') {
+    $<HTMLButtonElement>('conversation-send').disabled = true;
+    $<HTMLButtonElement>('conversation-execute').disabled = true;
+    if (surface === 'direct' && !conversationCorrectionId) {
+      $<HTMLButtonElement>('conversation-send').textContent = '先回到这个人';
+      $('conversation-execution-note').textContent = '这间私聊只保留会话记录。执行回到这个人的对话里，明确创建 Run。它不会自己回复。';
+    }
+  }
+  syncEntrySurface();
+  syncStandingInstruction();
+}
+function syncStandingInstruction(): void {
+  const section = $('standing-instruction');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  section.hidden = !life;
+  const field = $<HTMLTextAreaElement>('standing-text');
+  const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life;
+  const nextId = conversation?.id ?? '';
+  if (field) {
+    const focused = document.activeElement === field;
+    if (!conversation || nextId !== standingBoundId || !focused) {
+      field.value = conversation?.standingInstruction ?? '';
+      standingBoundId = nextId;
+    }
+    field.disabled = locked;
+  }
+  $<HTMLButtonElement>('standing-save').disabled = locked;
+  $<HTMLButtonElement>('standing-clear').disabled = locked || !conversation?.standingInstruction;
+  syncLastDelivery();
+}
+function deliveryDraft(delivery: LastDelivery): string {
+  const parts = [delivery.taskTitle.trim()];
+  if (delivery.planSummary?.trim()) parts.push(delivery.planSummary.trim());
+  if (delivery.artifactTitles?.length) parts.push(delivery.artifactTitles.join('、'));
+  const text = parts.join('。');
+  return text.length > 500 ? `${text.slice(0, 499)}…` : text;
+}
+function syncLastDelivery(): void {
+  const section = $('last-delivery');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  const delivery = life ? conversation?.lastDelivery : undefined;
+  section.hidden = !delivery;
+  const copy = $('last-delivery-copy');
+  if (copy) copy.textContent = delivery ? deliveryDraft(delivery) : '';
+  const pin = $<HTMLButtonElement>('last-delivery-pin');
+  if (pin) pin.disabled = !delivery || conversationBusy || Boolean(conversationAttempt);
+  syncPracticeDraft(delivery);
+  syncAcceptedPractice();
+}
+function syncPracticeDraft(delivery: LastDelivery | undefined): void {
+  const field = $<HTMLTextAreaElement>('practice-text');
+  const accept = $<HTMLButtonElement>('practice-accept');
+  const locked = !delivery || conversationBusy || Boolean(conversationAttempt);
+  if (field) {
+    const nextRun = delivery?.runId ?? '';
+    const focused = document.activeElement === field;
+    if (!delivery || nextRun !== practiceBoundRunId || !focused) {
+      field.value = delivery ? deliveryDraft(delivery) : '';
+      practiceBoundRunId = nextRun;
+    }
+    field.disabled = locked;
+  }
+  if (accept) accept.disabled = locked;
+}
+function syncAcceptedPractice(): void {
+  const section = $('accepted-practice');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  const practice = life ? conversation?.acceptedPractice : undefined;
+  section.hidden = !practice;
+  const copy = $('accepted-practice-copy');
+  if (copy) copy.textContent = practice?.text ?? '';
+  const retract = $<HTMLButtonElement>('accepted-practice-retract');
+  if (retract) retract.disabled = !practice || conversationBusy || Boolean(conversationAttempt);
+  syncTaskSettings();
+}
+function currentTaskKind(): string {
+  return $<HTMLInputElement>('task-kind')?.value.trim() ?? '';
+}
+function syncTaskSettings(): void {
+  const section = $('task-settings');
+  if (!section) return;
+  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  section.hidden = !life;
+  const kind = currentTaskKind();
+  const settings = life ? conversation?.taskSettings : undefined;
+  const skill = kind ? settings?.skills.find(item => item.taskKind === kind) : undefined;
+  const model = kind ? settings?.models.find(item => item.taskKind === kind) : undefined;
+  const copy = $('skill-profile-copy');
+  if (copy) {
+    if (skill) copy.textContent = `${skill.methodId} · ${skill.version}，引用 ${skill.runId}`;
+    else if (!kind && settings?.skills.length) copy.textContent = settings.skills.map(item => `${item.taskKind}：${item.methodId} · ${item.version}`).join('；');
+    else copy.textContent = kind ? '这个种类还没有技能档案。' : '这个人还没有按任务种类留下技能档案。';
+  }
+  const modelCopy = $('task-model-copy');
+  if (modelCopy) {
+    if (model) modelCopy.textContent = model.provider ? `${model.model} · ${model.provider}` : model.model;
+    else if (!kind && settings?.models.length) modelCopy.textContent = settings.models.map(item => `${item.taskKind}：${item.model}`).join('；');
+    else modelCopy.textContent = kind ? '这个种类沿用当前运行时。' : '还没有哪个种类单独选了模型。';
+  }
+  const runtime = $('task-runtime-model');
+  if (runtime) runtime.textContent = runtimeModel ? `当前运行时：${runtimeModel}。留空就用它。` : '当前按目录选择模型。留空就继续按目录。';
+  const modelField = $<HTMLInputElement>('task-model');
+  const providerField = $<HTMLInputElement>('task-model-provider');
+  const bound = `${conversation?.id ?? ''}:${kind}`;
+  if (modelField && document.activeElement !== modelField && bound !== taskModelBound) {
+    modelField.value = model?.model ?? '';
+    if (providerField && document.activeElement !== providerField) providerField.value = model?.provider ?? '';
+    taskModelBound = bound;
+  }
+  const locked = !life || !conversation || conversationBusy || Boolean(conversationAttempt);
+  const kindLocked = locked || !kind;
+  $<HTMLInputElement>('task-kind').disabled = locked;
+  if (modelField) modelField.disabled = locked;
+  if (providerField) providerField.disabled = locked;
+  const compare = kind ? settings?.comparisons?.find(item => item.taskKind === kind) : undefined;
+  const compareCopy = $('task-kind-compare');
+  if (compareCopy) {
+    compareCopy.hidden = !compare;
+    compareCopy.textContent = compare ? taskKindCompareText(compare) : '';
+  }
+  $<HTMLButtonElement>('skill-promote').disabled = kindLocked || !promotionRunId();
+  $<HTMLButtonElement>('task-kind-keep').disabled = kindLocked || !compare?.differs || compare.kept;
+  $<HTMLButtonElement>('task-kind-propose').disabled = kindLocked || !skillLineup(compare) || Boolean(compare?.proposal);
+  $<HTMLButtonElement>('skill-rollback').disabled = kindLocked || !skill;
+  $<HTMLButtonElement>('skill-retract').disabled = kindLocked || !skill;
+  $<HTMLInputElement>('skill-rollback-reason').disabled = kindLocked || !skill;
+  $<HTMLButtonElement>('task-model-save').disabled = kindLocked;
+  $<HTMLButtonElement>('task-model-clear').disabled = kindLocked || !model;
+}
+function skillLineup(compare: TaskKindComparison | undefined): boolean {
+  return Boolean(compare?.methodId && compare.profileMethodId && compare.version && compare.profileVersion && (compare.methodId !== compare.profileMethodId || compare.version !== compare.profileVersion));
+}
+function taskKindCompareText(compare: TaskKindComparison): string {
+  const usedSkill = compare.methodId ? `${compare.methodId} · ${compare.version}` : '没有技能版本';
+  const usedModel = compare.model ?? '当前运行时';
+  const used = `这次做成：${usedSkill}，模型 ${usedModel}，引用 ${compare.runId}`;
+  const sent = compare.proposal?.status === 'proposed'
+    ? '已送去评测。候选停在 proposed。'
+    : compare.proposal
+      ? `已送去评测。候选状态：${compare.proposal.status}。`
+      : '';
+  if (!compare.profileMethodId && !compare.profileModel) return `${sent}${used}。这个种类还没有档案。`;
+  const profileSkill = compare.profileMethodId ? `${compare.profileMethodId} · ${compare.profileVersion}` : '没有技能档案';
+  const profileModel = compare.profileModel ?? '未指定模型';
+  if (compare.kept) return `${sent}已留下这份档案。${used}。档案：${profileSkill}，模型 ${profileModel}。`;
+  if (!compare.differs) return `${sent}这次做成和档案一致：${profileSkill}，模型 ${profileModel}。`;
+  const offer = skillLineup(compare) ? '技能版本不同，可以送去评测。' : '';
+  return `${sent}${used}。档案：${profileSkill}，模型 ${profileModel}。可以晋升这次技能，也可以留下档案。${offer}不点就不动。`;
+}
+function promotionRunId(): string {
+  const kind = currentTaskKind();
+  const compare = kind ? conversation?.taskSettings?.comparisons?.find(item => item.taskKind === kind) : undefined;
+  if (compare) return compare.methodId ? compare.runId : '';
+  return conversation?.lastDelivery?.runId ?? '';
+}
+function pinLastDelivery(): void {
+  const surface = rosterView();
+  const delivery = conversation?.lastDelivery;
+  if ((surface !== 'entry' && surface !== 'bot') || !conversation || !delivery || conversationBusy || conversationAttempt) return;
+  const field = $<HTMLTextAreaElement>('standing-text');
+  const draft = deliveryDraft(delivery);
+  const current = field.value.trim();
+  if (current && current !== draft && !current.includes(draft)) {
+    const combined = `${current}\n${draft}`;
+    if (combined.length > 500) {
+      $('conversation-error').textContent = '这句话已经写满。先删短，再放上次的做法。';
+      field.focus();
+      return;
+    }
+    field.value = combined;
+  } else field.value = draft;
+  standingBoundId = conversation.id;
+  field.focus();
+  $('conversation-status').textContent = '已放进嘱咐草稿。还没记住。要点「记住这句」才会留下。';
+  $('conversation-error').textContent = '';
+  updateConversationControls();
+}
+function usingDemoBots(): boolean {
+  return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
+}
+function rosterBots(): RosterBot[] {
+  const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
+    id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
+  }));
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+}
+function loadBotGroups(): BotGroups {
+  const raw = localStorage.getItem('aeeis.bot-groups');
+  if (!raw) return usingDemoBots() ? {
+    groups: [{ id: 'work', name: '工作' }, { id: 'research', name: '研究' }],
+    placement: { aeeis: 'work', 'demo.release': 'work', 'demo.research': 'research', 'demo.brief': 'research' },
+  } : { groups: [], placement: {} };
+  try {
+    const parsed = JSON.parse(raw) as BotGroups;
+    if (!parsed || !Array.isArray(parsed.groups) || !parsed.placement || typeof parsed.placement !== 'object') throw new Error('bad');
+    return {
+      groups: parsed.groups.filter(group => group && typeof group.id === 'string' && typeof group.name === 'string' && group.name.trim()).slice(0, 8),
+      placement: Object.fromEntries(Object.entries(parsed.placement).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string')),
+    };
+  } catch {
+    return { groups: [], placement: {} };
+  }
+}
+function ensureBotGroups(): BotGroups {
+  if (!agentsLoaded) return botGroups ?? { groups: [], placement: {} };
+  botGroups ??= loadBotGroups();
+  return botGroups;
+}
+function saveBotGroups(): void {
+  if (!botGroups) return;
+  localStorage.setItem('aeeis.bot-groups', JSON.stringify(botGroups));
+}
+function botById(id: string): RosterBot | undefined {
+  return rosterBots().find(bot => bot.id === id);
+}
+function activeBotId(): string {
+  return rosterBots().some(bot => bot.id === selectedBotId) ? selectedBotId : 'aeeis';
+}
+function chatRoom(): RoomSummary | undefined {
+  return roomSummaries.find(room => room.id === openGroupId);
+}
+function isManagedChat(room: RoomSummary): boolean {
+  return room.status === 'active' && (room.description === '私聊' || room.description === '群聊');
+}
+function rosterView(): 'entry' | 'bot' | 'group' | 'draft' | 'direct' {
+  if (groupDraftOpen) return 'draft';
+  const room = chatRoom();
+  if (room?.description === '私聊') return 'direct';
+  if (room?.description === '群聊' || openGroupId) return openGroupId ? 'group' : 'entry';
+  return activeBotId() === 'aeeis' ? 'entry' : 'bot';
+}
+function directRoomId(principalId: string): string {
+  for (const [roomId, memberId] of directMembers) {
+    if (memberId !== principalId) continue;
+    const room = roomSummaries.find(item => item.id === roomId);
+    if (room && isManagedChat(room) && room.description === '私聊') return roomId;
+  }
+  return '';
+}
+function lifeAgent(view: { id: string; agentId?: string } | undefined): string {
+  if (!view) return '';
+  if (view.agentId) return view.agentId;
+  return view.id === aeeisConversationId ? 'aeeis' : '';
+}
+function lifeSummary(agentId: string): ConversationSummary | undefined {
+  const stamped = conversationList.find(item => item.agentId === agentId);
+  if (stamped) return stamped;
+  if (agentId === 'aeeis' && aeeisConversationId) return conversationList.find(item => item.id === aeeisConversationId) ?? (conversation?.id === aeeisConversationId ? conversation : undefined);
+  return undefined;
+}
+function taskCountOf(item: ConversationSummary | undefined): number | undefined {
+  if (!item) return undefined;
+  if (typeof item.taskCount === 'number') return item.taskCount;
+  const tasks = (item as ConversationView).tasks;
+  return Array.isArray(tasks) ? tasks.length : undefined;
+}
+function presenceFromTasks(tasks: Array<{ id: string; title: string; status: string }>): LifePresence {
+  const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
+    : status === 'unknown' ? 1
+    : status === 'failed' ? 2
+    : status === 'paused' ? 3
+    : status === 'planning' || status === 'reviewing' ? 4
+    : status === 'running' || status === 'queued' || status === 'preparing' ? 5
+    : 9;
+  const lead = tasks.filter(task => rank(task.status) < 9).sort((left, right) => rank(left.status) - rank(right.status))[0];
+  if (!lead) return { state: 'idle', label: '空闲' };
+  const ranked = rank(lead.status);
+  const state = ranked === 0 ? 'waiting' as const : ranked === 1 ? 'unknown' as const : ranked === 2 ? 'blocked' as const : ranked === 3 ? 'paused' as const : ranked === 4 ? 'thinking' as const : 'working' as const;
+  const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
+  return { state, label, taskId: lead.id, taskTitle: lead.title };
+}
+function lifePresence(agentId: string): LifePresence {
+  const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
+  const listed = lifeSummary(agentId);
+  const tasks = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
+  if (tasks?.length) {
+    const derived = presenceFromTasks(tasks);
+    if (derived.state !== 'idle') return derived;
+    return { state: 'idle', label: `空闲 · ${tasks.length} 件事` };
+  }
+  if (listed?.presence && listed.presence.state !== 'idle') return listed.presence;
+  const count = taskCountOf(listed);
+  if (count) return { state: 'idle', label: `空闲 · ${count} 件事` };
+  return { state: 'idle', label: '空闲' };
+}
+function lifePresenceLabel(agentId: string): string {
+  const presence = lifePresence(agentId);
+  return presence.state === 'idle' || !presence.taskTitle ? presence.label : `${presence.label} · ${presence.taskTitle}`;
+}
+function lifeAvatarState(agentId: string): string {
+  const state = lifePresence(agentId).state;
+  if (state === 'paused') return 'waiting';
+  if (state === 'unknown' || state === 'blocked') return 'blocked';
+  return state;
+}
+function rememberAeeisHome(list: ConversationSummary[], loaded?: ConversationSummary): void {
+  const stamped = list.find(item => item.agentId === 'aeeis');
+  if (stamped) {
+    aeeisConversationId = stamped.id;
+    localStorage.setItem(LIFE_HOME, stamped.id);
+    return;
+  }
+  if (aeeisConversationId && list.some(item => item.id === aeeisConversationId && !item.agentId)) return;
+  const unscoped = loaded && !loaded.agentId ? loaded : list.find(item => !item.agentId);
+  if (!unscoped) return;
+  aeeisConversationId = unscoped.id;
+  localStorage.setItem(LIFE_HOME, unscoped.id);
+}
+function aeeisThread(): { id: string; revision: number } | undefined {
+  const stamped = conversationList.find(item => item.agentId === 'aeeis');
+  if (stamped) return stamped;
+  if (aeeisConversationId) {
+    const remembered = conversationList.find(item => item.id === aeeisConversationId);
+    if (remembered) return remembered;
+    if (conversation?.id === aeeisConversationId) return conversation;
+  }
+  if (conversationList.length <= 1) return conversation ?? conversationList[0];
+  return conversation;
+}
+function participantLabel(principalId: string): string {
+  return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
+}
+function eventWriter(event: SessionEventSummary): { id: string; type: 'principal' | 'agent' | 'system' } {
+  return event.recordedBy ?? { id: event.actorId, type: event.actorType };
+}
+function roomOwnerWrote(event: SessionEventSummary): boolean {
+  const writer = eventWriter(event);
+  if (writer.type !== 'principal') return false;
+  if (event.owner) return writer.id === event.owner;
+  return Boolean(sessionPrincipal) && writer.id === sessionPrincipal;
+}
+function eventAuthor(event: SessionEventSummary): string {
+  if (event.type === 'system') {
+    const writer = eventWriter(event);
+    if (writer.type === 'system' || roomOwnerWrote(event)) return '记录';
+    return participantLabel(writer.id);
+  }
+  if (event.actorType === 'agent') return participantLabel(event.actorId);
+  if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
+  return '你';
+}
+function lifePersonId(): string {
+  const view = rosterView();
+  if (view === 'entry') return lifeAgent(conversation) || 'aeeis';
+  if (view === 'bot') return lifeAgent(conversation) || activeBotId();
+  return '';
+}
+function messageAuthor(item: ConversationMessageView): string {
+  if (item.role === 'notification') return '任务通知';
+  const person = lifePersonId();
+  const personLabel = person ? participantLabel(person) : '';
+  if (item.speaker?.role === 'agent') {
+    const who = participantLabel(item.speaker.id);
+    if (person && item.speaker.id !== person) return `${who} · 对${personLabel}`;
+    return who;
+  }
+  if (item.speaker && person && item.speaker.id !== person) return `你 · 对${personLabel}`;
+  return '你';
+}
+function selectedLifeSpeaker(): { role: 'agent'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'entry' && view !== 'bot') return;
+  const id = $<HTMLSelectElement>('life-speaker')?.value.trim() ?? '';
+  const person = lifePersonId();
+  if (!id || id !== person || !/^[A-Za-z0-9._-]+$/.test(id)) return;
+  return { role: 'agent', id };
+}
+function syncLifeSpeaker(): void {
+  const select = $<HTMLSelectElement>('life-speaker');
+  if (!select) return;
+  const view = rosterView();
+  const person = lifePersonId();
+  const valid = /^[A-Za-z0-9._-]+$/.test(person);
+  const previous = select.value;
+  select.replaceChildren();
+  const you = document.createElement('option');
+  you.value = '';
+  you.textContent = '你';
+  select.append(you);
+  if (valid) {
+    const option = document.createElement('option');
+    option.value = person;
+    option.textContent = participantLabel(person);
+    select.append(option);
+  }
+  select.value = valid && previous === person ? previous : '';
+  select.hidden = view !== 'entry' && view !== 'bot';
+}
+function speakerChoices(): Array<{ id: string; label: string; type: 'agent' | 'principal' }> {
+  const view = rosterView();
+  if (view === 'group') {
+    return groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => ({ id: member.principalId, label: participantLabel(member.principalId), type: 'agent' as const }));
+  }
+  if (view === 'direct') {
+    return groupMembers.filter(member => member.status === 'active').map(member => ({
+      id: member.principalId,
+      label: participantLabel(member.principalId),
+      type: member.role === 'agent' ? 'agent' as const : 'principal' as const,
+    }));
+  }
+  return [];
+}
+function selectedRoomSpeaker(): { type: 'agent' | 'principal'; id: string } | undefined {
+  const view = rosterView();
+  if (view !== 'group' && view !== 'direct') return;
+  const id = $<HTMLSelectElement>('group-speaker')?.value.trim() ?? '';
+  if (!id) return;
+  const choice = speakerChoices().find(item => item.id === id);
+  if (!choice) return;
+  return { type: choice.type, id: choice.id };
+}
+function syncGroupSpeaker(): void {
+  const select = $<HTMLSelectElement>('group-speaker');
+  if (!select) return;
+  const previous = select.value;
+  const choices = speakerChoices();
+  select.replaceChildren();
+  const you = document.createElement('option');
+  you.value = '';
+  you.textContent = '你';
+  select.append(you);
+  for (const choice of choices) {
+    const option = document.createElement('option');
+    option.value = choice.id;
+    option.textContent = choice.label;
+    select.append(option);
+  }
+  select.value = choices.some(choice => choice.id === previous) ? previous : '';
+  const view = rosterView();
+  select.hidden = view !== 'group' && view !== 'direct';
+  syncGroupHandoff();
+}
+function handoffChoices(): RosterBot[] {
+  const members = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
+  return rosterBots().filter(bot => bot.id === 'aeeis' || members.has(bot.id));
+}
+function syncGroupHandoff(): void {
+  const select = $<HTMLSelectElement>('group-handoff');
+  if (!select) return;
+  const previous = select.value;
+  const choices = handoffChoices();
+  select.replaceChildren();
+  const stay = document.createElement('option');
+  stay.value = '';
+  stay.textContent = '只留在会话里';
+  select.append(stay);
+  for (const bot of choices) {
+    const option = document.createElement('option');
+    option.value = bot.id;
+    option.textContent = `交给${bot.name}`;
+    select.append(option);
+  }
+  select.value = choices.some(bot => bot.id === previous) ? previous : '';
+  select.hidden = rosterView() !== 'group';
+}
+function handoffCitation(event: SessionEventSummary): { conversationId: string; taskId: string; agentId?: string } | undefined {
+  if (!roomOwnerWrote(event)) return;
+  const refs = event.evidenceRefs ?? [];
+  const conversationId = refs.find(id => id.startsWith('conv_') && CITATION_ID.test(id));
+  const taskId = refs.find(id => id.startsWith('task_') && CITATION_ID.test(id));
+  if (!conversationId || !taskId) return;
+  const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && botById(id));
+  return agentId ? { conversationId, taskId, agentId } : { conversationId, taskId };
+}
+function hideChannelArtifact(): void {
+  const panel = $('channel-artifact');
+  const body = $('channel-artifact-body');
+  if (panel) panel.hidden = true;
+  if (body) body.replaceChildren();
+}
+async function openChannelArtifact(runId: string): Promise<void> {
+  const panel = $('channel-artifact');
+  const body = $('channel-artifact-body');
+  const roomId = openGroupId;
+  if (!panel || !body || !roomId) return;
+  body.replaceChildren(element('p', '正在读取产物。看一眼不会执行。'));
+  panel.hidden = false;
+  try {
+    const run = await api<RunView>(`/runs/${encodeURIComponent(runId)}`);
+    if (openGroupId !== roomId) return;
+    body.replaceChildren();
+    const artifacts = (run.artifacts ?? []).slice(0, 8);
+    if (!artifacts.length) {
+      body.append(element('p', '这件 Run 还没有写下产物。'));
+      return;
+    }
+    for (const artifact of artifacts) {
+      const block = element('article', '', 'channel-artifact-item');
+      block.append(element('strong', artifact.title.trim() || '未命名产物'));
+      const text = artifact.content.trim();
+      block.append(element('p', text ? (text.length > 4000 ? `${text.slice(0, 4000)}…` : text) : '这篇产物还没有正文。'));
+      if (artifact.evidenceRefs?.length) block.append(element('small', `证据：${artifact.evidenceRefs.slice(0, 8).join('、')}`));
+      body.append(block);
+    }
+  } catch (error) {
+    body.replaceChildren(element('p', errorMessage(error)));
+  }
+}
+function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts: { answer: Map<string, string>; reject: Map<string, string> } = { answer: new Map(), reject: new Map() }): void {
+  const cite = handoffCitation(event);
+  if (!cite) return;
+  const view = handoffViews.get(cite.conversationId);
+  const task = view?.tasks.find(candidate => candidate.id === cite.taskId);
+  const card = element('div', '', 'group-run-card');
+  card.dataset.card = 'handoff';
+  card.dataset.handoff = cite.taskId;
+  const named = cite.agentId ? botById(cite.agentId) : undefined;
+  const viewed = !named && view?.agentId ? botById(view.agentId) : undefined;
+  const person = named?.name ?? cite.agentId ?? viewed?.name ?? view?.agentId ?? '这个人';
+  card.append(element('strong', `交给${person}`));
+  if (!view) card.append(element('small', '正在读取这件事。看一眼不会执行。'));
+  else if (!task) card.append(element('small', '这条讨论不在这个人的对话里。'));
+  else card.append(element('small', task.title));
+  const bot = named ?? viewed;
+  if (bot) {
+    const open = element('button', `打开${bot.name}`) as HTMLButtonElement;
+    open.type = 'button';
+    open.dataset.openLife = bot.id;
+    open.addEventListener('click', () => { void openLifeThread(bot.id).catch(error => message(errorMessage(error))); });
+    card.append(open);
+  }
+  item.append(card);
+  if (!task) return;
+  const taskCard = element('div', '', 'group-run-card');
+  taskCard.dataset.card = 'task';
+  taskCard.dataset.handoff = cite.taskId;
+  const state = task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status);
+  taskCard.append(element('strong', '任务'), element('small', task.title), element('small', state));
+  if (task.execution?.steps.length) taskCard.append(element('small', executionLine(task.execution), 'conversation-steps'));
+  taskCard.append(element('small', '这张卡只描述这件事。看一眼不会执行。'));
+  item.append(taskCard);
+  const delivery = view?.lastDelivery?.taskId === task.id ? view.lastDelivery : undefined;
+  const artifactTitles = task.execution?.evidence?.length ? task.execution.evidence : (delivery?.artifactTitles ?? []);
+  if (artifactTitles.length || delivery?.planSummary) {
+    const artifact = element('div', '', 'group-run-card');
+    artifact.dataset.card = 'artifact';
+    artifact.dataset.handoff = cite.taskId;
+    artifact.append(element('strong', '产物'));
+    if (delivery?.planSummary) artifact.append(element('small', `结论：${delivery.planSummary}`));
+    if (artifactTitles.length) artifact.append(element('small', artifactTitles.join('、')));
+    artifact.append(element('small', '在频道里阅读。不会改讨论焦点，也不会另开一件 Run。'));
+    const artifactRunId = task.runId ?? task.latestRunId ?? delivery?.runId;
+    if (artifactRunId) {
+      const read = dashboardButton('阅读全文', () => openChannelArtifact(artifactRunId));
+      read.dataset.readArtifact = artifactRunId;
+      artifact.append(read);
+    }
+    item.append(artifact);
+  }
+  const decision = (kind: string, title: string, copy: string) => {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = kind;
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', title), element('small', copy), element('small', '在这个人的对话里处理。这里只读，不会执行。'));
+    item.append(extra);
+  };
+  if (task.pendingApproval && task.runId) {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = 'approval';
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', '审批'), element('small', `待批准：${task.pendingApproval.summary}`), element('small', '在这里批准或拒绝。不会改讨论焦点，也不会另开一件 Run。'));
+    const approve = dashboardButton('批准并执行', () => approveConversationTask(task, 'task'));
+    approve.dataset.approve = task.id;
+    const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
+    once.dataset.approveOnce = task.id;
+    const field = document.createElement('textarea');
+    field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+    field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+    field.dataset.reject = task.id;
+    const rejectDraft = drafts.reject.get(task.id);
+    if (rejectDraft) field.value = rejectDraft;
+    const reject = dashboardButton('拒绝并说明', () => rejectConversationTask(task, field.value));
+    reject.dataset.rejectSubmit = task.id;
+    extra.append(approve, once, field, reject);
+    item.append(extra);
+  } else if (task.pendingApproval) decision('approval', '审批', `待批准：${task.pendingApproval.summary}`);
+  if (task.pendingQuestion && task.runId) {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = 'question';
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', '提问'), element('small', `待回答：${task.pendingQuestion.text}`), element('small', '在这里回答。不会改讨论焦点，也不会另开一件 Run。'));
+    const field = document.createElement('textarea');
+    field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+    field.placeholder = '回答后从当前节点继续';
+    field.dataset.answer = task.id;
+    field.setAttribute('aria-label', `回答「${task.title}」`);
+    const answerDraft = drafts.answer.get(task.id);
+    if (answerDraft) field.value = answerDraft;
+    const submit = dashboardButton('提交回答', () => answerConversationTask(task, field.value));
+    submit.dataset.answerSubmit = task.id;
+    extra.append(field, submit);
+    item.append(extra);
+  } else if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
+  if (task.status === 'unknown' || task.status === 'waiting_external') decision('reconcile', '核查', task.status === 'unknown' ? '结果需要核查。' : '还在等外部回执。');
+  if (task.status === 'failed') decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
+}
+async function refreshHandoffViews(): Promise<void> {
+  const epoch = ++handoffEpoch;
+  const roomId = openGroupId;
+  const ids = [...new Set(groupEvents.flatMap(event => {
+    const cite = handoffCitation(event);
+    return cite ? [cite.conversationId] : [];
+  }))];
+  if (!ids.length || !roomId) return;
+  const views = await Promise.all(ids.map(async id => {
+    try { return await api<ConversationView>(`/conversations/${encodeURIComponent(id)}`); }
+    catch { return undefined; }
+  }));
+  if (epoch !== handoffEpoch || openGroupId !== roomId) return;
+  ids.forEach((id, index) => {
+    const view = views[index];
+    if (view) handoffViews.set(id, view);
+  });
+  renderGroupTranscript();
+}
+function groupOccupancy(): number {
+  return 1 + draftAgents.size + draftPeople.length;
+}
+
+function leaveGroup(): void {
+  openGroupId = '';
+  groupMembers = [];
+  groupEvents = [];
+  groupDraftOpen = false;
+  hideChannelArtifact();
+  localStorage.removeItem('aeeis.group');
+  document.body.classList.remove('group-open', 'group-draft');
+  const panel = $('group-panel');
+  const draft = $('group-draft');
+  const composer = $('group-composer');
+  if (panel) panel.hidden = true;
+  if (draft) draft.hidden = true;
+  if (composer) composer.hidden = true;
+  syncComposerHeading();
+}
+function clearOpenGroup(): void {
+  openGroupId = '';
+  groupMembers = [];
+  groupEvents = [];
+  localStorage.removeItem('aeeis.group');
+}
+function showRoster(focused = true): void {
+  document.body.classList.toggle('roster-focus', focused);
+  if (focused) document.body.classList.remove('draft-open');
+}
+function syncShellClasses(): void {
+  const view = rosterView();
+  document.body.classList.toggle('group-draft', view === 'draft');
+  document.body.classList.toggle('group-open', view === 'group' || view === 'direct');
+  if (view === 'bot' || view === 'draft' || view === 'group' || view === 'direct') {
+    document.body.classList.remove('roster-focus');
+    document.body.classList.add('draft-open');
+  }
+}
+function syncEntrySurface(): void {
+  const view = rosterView();
+  const life = view === 'entry' || view === 'bot';
+  const messages = $('conversation-messages');
+  const earlier = $('conversation-earlier');
+  const empty = $('conversation-empty');
+  const composer = $('conversation-composer');
+  const note = $('bot-note');
+  const placement = $('bot-placement');
+  const draft = $('group-draft');
+  const panel = $('group-panel');
+  if (messages) messages.hidden = !life;
+  if (earlier) earlier.hidden = !life || !conversation?.hasEarlierMessages;
+  if (empty) empty.hidden = !life || Boolean(conversation?.messages.length);
+  if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
+  if (note) note.hidden = view !== 'bot';
+  if (placement) placement.hidden = view !== 'bot' && view !== 'direct';
+  if (draft) draft.hidden = view !== 'draft';
+  if (panel) panel.hidden = view !== 'group' && view !== 'direct';
+  const room = chatRoom();
+  const directPrincipal = directMembers.get(room?.id ?? '') ?? '';
+  const counterpart = view === 'direct' ? (botById(directPrincipal) ?? botById(activeBotId())) : botById(activeBotId());
+  if (view === 'bot') {
+    const title = $('bot-note-title');
+    const copy = $('bot-note-copy');
+    if (title) title.textContent = counterpart?.name ?? '成员';
+    if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
+    const role = $('bot-profile-role');
+    if (role) role.textContent = counterpart?.note ? `职责：${counterpart.note}` : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+  }
+  const botStatus = $('bot-status');
+  if (botStatus) {
+    const personId = view === 'bot' ? activeBotId() : '';
+    const presence = personId ? lifePresence(personId) : undefined;
+    botStatus.hidden = view !== 'bot';
+    botStatus.textContent = presence ? (presence.taskTitle && presence.state !== 'idle' ? `${presence.label} · ${presence.taskTitle}。看一眼不会执行。` : `${presence.label}。看一眼不会执行。`) : '';
+  }
+  const chatNote = $('chat-note');
+  const rename = $('group-rename');
+  const send = document.querySelector<HTMLButtonElement>('#group-composer button[type="submit"]');
+  const groupText = $<HTMLTextAreaElement>('group-text');
+  if (chatNote) chatNote.textContent = view === 'direct'
+    ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
+    : '这是群聊。没选说话人时，入口收下这句话，记成一条讨论。@一个人则交给那个人；@所有人或点到多个人时，仍只记成入口的一条讨论。选一位说话人，只是标明这句话是谁说的。都不会执行，也不会调用模型。选「交给」同样只记成讨论。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+  if (rename) rename.hidden = view === 'direct';
+  if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写给入口。@AEEIS 或没点名，都记成一条讨论。@一个人交给那个人。@所有人仍由入口记成一条。不执行，也不调用模型。';
+  const sendNote = $('group-send-note');
+  if (sendNote) sendNote.textContent = view === 'direct'
+    ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没选说话人时，入口或被点名的那一个人会记下一条讨论，不执行。选一位说话人，只是标明这句话是谁说的。';
+  syncGroupSpeaker();
+  syncLifeSpeaker();
+  const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
+  const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
+  const entryTitle = $('entry-title');
+  const entryPresence = $('entry-presence');
+  const titleText = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
+  const presenceText = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
+  if (entryTitle) entryTitle.textContent = titleText;
+  if (entryPresence) entryPresence.textContent = presenceText;
+  const shellTitle = $('gb-title');
+  const shellPresence = $('gb-presence');
+  if (shellTitle) shellTitle.textContent = titleText;
+  if (shellPresence) shellPresence.textContent = presenceText;
+  const stageEmpty = $('empty');
+  if (stageEmpty && conversationEnabled) stageEmpty.hidden = true;
+  syncShellClasses();
+  renderBotPlacement();
+}
+function renderBotRoster(): void {
+  const list = $('bots');
+  if (!list) return;
+  const bots = rosterBots();
+  const groups = ensureBotGroups();
+  list.replaceChildren();
+  const renderRow = (bot: RosterBot) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'bot-row';
+    item.dataset.botId = bot.id;
+    if (bot.id === 'aeeis') item.id = 'gb-bot';
+    const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
+    avatar.dataset.state = lifeAvatarState(bot.id);
+    const copy = element('span', '', 'roster-copy');
+    const presence = element('small', lifePresenceLabel(bot.id));
+    copy.append(element('strong', bot.name), presence);
+    item.append(avatar, copy);
+    list.append(item);
+  };
+  const known = new Set(groups.groups.map(group => group.id));
+  for (const group of groups.groups) {
+    const members = bots.filter(bot => groups.placement[bot.id] === group.id);
+    const heading = document.createElement('button');
+    heading.type = 'button';
+    heading.className = 'bot-group-label';
+    heading.dataset.groupId = group.id;
+    heading.textContent = `${group.name} · ${members.length}`;
+    list.append(heading);
+    for (const bot of members) renderRow(bot);
+  }
+  const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
+  if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
+  for (const bot of loose) renderRow(bot);
+  for (const room of roomSummaries.filter(item => item.status === 'active' && item.description === '私聊')) {
+    const principalId = directMembers.get(room.id);
+    if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'bot-row';
+    item.dataset.roomId = room.id;
+    const avatar = element('span', room.title.slice(0, 1) || '成', 'roster-avatar');
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', room.title), element('small', '私聊'));
+    item.append(avatar, copy);
+    list.append(item);
+  }
+  const viewingBot = rosterView() === 'entry' || rosterView() === 'bot' || rosterView() === 'direct';
+  const visible = activeBotId();
+  list.querySelectorAll<HTMLButtonElement>('[data-bot-id]').forEach(row => {
+    row.setAttribute('aria-pressed', String(viewingBot && row.dataset.botId === visible));
+  });
+}
+function renderBotPlacement(): void {
+  const host = $('bot-placement');
+  if (!host || host.hidden) return;
+  host.replaceChildren();
+  const groups = ensureBotGroups();
+  const botId = activeBotId();
+  const current = groups.groups.some(group => group.id === groups.placement[botId]) ? groups.placement[botId] : '';
+  host.append(element('span', '分组', 'bot-placement-label'));
+  const none = document.createElement('button');
+  none.type = 'button';
+  none.textContent = '未分组';
+  none.setAttribute('aria-pressed', String(!current));
+  none.addEventListener('click', () => placeBot(botId, ''));
+  host.append(none);
+  for (const group of groups.groups) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = group.name;
+    chip.setAttribute('aria-pressed', String(current === group.id));
+    chip.addEventListener('click', () => placeBot(botId, group.id));
+    host.append(chip);
+  }
+}
+function placeBot(botId: string, groupId: string): void {
+  const groups = ensureBotGroups();
+  if (!agentsLoaded) return;
+  if (groupId && !groups.groups.some(group => group.id === groupId)) return;
+  if (groupId) groups.placement[botId] = groupId;
+  else delete groups.placement[botId];
+  saveBotGroups();
+  renderBotRoster();
+  updateConversationControls();
+}
+function createBotGroup(event: Event): void {
+  event.preventDefault();
+  const input = $<HTMLInputElement>('bot-group-name');
+  const name = input?.value.trim().slice(0, 40) ?? '';
+  if (!name) { input?.focus(); return; }
+  const groups = ensureBotGroups();
+  if (!agentsLoaded) return;
+  if (groups.groups.length >= 8) { message('最多 8 个分组。'); return; }
+  if (groups.groups.some(group => group.name === name)) { message('已经有这个分组。'); return; }
+  groups.groups.push({ id: `group_${Date.now().toString(36)}`, name });
+  saveBotGroups();
+  if (input) input.value = '';
+  const draft = $('bot-group-draft');
+  if (draft) draft.hidden = true;
+  renderBotRoster();
+  updateConversationControls();
+}
+function renameBotGroup(id: string): void {
+  const groups = ensureBotGroups();
+  const group = groups.groups.find(item => item.id === id);
+  if (!group) return;
+  const next = window.prompt('分组名称。留空则解散这一组。', group.name);
+  if (next === null) return;
+  const name = next.trim().slice(0, 40);
+  if (!name) {
+    groups.groups = groups.groups.filter(item => item.id !== id);
+    for (const [botId, groupId] of Object.entries(groups.placement)) if (groupId === id) delete groups.placement[botId];
+  } else if (groups.groups.some(item => item.id !== id && item.name === name)) {
+    message('已经有这个分组。');
+    return;
+  } else group.name = name;
+  saveBotGroups();
+  renderBotRoster();
+  updateConversationControls();
+}
+function selectBot(id: string): void {
+  if (!rosterBots().some(bot => bot.id === id)) return;
+  if (conversationEnabled) {
+    void openLifeThread(id).catch(error => message(errorMessage(error)));
+    return;
+  }
+  if (id === 'aeeis') { showEntry(); return; }
+  selectedBotId = id;
+  localStorage.setItem('aeeis.bot', id);
+  entryEpoch += 1;
+  leaveGroup();
+  stopRunEventStream();
+  currentId = '';
+  current = undefined;
+  localStorage.removeItem('aeeis.run');
+  document.body.classList.remove('roster-focus');
+  document.body.classList.add('draft-open');
+  setCurrentRunOpen(false);
+  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  setIntentPresetsOpen(false);
+  renderBotRoster();
+  renderRunQueue(runSummaries);
+  syncPresence();
+}
+async function openLifeThread(agentId: string): Promise<void> {
+  if (!conversationEnabled || conversationBusy || conversationAttempt || lifeOpening.has(agentId)) return;
+  const bot = botById(agentId);
+  if (!bot) return;
+  if (conversation && lifeAgent(conversation) === agentId && !openGroupId && !groupDraftOpen) {
+    selectedBotId = agentId;
+    localStorage.setItem('aeeis.bot', agentId);
+    showRoster(false);
+    renderBotRoster();
+    renderGroups(roomSummaries);
+    updateConversationControls();
+    return;
+  }
+  lifeOpening.add(agentId);
+  const epoch = conversationEpoch;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    let summary = lifeSummary(agentId);
+    let view: ConversationView;
+    if (!summary) view = await api<ConversationView>('/conversations', { title: bot.name, agentId });
+    else if (agentId === 'aeeis' && !summary.agentId) view = await api<ConversationView>('/conversations', { title: 'AEEIS', agentId: 'aeeis', claimId: summary.id });
+    else if (conversation && conversation.id === summary.id) view = conversation;
+    else view = await api<ConversationView>(`/conversations/${encodeURIComponent(summary.id)}`);
+    if (epoch !== conversationEpoch) return;
+    groupDraftOpen = false;
+    clearOpenGroup();
+    showRoster(false);
+    if (conversation?.id !== view.id) {
+      conversationReplyId = undefined;
+      conversationCorrectionId = undefined;
+      conversationNeedsRefresh = false;
+      $<HTMLFormElement>('conversation-composer').reset();
+      $('conversation-status').textContent = '';
+      $('conversation-error').textContent = '';
+    }
+    selectedBotId = agentId;
+    localStorage.setItem('aeeis.bot', agentId);
+    if (agentId === 'aeeis') {
+      aeeisConversationId = view.id;
+      localStorage.setItem(LIFE_HOME, view.id);
+    }
+    acceptConversation(view);
+    renderBotRoster();
+    renderGroups(roomSummaries);
+  } finally {
+    lifeOpening.delete(agentId);
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+function indexDirectRooms(rooms: RoomSummary[]): void {
+  const directs = rooms.filter(room => room.status === 'active' && room.description === '私聊');
+  const key = directs.map(room => room.id).join('|');
+  if (key === directIndexKey) return;
+  directIndexKey = key;
+  directIndexPromise = Promise.all(directs.map(async room => {
+    if (directMembers.has(room.id)) return;
+    const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`).catch(() => [] as RoomMemberSummary[]);
+    const other = members.find(member => member.status === 'active');
+    if (other) directMembers.set(room.id, other.principalId);
+  })).then(() => { if (directIndexKey === key && $('bots')) renderBotRoster(); });
+}
+async function openDirect(principalId: string): Promise<void> {
+  if (!principalId) return;
+  if (botById(principalId)) { await openLifeThread(principalId); return; }
+  if (directOpening.has(principalId)) return;
+  groupDraftOpen = false;
+  showRoster(false);
+  renderBotRoster();
+  updateConversationControls();
+  directOpening.add(principalId);
+  try {
+    await directIndexPromise;
+    const existing = directRoomId(principalId);
+    if (existing) { await openGroup(existing); return; }
+    const room = await api<RoomSummary>('/rooms', { title: principalId, description: '私聊' });
+    try {
+      await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId, role: 'editor' });
+    } catch (error) {
+      await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+      throw error;
+    }
+    directMembers.set(room.id, principalId);
+    directIndexKey = '';
+    roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
+    message('');
+    await openGroup(room.id);
+  } finally { directOpening.delete(principalId); }
+}
+async function archiveOpenChat(): Promise<void> {
+  const id = openGroupId;
+  const room = chatRoom();
+  if (!id || !room || !isManagedChat(room)) return;
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`, { status: 'archived' }, 'PATCH');
+  roomSummaries = roomSummaries.map(item => item.id === id ? { ...item, ...updated, status: 'archived' } : item);
+  directMembers.delete(id);
+  directIndexKey = '';
+  clearOpenGroup();
+  selectedBotId = 'aeeis';
+  localStorage.setItem('aeeis.bot', 'aeeis');
+  message('');
+  renderBotRoster();
+  renderGroups(roomSummaries);
+  updateConversationControls();
+}
+function renderGroupCandidates(): void {
+  const host = $('group-candidates');
+  const people = $('group-people');
+  const live = $('group-count-live');
+  if (!host || !people || !live) return;
+  host.replaceChildren();
+  for (const bot of rosterBots().filter(item => item.id !== 'aeeis')) {
+    const row = element('label', '', 'group-candidate');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = draftAgents.has(bot.id);
+    box.addEventListener('change', () => {
+      if (box.checked) {
+        if (groupOccupancy() >= 6) { box.checked = false; message('一个群聊最多 6 人。'); return; }
+        draftAgents.add(bot.id);
+      } else draftAgents.delete(bot.id);
+      renderGroupCandidates();
+    });
+    row.append(box, document.createTextNode(` ${bot.name}`));
+    host.append(row);
+  }
+  people.replaceChildren();
+  for (const person of draftPeople) {
+    const row = element('div', '', 'group-person');
+    row.append(element('span', person));
+    const remove = element('button', '移除') as HTMLButtonElement;
+    remove.type = 'button';
+    remove.className = 'quiet-button';
+    remove.addEventListener('click', () => { draftPeople = draftPeople.filter(item => item !== person); renderGroupCandidates(); });
+    row.append(remove);
+    people.append(row);
+  }
+  const names = [...draftAgents].map(participantLabel).concat(draftPeople);
+  live.textContent = `${groupOccupancy()} / 6 · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
+}
+function showGroupDraft(): void {
+  clearOpenGroup();
+  showRoster(false);
+  draftAgents.clear();
+  draftPeople = [];
+  groupDraftOpen = true;
+  setCurrentRunOpen(false);
+  renderGroupCandidates();
+  renderBotRoster();
+  updateConversationControls();
+  const title = $<HTMLInputElement>('group-title');
+  if (title) { title.value = ''; title.focus(); }
+  const person = $<HTMLInputElement>('group-person');
+  if (person) person.value = '';
+}
+function addDraftPerson(): void {
+  const input = $<HTMLInputElement>('group-person');
+  const person = input?.value.trim() ?? '';
+  if (!person) { input?.focus(); return; }
+  if (draftPeople.includes(person) || draftAgents.has(person) || person === 'aeeis') { message('这位已经在群里。'); return; }
+  if (groupOccupancy() >= 6) { message('一个群聊最多 6 人。'); return; }
+  draftPeople = [...draftPeople, person];
+  if (input) input.value = '';
+  renderGroupCandidates();
+}
+async function createGroup(event: Event): Promise<void> {
+  event.preventDefault();
+  const title = $<HTMLInputElement>('group-title')?.value.trim() ?? '';
+  if (!title) return;
+  if (groupOccupancy() < 2) { message('群聊至少要 AEEIS 和另外一位。'); return; }
+  if (groupOccupancy() > 6) { message('一个群聊最多 6 人。'); return; }
+  const room = await api<RoomSummary>('/rooms', { title, description: '群聊' });
+  try {
+    for (const agentId of draftAgents) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: agentId, role: 'agent' });
+    for (const person of draftPeople) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: person, role: 'editor' });
+  } catch (error) {
+    await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+    throw error;
+  }
+  roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
+  groupDraftOpen = false;
+  message('');
+  await openGroup(room.id);
+  await refresh();
+}
+function renderGroups(rooms: RoomSummary[]): void {
+  roomSummaries = rooms;
+  indexDirectRooms(rooms);
+  if (!openGroupId && !groupDraftOpen) {
+    const saved = localStorage.getItem('aeeis.group') ?? '';
+    const savedRoom = rooms.find(room => room.id === saved);
+    if (savedRoom && isManagedChat(savedRoom)) openGroupId = saved;
+    else if (saved) localStorage.removeItem('aeeis.group');
+  }
+  const list = $('groups');
+  if (!list) return;
+  const visible = rooms.filter(room => room.status === 'active' && room.description === '群聊');
+  if (openGroupId && !rooms.some(room => room.id === openGroupId && isManagedChat(room))) {
+    openGroupId = '';
+    groupMembers = [];
+    groupEvents = [];
+    localStorage.removeItem('aeeis.group');
+  }
+  list.replaceChildren();
+  for (const room of visible) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `group-row${room.id === openGroupId ? ' selected' : ''}`;
+    item.addEventListener('click', () => { void openGroup(room.id).catch(error => message(errorMessage(error))); });
+    const avatar = element('span', room.title.slice(0, 1) || '群', 'roster-avatar');
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', room.title), element('small', '群聊'));
+    item.append(avatar, copy);
+    list.append(item);
+  }
+  const empty = $('groups-empty');
+  if (empty) empty.hidden = visible.length > 0;
+  if (openGroupId) void loadGroup(openGroupId);
+  renderBotRoster();
+  syncEntrySurface();
+}
+async function openGroup(id: string): Promise<void> {
+  const room = roomSummaries.find(item => item.id === id);
+  if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; hideChannelArtifact(); }
+  openGroupId = id;
+  groupDraftOpen = false;
+  showRoster(false);
+  localStorage.setItem('aeeis.group', id);
+  renderGroups(roomSummaries);
+  $<HTMLTextAreaElement>('group-text')?.focus();
+}
+async function loadGroup(id: string): Promise<void> {
+  const [members, events] = await Promise.all([
+    api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`).catch(() => [] as RoomMemberSummary[]),
+    api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50`).catch(() => ({ items: [] as SessionEventSummary[] })),
+  ]);
+  if (openGroupId !== id) return;
+  groupMembers = members.filter(member => member.status === 'active');
+  groupEvents = events.items ?? [];
+  renderGroupTranscript();
+  void refreshHandoffViews();
+}
+function renderGroupTranscript(): void {
+  const list = $('group-transcript');
+  const empty = $('group-thread-empty');
+  const members = $('group-members');
+  if (!list) return;
+  if (members) {
+    members.replaceChildren(document.createTextNode('AEEIS'));
+    for (const member of groupMembers) {
+      members.append(document.createTextNode('、'));
+      const openMember = document.createElement('button');
+      openMember.type = 'button';
+      openMember.className = 'quiet-button';
+      openMember.textContent = participantLabel(member.principalId);
+      openMember.addEventListener('click', () => { void openDirect(member.principalId).catch(error => message(errorMessage(error))); });
+      members.append(openMember);
+    }
+  }
+  const answerDrafts = new Map<string, string>();
+  const rejectDrafts = new Map<string, string>();
+  list.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
+    if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
+  });
+  list.querySelectorAll<HTMLTextAreaElement>('textarea[data-reject]').forEach(field => {
+    if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
+  });
+  list.replaceChildren();
+  for (const event of groupEvents) {
+    if (event.operation === 'retract') continue;
+    const item = element('li', '', 'group-message');
+    item.dataset.type = event.type;
+    item.dataset.kind = event.type === 'system' ? 'system' : event.actorType === 'agent' ? 'bot' : event.type === 'message' ? 'human' : event.type;
+    const heading = element('header');
+    heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
+    item.append(heading, element('p', event.content));
+    appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
+    list.append(item);
+  }
+  if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
+  syncGroupSpeaker();
+  renderMentions();
+}
+function mentionTargets(): Array<{ label: string }> {
+  return [{ label: 'AEEIS' }, { label: '所有人' }, ...groupMembers.map(member => ({ label: participantLabel(member.principalId) }))];
+}
+function renderMentions(): void {
+  const box = $('group-mentions');
+  const input = $<HTMLTextAreaElement>('group-text');
+  if (!box || !input) return;
+  const match = input.value.match(/(?:^|\s)@([^\s@]*)$/);
+  const query = match?.[1]?.toLowerCase();
+  box.replaceChildren();
+  if (query === undefined) { box.hidden = true; return; }
+  const hits = mentionTargets().filter(target => target.label.toLowerCase().includes(query));
+  box.hidden = hits.length === 0;
+  for (const hit of hits) {
+    const choice = element('button', `@${hit.label}`) as HTMLButtonElement;
+    choice.type = 'button';
+    choice.addEventListener('click', () => {
+      input.value = input.value.replace(/(?:^|\s)@([^\s@]*)$/, token => /^\s/.test(token) ? ` @${hit.label} ` : `@${hit.label} `);
+      box.hidden = true;
+      input.focus();
+    });
+    box.append(choice);
+  }
+}
+function hasMention(text: string): boolean {
+  return /(?:^|[^\p{L}\p{N}_])@/u.test(text.normalize('NFKC'));
+}
+function mentionOf(label: string, text: string): boolean {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])@${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(text.normalize('NFKC'));
+}
+function mentionedRosterBots(text: string): RosterBot[] {
+  return rosterBots().filter(bot => bot.id !== 'aeeis' && mentionOf(bot.name, text));
+}
+const AEEIS_MENTION = /(?:^|[^\p{L}\p{N}_])@aeeis(?=$|[^\p{L}\p{N}_])/giu;
+function mentionsAeeis(text: string): boolean {
+  AEEIS_MENTION.lastIndex = 0;
+  return AEEIS_MENTION.test(text.normalize('NFKC'));
+}
+function clipEntryText(value: string, max: number): string {
+  const sliced = value.slice(0, max);
+  const last = sliced.charCodeAt(sliced.length - 1);
+  return last >= 0xD800 && last <= 0xDBFF ? sliced.slice(0, -1) : sliced;
+}
+function entryMentionTitle(text: string, roomTitle: string, kind: string): string {
+  AEEIS_MENTION.lastIndex = 0;
+  const stripped = text.normalize('NFKC').replace(AEEIS_MENTION, ' ').replace(/\s+/g, ' ').trim();
+  const title = clipEntryText(stripped || `来自${kind}「${roomTitle || kind}」`, 80).trim();
+  return title.length >= 2 ? title : '入口请求';
+}
+function groupIdempotencyKey(): string {
+  return `group-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`}`;
+}
+function selectedHandoffBot(): RosterBot | undefined {
+  if (rosterView() !== 'group') return;
+  const id = $<HTMLSelectElement>('group-handoff')?.value.trim() ?? '';
+  if (!id) return;
+  return handoffChoices().find(bot => bot.id === id);
+}
+async function recordRosterHandoff(
+  bot: RosterBot,
+  text: string,
+  room: RoomSummary | undefined,
+  spoken: { type: 'agent' | 'principal'; id: string } | undefined,
+  postSession: (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => Promise<unknown>,
+  receipt: (title: string) => string,
+): Promise<string> {
+  const kind = room?.description === '私聊' ? '私聊' : '群聊';
+  const roomTitle = room?.title || kind;
+  const title = entryMentionTitle(text, roomTitle, kind);
+  const known = bot.id === 'aeeis' ? aeeisThread() : lifeSummary(bot.id);
+  if (bot.id === 'aeeis') {
+    if (!conversationEnabled || !known) return '这条点名了 AEEIS，入口讨论还没打开，所以只留在会话里。';
+    if (conversationBusy || conversationAttempt) return '入口正在发送另一条讨论，这条点名只留在会话里。';
+  } else if (!conversationEnabled) return `还没打开${bot.name}的对话，这句话只留在会话里。`;
+  else if (conversationBusy || conversationAttempt) return `${bot.name}正在发送另一条讨论，这句话只留在会话里。`;
+  const epoch = conversationEpoch;
+  conversationBusy = true;
+  updateConversationControls();
+  let conversationId = known?.id ?? '';
+  let taskId = '';
+  let handoffError = '';
+  let recorded = false;
+  try {
+    let target = known;
+    if (!target) {
+      const created = await api<ConversationView>('/conversations', { title: bot.name, agentId: bot.id });
+      if (epoch !== conversationEpoch) return '';
+      rememberLifeSummary(created);
+      target = created;
+    }
+    conversationId = target.id;
+    const expectedRevision = conversation?.id === conversationId ? conversation.revision : target.revision;
+    const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      text: clipEntryText(`来自${kind}「${roomTitle}」：${text}`, 7000),
+      expectedRevision,
+      newTask: { title },
+      focus: 'keep',
+      intent: 'discuss',
+      ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
+    }, 'POST', groupIdempotencyKey());
+    taskId = result.message.route.taskIds.find(item => CITATION_ID.test(item)) ?? '';
+    if (epoch === conversationEpoch && result.conversation?.id === conversationId) {
+      handoffViews.set(conversationId, result.conversation);
+      if (conversation?.id === conversationId) acceptConversation(result.conversation);
+      else rememberLifeSummary(result.conversation);
+    }
+    recorded = epoch === conversationEpoch;
+  } catch (error) {
+    handoffError = bot.id === 'aeeis'
+      ? `会话已留下，入口讨论没有记上。${errorMessage(error)}`
+      : `会话已留下，${bot.name}的讨论没有记上。${errorMessage(error)}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+  if (handoffError || !recorded) return handoffError;
+  const cited = CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
+  try {
+    await postSession('system', receipt(title), cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : undefined);
+  } catch (error) {
+    return bot.id === 'aeeis'
+      ? `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`
+      : `已交给${bot.name}，回执没有写进会话。${errorMessage(error)}`;
+  }
+  return '';
+}
+async function submitGroupMessage(event: Event): Promise<void> {
+  event.preventDefault();
+  const input = $<HTMLTextAreaElement>('group-text');
+  const text = input?.value.trim() ?? '';
+  const roomId = openGroupId;
+  if (!text || !roomId) { input?.focus(); return; }
+  const room = roomSummaries.find(item => item.id === roomId);
+  if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
+  const listed = await api<GoalSummary[] | { goals?: GoalSummary[] }>(`/rooms/${encodeURIComponent(roomId)}/goals`);
+  const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
+  let goal = goals.find(item => item.status === 'active') ?? goals[0];
+  if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
+  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
+  const spoken = selectedRoomSpeaker();
+  const postSession = (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
+    goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
+    ...(type === 'message' && spoken ? { actor: spoken } : {}),
+    ...(evidenceRefs?.length ? { evidenceRefs } : {}),
+  });
+  await postSession('message', text);
+  if (input) input.value = '';
+  let handoffError = '';
+  const chosen = selectedHandoffBot();
+  const speakingAsBot = spoken?.type === 'agent';
+  const inGroup = room?.description !== '私聊';
+  const handTo = (bot: RosterBot, receipt: (title: string) => string) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt);
+  if (chosen) {
+    handoffError = await handTo(chosen, title => `已交给${chosen.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
+    if (!handoffError) {
+      const select = $<HTMLSelectElement>('group-handoff');
+      if (select) select.value = '';
+    }
+  } else if (speakingAsBot || !inGroup) {
+    if (mentionsAeeis(text)) {
+      const home = botById('aeeis');
+      if (home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
+    }
+  } else {
+    const named = mentionedRosterBots(text);
+    const addressed = mentionsAeeis(text);
+    const crowd = mentionOf('所有人', text) || mentionOf('团队', text) || named.length > 1 || (addressed && named.length > 0);
+    const home = botById('aeeis');
+    if (!crowd && named.length === 1 && !addressed) {
+      const bot = named[0]!;
+      handoffError = await handTo(bot, title => `已交给${bot.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
+    } else if (home && (crowd || addressed || !hasMention(text))) {
+      const receipt = crowd
+        ? (title: string) => `入口记下了这句话，记成讨论「${title}」。没有拆给多个人，也未执行。`
+        : mentionsAeeis(text)
+          ? (title: string) => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`
+          : (title: string) => `入口收下了这句话，记成讨论「${title}」。未执行，讨论焦点不变。`;
+      handoffError = await handTo(home, receipt);
+    }
+  }
+  await loadGroup(roomId);
+  message(handoffError);
+}
+async function renameGroup(): Promise<void> {
+  if (!openGroupId) return;
+  const room = roomSummaries.find(item => item.id === openGroupId);
+  const title = window.prompt('群聊名称', room?.title ?? '')?.trim();
+  if (!title) return;
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(openGroupId)}`, { title }, 'PATCH');
+  roomSummaries = roomSummaries.map(item => item.id === updated.id ? { ...item, ...updated } : item);
+  renderGroups(roomSummaries);
+}
+function machineLine(machine: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }): string {
+  if (machine.state === 'unknown') return '这件工作的机器记录读不出来。看一眼不会执行。';
+  if (machine.state === 'released') return '这件工作的机器已经收掉。';
+  if (machine.state === 'present' && machine.ready) return '这件工作有一台机器，还在。看一眼不会执行。';
+  if (machine.state === 'present') return '这件工作的机器还没准备好。看一眼不会启动它。';
+  return '这件工作还没有机器。';
+}
+function executionLine(execution: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }> }): string {
+  const label = (state: 'done' | 'current' | 'waiting') => state === 'done' ? '已完成' : state === 'current' ? '正在做' : '还没到';
+  return `执行步骤：${execution.steps.map(step => `${step.title} ${label(step.state)}`).join(' · ')}`;
 }
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
@@ -886,8 +2535,16 @@ function renderConversation(): void {
     target.value = [...target.options].some(option => option.value === previousTarget) ? previousTarget : '';
     const taskBody = $('conversation-tasks').querySelector('tbody');
     const answerDrafts = new Map<string, string>();
+    const reconcileDrafts = new Map<string, string>();
+    const rejectDrafts = new Map<string, string>();
     taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
       if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
+    });
+    taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-reconcile]').forEach(field => {
+      if (field.dataset.reconcile) reconcileDrafts.set(field.dataset.reconcile, field.value);
+    });
+    taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-reject]').forEach(field => {
+      if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
     });
     taskBody?.replaceChildren();
     const ordered = conversationTaskOrder(conversation?.tasks ?? []);
@@ -907,6 +2564,11 @@ function renderConversation(): void {
         name.append(preview);
       }
       if (task.pendingQuestion) name.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
+      if (task.execution?.steps.length) {
+        name.append(element('small', executionLine(task.execution), 'conversation-steps'));
+        if (task.execution.evidence?.length) name.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
+      }
+      if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
       const status = document.createElement('td');
       status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
       const actions = document.createElement('td');
@@ -918,9 +2580,19 @@ function renderConversation(): void {
       actions.append(raise, lower, focus);
       const runId = task.runId ?? task.latestRunId;
       if (runId && task.pendingApproval) {
-        const approve = dashboardButton('批准并执行', () => approveConversationTask(task));
+        const approve = dashboardButton('批准并执行', () => approveConversationTask(task, 'task'));
         approve.dataset.approve = task.id; approve.className = 'decision-primary';
-        actions.append(approve);
+        const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
+        once.dataset.approveOnce = task.id;
+        const field = document.createElement('textarea');
+        field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+        field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+        field.dataset.reject = task.id;
+        const draft = rejectDrafts.get(task.id);
+        if (draft) field.value = draft;
+        const reject = dashboardButton('拒绝并说明', () => rejectConversationTask(task, field.value));
+        reject.dataset.rejectSubmit = task.id;
+        actions.append(approve, once, field, reject);
       }
       if (runId && task.status === 'needs_input' && task.pendingQuestion) {
         const field = document.createElement('textarea');
@@ -938,6 +2610,27 @@ function renderConversation(): void {
         retry.dataset.retry = task.id;
         actions.append(retry);
       }
+      if (runId && ['queued', 'planning', 'running', 'reviewing'].includes(task.status)) {
+        const pause = dashboardButton('暂停', () => controlConversationRun(task, 'pause'));
+        pause.dataset.runPause = task.id;
+        actions.append(pause);
+      }
+      if (runId && task.status === 'paused') {
+        const resume = dashboardButton('继续', () => controlConversationRun(task, 'resume'));
+        resume.dataset.runResume = task.id;
+        actions.append(resume);
+      }
+      if (runId && (task.status === 'unknown' || task.status === 'waiting_external')) {
+        const field = document.createElement('textarea');
+        field.className = 'conversation-answer'; field.maxLength = 2000; field.rows = 2;
+        field.placeholder = '写下你确认的结果。核查后才会决定是否恢复。'; field.dataset.reconcile = task.id;
+        field.setAttribute('aria-label', `核查「${task.title}」`);
+        const draft = reconcileDrafts.get(task.id);
+        if (draft) field.value = draft;
+        const submit = dashboardButton('提交核查', () => controlConversationRun(task, 'reconcile', { reason: field.value.trim() }));
+        submit.dataset.reconcileSubmit = task.id;
+        actions.append(field, submit);
+      }
       if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; actions.append(view); }
       if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; actions.append(memory); }
       row.append(rank, name, status, actions); taskBody?.append(row);
@@ -946,7 +2639,8 @@ function renderConversation(): void {
     const messages = $('conversation-messages'); messages.replaceChildren();
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
-      row.append(element('small', `${item.role === 'notification' ? '任务通知' : '你'} · ${formatTime(item.createdAt)}`), element('p', item.text));
+      if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
+      row.append(element('small', `${messageAuthor(item)} · ${formatTime(item.createdAt)}`), element('p', item.text));
       if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`));
       const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
       if (corrected) row.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
@@ -965,7 +2659,7 @@ function renderConversation(): void {
           $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
           $<HTMLTextAreaElement>('conversation-text').value = '纠正这条讨论的任务归属';
           $('conversation-correction-label').textContent = `纠正归属：${item.text.slice(0, 160)}`;
-          updateConversationControls(); $<HTMLSelectElement>('conversation-target').focus();
+          updateConversationControls(); openConversationRoute(); $<HTMLSelectElement>('conversation-target').focus();
         }); correct.type = 'button'; row.append(correct);
       }
       if (item.route.status === 'clarify' && !corrected) {
@@ -973,7 +2667,7 @@ function renderConversation(): void {
           const choice = button(`选择任务：${conversationTaskName(id)}`, async () => {
             if (conversationBusy || conversationAttempt) return;
             prepareConversationReply(item); $<HTMLSelectElement>('conversation-target').value = id;
-            $<HTMLTextAreaElement>('conversation-text').value = item.text; updateConversationControls();
+            $<HTMLTextAreaElement>('conversation-text').value = item.text; openConversationRoute(); updateConversationControls();
             $('conversation-status').textContent = '已选择任务。请检查内容，再点击“发送讨论”或“创建执行 Run”；尚未执行。';
           }); choice.type = 'button'; row.append(choice);
         }
@@ -988,11 +2682,19 @@ function renderConversation(): void {
   }
   updateConversationControls();
 }
+function rememberLifeSummary(view: ConversationView): void {
+  const index = conversationList.findIndex(item => item.id === view.id);
+  if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
+  if (view.agentId === 'aeeis') {
+    aeeisConversationId = view.id;
+    localStorage.setItem(LIFE_HOME, view.id);
+  }
+  renderBotRoster();
+}
 function acceptConversation(view: ConversationView): void {
   if (conversation?.id === view.id && conversation.revision > view.revision) return;
   conversation = view;
-  const index = conversationList.findIndex(item => item.id === view.id);
-  if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
+  rememberLifeSummary(view);
   localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
   renderConversation();
 }
@@ -1013,6 +2715,7 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
       const view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
       if (epoch !== conversationEpoch) return;
       acceptConversation(view);
+      rememberAeeisHome(conversationList, view);
       if (!conversationAttempt) {
         try {
           const saved = JSON.parse(sessionStorage.getItem(CONVERSATION_PENDING) ?? 'null') as ConversationAttempt | null;
@@ -1029,6 +2732,11 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
           }
         } catch { sessionStorage.removeItem(CONVERSATION_PENDING); }
       }
+    } else {
+      const view = await api<ConversationView>('/conversations', {});
+      if (epoch !== conversationEpoch) return;
+      acceptConversation(view);
+      rememberAeeisHome(conversationList, view);
     }
     renderConversation();
   } catch (error) {
@@ -1092,9 +2800,37 @@ async function answerConversationTask(task: ConversationTaskView, answer: string
     await refreshConversation(false, true);
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
+    void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
     $('conversation-status').textContent = `已回答「${task.title}」。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '回答后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function controlConversationRun(task: ConversationTaskView, action: 'pause' | 'resume' | 'reconcile', body: Record<string, string> = {}): Promise<void> {
+  const runId = task.runId;
+  if (!conversation || !runId || conversationBusy || conversationAttempt) return;
+  const allowed = action === 'pause' ? ['queued', 'planning', 'running', 'reviewing'] : action === 'resume' ? ['paused'] : ['unknown', 'waiting_external'];
+  if (!allowed.includes(task.status)) return;
+  if (action === 'reconcile' && !body.reason?.trim()) {
+    $('conversation-error').textContent = '请先写下核查说明，再提交。';
+    return;
+  }
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/${action}`, body);
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    if (epoch !== conversationEpoch) return;
+    const receipt = action === 'pause' ? `已暂停「${task.title}」。讨论焦点没有改变。` : action === 'resume' ? `已继续「${task.title}」。讨论焦点没有改变。` : `已记下「${task.title}」的核查。讨论焦点没有改变。`;
+    $('conversation-status').textContent = receipt;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '这一步之后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
     $('conversation-error').textContent = errorMessage(error);
@@ -1120,19 +2856,44 @@ async function retryConversationTask(task: ConversationTaskView): Promise<void> 
     if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
-async function approveConversationTask(task: ConversationTaskView): Promise<void> {
+async function approveConversationTask(task: ConversationTaskView, duration: 'task' | 'once' = 'task'): Promise<void> {
   if (!conversation || !task.runId || !task.pendingApproval || conversationBusy || conversationAttempt) return;
   const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
   conversationBusy = true; updateConversationControls();
   try {
-    await api(`/runs/${encodeURIComponent(runId)}/approve`, { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion });
+    await api(`/runs/${encodeURIComponent(runId)}/approve`, { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion, ...(duration === 'once' ? { duration: 'once' } : {}) });
     if (epoch !== conversationEpoch) return;
     await refreshConversation(false, true);
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
+    void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
-    $('conversation-status').textContent = `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
+    $('conversation-status').textContent = duration === 'once'
+      ? `已批准这一次「${task.title}」。这一次不会写成长期做法。讨论焦点没有改变。`
+      : `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '批准后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function rejectConversationTask(task: ConversationTaskView, feedback: string): Promise<void> {
+  const text = feedback.trim();
+  if (!conversation || !task.runId || !task.pendingApproval || conversationBusy || conversationAttempt) return;
+  if (!text) { $('conversation-error').textContent = '请先写下拒绝原因，再提交。'; return; }
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/revise-plan`, { planVersion: task.pendingApproval.planVersion, feedback: text });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    void refreshHandoffViews();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已拒绝「${task.title}」的当前计划，并请它重新规划。讨论焦点没有改变。`;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '拒绝后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
     $('conversation-error').textContent = errorMessage(error);
@@ -1165,7 +2926,176 @@ async function openConversationRun(runId: string): Promise<void> {
   $('run-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   $('run-title').focus({ preventScroll: true });
 }
+async function acceptPractice(text: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  const delivery = conversation?.lastDelivery;
+  if (!conversation || !delivery || conversationBusy || conversationAttempt) return;
+  const trimmed = text.trim();
+  if (!trimmed) {
+    $('conversation-error').textContent = '先写下这句做法。';
+    return;
+  }
+  if (trimmed.length > 500) {
+    $('conversation-error').textContent = '这句话最多 500 字。';
+    return;
+  }
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/practice`, { expectedRevision: conversation.revision, text: trimmed, runId: delivery.runId });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    $('conversation-status').textContent = '已收下这句做法。讨论不会改它。下一次明确创建 Run 时，会作为不可信材料带进去。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再收下这句。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+async function retractPractice(): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  const practice = conversation?.acceptedPractice;
+  if (!conversation || !practice || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/practice/retract`, { expectedRevision: conversation.revision, claimId: practice.claimId });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    $('conversation-status').textContent = '已撤回这句做法。之后的 Run 不再带上它。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再撤回这句。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+async function postTaskSetting(path: string, body: Record<string, unknown>, success: string, refreshHint: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  if (!conversation || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/${path}`, { expectedRevision: conversation.revision, ...body });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    taskModelBound = '';
+    acceptConversation(view);
+    $('conversation-status').textContent = success;
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? `。${refreshHint}` : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+async function saveTaskModel(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) {
+    $('conversation-error').textContent = '先写任务种类。';
+    return;
+  }
+  const model = $<HTMLInputElement>('task-model').value.trim();
+  const provider = $<HTMLInputElement>('task-model-provider').value.trim();
+  if (!model) {
+    $('conversation-error').textContent = '先写下这种任务要用的模型，或改回默认。';
+    return;
+  }
+  await postTaskSetting('task-model', { taskKind, model, ...(provider ? { provider } : {}) }, '已记下这个任务种类的模型。讨论不会改它。下一次明确创建这种任务的 Run 时，会冻进那次模型决定。', '请先刷新，再改这个模型。');
+}
+async function clearTaskModel(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) return;
+  await postTaskSetting('task-model', { taskKind }, '已改回默认。这个任务种类不再指定模型。', '请先刷新，再改这个模型。');
+}
+async function promoteSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const runId = promotionRunId();
+  if (!taskKind) {
+    $('conversation-error').textContent = '先写任务种类。';
+    return;
+  }
+  if (!runId) return;
+  await postTaskSetting('skill-profile', { taskKind, runId }, '已晋升这次技能。讨论不会改它。下一次明确创建这种任务的 Run 时，会作为不可信材料带进去。', '请先刷新，再晋升。');
+}
+async function keepTaskProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) return;
+  await postTaskSetting('task-kind/keep', { taskKind }, '已留下这份档案。这次做成不会替换它。讨论不会改它。', '请先刷新，再留下这份档案。');
+}
+async function proposeTaskKind(): Promise<void> {
+  const taskKind = currentTaskKind();
+  if (!taskKind) return;
+  await postTaskSetting('task-kind/propose', { taskKind }, '已送去评测。这次只建立了 proposed 候选。后面还有评估、批准和晋升。', '请先刷新，再送去评测。');
+}
+async function rollbackSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const reason = $<HTMLInputElement>('skill-rollback-reason').value.trim();
+  if (!taskKind) return;
+  if (!reason) {
+    $('conversation-error').textContent = '先写下回滚原因。';
+    return;
+  }
+  await postTaskSetting('skill-profile/rollback', { taskKind, reason }, '已回滚到上一版技能。之后这种任务带上的是上一版。', '请先刷新，再回滚。');
+}
+async function retractSkillProfile(): Promise<void> {
+  const taskKind = currentTaskKind();
+  const skill = conversation?.taskSettings?.skills.find(item => item.taskKind === taskKind);
+  if (!taskKind || !skill) return;
+  await postTaskSetting('skill-profile/retract', { taskKind, claimId: skill.claimId }, '已撤回这份技能档案。之后这种任务不再带上它。', '请先刷新，再撤回这份档案。');
+}
+async function saveStandingInstruction(text: string): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
+  if (!conversation || conversationBusy || conversationAttempt) return;
+  const trimmed = text.trim();
+  if (trimmed.length > 500) {
+    $('conversation-error').textContent = '这句话最多 500 字。';
+    return;
+  }
+  const epoch = conversationEpoch;
+  const id = conversation.id;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/standing`, { expectedRevision: conversation.revision, text: trimmed });
+    if (epoch !== conversationEpoch || !view || view.id !== id) return;
+    acceptConversation(view);
+    const field = $<HTMLTextAreaElement>('standing-text');
+    if (field) field.value = view.standingInstruction ?? '';
+    standingBoundId = view.id;
+    $('conversation-status').textContent = trimmed ? '已记住这句话。讨论不会改它。下一次明确创建 Run 时，它会作为不可信材料带进去。' : '已忘掉这句话。之后的 Run 不再带上它。';
+    $('conversation-error').textContent = '';
+    conversationNeedsRefresh = false;
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    conversationNeedsRefresh = error instanceof ApiError && error.status === 409;
+    $('conversation-error').textContent = `${errorMessage(error)}${conversationNeedsRefresh ? '。请先刷新，再改这句话。' : ''}`;
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
 async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
+  const surface = rosterView();
+  if (surface !== 'entry' && surface !== 'bot') return;
   if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
   if (!retry) {
     const form = $<HTMLFormElement>('conversation-composer');
@@ -1173,11 +3103,13 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (intent === 'execute' && $<HTMLButtonElement>('conversation-execute').disabled) return;
     const target = $<HTMLSelectElement>('conversation-target').value;
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
+    const lifeSpeaker = selectedLifeSpeaker();
     const body = conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
+        ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
         ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
-        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { runOptions: runOptions() } : {}) };
+        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { ...(currentTaskKind() ? { taskKind: currentTaskKind() } : {}), runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
     saveConversationAttempt();
@@ -1207,10 +3139,41 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('standing-form')?.addEventListener('submit', event => {
+  event.preventDefault();
+  void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
+$('standing-clear')?.addEventListener('click', () => {
+  void saveStandingInstruction('').catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
+$('last-delivery-pin')?.addEventListener('click', () => pinLastDelivery());
+$('practice-accept')?.addEventListener('click', () => {
+  void acceptPractice($<HTMLTextAreaElement>('practice-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
+$('task-kind')?.addEventListener('change', () => { taskModelBound = ''; syncTaskSettings(); });
+$('task-kind')?.addEventListener('input', () => { taskModelBound = ''; syncTaskSettings(); });
+$('task-model-save')?.addEventListener('click', () => { void saveTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('task-model-clear')?.addEventListener('click', () => { void clearTaskModel().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-promote')?.addEventListener('click', () => { void promoteSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('task-kind-keep')?.addEventListener('click', () => { void keepTaskProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('task-kind-propose')?.addEventListener('click', () => { void proposeTaskKind().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-rollback')?.addEventListener('click', () => { void rollbackSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('skill-retract')?.addEventListener('click', () => { void retractSkillProfile().catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('accepted-practice-retract')?.addEventListener('click', () => {
+  void retractPractice().catch(error => { $('conversation-error').textContent = errorMessage(error); });
+});
 $('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('execution-review')?.addEventListener('change', () => {
+  localStorage.setItem('aeeis.execution-review', executionReviewValue());
+  updateConversationControls();
+});
+for (const id of ['conversation-text', 'conversation-task-title', 'allowed-tools', 'allowed-agents', 'builtin-skill', 'external-budget-calls', 'external-budget-tokens', 'external-budget-usd']) {
+  $(id)?.addEventListener('input', () => updateConversationControls());
+  $(id)?.addEventListener('change', () => updateConversationControls());
+}
 $('conversation-retry').addEventListener('click', () => { void sendConversation('discuss', true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('conversation-target').addEventListener('change', () => {
-  if ($<HTMLSelectElement>('conversation-target').value === '__new') conversationReplyId = undefined;
+  if ($<HTMLSelectElement>('conversation-target').value === '__new') { conversationReplyId = undefined; openConversationRoute(); }
   updateConversationControls();
 });
 $('conversation-cancel-correction').addEventListener('click', () => {
@@ -1250,6 +3213,34 @@ $('conversation-new').addEventListener('click', async () => {
   } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
   finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 });
+$('bots')?.addEventListener('click', event => {
+  const target = (event.target as HTMLElement | null)?.closest('button');
+  if (!target || !$('bots')?.contains(target)) return;
+  if (target.dataset.botId) selectBot(target.dataset.botId);
+  else if (target.dataset.roomId) void openGroup(target.dataset.roomId).catch(error => message(errorMessage(error)));
+  else if (target.dataset.groupId) renameBotGroup(target.dataset.groupId);
+});
+$('bot-group-draft')?.addEventListener('submit', createBotGroup);
+$('gb-new-bot-group')?.addEventListener('click', () => {
+  const draft = $('bot-group-draft');
+  if (!draft) return;
+  draft.hidden = !draft.hidden;
+  if (!draft.hidden) $<HTMLInputElement>('bot-group-name')?.focus();
+});
+$('gb-new-group')?.addEventListener('click', () => showGroupDraft());
+$('group-add-person')?.addEventListener('click', () => addDraftPerson());
+$('group-create')?.addEventListener('submit', event => { void createGroup(event).catch(error => message(errorMessage(error))); });
+$('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
+$('channel-artifact-close')?.addEventListener('click', () => hideChannelArtifact());
+$('group-text')?.addEventListener('input', () => renderMentions());
+$('group-rename')?.addEventListener('click', () => { void renameGroup().catch(error => message(errorMessage(error))); });
+$('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });
+$('entry-back')?.addEventListener('click', () => showRoster(true));
+$('entry-computer')?.addEventListener('click', () => {
+  if (computerOpen) closeComputer();
+  else if (current || currentId) setRunDetailsMode(true);
+  else setComputerOpen(true, 'setup');
+});
 
 function attentionCopy(status: string): [string, string] {
   const copy: Record<string, [string, string]> = {
@@ -1287,14 +3278,64 @@ function openInputPanel(mode: InputPanelMode): void {
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   answer.focus();
 }
+type InboxKind = 'approval' | 'question' | 'unknown' | 'failure' | 'mention';
+function inboxKind(status: string): InboxKind | undefined {
+  if (status === 'needs_approval') return 'approval';
+  if (status === 'needs_input' || status === 'waiting_external' || status === 'paused') return 'question';
+  if (status === 'unknown') return 'unknown';
+  if (status === 'failed') return 'failure';
+  return undefined;
+}
+function inboxSeverity(kind: InboxKind): number {
+  if (kind === 'approval' || kind === 'question') return 1;
+  if (kind === 'unknown') return 2;
+  return 3;
+}
+function inboxAge(at: string | undefined, kind: InboxKind): { label: string; level: 'normal' | 'remind' | 'escalate' } {
+  const stamp = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Date.now();
+  const hours = Math.max(0, Date.now() - stamp) / 3_600_000;
+  const [remind, escalate] = kind === 'approval' || kind === 'question' ? [1, 4] : kind === 'unknown' ? [2, 8] : [24, 72];
+  if (hours < remind) return { label: '正常', level: 'normal' };
+  if (hours < escalate) return { label: '提醒', level: 'remind' };
+  return { label: '升级', level: 'escalate' };
+}
+function inboxKindLabel(kind: InboxKind): string {
+  if (kind === 'approval') return '审批';
+  if (kind === 'question') return '提问';
+  if (kind === 'unknown') return '结果不明';
+  if (kind === 'failure') return '失败';
+  return '点名';
+}
 function renderAttentionInbox(runs: RunSummary[]): void {
   const panel = $('attention-inbox');
   const list = $('attention-items');
   const count = $('attention-count');
   if (!panel || !list || !count) return;
-  const attention = runs
-    .filter(run => ATTENTION_STATUSES.has(run.status))
-    .slice(0, 8);
+  const items: Array<{ kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
+  for (const run of runs) {
+    const kind = inboxKind(run.status);
+    if (!kind) continue;
+    const [label, next] = attentionCopy(run.status);
+    items.push({
+      kind, title: run.goal, detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
+      open: () => openAttentionRun(run),
+      quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
+      act: () => openAttentionRun(run),
+    });
+  }
+  for (const message of conversation?.messages ?? []) {
+    if (message.route.status !== 'clarify') continue;
+    if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
+    items.push({
+      kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
+      open: async () => { prepareConversationReply(message); openConversationRoute(); },
+      quick: '查看',
+      act: async () => { prepareConversationReply(message); openConversationRoute(); },
+    });
+  }
+  const stamp = (at?: string) => { const value = Date.parse(at ?? ''); return Number.isFinite(value) ? value : 0; };
+  items.sort((left, right) => inboxSeverity(left.kind) - inboxSeverity(right.kind) || stamp(left.at) - stamp(right.at));
+  const attention = items.slice(0, 8);
   if (!attention.length) attentionInboxOpen = false;
   const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;
   if (attentionToggle) {
@@ -1308,37 +3349,25 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   const paletteCount = $('command-attention-count');
   if (paletteCount) paletteCount.textContent = attention.length ? `${attention.length} 项` : '暂无';
   list.replaceChildren();
-  for (const run of attention) {
-    const [label, next] = attentionCopy(run.status);
-    const item = element('div', '', `attention-item ${run.status}${run.id === currentId ? ' is-selected' : ''}`);
+  for (const entry of attention) {
+    const age = inboxAge(entry.at, entry.kind);
+    const item = element('div', '', `attention-item ${entry.status}${entry.selected ? ' is-selected' : ''}`);
+    item.dataset.inbox = entry.kind;
+    item.dataset.age = age.level;
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
-    item.onclick = () => void openAttentionRun(run).catch(error => message(errorMessage(error)));
+    item.onclick = () => void entry.open().catch(error => message(errorMessage(error)));
     item.onkeydown = event => {
-      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openAttentionRun(run).catch(error => message(errorMessage(error))); }
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void entry.open().catch(error => message(errorMessage(error))); }
     };
-    item.className = `attention-item ${run.status}${run.id === currentId ? ' is-selected' : ''}`;
-    item.setAttribute('aria-label', `${label}：${run.goal}`);
+    item.setAttribute('aria-label', `${inboxKindLabel(entry.kind)}：${entry.title}`);
     const marker = element('span', '', 'attention-marker');
     const body = element('span', '', 'attention-body');
     const heading = element('span', '', 'attention-heading');
-    heading.append(element('strong', label), element('small', runStatusLabel(run.status)));
-    body.append(heading, element('span', run.goal.slice(0, 120), 'attention-goal'), element('small', `下一步 · ${next}`, 'attention-next'));
-    const meta = run.updatedAt && Number.isFinite(Date.parse(run.updatedAt))
-      ? formatTime(run.updatedAt)
-      : '刚刚更新';
-    const quickLabel = run.status === 'failed' ? '重试' : run.status === 'needs_input' ? '补充' : run.status === 'needs_approval' ? '查看计划' : '核查';
-    const quickAction = button(quickLabel, async () => {
-      if (run.status === 'failed') {
-        currentId = run.id;
-        localStorage.setItem('aeeis.run', run.id);
-        current = undefined;
-        await api(`/runs/${encodeURIComponent(run.id)}/retry`, {});
-        await refresh();
-        return;
-      }
-      await openAttentionRun(run);
-    });
+    heading.append(element('strong', inboxKindLabel(entry.kind)), element('small', age.label));
+    body.append(heading, element('span', entry.title.slice(0, 120), 'attention-goal'), element('small', entry.detail, 'attention-next'));
+    const meta = entry.at && Number.isFinite(Date.parse(entry.at)) ? formatTime(entry.at) : '刚刚更新';
+    const quickAction = button(entry.quick, () => entry.act());
     quickAction.className = 'attention-quick-action';
     quickAction.addEventListener('click', event => event.stopPropagation(), { capture: true });
     item.append(marker, body, element('time', meta, 'attention-time'), quickAction, element('span', '↗', 'attention-arrow'));
@@ -1367,21 +3396,37 @@ function renderRunQueue(runs: RunSummary[]): void {
   const visible = runs.filter(runMatchesFilter);
   list.replaceChildren();
   for (const run of visible) {
-    const item = button(`${run.goal.slice(0, 60)} · ${runStatusLabel(run.status)}`, async () => {
+    const item = button('', async () => {
+      leaveGroup();
+      document.body.classList.remove('roster-focus');
+      document.body.classList.add('draft-open');
+      if (currentId === run.id && current) {
+        setCurrentRunOpen(true);
+        $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       currentId = run.id;
       localStorage.setItem('aeeis.run', run.id);
       current = undefined;
       await refresh();
     });
-    item.className = run.id === currentId ? 'selected' : '';
+    item.className = `roster-row task-row${run.id === currentId && currentRunOpen && !openGroupId ? ' selected' : ''}`;
+    item.dataset.status = run.status;
+    const presence = presenceOf(run.status);
+    const dot = element('span', '', 'task-dot');
+    dot.dataset.state = presence.state;
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', run.goal), element('small', presence.label));
+    item.append(dot, copy);
     list.append(item);
   }
+  syncBotRow();
   const count = $('run-count');
-  if (count) count.textContent = `${visible.length} / ${runs.length} 个运行`;
+  if (count) count.textContent = `${visible.length} / ${runs.length} 项任务`;
   const empty = $('runs-empty');
   if (empty) {
     empty.hidden = visible.length > 0;
-    empty.textContent = runs.length ? '当前筛选没有运行。' : '还没有运行记录。';
+    empty.textContent = runs.length ? '当前筛选没有任务。' : '还没有任务。先发一条消息。';
   }
   document.querySelectorAll<HTMLButtonElement>('#run-filters [data-run-filter]').forEach(control => {
     const active = control.dataset.runFilter === runFilter;
@@ -1548,31 +3593,54 @@ async function refresh(): Promise<void> {
   ]);
   const runs = runPage.items;
   runSummaries = runs;
+  roomSummaries = rooms;
+  agentSummaries = agents;
+  agentsLoaded = true;
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   renderAttentionInbox(runs);
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
+  renderBotRoster();
+  renderGroups(rooms);
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
   renderRunQueue(runs);
   renderMinimalRecentRuns(runs);
-  if (!currentId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
+  const requestedId = currentId;
+  const epoch = entryEpoch;
+  if (!requestedId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
   let run: RunView;
-  try { run = await api<RunView>(`/runs/${currentId}`); }
+  try { run = await api<RunView>(`/runs/${requestedId}`); }
   catch (error) {
     // A local data directory or tenant can change between sessions. Do not
     // leave the workbench stuck on a stale selection when its Run disappeared.
     if (error instanceof Error && /Unknown run|HTTP 404/.test(error.message)) {
-      currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true; return;
+      if (currentId === requestedId && entryEpoch === epoch) {
+        currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true;
+      }
+      return;
     }
     throw error;
   }
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
   if (DONE_STATUSES.has(run.status)) stopRunEventStream();
-  else ensureRunEventStream(currentId);
+  else ensureRunEventStream(requestedId);
   const [graphs, explanation] = await Promise.all([
-    api<RunGraphsView>(`/runs/${currentId}/graphs`),
-    api<RunExplanation>(`/runs/${currentId}/explanation`),
+    api<RunGraphsView>(`/runs/${requestedId}/graphs`),
+    api<RunExplanation>(`/runs/${requestedId}/explanation`),
   ]);
-  if (current?.id === run.id && current.revision === run.revision) return;
-  current = { ...run, graphs }; render(current); renderExplanation(explanation);
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
+  const keepGroup = Boolean(openGroupId) || document.body.classList.contains('group-draft');
+  if (current?.id === run.id && current.revision === run.revision) {
+    if (!currentRunOpen && !keepGroup) {
+      setCurrentRunOpen(true);
+      render(current);
+      renderExplanation(explanation);
+    }
+    return;
+  }
+  current = { ...run, graphs };
+  if (keepGroup) return;
+  if (!currentRunOpen) setCurrentRunOpen(true);
+  render(current); renderExplanation(explanation);
 }
 
 function reminderQueryString(cursor?: string): string {
@@ -2096,7 +4164,7 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
       const planDispatches = goalData?.dispatches.find(entry => entry.planId === plan.id)?.dispatches ?? [];
       if (index === 0 && goal.status === 'active' && modelConfigured && taskSchedulerConfigured) {
         details.append(button(planDispatches.length ? '继续调度 DAG' : '调度整张 DAG', async () => {
-          await api(`/plans/${plan.id}/schedule`, runOptions(false)); await refresh();
+          await api(`/plans/${plan.id}/schedule`, goalExecutionOptions()); await refresh();
         }));
       } else if (index === 0 && goal.status === 'active' && modelConfigured && !taskSchedulerConfigured) {
         details.append(element('small', 'DAG 调度器未启用；可直接执行单个任务。', 'muted'));
@@ -2145,14 +4213,14 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
         } else if (!execution && node.status === 'ready' && goal.status === 'active') {
           if (taskSchedulerConfigured) {
             const schedule = button('调度此任务', async () => {
-              await api(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/schedule`, runOptions(false)); goalViewSignature = ''; await refresh();
+              await api(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/schedule`, goalExecutionOptions()); goalViewSignature = ''; await refresh();
             });
             schedule.disabled = !modelConfigured; row.append(schedule);
           } else {
             row.append(element('small', '调度器未启用', 'muted'));
           }
           const start = button('直接执行此任务', async () => {
-            const created = await api<{ id: string }>(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/run`, runOptions(false));
+            const created = await api<{ id: string }>(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/run`, goalExecutionOptions());
             await openRun(created.id);
           });
           start.disabled = !modelConfigured; row.append(start);
@@ -2250,11 +4318,61 @@ async function readMaterialFiles(files: FileList | null): Promise<void> {
   renderMaterialFiles();
 });
 renderMaterialFiles();
-function runOptions(includeProjectQuery = true): Record<string, unknown> {
+function listedIds(id: string): string[] {
+  return [...new Set($<HTMLInputElement>(id).value.split(',').map(value => value.trim()).filter(Boolean))];
+}
+function externalBudgetPresent(): boolean {
+  return ['external-budget-calls', 'external-budget-tokens', 'external-budget-usd'].some(id => $<HTMLInputElement>(id).value.trim());
+}
+function conversationExecutionGoal(): string {
+  const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
+  const target = $<HTMLSelectElement>('conversation-target').value;
+  const title = target === '__new' ? $<HTMLInputElement>('conversation-task-title').value.trim() : (conversationTargetTask()?.title ?? '当前任务');
+  return `任务：${title || '当前任务'}\n当前请求：${text}`;
+}
+function currentPlanningDecision(goal = conversationExecutionGoal()) {
+  const builtinSkill = $<HTMLSelectElement>('builtin-skill').value;
+  return planningDecision({
+    goal,
+    ...(builtinSkill ? { builtinSkill } : {}),
+    allowedTools: listedIds('allowed-tools'),
+    allowedAgents: listedIds('allowed-agents'),
+    ...(externalBudgetPresent() ? { externalBudget: { calls: 1 } } : {}),
+  });
+}
+function executionReviewValue(): 'required' | 'auto' | 'yolo' {
+  const value = $<HTMLSelectElement>('execution-review')?.value;
+  return value === 'auto' || value === 'yolo' ? value : 'required';
+}
+function restoreExecutionReview(): void {
+  const saved = localStorage.getItem('aeeis.execution-review');
+  const select = $<HTMLSelectElement>('execution-review');
+  if (!select) return;
+  select.value = saved === 'auto' || saved === 'yolo' ? saved : 'required';
+}
+function executionReviewNote(): string {
+  const mode = executionReviewValue();
+  const decision = currentPlanningDecision();
+  const gate = mode === 'yolo'
+    ? '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。'
+    : mode === 'auto'
+      ? (decision.shape === 'direct'
+        ? '自动：这次只有一个只读步骤，由边界放行，不调用规划模型。讨论焦点不会因此改变。'
+        : '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。')
+      : '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+  const shape = decision.shape === 'direct'
+    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的审核档放行。'
+    : `这次先出任务图：${planningRefusal(decision.reason)}。`;
+  return `${gate}${shape}`;
+}
+function goalExecutionOptions(): Record<string, unknown> {
+  return { ...runOptions(false), executionReview: 'required' };
+}
+function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
-  const allowedTools = [...new Set($<HTMLInputElement>('allowed-tools').value.split(',').map(value => value.trim()).filter(Boolean))];
-  const allowedAgents = [...new Set($<HTMLInputElement>('allowed-agents').value.split(',').map(value => value.trim()).filter(Boolean))];
+  const allowedTools = listedIds('allowed-tools');
+  const allowedAgents = listedIds('allowed-agents');
   const brainScope = $<HTMLInputElement>('brain-scope').value.trim();
   const brainQuery = $<HTMLInputElement>('brain-query').value.trim();
   const memoryQuery = $<HTMLInputElement>('memory-query').value.trim();
@@ -2276,7 +4394,8 @@ function runOptions(includeProjectQuery = true): Record<string, unknown> {
     ...(content ? [{ title: '用户提供的项目资料', source: 'user-input', content }] : []),
     ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
   ];
-  return { ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  const planning = includeProjectQuery ? currentPlanningDecision(goal || conversationExecutionGoal()).shape : undefined;
+  return { executionReview: executionReviewValue(), ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -2739,9 +4858,11 @@ function render(run: RunView): void {
   $('run-status').className = `status ${run.status}`;
   updateRunActivity(run);
   renderRunDecision(run);
-  $('empty').hidden = minimalMode || currentRunOpen;
+  syncTranscriptEmpty();
   $('detail').hidden = !currentRunOpen;
   syncCurrentRunToggle(run);
+  syncPresence(run);
+  if (intentPresetsOpen) setIntentPresetsOpen(false);
   updateRunDock(run);
   renderDeliverySummary(run);
   const validationEvent = [...run.events].reverse().find(event => event.type === 'run.failed' && event.data?.validation?.issues?.length);
@@ -2861,7 +4982,7 @@ function render(run: RunView): void {
       const a = positions.get(dependency)!, b = positions.get(node.id)!;
       const path = document.createElementNS(svg.namespaceURI, 'path');
       path.setAttribute('d', `M${a.x+236} ${a.y+48} C${a.x+253} ${a.y+48} ${b.x-17} ${b.y+48} ${b.x} ${b.y+48}`);
-      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#5378a5'); path.setAttribute('stroke-width', '2'); svg.append(path);
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#d4d4d4'); path.setAttribute('stroke-width', '1.5'); svg.append(path);
     }
     canvas.append(svg);
     for (const node of plan.nodes) {
@@ -3100,7 +5221,7 @@ function renderDeliveryArtifact(run: RunView): void {
       if (run.calls.length) box.append(element('small', `已发起 ${run.calls.length} 次模型请求，${completedCalls} 次完成 · ${model}`, 'delivery-runtime-ok'));
       box.append(element('p', isFixture
         ? '当前连接的是本地固定协议桩：它会返回预置 JSON 来验证 AEEIS 流程，不代表真实 LLM 推理。要验证真实模型，需要配置实际 provider endpoint 和 key。'
-        : '请展开执行详情查看模型调用和事件记录。', 'delivery-artifact-warning'));
+        : '请打开它的工作台查看模型调用和事件记录。', 'delivery-artifact-warning'));
     }
     return;
   }
@@ -3291,14 +5412,18 @@ $('reminder-repeat')?.addEventListener('change', updateReminderFields);
 $('new-run').onsubmit = event => {
   event.preventDefault(); const submit = $('submit') as HTMLButtonElement; submit.disabled = true; submit.classList.add('is-busy'); submit.setAttribute('aria-busy', 'true'); message('');
   const goalId = $<HTMLSelectElement>('goal-id').value;
+  const goal = $<HTMLTextAreaElement>('goal').value;
   let quickRunOutcome = '';
-  void Promise.resolve().then(() => api<{ id: string }>('/runs', { goal: $<HTMLTextAreaElement>('goal').value, ...(goalId ? { goalId } : {}), ...runOptions() }))
+  void Promise.resolve().then(() => {
+    const options = runOptions(true, goal);
+    quickRunOutcome = options.planning === 'direct' ? '已启动，正在准备直接执行…' : '已启动，正在生成计划…';
+    return api<{ id: string }>('/runs', { goal, ...(goalId ? { goalId } : {}), ...options });
+  })
     .then(async result => {
       setCurrentRunOpen(true);
       currentId = result.id;
       current = undefined;
       localStorage.setItem('aeeis.run', currentId);
-      quickRunOutcome = '已启动，正在生成计划…';
       await refresh();
       window.requestAnimationFrame(() => $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     })
@@ -3383,7 +5508,9 @@ async function initialize(): Promise<void> {
       configAction.textContent = status.modelConfigured ? '检查运行配置' : '打开运行配置';
     }
     evolutionConfigured = status.evolutionConfigured;
+    sessionPrincipal = status.principal ?? '';
     modelConfigured = status.modelConfigured;
+    runtimeModel = status.model?.model ?? '';
     taskSchedulerConfigured = status.taskSchedulerConfigured;
     authRequired = false;
     quickRunReady = status.modelConfigured && status.modelHealth?.ready !== false;
@@ -3394,10 +5521,10 @@ async function initialize(): Promise<void> {
     const quickSubmit = document.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]');
     if (quickSubmit) {
       quickSubmit.disabled = !quickRunReady;
-      quickSubmit.title = quickRunReady ? '启动任务' : '请先连接模型';
+      quickSubmit.title = quickRunReady ? '发送' : '请先连接模型';
       const label = quickSubmit.querySelector('span');
       if (!quickRunReady) quickSubmit.childNodes[0]!.textContent = '等待连接 ';
-      else if (label) quickSubmit.childNodes[0]!.textContent = '启动任务 ';
+      else if (label) quickSubmit.childNodes[0]!.textContent = '发送 ';
     }
     await initializeConversations(status);
     await refresh(); message('');

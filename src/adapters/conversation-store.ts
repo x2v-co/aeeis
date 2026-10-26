@@ -20,6 +20,8 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const schema = z.object({
   schemaVersion: z.literal('conversation/1'), id: z.string().regex(conversationId),
   owner: identifier, tenantId: identifier, title: z.string(),
+  agentId: z.string().trim().min(1).max(100).optional(),
+  standingInstruction: z.string().trim().min(1).max(500).optional(),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), createdAt: timestamp, updatedAt: timestamp,
   focusTaskId: identifier.optional(), recentTaskIds: z.array(identifier).max(100),
   tasks: z.array(z.object({
@@ -29,6 +31,7 @@ const schema = z.object({
   }).strict()).max(100),
   messages: z.array(z.object({
     id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']),
+    speaker: z.object({ role: z.enum(['user', 'agent']), id: z.string().trim().min(1).max(200) }).strict().optional(),
     text: z.string(), createdAt: timestamp, replyTo: identifier.optional(), correctsMessageId: identifier.optional(),
     route: z.object({
       status: z.enum(['routed', 'clarify', 'general']),
@@ -121,7 +124,7 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
   assert(draft.messages.length >= before.messages.length, 'Conversation messages are append-only');
   before.messages.forEach((message, index) => {
     const next = draft.messages[index]!;
-    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId'] as const) {
+    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId'] as const) {
       assert(isDeepStrictEqual(message[field], next[field]), `Conversation message ${field} is immutable`);
     }
     if (message.execution) {
@@ -143,6 +146,16 @@ function recentFirst(a: Conversation, b: Conversation): number {
   return Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 function hasPending(value: Conversation): boolean { return value.messages.some(message => message.execution?.state === 'pending'); }
+const lifeConflict = '这个人已经有一条生命线';
+function assertOneLife(records: Iterable<Conversation>, value: Conversation): void {
+  if (!value.agentId) return;
+  for (const existing of records) {
+    if (existing.id !== value.id && existing.owner === value.owner && existing.tenantId === value.tenantId && existing.agentId === value.agentId) throw new Conflict(lifeConflict);
+  }
+}
+function agentIndexConflict(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === '23505' && (error as { constraint?: string }).constraint === 'aeeis_conversations_agent_uidx');
+}
 
 export class InMemoryConversationStore implements ConversationStore {
   private readonly records = new Map<string, Conversation>();
@@ -151,6 +164,7 @@ export class InMemoryConversationStore implements ConversationStore {
   async create(value: Conversation): Promise<void> {
     const copy = prepare(value);
     assert(!this.records.has(copy.id), 'Conversation already exists');
+    assertOneLife(this.records.values(), copy);
     this.records.set(copy.id, copy);
   }
   async get(id: string, scope: Ownership): Promise<Conversation> {
@@ -169,6 +183,7 @@ export class InMemoryConversationStore implements ConversationStore {
     // No await between reading and committing: short synchronous callbacks
     // are naturally serialized in this process, including rejected mutations.
     const next = changed(before, change);
+    assertOneLife(this.records.values(), next);
     this.records.set(id, next);
     return structuredClone(next);
   }
@@ -288,6 +303,9 @@ export class FileConversationStore implements ConversationStore {
     return this.operation(async () => {
       try { await this.read(copy.id); throw new Conflict('Conversation already exists'); }
       catch (error) { if (!(error instanceof NotFound)) throw error; }
+      const existing: Conversation[] = [];
+      for (const id of await this.ids()) existing.push(await this.read(id));
+      assertOneLife(existing, copy);
       await this.save(copy);
     });
   }
@@ -307,6 +325,11 @@ export class FileConversationStore implements ConversationStore {
     const owner = { ...scope };
     return this.operation(async () => {
       const before = await this.read(id, owner), next = changed(before, change);
+      if (next.agentId && next.agentId !== before.agentId) {
+        const existing: Conversation[] = [];
+        for (const otherId of await this.ids()) existing.push(await this.read(otherId));
+        assertOneLife(existing, next);
+      }
       if (next.revision !== before.revision) await this.save(next);
       return structuredClone(next);
     });
@@ -342,7 +365,9 @@ const migration = `CREATE TABLE IF NOT EXISTS aeeis_conversations (
 );
 CREATE INDEX IF NOT EXISTS aeeis_conversations_scope_idx ON aeeis_conversations(owner, tenant_id, id);
 CREATE INDEX IF NOT EXISTS aeeis_conversations_pending_idx ON aeeis_conversations(id)
-  WHERE state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb;`;
+  WHERE state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb;
+CREATE UNIQUE INDEX IF NOT EXISTS aeeis_conversations_agent_uidx ON aeeis_conversations(owner, tenant_id, (state->>'agentId'))
+  WHERE state->>'agentId' IS NOT NULL AND state->>'agentId' <> '';`;
 const pendingPredicate = `state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb`;
 const pageSize = 100;
 
@@ -357,11 +382,16 @@ export class PostgresConversationStore implements ConversationStore {
   async close(): Promise<void> { if (!this.closed) { this.closed = true; await this.pool.end(); } }
   async create(value: Conversation): Promise<void> {
     const copy = prepare(value);
-    const result = await this.pool.query(
-      'INSERT INTO aeeis_conversations(id,owner,tenant_id,revision,state,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
-      [copy.id, copy.owner, copy.tenantId, copy.revision, copy, copy.updatedAt],
-    );
-    assert(result.rowCount, 'Conversation already exists');
+    try {
+      const result = await this.pool.query(
+        'INSERT INTO aeeis_conversations(id,owner,tenant_id,revision,state,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
+        [copy.id, copy.owner, copy.tenantId, copy.revision, copy, copy.updatedAt],
+      );
+      assert(result.rowCount, 'Conversation already exists');
+    } catch (error) {
+      if (agentIndexConflict(error)) throw new Conflict(lifeConflict);
+      throw error;
+    }
   }
   async get(id: string, scope: Ownership): Promise<Conversation> {
     validateId(id);
@@ -394,7 +424,11 @@ export class PostgresConversationStore implements ConversationStore {
       if (next.revision !== before.revision) await client.query('UPDATE aeeis_conversations SET revision=$4,state=$5,updated_at=$6 WHERE id=$1 AND owner=$2 AND tenant_id=$3', [id, owner.owner, owner.tenantId, next.revision, next, next.updatedAt]);
       await client.query('COMMIT');
       return structuredClone(next);
-    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (agentIndexConflict(error)) throw new Conflict(lifeConflict);
+      throw error;
+    }
     finally { client.release(); }
   }
   async *pending(): AsyncIterable<Conversation> {

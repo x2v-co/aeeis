@@ -26,11 +26,19 @@ export interface ConversationRoute {
   candidateTaskIds: string[];
   focusEffect: 'keep' | 'switch';
 }
+/** Who spoke. `user` is the owner. `agent` is a roster bot. The role names the
+ * speaker; it does not grant tools, budget, or plan approval. */
+export interface ConversationSpeaker {
+  role: 'user' | 'agent';
+  id: string;
+}
 export interface ConversationMessage {
   id: string;
   keyHash: string;
   requestHash: string;
   role: 'user' | 'notification';
+  /** Missing on messages written before speakers. Those are the owner, role user. */
+  speaker?: ConversationSpeaker;
   text: string;
   createdAt: string;
   replyTo?: string;
@@ -49,6 +57,10 @@ export interface Conversation extends Ownership {
   schemaVersion: 'conversation/1';
   id: string;
   title: string;
+  /** Stable person this life thread belongs to. Missing on conversations created before personal agents. */
+  agentId?: string;
+  /** Owner-written sentence that stays with this person. Missing when none is pinned. */
+  standingInstruction?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
