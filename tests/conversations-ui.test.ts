@@ -579,6 +579,79 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
+  it('approves once or rejects the plan from the task row without moving focus', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId, pendingApproval: { planVersion: 1, planHash: 'plan-hash', summary: '发布计划' } };
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url.endsWith('/approve')) {
+        const body = JSON.parse(request.body);
+        if (body.duration !== 'once') return response({ error: 'not once' }, 400);
+        view.tasks[0]!.status = 'running';
+        delete view.tasks[0]!.pendingApproval;
+        view.revision++;
+        return response({ id: runId, status: 'running' });
+      }
+      if (request.method === 'POST' && url.endsWith('/revise-plan')) {
+        const body = JSON.parse(request.body);
+        if (body.feedback !== '先不要外发') return response({ error: 'bad feedback' }, 400);
+        view.tasks[0]!.status = 'planning';
+        delete view.tasks[0]!.pendingApproval;
+        view.revision++;
+        return response({ id: runId, status: 'planning' });
+      }
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const row = doc().querySelector<HTMLElement>('[data-task-id="task_a"]')!;
+    clickText('拒绝并说明', row);
+    expect(el('conversation-error').textContent).toContain('请先写下拒绝原因');
+    expect(h.posts.filter(post => post.url.endsWith('/revise-plan') || post.url.endsWith('/approve'))).toHaveLength(0);
+    const field = row.querySelector<HTMLTextAreaElement>('textarea[data-reject]')!;
+    field.value = '先不要外发';
+    clickText('仅这一次', row);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/approve'))?.body).toEqual({ planHash: 'plan-hash', planVersion: 1, duration: 'once' });
+    expect(el('conversation-status').textContent).toContain('这一次不会写成长期做法');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus') || post.url.endsWith('/revise-plan'))).toHaveLength(0);
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', pendingApproval: { planVersion: 2, planHash: 'plan-hash', summary: '第二版' } };
+    view.revision++;
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"] textarea[data-reject]')).toBeTruthy());
+    const again = doc().querySelector<HTMLTextAreaElement>('[data-task-id="task_a"] textarea[data-reject]')!;
+    again.value = '先不要外发';
+    clickText('拒绝并说明', doc().querySelector('[data-task-id="task_a"]')!);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('规划中'));
+    expect(h.posts.find(post => post.url.endsWith('/revise-plan'))?.body).toEqual({ planVersion: 2, feedback: '先不要外发' });
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+  });
+
+  it('sorts the inbox by the five kinds and opens a failure without retrying it', async () => {
+    const view = fixture();
+    view.messages = [{ id: 'clarify_1', role: 'user', text: '这句交给谁', createdAt: new Date(Date.now() - 3_600_000).toISOString(), route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a'], focusEffect: 'keep' } }];
+    const old = new Date(Date.now() - 80 * 3_600_000).toISOString();
+    const recent = new Date().toISOString();
+    const h = harness(view, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_failed', goal: '失败的发布', status: 'failed', updatedAt: old },
+        { id: 'run_unknown', goal: '不明的回执', status: 'unknown', updatedAt: recent },
+        { id: 'run_approve', goal: '待批的发布', status: 'needs_approval', updatedAt: recent },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    el('attention-toggle').click();
+    await vi.waitFor(() => expect(doc().querySelectorAll('#attention-items [data-inbox]').length).toBe(4));
+    const kinds = [...doc().querySelectorAll<HTMLElement>('#attention-items [data-inbox]')].map(item => item.dataset.inbox);
+    expect(kinds).toEqual(['approval', 'unknown', 'failure', 'mention']);
+    expect(doc().querySelector('[data-inbox="approval"]')?.getAttribute('data-age')).toBe('normal');
+    expect(doc().querySelector('[data-inbox="failure"]')?.getAttribute('data-age')).toBe('escalate');
+    expect(doc().querySelector('[data-inbox="failure"] .attention-quick-action')?.textContent).toBe('查看原因');
+    clickText('查看原因', doc().querySelector('[data-inbox="failure"]')!);
+    await vi.waitFor(() => expect(h.posts.some(post => post.url.endsWith('/retry'))).toBe(false));
+    expect(h.posts.filter(post => post.url.endsWith('/retry') || post.url.endsWith('/approve') || post.url.endsWith('/messages'))).toHaveLength(0);
+  });
+
   it('answers and retries in the task row without moving focus or sending a discussion message', async () => {
     const failedRunId = 'run_00000000-0000-4000-8000-000000000002';
     const view = fixture();
@@ -736,6 +809,8 @@ describe('entry bots and group chats', () => {
       expect(el('conversation-tasks').textContent ?? '').not.toContain('发布方案');
     });
     expect(el('bot-note-title').textContent).toBe('发布');
+    expect(el('bot-profile-role').textContent).toContain('对照发布清单');
+    expect(el('bot-profile-boundary').textContent).toContain('不会自己回复');
     expect(el('bot-note-copy').textContent).toContain('不会自己回复');
     expect(el('bot-note-copy').textContent).toContain('明确创建 Run');
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
@@ -860,7 +935,10 @@ describe('entry bots and group chats', () => {
     expect(manifest?.body).toEqual({ purpose: '群聊消息', audienceMode: 'room' });
     const message = calls.find(call => call.url.endsWith('/session-events') && call.method === 'POST');
     expect(message?.body).toMatchObject({ goalId: 'goal_group', type: 'message', content: '请 @发布 看一下', contextManifestId: 'ctx_group' });
-    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '请 @发布 看一下' } });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
@@ -872,7 +950,8 @@ describe('entry bots and group chats', () => {
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(true);
     expect(calls.find(call => call.url === '/api/rooms' && call.method === 'POST' && call.body?.description === '私聊')?.body).toMatchObject({ title: 'member.editor', description: '私聊' });
     expect(el('conversation-focus').textContent).toContain('发布方案');
-    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(1);
+    expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
     await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
@@ -881,7 +960,8 @@ describe('entry bots and group chats', () => {
     expect(el('groups').textContent ?? '').not.toContain('发布协作');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
-    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(1);
+    expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
   it('records an @AEEIS mention as an entry discussion and leaves other mentions in the room', async () => {
@@ -937,27 +1017,30 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('group-text').value = '请 @AEEIS发布 看一下';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @AEEIS发布 看一下'));
-    expect(messagePosts(h)).toHaveLength(0);
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '请 @所有人 看一下' } });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(el('group-transcript').textContent).toContain('没有拆给多个人');
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「整理发布风险」'));
     const mention = messagePosts(h);
-    expect(mention).toHaveLength(1);
-    expect(mention[0]?.body).toEqual({
+    expect(mention).toHaveLength(2);
+    expect(mention[1]?.body).toEqual({
       text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
-      expectedRevision: 1,
+      expectedRevision: 2,
       newTask: { title: '整理发布风险' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(mention[0]?.body).not.toHaveProperty('runOptions');
+    expect(mention[1]?.body).not.toHaveProperty('runOptions');
     const roomEvents = [...events.values()].flat().filter(event => event.content.includes('整理发布风险') || event.content.includes('入口讨论'));
     expect(roomEvents.map(event => event.type)).toEqual(['message', 'system']);
-    const receipt = doc().querySelector<HTMLElement>('#group-transcript [data-type="system"]');
+    const receipt = [...doc().querySelectorAll<HTMLElement>('#group-transcript [data-type="system"]')].find(item => item.textContent?.includes('整理发布风险'));
     expect(receipt?.textContent).toContain('记录');
     expect(receipt?.textContent).toContain('未执行，讨论焦点不变');
     expect(el('conversation-focus').textContent).toContain('发布方案');
-    const created = doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]');
+    const created = doc().querySelector<HTMLElement>('[data-task-id="task_new_3"]');
     expect(created?.textContent).toContain('整理发布风险');
     expect(created?.textContent).toContain('仅讨论，未执行');
     expect(created?.dataset.focused).toBe('false');
@@ -977,11 +1060,11 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('conversation-text').value = '发布口径先记在这里';
     el('conversation-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('发布口径先记在这里'));
-    expect(messagePosts(h)).toHaveLength(2);
-    expect(messagePosts(h)[1]?.url).toBe('/api/conversations/conv_life_1/messages');
-    expect(messagePosts(h)[1]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
-    expect(messagePosts(h)[1]?.body).not.toHaveProperty('speaker');
-    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)).toHaveLength(3);
+    expect(messagePosts(h)[2]?.url).toBe('/api/conversations/conv_life_1/messages');
+    expect(messagePosts(h)[2]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
+    expect(messagePosts(h)[2]?.body).not.toHaveProperty('speaker');
+    expect(messagePosts(h)[2]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
@@ -993,24 +1076,24 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 记下私聊';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「记下私聊」'));
-    expect(messagePosts(h)).toHaveLength(3);
-    expect(messagePosts(h)[2]?.url).toBe(`/api/conversations/${view.id}/messages`);
-    expect(messagePosts(h)[2]?.body).toMatchObject({
+    expect(messagePosts(h)).toHaveLength(4);
+    expect(messagePosts(h)[3]?.url).toBe(`/api/conversations/${view.id}/messages`);
+    expect(messagePosts(h)[3]?.body).toMatchObject({
       text: '来自私聊「member.editor」：@AEEIS 记下私聊',
-      expectedRevision: 2,
+      expectedRevision: 3,
       newTask: { title: '记下私聊' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(messagePosts(h)[2]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[3]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('记下私聊');
     expect(el('conversation-messages').textContent).toContain('发布口径先记在这里');
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
-    expect(doc().querySelector('[data-task-id="task_new_2"]')?.textContent).toContain('整理发布风险');
-    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]')?.dataset.focused).toBe('false');
-    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('记下私聊');
+    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('整理发布风险');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_3"]')?.dataset.focused).toBe('false');
+    expect(doc().querySelector('[data-task-id="task_new_4"]')?.textContent).toContain('记下私聊');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_4"]')?.dataset.focused).toBe('false');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
     expect(el('conversation-messages').textContent).not.toContain('发布口径先记在这里');
     expect(typed.value).toBe('');
@@ -1050,6 +1133,12 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
       if (url === '/api/conversations' && method === 'POST' && body?.agentId === 'demo.release') return response(release);
       if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
+      if (method === 'POST' && String(url).endsWith('/answer')) {
+        const task = release.tasks.find(item => item.pendingQuestion);
+        if (body.answer !== '用周三那一版') return response({ error: 'bad answer' }, 400);
+        if (task) delete task.pendingQuestion;
+        return response({ id: runId, status: 'needs_approval' });
+      }
       if (url === '/api/conversations/conv_release/messages' && method === 'POST') {
         const created = body.newTask ? { id: `task_new_${release.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${release.tasks.length}`, status: 'discussion' } : undefined;
         if (created) release.tasks.push(created);
@@ -1071,10 +1160,6 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect([...el<HTMLSelectElement>('group-handoff').options].map(option => option.textContent)).toEqual(['只留在会话里', '交给AEEIS', '交给发布']));
     expect([...el<HTMLSelectElement>('group-handoff').options].map(option => option.textContent).join('')).not.toContain('研究');
     expect(el<HTMLSelectElement>('group-handoff').value).toBe('');
-    el<HTMLTextAreaElement>('group-text').value = '请 @发布 看一下';
-    el<HTMLFormElement>('group-composer').requestSubmit();
-    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @发布 看一下'));
-    expect(messagePosts(h)).toHaveLength(0);
     const handoff = el<HTMLSelectElement>('group-handoff');
     handoff.value = 'demo.release';
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 不要记两次';
@@ -1136,17 +1221,33 @@ describe('entry bots and group chats', () => {
     const question = cards().find(item => item.dataset.card === 'question');
     expect(updated?.textContent).toContain('执行步骤：核对清单 还没到 · 写下结论 正在做');
     expect(updated?.textContent).toContain('证据：工作区清单');
-    expect(approval?.textContent).toContain('这里只读，不会执行');
+    expect(approval?.textContent).toContain('不会改讨论焦点');
+    expect(approval?.querySelector('[data-approve]')).not.toBeNull();
+    expect(approval?.querySelector('[data-approve-once]')).not.toBeNull();
+    expect(approval?.querySelector('[data-reject]')).not.toBeNull();
     expect(question?.textContent).toContain('待回答：哪一版说明？');
-    expect(approval?.querySelector('[data-approve]')).toBeNull();
-    expect(question?.querySelector('textarea')).toBeNull();
+    expect(question?.textContent).toContain('不会改讨论焦点');
+    expect(question?.querySelector('[data-answer]')).not.toBeNull();
+    expect(question?.querySelector('[data-answer-submit]')).not.toBeNull();
+    clickText('提交回答', question!);
+    expect(el('conversation-error').textContent).toContain('请先写下回答');
+    expect(h.posts.some(post => post.url.endsWith('/answer'))).toBe(false);
+    question!.querySelector<HTMLTextAreaElement>('textarea[data-answer]')!.value = '用周三那一版';
+    clickText('提交回答', question!);
+    await vi.waitFor(() => expect(cards().some(item => item.dataset.card === 'question')).toBe(false));
+    expect(h.posts.find(post => post.url.endsWith('/answer'))?.body).toEqual({ answer: '用周三那一版' });
+    expect(h.posts.find(post => post.url.endsWith('/answer'))?.url).toBe(`/api/runs/${runId}/answer`);
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(el('conversation-status').textContent).toContain('讨论焦点没有改变');
     expect(updated?.querySelector('[data-approve]')).toBeNull();
     expect(updated?.querySelector('textarea')).toBeNull();
-    clickText('打开发布', updated!);
+    const handoffCard = cards().find(item => item.dataset.handoff === 'task_new_1' && item.dataset.card === 'handoff');
+    clickText('打开发布', handoffCard!);
     await vi.waitFor(() => expect(el('entry-title').textContent).toBe('发布'));
     expect(el('conversation-tasks').textContent).toContain('请核对发布说明');
     expect(el('conversation-tasks').textContent).toContain('待批准');
-    expect(h.posts.some(post => /\/approve$|\/runs(?:\/|$)|\/focus$|\/cancel$/.test(post.url))).toBe(false);
+    expect(h.posts.filter(post => /\/approve$|\/focus$|\/cancel$|\/retry$|\/revise-plan$/.test(post.url))).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/answer'))).toHaveLength(1);
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
     expect(el('conversation-tasks').textContent ?? '').not.toContain('请核对发布说明');

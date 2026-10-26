@@ -1148,7 +1148,7 @@ function updateConversationControls(): void {
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], button[data-run-pause], button[data-run-resume], button[data-reconcile-submit], textarea[data-answer], textarea[data-reconcile]').forEach(control => {
+  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
   const surface = rosterView();
@@ -1619,7 +1619,7 @@ function handoffCitation(event: SessionEventSummary): { conversationId: string; 
   const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && botById(id));
   return agentId ? { conversationId, taskId, agentId } : { conversationId, taskId };
 }
-function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void {
+function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts: { answer: Map<string, string>; reject: Map<string, string> } = { answer: new Map(), reject: new Map() }): void {
   const cite = handoffCitation(event);
   if (!cite) return;
   const view = handoffViews.get(cite.conversationId);
@@ -1659,8 +1659,43 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void 
     extra.append(element('strong', title), element('small', copy), element('small', '在这个人的对话里处理。这里只读，不会执行。'));
     item.append(extra);
   };
-  if (task.pendingApproval) decision('approval', '审批', `待批准：${task.pendingApproval.summary}`);
-  if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
+  if (task.pendingApproval && task.runId) {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = 'approval';
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', '审批'), element('small', `待批准：${task.pendingApproval.summary}`), element('small', '在这里批准或拒绝。不会改讨论焦点，也不会另开一件 Run。'));
+    const approve = dashboardButton('批准并执行', () => approveConversationTask(task, 'task'));
+    approve.dataset.approve = task.id;
+    const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
+    once.dataset.approveOnce = task.id;
+    const field = document.createElement('textarea');
+    field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+    field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+    field.dataset.reject = task.id;
+    const rejectDraft = drafts.reject.get(task.id);
+    if (rejectDraft) field.value = rejectDraft;
+    const reject = dashboardButton('拒绝并说明', () => rejectConversationTask(task, field.value));
+    reject.dataset.rejectSubmit = task.id;
+    extra.append(approve, once, field, reject);
+    item.append(extra);
+  } else if (task.pendingApproval) decision('approval', '审批', `待批准：${task.pendingApproval.summary}`);
+  if (task.pendingQuestion && task.runId) {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = 'question';
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', '提问'), element('small', `待回答：${task.pendingQuestion.text}`), element('small', '在这里回答。不会改讨论焦点，也不会另开一件 Run。'));
+    const field = document.createElement('textarea');
+    field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+    field.placeholder = '回答后从当前节点继续';
+    field.dataset.answer = task.id;
+    field.setAttribute('aria-label', `回答「${task.title}」`);
+    const answerDraft = drafts.answer.get(task.id);
+    if (answerDraft) field.value = answerDraft;
+    const submit = dashboardButton('提交回答', () => answerConversationTask(task, field.value));
+    submit.dataset.answerSubmit = task.id;
+    extra.append(field, submit);
+    item.append(extra);
+  } else if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
   if (task.status === 'unknown' || task.status === 'waiting_external') decision('reconcile', '核查', task.status === 'unknown' ? '结果需要核查。' : '还在等外部回执。');
   if (task.status === 'failed') decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
 }
@@ -1748,6 +1783,8 @@ function syncEntrySurface(): void {
     const copy = $('bot-note-copy');
     if (title) title.textContent = counterpart?.name ?? '成员';
     if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
+    const role = $('bot-profile-role');
+    if (role) role.textContent = counterpart?.note ? `职责：${counterpart.note}` : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
   }
   const botStatus = $('bot-status');
   if (botStatus) {
@@ -1762,14 +1799,14 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。选一位 bot，只是标明这句话是它说的；它不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。选「交给」会把这句话记成那个人的一条讨论，不执行，对方不回复。频道接着只读这件事的批准、提问、步骤和证据标题。点名册里的人会打开这个人的对话；点不在名册上的成员，只打开会话记录。归档后从群聊列表撤下。';
+    : '这是群聊。没选说话人时，入口收下这句话，记成一条讨论。@一个人则交给那个人；@所有人或点到多个人时，仍只记成入口的一条讨论。选一位说话人，只是标明这句话是谁说的。都不会执行，也不会调用模型。选「交给」同样只记成讨论。频道里可以批准或拒绝已经摆出来的计划。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写给入口。@AEEIS 或没点名，都记成一条讨论。@一个人交给那个人。@所有人仍由入口记成一条。不执行，也不调用模型。';
   const sendNote = $('group-send-note');
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
-    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选「交给」会把这句话记成那个人的一条讨论，不执行，对方不回复。频道接着只读这件事的批准、提问、步骤和证据标题。选一位说话人，只是标明这句话是谁说的。';
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没选说话人时，入口或被点名的那一个人会记下一条讨论，不执行。选一位说话人，只是标明这句话是谁说的。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -2194,15 +2231,24 @@ function renderGroupTranscript(): void {
       members.append(openMember);
     }
   }
+  const answerDrafts = new Map<string, string>();
+  const rejectDrafts = new Map<string, string>();
+  list.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
+    if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
+  });
+  list.querySelectorAll<HTMLTextAreaElement>('textarea[data-reject]').forEach(field => {
+    if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
+  });
   list.replaceChildren();
   for (const event of groupEvents) {
     if (event.operation === 'retract') continue;
     const item = element('li', '', 'group-message');
     item.dataset.type = event.type;
+    item.dataset.kind = event.type === 'system' ? 'system' : event.actorType === 'agent' ? 'bot' : event.type === 'message' ? 'human' : event.type;
     const heading = element('header');
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
     item.append(heading, element('p', event.content));
-    appendHandoffCard(item, event);
+    appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
     list.append(item);
   }
   if (empty) empty.hidden = groupEvents.some(event => event.operation !== 'retract');
@@ -2232,6 +2278,16 @@ function renderMentions(): void {
     });
     box.append(choice);
   }
+}
+function hasMention(text: string): boolean {
+  return /(?:^|[^\p{L}\p{N}_])@/u.test(text.normalize('NFKC'));
+}
+function mentionOf(label: string, text: string): boolean {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])@${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(text.normalize('NFKC'));
+}
+function mentionedRosterBots(text: string): RosterBot[] {
+  return rosterBots().filter(bot => bot.id !== 'aeeis' && mentionOf(bot.name, text));
 }
 const AEEIS_MENTION = /(?:^|[^\p{L}\p{N}_])@aeeis(?=$|[^\p{L}\p{N}_])/giu;
 function mentionsAeeis(text: string): boolean {
@@ -2348,15 +2404,36 @@ async function submitGroupMessage(event: Event): Promise<void> {
   if (input) input.value = '';
   let handoffError = '';
   const chosen = selectedHandoffBot();
+  const speakingAsBot = spoken?.type === 'agent';
+  const inGroup = room?.description !== '私聊';
+  const handTo = (bot: RosterBot, receipt: (title: string) => string) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt);
   if (chosen) {
-    handoffError = await recordRosterHandoff(chosen, text, room, spoken, postSession, title => `已交给${chosen.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
+    handoffError = await handTo(chosen, title => `已交给${chosen.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
     if (!handoffError) {
       const select = $<HTMLSelectElement>('group-handoff');
       if (select) select.value = '';
     }
-  } else if (mentionsAeeis(text)) {
+  } else if (speakingAsBot || !inGroup) {
+    if (mentionsAeeis(text)) {
+      const home = botById('aeeis');
+      if (home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
+    }
+  } else {
+    const named = mentionedRosterBots(text);
+    const addressed = mentionsAeeis(text);
+    const crowd = mentionOf('所有人', text) || mentionOf('团队', text) || named.length > 1 || (addressed && named.length > 0);
     const home = botById('aeeis');
-    if (home) handoffError = await recordRosterHandoff(home, text, room, spoken, postSession, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
+    if (!crowd && named.length === 1 && !addressed) {
+      const bot = named[0]!;
+      handoffError = await handTo(bot, title => `已交给${bot.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
+    } else if (home && (crowd || addressed || !hasMention(text))) {
+      const receipt = crowd
+        ? (title: string) => `入口记下了这句话，记成讨论「${title}」。没有拆给多个人，也未执行。`
+        : mentionsAeeis(text)
+          ? (title: string) => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`
+          : (title: string) => `入口收下了这句话，记成讨论「${title}」。未执行，讨论焦点不变。`;
+      handoffError = await handTo(home, receipt);
+    }
   }
   await loadGroup(roomId);
   message(handoffError);
@@ -2406,11 +2483,15 @@ function renderConversation(): void {
     const taskBody = $('conversation-tasks').querySelector('tbody');
     const answerDrafts = new Map<string, string>();
     const reconcileDrafts = new Map<string, string>();
+    const rejectDrafts = new Map<string, string>();
     taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
       if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
     });
     taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-reconcile]').forEach(field => {
       if (field.dataset.reconcile) reconcileDrafts.set(field.dataset.reconcile, field.value);
+    });
+    taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-reject]').forEach(field => {
+      if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
     });
     taskBody?.replaceChildren();
     const ordered = conversationTaskOrder(conversation?.tasks ?? []);
@@ -2446,9 +2527,19 @@ function renderConversation(): void {
       actions.append(raise, lower, focus);
       const runId = task.runId ?? task.latestRunId;
       if (runId && task.pendingApproval) {
-        const approve = dashboardButton('批准并执行', () => approveConversationTask(task));
+        const approve = dashboardButton('批准并执行', () => approveConversationTask(task, 'task'));
         approve.dataset.approve = task.id; approve.className = 'decision-primary';
-        actions.append(approve);
+        const once = dashboardButton('仅这一次', () => approveConversationTask(task, 'once'));
+        once.dataset.approveOnce = task.id;
+        const field = document.createElement('textarea');
+        field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
+        field.placeholder = '写下拒绝原因。拒绝后重新规划，不会按这份计划执行。';
+        field.dataset.reject = task.id;
+        const draft = rejectDrafts.get(task.id);
+        if (draft) field.value = draft;
+        const reject = dashboardButton('拒绝并说明', () => rejectConversationTask(task, field.value));
+        reject.dataset.rejectSubmit = task.id;
+        actions.append(approve, once, field, reject);
       }
       if (runId && task.status === 'needs_input' && task.pendingQuestion) {
         const field = document.createElement('textarea');
@@ -2656,6 +2747,7 @@ async function answerConversationTask(task: ConversationTaskView, answer: string
     await refreshConversation(false, true);
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
+    void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
     $('conversation-status').textContent = `已回答「${task.title}」。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '回答后讨论焦点发生变化，请刷新核对。' : '';
@@ -2711,19 +2803,44 @@ async function retryConversationTask(task: ConversationTaskView): Promise<void> 
     if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
-async function approveConversationTask(task: ConversationTaskView): Promise<void> {
+async function approveConversationTask(task: ConversationTaskView, duration: 'task' | 'once' = 'task'): Promise<void> {
   if (!conversation || !task.runId || !task.pendingApproval || conversationBusy || conversationAttempt) return;
   const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
   conversationBusy = true; updateConversationControls();
   try {
-    await api(`/runs/${encodeURIComponent(runId)}/approve`, { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion });
+    await api(`/runs/${encodeURIComponent(runId)}/approve`, { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion, ...(duration === 'once' ? { duration: 'once' } : {}) });
     if (epoch !== conversationEpoch) return;
     await refreshConversation(false, true);
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
+    void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
-    $('conversation-status').textContent = `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
+    $('conversation-status').textContent = duration === 'once'
+      ? `已批准这一次「${task.title}」。这一次不会写成长期做法。讨论焦点没有改变。`
+      : `已批准「${task.title}」的当前计划并开始执行。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '批准后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function rejectConversationTask(task: ConversationTaskView, feedback: string): Promise<void> {
+  const text = feedback.trim();
+  if (!conversation || !task.runId || !task.pendingApproval || conversationBusy || conversationAttempt) return;
+  if (!text) { $('conversation-error').textContent = '请先写下拒绝原因，再提交。'; return; }
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/revise-plan`, { planVersion: task.pendingApproval.planVersion, feedback: text });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    void refreshHandoffViews();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已拒绝「${task.title}」的当前计划，并请它重新规划。讨论焦点没有改变。`;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '拒绝后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
     $('conversation-error').textContent = errorMessage(error);
@@ -3107,14 +3224,64 @@ function openInputPanel(mode: InputPanelMode): void {
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   answer.focus();
 }
+type InboxKind = 'approval' | 'question' | 'unknown' | 'failure' | 'mention';
+function inboxKind(status: string): InboxKind | undefined {
+  if (status === 'needs_approval') return 'approval';
+  if (status === 'needs_input' || status === 'waiting_external' || status === 'paused') return 'question';
+  if (status === 'unknown') return 'unknown';
+  if (status === 'failed') return 'failure';
+  return undefined;
+}
+function inboxSeverity(kind: InboxKind): number {
+  if (kind === 'approval' || kind === 'question') return 1;
+  if (kind === 'unknown') return 2;
+  return 3;
+}
+function inboxAge(at: string | undefined, kind: InboxKind): { label: string; level: 'normal' | 'remind' | 'escalate' } {
+  const stamp = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Date.now();
+  const hours = Math.max(0, Date.now() - stamp) / 3_600_000;
+  const [remind, escalate] = kind === 'approval' || kind === 'question' ? [1, 4] : kind === 'unknown' ? [2, 8] : [24, 72];
+  if (hours < remind) return { label: '正常', level: 'normal' };
+  if (hours < escalate) return { label: '提醒', level: 'remind' };
+  return { label: '升级', level: 'escalate' };
+}
+function inboxKindLabel(kind: InboxKind): string {
+  if (kind === 'approval') return '审批';
+  if (kind === 'question') return '提问';
+  if (kind === 'unknown') return '结果不明';
+  if (kind === 'failure') return '失败';
+  return '点名';
+}
 function renderAttentionInbox(runs: RunSummary[]): void {
   const panel = $('attention-inbox');
   const list = $('attention-items');
   const count = $('attention-count');
   if (!panel || !list || !count) return;
-  const attention = runs
-    .filter(run => ATTENTION_STATUSES.has(run.status))
-    .slice(0, 8);
+  const items: Array<{ kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
+  for (const run of runs) {
+    const kind = inboxKind(run.status);
+    if (!kind) continue;
+    const [label, next] = attentionCopy(run.status);
+    items.push({
+      kind, title: run.goal, detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
+      open: () => openAttentionRun(run),
+      quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
+      act: () => openAttentionRun(run),
+    });
+  }
+  for (const message of conversation?.messages ?? []) {
+    if (message.route.status !== 'clarify') continue;
+    if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
+    items.push({
+      kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
+      open: async () => { prepareConversationReply(message); openConversationRoute(); },
+      quick: '查看',
+      act: async () => { prepareConversationReply(message); openConversationRoute(); },
+    });
+  }
+  const stamp = (at?: string) => { const value = Date.parse(at ?? ''); return Number.isFinite(value) ? value : 0; };
+  items.sort((left, right) => inboxSeverity(left.kind) - inboxSeverity(right.kind) || stamp(left.at) - stamp(right.at));
+  const attention = items.slice(0, 8);
   if (!attention.length) attentionInboxOpen = false;
   const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;
   if (attentionToggle) {
@@ -3128,37 +3295,25 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   const paletteCount = $('command-attention-count');
   if (paletteCount) paletteCount.textContent = attention.length ? `${attention.length} 项` : '暂无';
   list.replaceChildren();
-  for (const run of attention) {
-    const [label, next] = attentionCopy(run.status);
-    const item = element('div', '', `attention-item ${run.status}${run.id === currentId ? ' is-selected' : ''}`);
+  for (const entry of attention) {
+    const age = inboxAge(entry.at, entry.kind);
+    const item = element('div', '', `attention-item ${entry.status}${entry.selected ? ' is-selected' : ''}`);
+    item.dataset.inbox = entry.kind;
+    item.dataset.age = age.level;
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
-    item.onclick = () => void openAttentionRun(run).catch(error => message(errorMessage(error)));
+    item.onclick = () => void entry.open().catch(error => message(errorMessage(error)));
     item.onkeydown = event => {
-      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openAttentionRun(run).catch(error => message(errorMessage(error))); }
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void entry.open().catch(error => message(errorMessage(error))); }
     };
-    item.className = `attention-item ${run.status}${run.id === currentId ? ' is-selected' : ''}`;
-    item.setAttribute('aria-label', `${label}：${run.goal}`);
+    item.setAttribute('aria-label', `${inboxKindLabel(entry.kind)}：${entry.title}`);
     const marker = element('span', '', 'attention-marker');
     const body = element('span', '', 'attention-body');
     const heading = element('span', '', 'attention-heading');
-    heading.append(element('strong', label), element('small', runStatusLabel(run.status)));
-    body.append(heading, element('span', run.goal.slice(0, 120), 'attention-goal'), element('small', `下一步 · ${next}`, 'attention-next'));
-    const meta = run.updatedAt && Number.isFinite(Date.parse(run.updatedAt))
-      ? formatTime(run.updatedAt)
-      : '刚刚更新';
-    const quickLabel = run.status === 'failed' ? '重试' : run.status === 'needs_input' ? '补充' : run.status === 'needs_approval' ? '查看计划' : '核查';
-    const quickAction = button(quickLabel, async () => {
-      if (run.status === 'failed') {
-        currentId = run.id;
-        localStorage.setItem('aeeis.run', run.id);
-        current = undefined;
-        await api(`/runs/${encodeURIComponent(run.id)}/retry`, {});
-        await refresh();
-        return;
-      }
-      await openAttentionRun(run);
-    });
+    heading.append(element('strong', inboxKindLabel(entry.kind)), element('small', age.label));
+    body.append(heading, element('span', entry.title.slice(0, 120), 'attention-goal'), element('small', entry.detail, 'attention-next'));
+    const meta = entry.at && Number.isFinite(Date.parse(entry.at)) ? formatTime(entry.at) : '刚刚更新';
+    const quickAction = button(entry.quick, () => entry.act());
     quickAction.className = 'attention-quick-action';
     quickAction.addEventListener('click', event => event.stopPropagation(), { capture: true });
     item.append(marker, body, element('time', meta, 'attention-time'), quickAction, element('span', '↗', 'attention-arrow'));

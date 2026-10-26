@@ -1233,8 +1233,9 @@ export class AgentEngine {
         const { planHash, planVersion } = input;
         if (run.plans.at(-1)?.hash !== planHash || run.approval?.planHash !== planHash) throw new Conflict('计划已更新，请刷新后批准最新版本');
         applyApprovalBudgets(run, input);
-        run.approval = { planHash, planVersion, approved: true, actor: run.owner, at: now() };
-        run.status = 'running'; event(run, 'plan.approved', { planHash, planVersion, actor: run.owner });
+        const grant = input.duration === 'once' ? 'once' as const : undefined;
+        run.approval = { planHash, planVersion, approved: true, actor: run.owner, at: now(), ...(grant ? { grant } : {}) };
+        run.status = 'running'; event(run, 'plan.approved', { planHash, planVersion, actor: run.owner, grant: input.duration ?? 'task' });
       } else if (action === 'revise-plan') {
         const { planVersion, feedback } = revisePlanSchema.parse(body);
         assertReviewVersion(run, planVersion);

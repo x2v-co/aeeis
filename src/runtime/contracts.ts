@@ -109,7 +109,7 @@ export const approvalBudgetsSchema = z.object({
   modelBudget: modelBudgetSchema.nullable().optional(),
   externalBudget: externalBudgetSchema.nullable().optional(),
 }).strict();
-export const approvePlanSchema = approvalBudgetsSchema.extend({ planHash: z.string().min(1) });
+export const approvePlanSchema = approvalBudgetsSchema.extend({ planHash: z.string().min(1), duration: z.enum(['task', 'once']).optional() });
 export const revisePlanSchema = z.object({ planVersion: planVersionSchema, feedback: z.string().trim().min(1).max(8000) }).strict();
 export const editPlanSchema = z.object({
   planVersion: planVersionSchema,
@@ -388,7 +388,7 @@ export interface AgentRun {
   executionReview?: 'required' | 'auto' | 'yolo';
   /** Frozen at creation. Missing means the planner proposes the task graph. */
   planning?: 'direct' | 'dag';
-  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string };
+  approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string; grant?: 'once' };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;

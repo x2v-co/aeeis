@@ -1153,6 +1153,13 @@ describe('single-entry conversation routing', () => {
     expect(waiting.focusTaskId).toBe(focus);
     const approved = await f.app.inject({ method: 'POST', url: `/api/runs/${started.json().runId}/approve`, headers: f.headers, payload: { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion } });
     expect(approved.statusCode, approved.body).toBe(200);
+    expect((await f.repository.get(started.json().runId)).approval?.grant).toBeUndefined();
+    const forever = await f.app.inject({ method: 'POST', url: `/api/runs/${started.json().runId}/approve`, headers: f.headers, payload: { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion, duration: 'forever' } });
+    expect(forever.statusCode).toBe(400);
+    await f.repository.mutate(started.json().runId, run => { run.status = 'needs_approval'; });
+    const once = await f.app.inject({ method: 'POST', url: `/api/runs/${started.json().runId}/approve`, headers: f.headers, payload: { planHash: task.pendingApproval.planHash, planVersion: task.pendingApproval.planVersion, duration: 'once' } });
+    expect(once.statusCode, once.body).toBe(200);
+    expect((await f.repository.get(started.json().runId)).approval?.grant).toBe('once');
     const after = await f.fresh(entry.id);
     expect(after.focusTaskId).toBe(focus);
     const approvedTask = after.tasks.find((item: { id: string }) => item.id === aId);

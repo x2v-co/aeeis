@@ -240,7 +240,9 @@
 <p id="conversation-empty" class="muted">这是这个人的对话。普通发送只记录讨论，不会调用模型，也不会自己回复。</p>
 <section id="bot-note" hidden>
 <h3 id="bot-note-title">AEEIS</h3>
+<p id="bot-profile-role" class="muted"></p>
 <p id="bot-status" class="muted"></p>
+<p id="bot-profile-boundary" class="muted">边界：它不会自己回复，也不会执行。点名和交接只记成讨论。批准、登录和密钥留在和 AEEIS 的对话里。</p>
 <p id="bot-note-copy"></p>
 </section>
 <section id="standing-instruction" hidden>
@@ -353,7 +355,7 @@
 <div>
 <span class="command-kicker">ATTENTION INBOX</span>
 <h2>有几件事等你接手</h2>
-<p>Agent 已经停在安全边界，处理后会从当前节点继续。</p>
+<p>只收这五类：审批、提问或阻塞、结果不明、失败、直接点名。失败先看原因。打开不等于已经处理。</p>
 </div>
 <span id="attention-count" class="attention-count">
 </span>
