@@ -625,6 +625,58 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
+
+  it('pauses, resumes and reconciles the existing run from the task row without moving focus', async () => {
+    const activeId = 'run_00000000-0000-4000-8000-000000000003';
+    const pausedId = 'run_00000000-0000-4000-8000-000000000004';
+    const unknownId = 'run_00000000-0000-4000-8000-000000000005';
+    const view = fixture();
+    view.tasks = [
+      { id: 'task_a', title: '发布方案', threadId: 'thread_a', status: 'running', runId: activeId, latestRunId: activeId },
+      { id: 'task_b', title: '周报', threadId: 'thread_b', status: 'paused', runId: pausedId, latestRunId: pausedId },
+      { id: 'task_c', title: '回执', threadId: 'thread_c', status: 'unknown', runId: unknownId, latestRunId: unknownId },
+    ];
+    view.focusTaskId = 'task_a';
+    const h = harness(view, { handler(url, request) {
+      if (request.method !== 'POST') return undefined;
+      if (url.endsWith('/pause')) { view.tasks[0]!.status = 'paused'; view.revision++; return response({ id: activeId, status: 'paused' }); }
+      if (url.endsWith('/resume')) { view.tasks[1]!.status = 'running'; view.revision++; return response({ id: pausedId, status: 'running' }); }
+      if (url.endsWith('/reconcile')) {
+        const body = JSON.parse(request.body);
+        if (body.reason !== '供应商已完成') return response({ error: 'bad reason' }, 400);
+        view.tasks[2]!.status = 'running'; view.revision++; return response({ id: unknownId, status: 'running' });
+      }
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const active = doc().querySelector<HTMLElement>('[data-task-id="task_a"]')!;
+    const paused = doc().querySelector<HTMLElement>('[data-task-id="task_b"]')!;
+    const unknown = doc().querySelector<HTMLElement>('[data-task-id="task_c"]')!;
+    expect(active.textContent).toContain('执行中');
+    expect(active.querySelector('[data-run-pause]')).not.toBeNull();
+    expect(paused.textContent).toContain('已暂停');
+    expect(paused.querySelector('[data-run-resume]')).not.toBeNull();
+    expect(unknown.querySelector('textarea[data-reconcile]')).not.toBeNull();
+    expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('提交核查');
+    clickText('提交核查', unknown);
+    expect(el('conversation-error').textContent).toContain('请先写下核查说明');
+    expect(h.posts).toHaveLength(0);
+    clickText('暂停', active);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).toContain('已暂停'));
+    expect(h.posts.find(post => post.url.endsWith('/pause'))?.body).toEqual({});
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(el('conversation-status').textContent).toContain('讨论焦点没有改变');
+    clickText('继续', doc().querySelector('[data-task-id="task_b"]')!);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/resume'))?.body).toEqual({});
+    const field = doc().querySelector<HTMLTextAreaElement>('[data-task-id="task_c"] textarea[data-reconcile]')!;
+    field.value = '供应商已完成';
+    clickText('提交核查', doc().querySelector('[data-task-id="task_c"]')!);
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_c"]')!.textContent).toContain('执行中'));
+    expect(h.posts.find(post => post.url.endsWith('/reconcile'))?.body).toEqual({ reason: '供应商已完成' });
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus') || post.url.endsWith('/approve'))).toHaveLength(0);
+  });
 });
 
 describe('entry bots and group chats', () => {

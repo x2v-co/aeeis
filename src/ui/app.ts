@@ -1147,7 +1147,7 @@ function updateConversationControls(): void {
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], textarea[data-answer]').forEach(control => {
+  $('conversation-tasks').querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('button[data-change-focus], button[data-priority], button[data-approve], button[data-answer-submit], button[data-retry], button[data-run-pause], button[data-run-resume], button[data-reconcile-submit], textarea[data-answer], textarea[data-reconcile]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
   const surface = rosterView();
@@ -2363,8 +2363,12 @@ function renderConversation(): void {
     target.value = [...target.options].some(option => option.value === previousTarget) ? previousTarget : '';
     const taskBody = $('conversation-tasks').querySelector('tbody');
     const answerDrafts = new Map<string, string>();
+    const reconcileDrafts = new Map<string, string>();
     taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-answer]').forEach(field => {
       if (field.dataset.answer) answerDrafts.set(field.dataset.answer, field.value);
+    });
+    taskBody?.querySelectorAll<HTMLTextAreaElement>('textarea[data-reconcile]').forEach(field => {
+      if (field.dataset.reconcile) reconcileDrafts.set(field.dataset.reconcile, field.value);
     });
     taskBody?.replaceChildren();
     const ordered = conversationTaskOrder(conversation?.tasks ?? []);
@@ -2419,6 +2423,27 @@ function renderConversation(): void {
         const retry = dashboardButton('重试', () => retryConversationTask(task));
         retry.dataset.retry = task.id;
         actions.append(retry);
+      }
+      if (runId && ['queued', 'planning', 'running', 'reviewing'].includes(task.status)) {
+        const pause = dashboardButton('暂停', () => controlConversationRun(task, 'pause'));
+        pause.dataset.runPause = task.id;
+        actions.append(pause);
+      }
+      if (runId && task.status === 'paused') {
+        const resume = dashboardButton('继续', () => controlConversationRun(task, 'resume'));
+        resume.dataset.runResume = task.id;
+        actions.append(resume);
+      }
+      if (runId && (task.status === 'unknown' || task.status === 'waiting_external')) {
+        const field = document.createElement('textarea');
+        field.className = 'conversation-answer'; field.maxLength = 2000; field.rows = 2;
+        field.placeholder = '写下你确认的结果。核查后才会决定是否恢复。'; field.dataset.reconcile = task.id;
+        field.setAttribute('aria-label', `核查「${task.title}」`);
+        const draft = reconcileDrafts.get(task.id);
+        if (draft) field.value = draft;
+        const submit = dashboardButton('提交核查', () => controlConversationRun(task, 'reconcile', { reason: field.value.trim() }));
+        submit.dataset.reconcileSubmit = task.id;
+        actions.append(field, submit);
       }
       if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; actions.append(view); }
       if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; actions.append(memory); }
@@ -2592,6 +2617,33 @@ async function answerConversationTask(task: ConversationTaskView, answer: string
     if (epoch !== conversationEpoch) return;
     $('conversation-status').textContent = `已回答「${task.title}」。讨论焦点没有改变。`;
     $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '回答后讨论焦点发生变化，请刷新核对。' : '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function controlConversationRun(task: ConversationTaskView, action: 'pause' | 'resume' | 'reconcile', body: Record<string, string> = {}): Promise<void> {
+  const runId = task.runId;
+  if (!conversation || !runId || conversationBusy || conversationAttempt) return;
+  const allowed = action === 'pause' ? ['queued', 'planning', 'running', 'reviewing'] : action === 'resume' ? ['paused'] : ['unknown', 'waiting_external'];
+  if (!allowed.includes(task.status)) return;
+  if (action === 'reconcile' && !body.reason?.trim()) {
+    $('conversation-error').textContent = '请先写下核查说明，再提交。';
+    return;
+  }
+  const epoch = conversationEpoch, id = conversation.id, focus = conversation.focusTaskId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/${action}`, body);
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    if (epoch !== conversationEpoch) return;
+    const receipt = action === 'pause' ? `已暂停「${task.title}」。讨论焦点没有改变。` : action === 'resume' ? `已继续「${task.title}」。讨论焦点没有改变。` : `已记下「${task.title}」的核查。讨论焦点没有改变。`;
+    $('conversation-status').textContent = receipt;
+    $('conversation-error').textContent = conversation?.id === id && conversation.focusTaskId !== focus ? '这一步之后讨论焦点发生变化，请刷新核对。' : '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
     $('conversation-error').textContent = errorMessage(error);
