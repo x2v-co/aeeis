@@ -2135,9 +2135,12 @@ describe('entry bots and group chats', () => {
     expect(doc().querySelector('[data-column="review"]')?.textContent).toContain('待验收 0');
     expect(h.posts.some(post => post.body?.content === '验收通过')).toBe(true);
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_run"]')!.click();
-    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!.value = '等权限';
-    clickText('标成阻塞', el('channel-task-body'));
+    const blockField = el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!;
+    expect(blockField.placeholder).toContain('这会暂停这件 Run');
+    blockField.value = '等权限';
+    clickText('暂停并标成阻塞', el('channel-task-body'));
     await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"]')?.textContent).toContain('正在核对'));
+    expect(el('error').textContent).toContain('已暂停「正在核对」这件 Run');
     expect(h.posts.some(post => post.url.endsWith('/pause'))).toBe(true);
     expect(el('conversation-focus').textContent).toContain('发布方案');
     for (let index = 0; index < 4; index += 1) {
@@ -2155,12 +2158,14 @@ describe('entry bots and group chats', () => {
     clickText('分派', el('channel-task-body'));
     expect(el('error').textContent).toContain('进行中已有');
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(beforeAssign);
+    const goalsBeforeMemory = h.posts.filter(post => post.url === '/api/goals').length;
     doc().querySelector<HTMLButtonElement>('[data-bot-profile="demo.release"]')!.click();
     await vi.waitFor(() => expect(el('channel-bot-body').textContent).toContain('职责：对照发布清单'));
     expect(el('channel-bot-body').textContent).toContain('权限仍是现在这套');
     expect(el('channel-bot-body').textContent).toContain('待领取的对照');
     el('channel-memory-open').click();
     await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('这个频道还没有记下的事实'));
+    expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(goalsBeforeMemory);
     el<HTMLTextAreaElement>('channel-memory-text').value = '供应商只签年付';
     el<HTMLInputElement>('channel-memory-source').value = '这次讨论';
     el<HTMLFormElement>('channel-memory-form').requestSubmit();
@@ -2205,5 +2210,216 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('channel-board').textContent).toContain('后面才记下'));
     expect(el('channel-board-note').textContent).not.toContain('还有没读到的交接');
     expect(h.posts).toHaveLength(0);
+  });
+  it('applies acceptance recorded after the first event page while the board is closed', async () => {
+    const handoff = { id: 'evt_handoff', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
+    const accepted = { id: 'evt_accept', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '验收通过', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
+    const room = { id: 'room_accept', title: '稍后验收', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } }], messages: [], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_accept/members')) return response([{ id: 'member_release', roomId: 'room_accept', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_accept/session-events')) {
+        if (String(url).includes('cursor=')) return response({ items: [accepted] });
+        if (String(url).includes('limit=50')) return response({ items: [handoff], nextCursor: '50' });
+        return response({ items: [] });
+      }
+      if (url === '/api/conversations/conv_release') return response(release);
+      if (url === `/api/runs/${runId}`) return response({ id: runId, status: 'succeeded', calls: [], plans: [], artifacts: [], context: { sources: [] }, toolReceipts: [] });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('稍后验收'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已验收'));
+    expect(doc().querySelectorAll('#group-transcript .group-message')).toHaveLength(1);
+    expect(doc().querySelector('[data-accept-task]')).toBeNull();
+    expect(el('channel-board').hidden).toBe(true);
+    expect(h.posts).toHaveLength(0);
+  });
+  it('says when a block pauses the run and lets channel marks be cleared', async () => {
+    const room = { id: 'room_marks', title: '标注', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const goals: Array<{ id: string; title: string; status: string; createdAt: string; roomId?: string }> = [];
+    const cite = (taskId: string) => ['conv_marks', taskId, 'demo.release'];
+    const mark = (id: string, type: string, content: string, taskId: string) => ({ id, operation: 'publish', actorType: 'principal', actorId: 'owner', type, content, evidenceRefs: cite(taskId), createdAt: date });
+    const events = [
+      mark('evt_run', 'system', '交给正在核对', 'task_run'),
+      mark('evt_note', 'system', '交给只记一笔', 'task_note'),
+      mark('evt_cancel', 'system', '交给频道取消', 'task_cancel'),
+      mark('evt_live', 'system', '交给已经在跑', 'task_live'),
+      mark('evt_cancel_mark', 'task_update', '取消：先取消', 'task_cancel'),
+      mark('evt_live_cancel', 'task_update', '取消：旧记录', 'task_live'),
+      mark('evt_live_block', 'task_update', '阻塞：旧原因', 'task_live'),
+    ];
+    const release = { id: 'conv_marks', title: '发布', revision: 0, agentId: 'demo.release', tasks: [
+      { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: date, runId: 'run_pause', latestRunId: 'run_pause' },
+      { id: 'task_note', title: '只记一笔', threadId: 'thread_note', status: 'discussion', createdAt: date },
+      { id: 'task_cancel', title: '频道取消', threadId: 'thread_cancel', status: 'discussion', createdAt: date },
+      { id: 'task_live', title: '已经在跑', threadId: 'thread_live', status: 'running', createdAt: date, runId: 'run_live', latestRunId: 'run_live' },
+    ], messages: [] as any[], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_marks/members')) return response([{ id: 'member_release', roomId: 'room_marks', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).endsWith('/goals') && method === 'GET') return response(goals);
+      if (url === '/api/goals' && method === 'POST') {
+        const goal = { id: 'goal_marks', title: body.title, status: 'active', createdAt: date, roomId: body.roomId };
+        goals.push(goal);
+        return response(goal);
+      }
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_marks' });
+      if (String(url).includes('/session-events') && method === 'POST') {
+        events.push({ id: `evt_${events.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date });
+        return response(events.at(-1));
+      }
+      if (String(url).includes('/session-events')) {
+        if (String(url).includes('limit=20')) return response({ items: [] });
+        return response({ items: events });
+      }
+      if (url === '/api/conversations/conv_marks') return response(release);
+      if (url === '/api/runs/run_pause/pause' && method === 'POST') {
+        const task = release.tasks.find(item => item.id === 'task_run');
+        if (task) task.status = 'paused';
+        return response({ id: 'run_pause', status: 'paused' });
+      }
+      if ((url === '/api/runs/run_pause' || url === '/api/runs/run_live') && method === 'GET') return response({ id: 'run_live', status: 'running', calls: [], plans: [], artifacts: [], context: { sources: [] }, toolReceipts: [] });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('标注'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给已经在跑'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="doing"]')?.textContent).toContain('已经在跑'));
+    const liveCard = doc().querySelector<HTMLButtonElement>('[data-board-task="task_live"]')!;
+    expect(liveCard.textContent).not.toContain('已在频道里取消');
+    liveCard.click();
+    const lines = () => [...el('channel-task-body').querySelectorAll('small')].map(item => item.textContent ?? '');
+    expect(lines().some(line => line.startsWith('频道里还留着阻塞说明：旧原因'))).toBe(true);
+    expect(lines().some(line => line.startsWith('阻塞：'))).toBe(false);
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-unblock-task]')!.value = '已经继续';
+    clickText('解除阻塞', el('channel-task-body'));
+    await vi.waitFor(() => expect(lines().some(line => line.startsWith('频道里还留着阻塞说明：'))).toBe(false));
+    expect(el('error').textContent).toContain('已解除「已经在跑」的阻塞说明');
+    expect(el('error').textContent).toContain('这件 Run 仍在执行');
+    expect(lines().some(line => line.startsWith('阻塞：'))).toBe(false);
+    expect(lines().some(line => line.startsWith('交接：') && line.includes('解除阻塞：已经继续'))).toBe(true);
+    expect(h.posts.some(post => /\/pause$|\/resume$/.test(post.url))).toBe(false);
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-restore-task]')!.value = '记录过时';
+    clickText('撤回频道里的取消', el('channel-task-body'));
+    await vi.waitFor(() => expect(el('channel-task-body').querySelector('[data-restore-submit]')).toBeNull());
+    expect(doc().querySelector('[data-board-task="task_live"]')?.textContent).not.toContain('已在频道里取消');
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_run"]')!.click();
+    expect(el('channel-task-body').querySelector('textarea[data-block-task]')?.getAttribute('placeholder')).toContain('这会暂停这件 Run');
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!.value = '等权限';
+    clickText('暂停并标成阻塞', el('channel-task-body'));
+    await vi.waitFor(() => expect(lines().some(line => line.startsWith('阻塞：等权限'))).toBe(true));
+    expect(el('error').textContent).toContain('已暂停「正在核对」这件 Run');
+    expect(h.posts.filter(post => post.url.endsWith('/pause'))).toHaveLength(1);
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-unblock-task]')!.value = '原因记错';
+    clickText('解除阻塞', el('channel-task-body'));
+    await vi.waitFor(() => expect(lines().some(line => line === '需要你')).toBe(true));
+    expect(lines().some(line => line.startsWith('阻塞：'))).toBe(false);
+    expect(el('error').textContent).toContain('这件 Run 仍是已暂停');
+    expect(h.posts.some(post => post.url.endsWith('/resume'))).toBe(false);
+    const pauses = h.posts.filter(post => post.url.endsWith('/pause')).length;
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_note"]')!.click();
+    expect(el('channel-task-body').querySelector('textarea[data-block-task]')?.getAttribute('placeholder')).toContain('这次只记在频道里');
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!.value = '只是说明';
+    clickText('标成阻塞', el('channel-task-body'));
+    await vi.waitFor(() => expect(lines().some(line => line.startsWith('阻塞：只是说明'))).toBe(true));
+    expect(el('error').textContent).toContain('这次只记在频道里');
+    expect(h.posts.filter(post => post.url.endsWith('/pause'))).toHaveLength(pauses);
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_cancel"]')!.click();
+    expect(doc().querySelector('[data-board-task="task_cancel"]')?.textContent).toContain('已在频道里取消');
+    el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-restore-task]')!.value = '还要做';
+    clickText('撤回频道里的取消', el('channel-task-body'));
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="capture"]')?.textContent).toContain('频道取消'));
+    expect(doc().querySelector('[data-board-task="task_cancel"]')?.textContent).not.toContain('已在频道里取消');
+    expect(h.posts.some(post => /\/runs\/[^/]+\/cancel$|\/approve$|\/focus$/.test(post.url))).toBe(false);
+  });
+  it('counts in-progress channel work by bot id when display names match', async () => {
+    const agent = (agentId: string) => ({ agentId, status: 'admitted', card: { name: '同名', owner: 'owner', capabilities: [] as string[], cardVersion: '1' }, discoveredAt: date, reputation: { samples: 0, dimensions: {} } });
+    const tasks = [
+      ...[0, 1, 2, 3].flatMap(index => [
+        { id: `task_one_${index}`, title: `甲 ${index}`, threadId: `thread_one_${index}`, status: 'running', createdAt: date },
+        { id: `task_two_${index}`, title: `乙 ${index}`, threadId: `thread_two_${index}`, status: 'running', createdAt: date },
+      ]),
+      { id: 'task_ready', title: '待分派', threadId: 'thread_ready', status: 'queued', createdAt: date },
+    ];
+    const cited = (taskId: string, agentId: string) => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: taskId, evidenceRefs: ['conv_same', taskId, agentId], createdAt: date });
+    const events = [
+      ...[0, 1, 2, 3].flatMap(index => [cited(`task_one_${index}`, 'bot.one'), cited(`task_two_${index}`, 'bot.two')]),
+      cited('task_ready', 'bot.one'),
+    ];
+    const view = { id: 'conv_same', title: '同名', revision: 0, agentId: 'bot.one', tasks, messages: [], hasEarlierMessages: false };
+    const room = { id: 'room_same', title: '同名计数', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const member = (principalId: string) => ({ id: `member_${principalId}`, roomId: 'room_same', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/agents?limit=50') return response([agent('bot.one'), agent('bot.two')]);
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_same/members')) return response([member('bot.one'), member('bot.two')]);
+      if (String(url).includes('/rooms/room_same/session-events')) {
+        if (String(url).includes('limit=20')) return response({ items: [] });
+        return response({ items: events });
+      }
+      if (url === '/api/conversations/conv_same') return response(view);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('同名计数'))?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('task_ready'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(el('channel-board-note').textContent).toContain('同名进行中已有 4'));
+    expect(el('channel-board-note').textContent).not.toContain('已有 8');
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
+    const picker = el('channel-task-body').querySelector<HTMLSelectElement>('select')!;
+    picker.value = 'bot.one';
+    clickText('分派', el('channel-task-body'));
+    expect(el('error').textContent).toContain('同名进行中已有 4');
+    expect(el('error').textContent).not.toContain('已有 8');
+    picker.value = 'bot.two';
+    clickText('分派', el('channel-task-body'));
+    expect(el('error').textContent).toContain('同名进行中已有 4');
+    expect(h.posts.some(post => post.url.endsWith('/messages'))).toBe(false);
+  });
+  it('reads channel memory without creating a goal', async () => {
+    const room = { id: 'room_mem', title: '空记忆', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const goals: Array<{ id: string; title: string; status: string; createdAt: string; roomId?: string }> = [];
+    const memories: Array<{ id: string; kind: string; scope: string; classification: string; content: string; source: string; confidence: number; state: string }> = [];
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_mem/members')) return response([]);
+      if (String(url).includes('/rooms/room_mem/session-events')) return response({ items: [] });
+      if (String(url).endsWith('/goals') && method === 'GET') return response(goals);
+      if (url === '/api/goals' && method === 'POST') {
+        const goal = { id: 'goal_mem', title: body.title, status: 'active', createdAt: date, roomId: body.roomId };
+        goals.push(goal);
+        return response(goal);
+      }
+      if (String(url).includes('/memories') && method === 'POST') {
+        const memory = { id: 'memory_mem', kind: body.kind, scope: body.scope, classification: body.classification, content: body.content, source: body.source, confidence: body.confidence, state: 'active' };
+        memories.push(memory);
+        return response(memory);
+      }
+      if (String(url).includes('/memories')) return response(memories);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('空记忆'))?.click();
+    await vi.waitFor(() => expect(el('group-thread-empty').hidden).toBe(false));
+    el('channel-memory-open').click();
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('这个频道还没有记下的事实'));
+    expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(0);
+    el<HTMLTextAreaElement>('channel-memory-text').value = '供应商只签年付';
+    el<HTMLFormElement>('channel-memory-form').requestSubmit();
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('供应商只签年付'));
+    expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(1);
+    expect(h.posts.some(post => String(post.url).includes('/memories'))).toBe(true);
   });
 });

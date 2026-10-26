@@ -216,7 +216,10 @@ let openGroupId = '';
 let groupDraftOpen = false;
 let groupMembers: RoomMemberSummary[] = [];
 let groupEvents: SessionEventSummary[] = [];
+let laterChannelEvents: SessionEventSummary[] = [];
 let groupEventCursor: string | undefined;
+let channelReadEpoch = 0;
+let channelReadQueue: Promise<void> = Promise.resolve();
 const handoffViews = new Map<string, ConversationView>();
 let channelBoardOpen = false;
 let channelBoardEpoch = 0;
@@ -1631,10 +1634,13 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'review', title: '待验收' },
   { id: 'done', title: '完成' },
 ];
-interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelled: boolean; lines: string[] }
+interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; lines: string[] }
+function channelLog(): SessionEventSummary[] {
+  return laterChannelEvents.length ? [...groupEvents, ...laterChannelEvents] : groupEvents;
+}
 function boardDecision(conversationId: string, taskId: string): BoardDecision {
   const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, lines: [] };
-  for (const event of groupEvents) {
+  for (const event of channelLog()) {
     if (event.operation === 'retract' || event.type !== 'task_update' || !roomOwnerWrote(event)) continue;
     const refs = event.evidenceRefs ?? [];
     if (!refs.includes(conversationId) || !refs.includes(taskId)) continue;
@@ -1663,15 +1669,38 @@ function boardDecision(conversationId: string, taskId: string): BoardDecision {
     } else if (content.startsWith('阻塞：')) {
       decision.blockedNote = content.slice('阻塞：'.length).trim();
       decision.lines.push(content);
+    } else if (content.startsWith('解除阻塞')) {
+      delete decision.blockedNote;
+      decision.lines.push(content);
     } else if (content.startsWith('取消：')) {
       decision.cancelled = true;
+      decision.cancelReason = content.slice('取消：'.length).trim();
+      decision.lines.push(content);
+    } else if (content.startsWith('撤回取消：')) {
+      decision.cancelled = false;
+      delete decision.cancelReason;
       decision.lines.push(content);
     }
   }
   return decision;
 }
-function boardColumn(status: string, decision?: BoardDecision): BoardColumn | 'failed' {
-  if (decision?.cancelled && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'failed';
+function taskRunId(task: ConversationTaskView): string | undefined {
+  return task.runId ?? task.latestRunId;
+}
+function blockPausesRun(task: ConversationTaskView): boolean {
+  return Boolean(taskRunId(task) && ['queued', 'planning', 'running', 'reviewing'].includes(task.status));
+}
+function blockNoteCurrent(status: string, decision: BoardDecision): string | undefined {
+  if (!decision.blockedNote) return;
+  if (['planning', 'running', 'reviewing', 'preparing', 'queued', 'succeeded', 'failed', 'cancelled', 'unreadable'].includes(status)) return;
+  return decision.blockedNote;
+}
+function channelCancelHolds(task: ConversationTaskView, decision: BoardDecision): boolean {
+  if (!decision.cancelled || taskRunId(task)) return false;
+  return task.status === 'discussion' || task.status === 'preparing' || task.status === 'queued';
+}
+function boardColumn(status: string, decision?: BoardDecision, runId?: string): BoardColumn | 'failed' {
+  if (decision?.cancelled && !runId && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'failed';
   if (status === 'failed' || status === 'cancelled' || status === 'unreadable') return 'failed';
   if (status === 'discussion') return 'capture';
   if (status === 'preparing' || status === 'queued') return 'ready';
@@ -1711,7 +1740,7 @@ function hideChannelBoard(): void {
 function channelCitations(): Array<{ conversationId: string; taskId: string; agentId?: string }> {
   const seen = new Set<string>();
   const citations: Array<{ conversationId: string; taskId: string; agentId?: string }> = [];
-  for (const event of groupEvents) {
+  for (const event of channelLog()) {
     if (event.type === 'task_update') continue;
     const cite = handoffCitation(event);
     if (!cite || seen.has(`${cite.conversationId}\0${cite.taskId}`)) continue;
@@ -1723,23 +1752,28 @@ function channelCitations(): Array<{ conversationId: string; taskId: string; age
 function channelBoardIds(): string[] {
   return [...new Set(channelCitations().map(cite => cite.conversationId))];
 }
-async function absorbLaterEvents(roomId: string, epoch: number): Promise<void> {
-  for (let page = 0; page < 20 && groupEventCursor && openGroupId === roomId && epoch === channelBoardEpoch; page += 1) {
+async function absorbLaterEventsNow(roomId: string, epoch: number): Promise<void> {
+  for (let page = 0; page < 20 && groupEventCursor && openGroupId === roomId && epoch === channelReadEpoch; page += 1) {
     const cursor = groupEventCursor;
     const next = await api<SessionEventPage>(`/rooms/${encodeURIComponent(roomId)}/session-events?limit=50&cursor=${encodeURIComponent(cursor)}`).catch(() => undefined);
-    if (!next || openGroupId !== roomId || epoch !== channelBoardEpoch) return;
-    const seen = new Set(groupEvents.map(event => event.id));
-    for (const item of next.items ?? []) if (!seen.has(item.id)) groupEvents.push(item);
+    if (!next || openGroupId !== roomId || epoch !== channelReadEpoch) return;
+    const seen = new Set(channelLog().map(event => event.id));
+    for (const item of next.items ?? []) if (!seen.has(item.id)) laterChannelEvents.push(item);
     if (!next.nextCursor || next.nextCursor === cursor) { groupEventCursor = next.nextCursor; return; }
     groupEventCursor = next.nextCursor;
   }
+}
+function absorbLaterEvents(roomId: string, epoch: number): Promise<void> {
+  const run = channelReadQueue.then(() => absorbLaterEventsNow(roomId, epoch));
+  channelReadQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 async function showChannelBoard(): Promise<void> {
   const roomId = openGroupId;
   if (!roomId) return;
   channelBoardOpen = true;
   const epoch = ++channelBoardEpoch;
-  await absorbLaterEvents(roomId, epoch);
+  await absorbLaterEvents(roomId, channelReadEpoch);
   if (epoch !== channelBoardEpoch || openGroupId !== roomId || !channelBoardOpen) return;
   renderChannelBoard();
   const loaded = await Promise.all(channelBoardIds().map(async id => {
@@ -1765,18 +1799,23 @@ function renderChannelBoard(): void {
     const view = handoffViews.get(cite.conversationId);
     const task = view?.tasks.find(item => item.id === cite.taskId);
     if (!view || !task) return [];
-    const owner = botById(cite.agentId ?? view.agentId ?? '')?.name ?? cite.agentId ?? view.agentId ?? '这个人';
-    return [{ view, task, owner, decision: boardDecision(cite.conversationId, task.id) }];
+    const ownerId = cite.agentId ?? view.agentId ?? '';
+    const owner = botById(ownerId)?.name ?? (ownerId || '这个人');
+    return [{ view, task, owner, ownerId, decision: boardDecision(cite.conversationId, task.id) }];
   });
-  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status, card.decision) }));
+  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status, card.decision, taskRunId(card.task)) }));
   const failed = placed.filter(card => card.column === 'failed');
   failures.replaceChildren();
   failures.append(document.createTextNode(failed.length ? `有 ${failed.length} 件失败或读不到` : '没有失败或读不到的事'));
   for (const card of failed) failures.append(boardCard(card.view, card.task, card.owner, 'channel-failure-card', card.decision));
   const doing = placed.filter(card => card.column === 'doing');
-  const loads = new Map<string, number>();
-  for (const card of doing) loads.set(card.owner, (loads.get(card.owner) ?? 0) + 1);
-  const wip = [...loads.entries()].filter(([, count]) => count > 3).map(([owner, count]) => `${owner}进行中已有 ${count} 件。先完成或转交。`);
+  const loads = new Map<string, { name: string; count: number }>();
+  for (const card of doing) {
+    const current = loads.get(card.ownerId) ?? { name: card.owner, count: 0 };
+    current.count += 1;
+    loads.set(card.ownerId, current);
+  }
+  const wip = [...loads.values()].filter(item => item.count > 3).map(item => `${item.name}进行中已有 ${item.count} 件。先完成或转交。`);
   const more = groupEventCursor ? '还有没读到的交接。' : '';
   if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip, more].filter(Boolean).join(' ');
   const moreButton = $('channel-board-more');
@@ -1805,7 +1844,7 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   if (decision.conflicts.length) button.append(element('small', '已被领取'));
   if (decision.accepted) button.append(element('small', '已验收'));
   if (decision.revision) button.append(element('small', `要求修改：${decision.revision}`));
-  if (decision.cancelled) button.append(element('small', '已在频道里取消'));
+  if (channelCancelHolds(task, decision)) button.append(element('small', '已在频道里取消'));
   const age = taskAgeLabel(task.createdAt);
   if (age) button.append(element('small', age));
   button.addEventListener('click', () => openChannelTask(view, task, owner));
@@ -1816,18 +1855,17 @@ function channelOwnerName(view: ConversationView, task: ConversationTaskView): s
   return botById(cite?.agentId ?? view.agentId ?? '')?.name ?? cite?.agentId ?? view.agentId ?? '这个人';
 }
 function doingCount(agentId: string): number {
-  const name = botById(agentId)?.name ?? agentId;
   return channelCitations().filter(cite => {
     const view = handoffViews.get(cite.conversationId);
     const task = view?.tasks.find(item => item.id === cite.taskId);
     if (!view || !task) return false;
-    const owner = botById(cite.agentId ?? view.agentId ?? '')?.name ?? cite.agentId ?? view.agentId ?? '这个人';
-    return owner === name && boardColumn(task.status, boardDecision(cite.conversationId, task.id)) === 'doing';
+    const ownerId = cite.agentId ?? view.agentId ?? '';
+    return ownerId === agentId && boardColumn(task.status, boardDecision(cite.conversationId, task.id), taskRunId(task)) === 'doing';
   }).length;
 }
 function handoffChain(conversationId: string, taskId: string): string[] {
   const lines: string[] = [];
-  for (const event of groupEvents) {
+  for (const event of channelLog()) {
     if (event.operation === 'retract' || event.type === 'task_update') continue;
     const cite = handoffCitation(event);
     if (!cite || cite.conversationId !== conversationId || cite.taskId !== taskId) continue;
@@ -1846,8 +1884,10 @@ function spendLine(run: RunView): string {
 function stopLine(task: ConversationTaskView, decision: BoardDecision): string {
   if (task.pendingQuestion) return `停在这里：${task.pendingQuestion.text}`;
   if (task.pendingApproval) return `停在批准：${task.pendingApproval.summary}`;
-  if (decision.blockedNote) return `阻塞：${decision.blockedNote}`;
-  if (decision.cancelled) return '已在频道里取消';
+  const blocked = blockNoteCurrent(task.status, decision);
+  if (blocked) return `阻塞：${blocked}`;
+  if (channelCancelHolds(task, decision)) return '已在频道里取消';
+  if (task.status === 'cancelled' && decision.cancelReason) return `取消原因：${decision.cancelReason}`;
   return blockedCaption(task.status);
 }
 async function roomWriteContext(roomId: string): Promise<{ goalId: string; manifestId: string }> {
@@ -1928,13 +1968,29 @@ async function refuseChannelTask(view: ConversationView, task: ConversationTaskV
 async function blockChannelTask(view: ConversationView, task: ConversationTaskView, reason: string): Promise<void> {
   const text = reason.trim();
   if (!text) { message('请先写下阻塞原因。'); return; }
-  const runId = task.runId ?? task.latestRunId;
-  if (runId && ['queued', 'planning', 'running', 'reviewing'].includes(task.status)) {
+  const pauses = blockPausesRun(task);
+  const runId = taskRunId(task);
+  if (pauses && runId) {
     await api(`/runs/${encodeURIComponent(runId)}/pause`, {});
     task.status = 'paused';
   }
   await postRoomUpdate(`阻塞：${text}`, citeRefs(view, task));
-  message(`已记下「${task.title}」的阻塞。讨论焦点没有改变。`);
+  message(pauses
+    ? `已暂停「${task.title}」这件 Run，并记下阻塞。讨论焦点没有改变。`
+    : `已记下「${task.title}」的阻塞。这次只记在频道里。讨论焦点没有改变。`);
+  await afterChannelWrite(view, task.id);
+}
+async function unblockChannelTask(view: ConversationView, task: ConversationTaskView, reason: string): Promise<void> {
+  const text = reason.trim();
+  if (!text) { message('请先写下解除原因。'); return; }
+  const runId = taskRunId(task);
+  const still = task.status === 'paused' && runId
+    ? `这件 Run 仍是已暂停。`
+    : runId && ['planning', 'running', 'reviewing'].includes(task.status)
+      ? `这件 Run 仍在执行。`
+      : `这次只改频道记录。`;
+  await postRoomUpdate(`解除阻塞：${text}`, citeRefs(view, task));
+  message(`已解除「${task.title}」的阻塞说明。${still}讨论焦点没有改变。`);
   await afterChannelWrite(view, task.id);
 }
 async function cancelChannelTask(view: ConversationView, task: ConversationTaskView, reason: string): Promise<void> {
@@ -1947,6 +2003,15 @@ async function cancelChannelTask(view: ConversationView, task: ConversationTaskV
   }
   await postRoomUpdate(`取消：${text}`, citeRefs(view, task));
   message(runId ? `已取消「${task.title}」这件 Run。讨论焦点没有改变。` : `已在频道里取消「${task.title}」。这件还没有 Run。`);
+  await afterChannelWrite(view, task.id);
+}
+async function restoreChannelTask(view: ConversationView, task: ConversationTaskView, reason: string): Promise<void> {
+  const text = reason.trim();
+  if (!text) { message('请先写下撤回原因。'); return; }
+  await postRoomUpdate(`撤回取消：${text}`, citeRefs(view, task));
+  message(task.status === 'cancelled'
+    ? `已撤回「${task.title}」在频道里的取消说明。这件 Run 仍是已取消。讨论焦点没有改变。`
+    : `已撤回「${task.title}」在频道里的取消。这次只改频道记录。讨论焦点没有改变。`);
   await afterChannelWrite(view, task.id);
 }
 async function acceptChannelTask(view: ConversationView, task: ConversationTaskView): Promise<void> {
@@ -1978,10 +2043,11 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
   body.dataset.task = task.id;
   body.replaceChildren();
   const decision = boardDecision(view.id, task.id);
-  const column = boardColumn(task.status, decision);
+  const column = boardColumn(task.status, decision, taskRunId(task));
   body.append(element('p', `${owner} · ${taskStateLabel(task)}`));
   const stopped = stopLine(task, decision);
   if (stopped) body.append(element('small', stopped));
+  if (!blockNoteCurrent(task.status, decision) && decision.blockedNote) body.append(element('small', `频道里还留着阻塞说明：${decision.blockedNote}`));
   if (decision.assigneeId) body.append(element('small', `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取`));
   if (decision.conflicts.length) body.append(element('small', '已被领取'));
   const steps = task.execution?.steps ?? [];
@@ -2038,13 +2104,14 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
     refuse.dataset.refuseSubmit = task.id;
     body.append(reason, refuse);
   }
+  const pauses = blockPausesRun(task);
   const blockReason = document.createElement('textarea');
   blockReason.dataset.blockTask = task.id;
-  blockReason.setAttribute('aria-label', '阻塞原因');
+  blockReason.setAttribute('aria-label', pauses ? '阻塞原因，提交后会暂停这件 Run' : '阻塞原因，这次只记在频道里');
   blockReason.maxLength = 500;
   blockReason.rows = 2;
-  blockReason.placeholder = '写下阻塞原因';
-  const block = dashboardButton('标成阻塞', () => blockChannelTask(view, task, blockReason.value));
+  blockReason.placeholder = pauses ? '写下阻塞原因。这会暂停这件 Run。' : '写下阻塞原因。这次只记在频道里。';
+  const block = dashboardButton(pauses ? '暂停并标成阻塞' : '标成阻塞', () => blockChannelTask(view, task, blockReason.value));
   block.dataset.blockSubmit = task.id;
   const cancelReason = document.createElement('textarea');
   cancelReason.dataset.cancelTask = task.id;
@@ -2055,6 +2122,32 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
   const cancel = dashboardButton(runId ? '取消这件 Run' : '在频道里取消', () => cancelChannelTask(view, task, cancelReason.value));
   cancel.dataset.cancelSubmit = task.id;
   if (column !== 'failed' && column !== 'done') body.append(blockReason, block, cancelReason, cancel);
+  if (decision.blockedNote) {
+    const unblockReason = document.createElement('textarea');
+    unblockReason.dataset.unblockTask = task.id;
+    unblockReason.setAttribute('aria-label', '解除阻塞的原因');
+    unblockReason.maxLength = 500;
+    unblockReason.rows = 2;
+    unblockReason.placeholder = task.status === 'paused' && taskRunId(task)
+      ? '写下解除原因。这只清掉频道里的阻塞说明。这件 Run 仍是已暂停。'
+      : '写下解除原因。这只清掉频道里的阻塞说明。';
+    const unblock = dashboardButton('解除阻塞', () => unblockChannelTask(view, task, unblockReason.value));
+    unblock.dataset.unblockSubmit = task.id;
+    body.append(unblockReason, unblock);
+  }
+  if (decision.cancelled) {
+    const restoreReason = document.createElement('textarea');
+    restoreReason.dataset.restoreTask = task.id;
+    restoreReason.setAttribute('aria-label', '撤回取消的原因');
+    restoreReason.maxLength = 500;
+    restoreReason.rows = 2;
+    restoreReason.placeholder = task.status === 'cancelled'
+      ? '写下撤回原因。这次只清掉频道里的说明。这件 Run 仍是已取消。'
+      : '写下撤回原因。这次只改频道记录。';
+    const restore = dashboardButton('撤回频道里的取消', () => restoreChannelTask(view, task, restoreReason.value));
+    restore.dataset.restoreSubmit = task.id;
+    body.append(restoreReason, restore);
+  }
   if (task.status === 'succeeded' && !decision.accepted) {
     const accept = dashboardButton('验收', () => acceptChannelTask(view, task));
     accept.dataset.acceptTask = task.id;
@@ -2254,6 +2347,7 @@ function leaveGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  laterChannelEvents = [];
   groupEventCursor = undefined;
   handoffViews.clear();
   groupDraftOpen = false;
@@ -2272,6 +2366,7 @@ function clearOpenGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  laterChannelEvents = [];
   groupEventCursor = undefined;
   handoffViews.clear();
   hideChannelSurfaces();
@@ -2706,6 +2801,8 @@ function renderGroups(rooms: RoomSummary[]): void {
     openGroupId = '';
     groupMembers = [];
     groupEvents = [];
+    laterChannelEvents = [];
+    groupEventCursor = undefined;
     localStorage.removeItem('aeeis.group');
   }
   list.replaceChildren();
@@ -2729,7 +2826,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; groupEvents = []; groupEventCursor = undefined; handoffViews.clear(); hideChannelSurfaces(); }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; laterChannelEvents = []; groupEventCursor = undefined; handoffViews.clear(); hideChannelSurfaces(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -2738,16 +2835,21 @@ async function openGroup(id: string): Promise<void> {
   $<HTMLTextAreaElement>('group-text')?.focus();
 }
 async function loadGroup(id: string): Promise<void> {
+  const epoch = ++channelReadEpoch;
   const [members, events] = await Promise.all([
     api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`).catch(() => [] as RoomMemberSummary[]),
     api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50`).catch((): SessionEventPage => ({ items: [] })),
   ]);
-  if (openGroupId !== id) return;
+  if (openGroupId !== id || epoch !== channelReadEpoch) return;
   groupMembers = members.filter(member => member.status === 'active');
   groupEvents = events.items ?? [];
+  laterChannelEvents = [];
   groupEventCursor = events.nextCursor;
+  await absorbLaterEvents(id, epoch);
+  if (openGroupId !== id || epoch !== channelReadEpoch) return;
   renderGroupTranscript();
   void refreshHandoffViews();
+  if (channelBoardOpen) renderChannelBoard();
 }
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
@@ -3727,20 +3829,26 @@ $('group-create')?.addEventListener('submit', event => { void createGroup(event)
 $('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
 $('channel-artifact-close')?.addEventListener('click', () => hideChannelArtifact());
 const MEMORY_KIND_LABEL: Record<string, string> = { fact: '事实', preference: '偏好', decision: '决定', note: '备注' };
-async function channelGoal(): Promise<GoalSummary | undefined> {
+async function listedChannelGoal(): Promise<GoalSummary | undefined> {
   const roomId = openGroupId;
   if (!roomId) return;
-  const room = roomSummaries.find(item => item.id === roomId);
   const listed = await api<GoalSummary[] | { goals?: GoalSummary[] }>(`/rooms/${encodeURIComponent(roomId)}/goals`);
   const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
-  return goals.find(item => item.status === 'active') ?? goals[0] ?? await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
+  return goals.find(item => item.status === 'active') ?? goals[0];
+}
+async function channelGoal(): Promise<GoalSummary | undefined> {
+  const existing = await listedChannelGoal();
+  if (existing || !openGroupId) return existing;
+  const roomId = openGroupId;
+  const room = roomSummaries.find(item => item.id === roomId);
+  return api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
 }
 async function renderChannelMemory(): Promise<void> {
   const list = $('channel-memory-list');
   const roomId = openGroupId;
   if (!list || !roomId) return;
   list.replaceChildren(element('p', '正在读取这个频道记住的事。'));
-  const goal = await channelGoal();
+  const goal = await listedChannelGoal();
   if (openGroupId !== roomId) return;
   const memories = goal ? await api<MemoryView[]>(`/goals/${encodeURIComponent(goal.id)}/memories?limit=50`).catch(() => [] as MemoryView[]) : [];
   if (openGroupId !== roomId) return;
