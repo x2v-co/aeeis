@@ -47,6 +47,43 @@ export class GovernedBrain {
   private audit: BrainAudit[] = [];
   private key(owner: string, tenantId: string, scopeRef: string): string { return JSON.stringify([tenantId, owner, scopeRef]); }
 
+  /** Retract the named claims and add the replacement. A failed add restores the claims it retracted. */
+  replaceClaims(scopeRef: string, claimIds: string[], input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, resourceOwner?: string): BrainClaim {
+    const principal = brainActor(actor);
+    const parsed = brainClaimInputSchema.parse(input);
+    const tenantId = parsed.tenantId ?? principal.tenantId;
+    const owner = resourceOwner ?? (typeof actor === 'string' ? 'owner' : principal.id);
+    this.assertGrant(principal, parsed.owner, tenantId, parsed.scopeRef, parsed.classification, 'write');
+    const key = this.key(owner, principal.tenantId, scopeRef);
+    const history = this.claims.get(key) ?? [];
+    const targets = [...new Set(claimIds)].map(id => {
+      const claim = history.find(item => item.id === id && item.state === 'active');
+      if (!claim) throw new Error('Claim not found');
+      this.assertGrant(principal, owner, principal.tenantId, scopeRef, claim.classification, 'retract');
+      return claim;
+    });
+    if (!targets.length) return this.addClaim(parsed, actor);
+    const snapshots = targets.map(claim => structuredClone(claim));
+    const beforeIds = new Set(history.map(item => item.id));
+    try {
+      for (const claim of targets) {
+        const after = { ...claim, state: 'retracted' as const, updatedAt: new Date().toISOString() };
+        this.recordChange(claim, after, principal, 'brain.retract');
+        Object.assign(claim, after);
+        this.record('retract', principal, owner, scopeRef, claim.id, claim);
+      }
+      return this.addClaim(parsed, actor);
+    } catch (error) {
+      const current = this.claims.get(key) ?? [];
+      const kept = current.filter(item => beforeIds.has(item.id));
+      for (const snapshot of snapshots) {
+        const claim = kept.find(item => item.id === snapshot.id);
+        if (claim) Object.assign(claim, snapshot);
+      }
+      this.claims.set(key, kept);
+      throw error;
+    }
+  }
   addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext): BrainClaim {
     const principal = brainActor(actor);
     const parsed = brainClaimInputSchema.parse(input);

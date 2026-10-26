@@ -46,6 +46,7 @@ export const sessionEventSchema = z.object({
   contentHash: hash,
   evidenceRefs: z.array(id).max(200),
   idempotencyKey: z.string().trim().min(1).max(500),
+  recordedBy: z.object({ id: z.string().min(1).max(200), type: sessionEventActorTypeSchema }).strict().optional(),
   createdAt: isoDate,
 }).strict().superRefine((event, ctx) => {
   if (event.operation === 'publish' && (event.targetEventId !== undefined || event.revision !== 1 || event.retractionReason !== undefined)) ctx.addIssue({ code: 'custom', message: 'Published event cannot carry revision metadata' });
@@ -74,6 +75,7 @@ export interface SessionEventDraft {
   contentHash: string;
   evidenceRefs: Id[];
   idempotencyKey: string;
+  recordedBy?: { id: string; type: SessionEventActorType };
   createdAt: string;
 }
 
@@ -319,7 +321,7 @@ export class SessionEventService {
         if (!manifest.audience.includes(audienceFor(member.principalId, tenantId))) throw new AeeisConflict('这个 bot 不在这条会话的受众里');
         eventActorId = member.principalId;
         eventActorType = 'agent';
-      } else if (room.description === '私聊') {
+      } else if (room.chat === 'direct' && (room.owner ?? 'owner') === actorId) {
         const member = members.find(item => item.principalId === input.actor!.id && item.status === 'active' && (item.role === 'editor' || item.role === 'agent'));
         if (!member || member.principalId === actorId) throw new AeeisConflict('只能以这间私聊里的对方身份说话');
         if (!manifest.audience.includes(audienceFor(member.principalId, tenantId))) throw new AeeisConflict('对方不在这条会话的受众里');
@@ -330,7 +332,7 @@ export class SessionEventService {
     const evidenceRefs = [...new Set(input.evidenceRefs ?? [])];
     const contextManifestHash = contextManifestBindingHash(manifest);
     const contentHash = digestProtocol({ type: input.type, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
-    return this.repository.append({ roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() });
+    return this.repository.append({ roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, recordedBy: { id: actorId, type: actorType }, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() });
   }
 
   async revise(roomId: Id, eventId: Id, input: ReviseSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
@@ -350,7 +352,7 @@ export class SessionEventService {
     const contextManifestHash = contextManifestBindingHash(manifest);
     const revision = target.revision + 1;
     const contentHash = digestProtocol({ type: target.type, operation: 'revise', targetEventId: target.id, revision, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
-    const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, operation: 'revise' as const, targetEventId: target.id, revision, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() };
+    const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'revise' as const, targetEventId: target.id, revision, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() };
     return this.repository.appendLinear ? this.repository.appendLinear(draft, target.id, target.revision) : this.repository.append(draft);
   }
 
@@ -370,7 +372,7 @@ export class SessionEventService {
     const contextManifestHash = contextManifestBindingHash(manifest);
     const content = `Retracted: ${reason.trim()}`;
     const contentHash = digestProtocol({ type: target.type, operation: 'retract', targetEventId: target.id, content, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
-    const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, operation: 'retract' as const, targetEventId: target.id, revision: target.revision, retractionReason: reason.trim(), classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs: target.evidenceRefs, idempotencyKey, createdAt: new Date().toISOString() };
+    const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'retract' as const, targetEventId: target.id, revision: target.revision, retractionReason: reason.trim(), classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs: target.evidenceRefs, idempotencyKey, createdAt: new Date().toISOString() };
     return this.repository.appendLinear ? this.repository.appendLinear(draft, target.id, target.revision) : this.repository.append(draft);
   }
 

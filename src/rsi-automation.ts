@@ -137,7 +137,7 @@ export class RsiAutomationPump {
         result.evaluated += 1;
         continue;
       }
-      if (candidate.status === 'evaluating' && this.state.autoApproveLowRisk && candidate.risk === 'low' && candidate.evaluations.length >= 3 && candidate.evaluations.every(item => item.passed)) {
+      if (candidate.status === 'evaluating' && this.state.autoApproveLowRisk && candidate.risk === 'low' && !candidate.proposalSignalId?.startsWith('task-kind-rsi:') && candidate.evaluations.length >= 3 && candidate.evaluations.every(item => item.passed)) {
         candidate = await this.rsi.approve(candidate.id, `rsi-internal-auto-approve:${this.state.suiteVersion}`, scope);
         result.approved += 1;
         continue;

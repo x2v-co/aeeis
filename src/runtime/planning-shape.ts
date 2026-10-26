@@ -36,6 +36,12 @@ export function needsExternalLiveData(goal: string): boolean {
   return /天气|气温|降雨|weather|forecast|实时|最新(?:新闻|消息|数据|价格)|今日(?:新闻|股价|汇率)|股价|汇率|live\s+data|real[ -]?time|current\s+(?:weather|price|news|exchange\s+rate)|latest\s+(?:news|price|data)/i.test(goal);
 }
 
+/** A model `needed: false` may clear only a frozen run that is still one read-only step. */
+export function automaticReviewCanClear(input: PlanningInput & { planText?: string }): boolean {
+  if (planningDecision(input).shape !== 'direct') return false;
+  return !input.planText || !externalEffect.test(input.planText);
+}
+
 export function planningDecision(input: PlanningInput): { shape: PlanningShape; reason: PlanningReason } {
   if (input.taskExecution) return { shape: 'dag', reason: 'domain_task' };
   if (input.builtinSkill) return { shape: 'dag', reason: 'skill' };

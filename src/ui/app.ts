@@ -16,7 +16,7 @@ interface RoomMemberSummary { id: string; roomId: string; principalId: string; r
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
   sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system';
-  actorId: string; actorType: 'principal' | 'agent' | 'system'; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
+  actorId: string; actorType: 'principal' | 'agent' | 'system'; recordedBy?: { id: string; type: 'principal' | 'agent' | 'system' }; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
   audienceSnapshot: { digest: string; members: Array<{ principalId: string; role: string; status: string }> };
   content: string; contentHash: string; evidenceRefs: string[]; idempotencyKey: string; createdAt: string;
 }
@@ -85,7 +85,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { id: string; threadId: string; title: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -187,6 +187,7 @@ let runtimeModel = '';
 let taskModelBound = '';
 let evolutionConfigured = false;
 let taskSchedulerConfigured = false;
+let sessionPrincipal = '';
 let eventStreamRunId = '';
 let eventStreamAbort: AbortController | undefined;
 let eventStreamCursor: string | undefined;
@@ -1220,8 +1221,21 @@ function aeeisThread(): { id: string; revision: number } | undefined {
 function participantLabel(principalId: string): string {
   return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
 }
+function eventWriter(event: SessionEventSummary): { id: string; type: 'principal' | 'agent' | 'system' } {
+  return event.recordedBy ?? { id: event.actorId, type: event.actorType };
+}
+function roomOwnerWrote(event: SessionEventSummary): boolean {
+  const writer = eventWriter(event);
+  if (writer.type !== 'principal') return false;
+  if (event.owner) return writer.id === event.owner;
+  return Boolean(sessionPrincipal) && writer.id === sessionPrincipal;
+}
 function eventAuthor(event: SessionEventSummary): string {
-  if (event.type === 'system') return '记录';
+  if (event.type === 'system') {
+    const writer = eventWriter(event);
+    if (writer.type === 'system' || roomOwnerWrote(event)) return '记录';
+    return participantLabel(writer.id);
+  }
   if (event.actorType === 'agent') return participantLabel(event.actorId);
   if (groupMembers.some(member => member.principalId === event.actorId)) return participantLabel(event.actorId);
   return '你';
@@ -1341,6 +1355,7 @@ function syncGroupHandoff(): void {
   select.hidden = rosterView() !== 'group';
 }
 function handoffCitation(event: SessionEventSummary): { conversationId: string; taskId: string; agentId?: string } | undefined {
+  if (!roomOwnerWrote(event)) return;
   const refs = event.evidenceRefs ?? [];
   const conversationId = refs.find(id => id.startsWith('conv_') && CITATION_ID.test(id));
   const taskId = refs.find(id => id.startsWith('task_') && CITATION_ID.test(id));
@@ -2025,7 +2040,8 @@ async function renameGroup(): Promise<void> {
   roomSummaries = roomSummaries.map(item => item.id === updated.id ? { ...item, ...updated } : item);
   renderGroups(roomSummaries);
 }
-function machineLine(machine: { state: 'absent' | 'present' | 'released'; ready: boolean }): string {
+function machineLine(machine: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }): string {
+  if (machine.state === 'unknown') return '这件工作的机器记录读不出来。看一眼不会执行。';
   if (machine.state === 'released') return '这件工作的机器已经收掉。';
   if (machine.state === 'present' && machine.ready) return '这件工作有一台机器，还在。看一眼不会执行。';
   if (machine.state === 'present') return '这件工作的机器还没准备好。看一眼不会启动它。';
@@ -3522,7 +3538,7 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
       const planDispatches = goalData?.dispatches.find(entry => entry.planId === plan.id)?.dispatches ?? [];
       if (index === 0 && goal.status === 'active' && modelConfigured && taskSchedulerConfigured) {
         details.append(button(planDispatches.length ? '继续调度 DAG' : '调度整张 DAG', async () => {
-          await api(`/plans/${plan.id}/schedule`, runOptions(false)); await refresh();
+          await api(`/plans/${plan.id}/schedule`, goalExecutionOptions()); await refresh();
         }));
       } else if (index === 0 && goal.status === 'active' && modelConfigured && !taskSchedulerConfigured) {
         details.append(element('small', 'DAG 调度器未启用；可直接执行单个任务。', 'muted'));
@@ -3571,14 +3587,14 @@ async function renderGoals(goals: GoalSummary[], runs: RunSummary[], rooms: Room
         } else if (!execution && node.status === 'ready' && goal.status === 'active') {
           if (taskSchedulerConfigured) {
             const schedule = button('调度此任务', async () => {
-              await api(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/schedule`, runOptions(false)); goalViewSignature = ''; await refresh();
+              await api(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/schedule`, goalExecutionOptions()); goalViewSignature = ''; await refresh();
             });
             schedule.disabled = !modelConfigured; row.append(schedule);
           } else {
             row.append(element('small', '调度器未启用', 'muted'));
           }
           const start = button('直接执行此任务', async () => {
-            const created = await api<{ id: string }>(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/run`, runOptions(false));
+            const created = await api<{ id: string }>(`/plans/${plan.id}/tasks/${encodeURIComponent(node.id)}/run`, goalExecutionOptions());
             await openRun(created.id);
           });
           start.disabled = !modelConfigured; row.append(start);
@@ -3722,6 +3738,9 @@ function executionReviewNote(): string {
     ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的审核档放行。'
     : `这次先出任务图：${planningRefusal(decision.reason)}。`;
   return `${gate}${shape}`;
+}
+function goalExecutionOptions(): Record<string, unknown> {
+  return { ...runOptions(false), executionReview: 'required' };
 }
 function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
@@ -4861,6 +4880,7 @@ async function initialize(): Promise<void> {
       configAction.textContent = status.modelConfigured ? '检查运行配置' : '打开运行配置';
     }
     evolutionConfigured = status.evolutionConfigured;
+    sessionPrincipal = status.principal ?? '';
     modelConfigured = status.modelConfigured;
     runtimeModel = status.model?.model ?? '';
     taskSchedulerConfigured = status.taskSchedulerConfigured;

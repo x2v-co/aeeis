@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { principalAudience, validatePrincipal, type Ownership } from '../security/principal.js';
 import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSchema, decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema, fillablePdfArtifactSchema } from './contracts.js';
-import { directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
+import { automaticReviewCanClear, directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -109,6 +109,21 @@ function plannerApprovalJudgment(value: unknown): { needed: boolean; reason: str
   return parsed.success ? parsed.data : undefined;
 }
 const automaticReviewGuidance = '\nThis run uses automatic review. Also return "approvalRequest":{"needed":true or false,"reason":"one sentence"}. Set needed true when the plan would spend money, call an external agent or tool, send a message, change shared state, or you are unsure. Set needed false only for read-only work on supplied materials. This judgment cannot add tools, raise budgets, or replace a person\'s approval.';
+function frozenRunCanClear(current: AgentRun): boolean {
+  const plan = current.plans.at(-1);
+  const planText = plan ? [plan.summary, ...plan.nodes.flatMap(node => [node.title, node.instruction ?? ''])].join('\n') : '';
+  return automaticReviewCanClear({
+    goal: current.goal,
+    taskExecution: current.taskExecution,
+    builtinSkill: current.builtinSkill,
+    allowedTools: current.allowedTools,
+    allowedAgents: current.allowedAgents,
+    externalBudget: current.externalBudget,
+    resources: current.resourceSnapshot,
+    skillRuntime: current.skillRuntime,
+    planText,
+  });
+}
 function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model'): void {
   const mode = current.executionReview ?? 'required';
   if (mode === 'yolo') {
@@ -118,10 +133,17 @@ function settlePlanApproval(current: AgentRun, hash: string, version: number, ju
     return;
   }
   if (mode === 'auto' && judgment && !judgment.needed) {
-    const actor = judgmentSource === 'policy' ? 'policy:direct' : 'policy:auto';
-    current.approval = { planHash: hash, planVersion: version, approved: true, actor, at: now(), mode, reason: judgment.reason };
-    current.status = 'running';
-    event(current, 'plan.auto_approved', { planHash: hash, planVersion: version, mode, actor, reason: judgment.reason });
+    if (frozenRunCanClear(current)) {
+      const actor = judgmentSource === 'policy' ? 'policy:direct' : 'policy:auto';
+      current.approval = { planHash: hash, planVersion: version, approved: true, actor, at: now(), mode, reason: judgment.reason };
+      current.status = 'running';
+      event(current, 'plan.auto_approved', { planHash: hash, planVersion: version, mode, actor, reason: judgment.reason });
+      return;
+    }
+    const reason = '冻结的计划带有工具、代理、预算或外部动作，仍等待批准';
+    current.approval = { planHash: hash, planVersion: version, approved: false, mode, reason };
+    current.status = 'needs_approval';
+    event(current, 'plan.approval_requested', { planHash: hash, planVersion: version, mode, reason });
     return;
   }
   if (mode === 'auto') {

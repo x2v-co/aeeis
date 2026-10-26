@@ -54,7 +54,8 @@ export class AeeisService {
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     if (!input.title.trim()) throw new Error('Room title is required');
-    const room: Room = { id: `room_${randomUUID()}`, owner, tenantId, title: input.title.trim(), ...(input.description === undefined ? {} : { description: input.description }), status: 'active', createdAt: now, updatedAt: now };
+    const chat = input.description === '私聊' ? 'direct' as const : input.description === '群聊' ? 'group' as const : undefined;
+    const room: Room = { id: `room_${randomUUID()}`, owner, tenantId, title: input.title.trim(), ...(input.description === undefined ? {} : { description: input.description }), ...(chat ? { chat } : {}), status: 'active', createdAt: now, updatedAt: now };
     await this.store.commitRoomCreation(room, this.buildRoomProjectionIntents(room));
     return room;
   }

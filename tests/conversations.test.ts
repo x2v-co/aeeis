@@ -305,6 +305,12 @@ describe('single-entry conversation routing', () => {
     const accepted = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/practice`, headers: f.headers, payload: { expectedRevision: current.revision, text: `  ${sentence}  `, runId: done.runId } });
     expect(accepted.statusCode, accepted.body).toBe(200);
     expect(accepted.json().revision).toBe(current.revision);
+    const addClaim = brain.addClaim.bind(brain);
+    brain.addClaim = () => { throw new Error('校验失败'); };
+    const brokenPractice = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/practice`, headers: f.headers, payload: { expectedRevision: current.revision, text: '新的做法没有写上', runId: done.runId } });
+    expect(brokenPractice.statusCode).toBeGreaterThanOrEqual(400);
+    expect(practiceClaims().filter(claim => claim.state === 'active')).toEqual([expect.objectContaining({ id: accepted.json().acceptedPractice.claimId, content: sentence })]);
+    brain.addClaim = addClaim;
     expect(accepted.json().acceptedPractice).toMatchObject({ text: sentence, runId: done.runId, evidenceRefs: ['artifact_later'] });
     expect(JSON.stringify(accepted.json().acceptedPractice)).not.toContain('SECRET');
     expect(await f.store.get(release.id, scope)).not.toHaveProperty('acceptedPractice');
@@ -443,6 +449,17 @@ describe('single-entry conversation routing', () => {
     expect(promoted.statusCode, promoted.body).toBe(200);
     expect(promoted.json().revision).toBe(rev);
     expect(promoted.json().taskSettings.skills).toEqual([expect.objectContaining({ taskKind: '周报', methodId: 'project-pulse', version: '1', runId: first.runId, evidenceRefs: ['artifact_pulse'] })]);
+    const addSkill = brain.addClaim.bind(brain);
+    brain.addClaim = () => { throw new Error('校验失败'); };
+    const brokenSkill = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: second.runId } });
+    expect(brokenSkill.statusCode).toBeGreaterThanOrEqual(400);
+    expect(profileClaims().filter(claim => claim.state === 'active' && claim.sourceRefs.includes('skill-profile:demo.release:周报'))).toEqual([
+      expect.objectContaining({ sourceRefs: expect.arrayContaining(['method:project-pulse', 'version:1', `run:${first.runId}`]) }),
+    ]);
+    const brokenModel = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', model: 'owner-picked-model' } });
+    expect(brokenModel.statusCode).toBeGreaterThanOrEqual(400);
+    expect(profileClaims().filter(claim => claim.state === 'active' && claim.sourceRefs.some(ref => ref.startsWith('task-model:')))).toEqual([]);
+    brain.addClaim = addSkill;
     expect(JSON.stringify(promoted.json().taskSettings)).not.toContain('SECRET');
     expect(await f.store.get(release.id, scope)).not.toHaveProperty('taskSettings');
     const replaced = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: second.runId } });
@@ -715,7 +732,7 @@ describe('single-entry conversation routing', () => {
       proposal: { candidateId: candidate.id, status: 'proposed' },
     });
     expect(candidate).toMatchObject({
-      target: 'profile', baseVersion: 'profile/4', proposedVersion: 'brief-method/2', risk: 'low', status: 'proposed', evaluations: [],
+      target: 'profile', baseVersion: 'profile/4', proposedVersion: 'brief-method/2', risk: 'medium', status: 'proposed', evaluations: [],
       sourceReceiptRefs: ['artifact_brief'], proposalSignalId: `task-kind-rsi:demo.release:周报:${secondId}`,
     });
     expect(candidate.change).toContain('任务种类：周报');
@@ -766,7 +783,7 @@ describe('single-entry conversation routing', () => {
     expect(sentAgain.statusCode, sentAgain.body).toBe(200);
     const listed = await rsi.list(scope);
     expect(listed).toHaveLength(2);
-    expect(listed.every(item => item.status === 'proposed' && item.evaluations.length === 0 && item.target === 'profile' && item.risk === 'low')).toBe(true);
+    expect(listed.every(item => item.status === 'proposed' && item.evaluations.length === 0 && item.target === 'profile' && item.risk === 'medium')).toBe(true);
     expect(listed.map(item => item.id)).toContain(candidate.id);
     const newer = listed.find(item => item.proposedVersion === 'weekly-brief/3')!;
     expect(newer.baseVersion).toBe('profile/1');
@@ -1326,6 +1343,18 @@ describe('single-entry conversation routing', () => {
     expect(homeRun.allowedTools).toEqual([]);
     expect(homeRun.allowedAgents).toEqual([]);
   });
+  it('opens one life thread when the same person is created twice at once', async () => {
+    const f = await fixture();
+    const [first, second] = await Promise.all([
+      f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布甲', agentId: 'demo.release' } }),
+      f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布乙', agentId: 'demo.release' } }),
+    ]);
+    expect(first.statusCode, first.body).toBe(201);
+    expect(second.statusCode, second.body).toBe(201);
+    expect(first.json().id).toBe(second.json().id);
+    expect(first.json().agentId).toBe('demo.release');
+    expect((await f.store.list(scope)).filter(item => item.agentId === 'demo.release')).toHaveLength(1);
+  });
   it('shows this Run machine on the life thread without starting it or changing the Run', async () => {
     const seen: string[] = [];
     const records = new Map<string, { state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>();
@@ -1367,6 +1396,17 @@ describe('single-entry conversation routing', () => {
     const unmarked = await plain.addTask(quiet.id, '没有机器读口', 'execute');
     expect(unmarked.conversation.tasks.find((item: { title: string }) => item.title === '没有机器读口')).not.toHaveProperty('machine');
     expect(seen.every(id => id === runId)).toBe(true);
+  });
+  it('keeps the life thread when one machine record cannot be read', async () => {
+    const f = await fixture(undefined, undefined, async () => { throw new Error('Sandbox identity mismatch'); });
+    const entry = await f.create();
+    const started = await f.addTask(entry.id, '坏掉的机器记录', 'execute');
+    const task = started.conversation.tasks.find((item: { title: string }) => item.title === '坏掉的机器记录');
+    expect(task.machine).toEqual({ state: 'unknown', ready: false });
+    expect(task.status).toBe('queued');
+    const viewed = await f.fresh(entry.id);
+    expect(viewed.tasks.find((item: { title: string }) => item.title === '坏掉的机器记录').machine).toEqual({ state: 'unknown', ready: false });
+    expect(viewed.title).toBe('AEEIS');
   });
   it('shows this Run plan steps and artifact titles without starting work or copying instructions', async () => {
     const f = await fixture(), entry = await f.create();

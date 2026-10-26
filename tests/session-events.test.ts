@@ -252,7 +252,11 @@ describe('Shared Session canonical events', () => {
       goalId: goal.id, type: 'message', content: '对方先说', contextManifestId: manifest.id, idempotencyKey: 'direct-1',
       actor: { type: 'principal', id: 'member.editor' },
     }, 'alice', 'team-a');
-    expect(spoken).toMatchObject({ actorType: 'principal', actorId: 'member.editor', type: 'message', content: '对方先说' });
+    expect(spoken).toMatchObject({ actorType: 'principal', actorId: 'member.editor', type: 'message', content: '对方先说', recordedBy: { id: 'alice', type: 'principal' } });
+    await expect(events.create(room.id, {
+      goalId: goal.id, type: 'message', content: '编辑冒充对方', contextManifestId: manifest.id, idempotencyKey: 'direct-editor',
+      actor: { type: 'principal', id: 'alice' },
+    }, 'member.editor', 'team-a')).rejects.toThrow('只能以本人的身份说话');
     await expect(events.create(room.id, {
       goalId: goal.id, type: 'message', content: '当成 bot', contextManifestId: manifest.id, idempotencyKey: 'direct-agent',
       actor: { type: 'agent', id: 'member.editor' },
@@ -265,5 +269,12 @@ describe('Shared Session canonical events', () => {
       goalId: groupGoal.id, type: 'message', content: '群里冒充', contextManifestId: groupManifest.id, idempotencyKey: 'group-editor',
       actor: { type: 'principal', id: 'member.editor' },
     }, 'alice', 'team-a')).rejects.toThrow('只能以本人的身份说话');
+    const renamed = await domain.updateRoom(group.id, { description: '私聊' }, undefined, 'member.editor', 'team-a');
+    expect(renamed.chat).toBeUndefined();
+    expect(renamed.description).toBe('私聊');
+    await expect(events.create(group.id, {
+      goalId: groupGoal.id, type: 'message', content: '改说明后冒充', contextManifestId: groupManifest.id, idempotencyKey: 'renamed-editor',
+      actor: { type: 'principal', id: 'alice' },
+    }, 'member.editor', 'team-a')).rejects.toThrow('只能以本人的身份说话');
   });
 });

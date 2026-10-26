@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine } from '../src/runtime/engine.js';
+import type { ToolGateway } from '../src/integrations.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 
 const pin = { model: 'fixture', endpoint: 'http://127.0.0.1', promptVersion: 'fixture/1' };
@@ -66,6 +67,31 @@ describe('execution review', () => {
       expect(closed.saved.approval?.approved).toBe(false);
       expect(closed.saved.approval?.reason).toContain('等待批准');
     }
+  });
+
+  it('keeps a model clearance waiting when the frozen run can leave the supplied materials', async () => {
+    const tools: ToolGateway = {
+      listTools: async () => [{ id: 'read', version: '1', capabilities: ['read'], inputSchema: {}, outputSchema: {} }],
+      invoke: async () => { throw new Error('unused'); },
+    };
+    const repository = new InMemoryRunRepository();
+    const tooled = new AgentEngine(repository, { model: new Fixture('clear'), tools });
+    const withTool = await tooled.create({ goal: '读这张纸条', executionReview: 'auto', allowedTools: ['read@1'] });
+    expect(await tooled.advance(withTool.id)).toBe('needs_approval');
+    const savedTool = await repository.get(withTool.id);
+    expect(savedTool.approval?.approved).toBe(false);
+    expect(savedTool.approval?.reason).toContain('仍等待批准');
+    expect(savedTool.events.some(event => event.type === 'plan.auto_approved')).toBe(false);
+
+    const withBudget = new AgentEngine(new InMemoryRunRepository(), new Fixture('clear'));
+    const budgetRun = await withBudget.create({ goal: '读这张纸条', executionReview: 'auto', externalBudget: { calls: 1 } });
+    expect(await withBudget.advance(budgetRun.id)).toBe('needs_approval');
+    expect((await withBudget.repository.get(budgetRun.id)).approval?.approved).toBe(false);
+
+    const mailed = new AgentEngine(new InMemoryRunRepository(), new Fixture('clear'));
+    const mailRun = await mailed.create({ goal: '给客户发邮件', executionReview: 'auto' });
+    expect(await mailed.advance(mailRun.id)).toBe('needs_approval');
+    expect((await mailed.repository.get(mailRun.id)).approval?.approved).toBe(false);
   });
 
   it('lets yolo execute without treating the model judgment as a stop', async () => {

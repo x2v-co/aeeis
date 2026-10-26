@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
-import { BrainAccessDenied, type BrainClaim, type GovernedBrain } from '../brain.js';
+import { BrainAccessDenied, brainClaimInputSchema, type BrainClaim, type GovernedBrain } from '../brain.js';
 import type { Ownership, Principal } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
 import { projectRunGraphs } from '../runtime/graphs.js';
@@ -133,9 +133,10 @@ function pendingApproval(run: { status: string; plans: ReadonlyArray<{ version: 
   const reason = run.approval.mode === 'auto' && run.approval.reason ? `模型请求批准：${run.approval.reason}。` : '';
   return { planVersion: plan.version, planHash: plan.hash, summary: `${reason}${plan.summary}`.slice(0, 240) };
 }
-function machineView(record: { state: string; ready?: boolean } | undefined): { state: 'absent' | 'present' | 'released'; ready: boolean } {
+function machineView(record: { state: string; ready?: boolean } | undefined): { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean } {
   if (record?.state === 'released') return { state: 'released', ready: false };
   if (record?.state === 'present') return { state: 'present', ready: record.ready === true };
+  if (record?.state === 'unknown') return { state: 'unknown', ready: false };
   return { state: 'absent', ready: false };
 }
 function clipTitle(value: string): string {
@@ -336,7 +337,13 @@ export class ConversationService {
       schemaVersion: 'conversation/1', id: `conv_${randomUUID()}`, ...scope, title: body.title, revision: 0, createdAt: at, updatedAt: at, recentTaskIds: [], tasks: [], messages: [],
       ...(body.agentId ? { agentId: body.agentId } : {}),
     };
-    await this.store.create(conversation);
+    try { await this.store.create(conversation); }
+    catch (error) {
+      if (!(error instanceof Conflict) || error.message !== '这个人已经有一条生命线' || !body.agentId) throw error;
+      const winner = (await this.store.list(scope)).find(item => item.agentId === body.agentId);
+      if (!winner) throw error;
+      return this.view(winner, scope, actor);
+    }
     return this.view(conversation, scope, actor);
   }
   async list(scope: Ownership) {
@@ -353,7 +360,11 @@ export class ConversationService {
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
       const question = pendingQuestion(run);
-      const machine = this.machines && task.latestRunId ? machineView(await this.machines(task.latestRunId)) : undefined;
+      let machine: ReturnType<typeof machineView> | undefined;
+      if (this.machines && task.latestRunId) {
+        try { machine = machineView(await this.machines(task.latestRunId)); }
+        catch { machine = { state: 'unknown', ready: false }; }
+      }
       const execution = executionView(run);
       return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
     }));
@@ -450,13 +461,10 @@ export class ConversationService {
     const evidenceRefs = practiceEvidence(run);
     if (!evidenceRefs.length) throw new Conflict('这次做成还没有可引用的证据');
     const marker = practiceMarker(person);
-    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'preference' && item.sourceRefs.includes(marker))) {
-      brain.retract(person, claim.id, actor, scope.owner);
-    }
-    brain.addClaim({
+    this.replaceMarked(brain, person, actor, scope, 'preference', marker, {
       owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'preference',
       content: body.text, sourceRefs: [marker, `run:${run.id}`, ...evidenceRefs], confidence: 1,
-    }, actor);
+    });
     return this.view(conversation, scope, actor);
   }
   async retractPractice(id: string, input: unknown, scope: Ownership, actor: Principal) {
@@ -482,6 +490,10 @@ export class ConversationService {
     if (!brain) throw new Conflict('Brain 还没有接上，这次先不记');
     if (!this.ownerActor(actor, scope)) throw new BrainAccessDenied('Brain access denied');
     return { person, brain };
+  }
+  private replaceMarked(brain: GovernedBrain, person: string, actor: Principal, scope: Ownership, kind: BrainClaim['kind'], marker: string, input: z.input<typeof brainClaimInputSchema>) {
+    const active = brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === kind && item.sourceRefs.includes(marker));
+    brain.replaceClaims(person, active.map(item => item.id), input, actor, scope.owner);
   }
   private skillClaims(person: string, taskKind: string, scope: Ownership): BrainClaim[] {
     const brain = this.brain;
@@ -651,14 +663,11 @@ export class ConversationService {
     const evidenceRefs = practiceEvidence(run);
     if (!evidenceRefs.length) throw new Conflict('这次做成还没有可引用的证据');
     const marker = skillMarker(person, body.taskKind);
-    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker))) {
-      brain.retract(person, claim.id, actor, scope.owner);
-    }
-    brain.addClaim({
+    this.replaceMarked(brain, person, actor, scope, 'decision', marker, {
       owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
       content: `任务种类：${body.taskKind}\n方法：${skill.methodId}\n版本：${skill.version}\n引用：${run.id}`,
       sourceRefs: [marker, `method:${skill.methodId}`, `version:${skill.version}`, `run:${run.id}`, ...evidenceRefs], confidence: 1,
-    }, actor);
+    });
     return this.view(conversation, scope, actor);
   }
   async promoteSkillProfile(id: string, input: unknown, scope: Ownership, actor: Principal) { return this.promoteSkill(id, input, scope, actor); }
@@ -675,14 +684,11 @@ export class ConversationService {
     if (!previous) throw new Conflict('这个任务种类还没有可回滚的上一版');
     const verified = await this.verifySkillClaim(conversation, scope, previous, person, body.taskKind);
     if (!verified) throw new Conflict('上一版做法已经不能再核对');
-    for (const claim of brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker))) {
-      brain.retract(person, claim.id, actor, scope.owner);
-    }
-    brain.addClaim({
+    this.replaceMarked(brain, person, actor, scope, 'decision', marker, {
       owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
       content: `任务种类：${body.taskKind}\n方法：${verified.methodId}\n版本：${verified.version}\n引用：${verified.runId}\n回滚：${body.reason}`,
       sourceRefs: [marker, `method:${verified.methodId}`, `version:${verified.version}`, `run:${verified.runId}`, ...verified.evidenceRefs], confidence: 1,
-    }, actor);
+    });
     return this.view(conversation, scope, actor);
   }
   async retractSkillProfile(id: string, input: unknown, scope: Ownership, actor: Principal) {
@@ -704,13 +710,14 @@ export class ConversationService {
     const provider = body.provider ?? '';
     const active = brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker));
     if (!model && !active.length) throw new Conflict('这个任务种类还没有选定模型');
-    for (const claim of active) brain.retract(person, claim.id, actor, scope.owner);
     if (model) {
-      brain.addClaim({
+      this.replaceMarked(brain, person, actor, scope, 'decision', marker, {
         owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
         content: `任务种类：${body.taskKind}\n模型：${model}${provider ? `\n提供方：${provider}` : ''}`,
         sourceRefs: [marker, `model:${model}`, ...(provider ? [`provider:${provider}`] : [])], confidence: 1,
-      }, actor);
+      });
+    } else {
+      for (const claim of active) brain.retract(person, claim.id, actor, scope.owner);
     }
     return this.view(conversation, scope, actor);
   }
@@ -728,12 +735,11 @@ export class ConversationService {
     const marker = keepMarker(person, body.taskKind);
     const active = brain.read(person, actor, 'internal', scope.owner).filter(item => item.kind === 'decision' && item.sourceRefs.includes(marker));
     if (active.length === 1 && active[0]!.sourceRefs.includes(`run:${delivery.run.id}`) && active[0]!.sourceRefs.every(ref => ref === marker || ref === `run:${delivery.run.id}`)) return this.view(conversation, scope, actor);
-    for (const claim of active) brain.retract(person, claim.id, actor, scope.owner);
-    brain.addClaim({
+    this.replaceMarked(brain, person, actor, scope, 'decision', marker, {
       owner: scope.owner, tenantId: scope.tenantId, scope: 'identity', scopeRef: person, classification: 'internal', kind: 'decision',
       content: `任务种类：${body.taskKind}\n留下：${delivery.run.id}`,
       sourceRefs: [marker, `run:${delivery.run.id}`], confidence: 1,
-    }, actor);
+    });
     return this.view(conversation, scope, actor);
   }
   async proposeTaskKind(id: string, input: unknown, scope: Ownership, actor: Principal) {
@@ -758,9 +764,9 @@ export class ConversationService {
     if (!rsi) throw new Conflict('自进化还没有接上，这次先不送');
     const from = `${skill.methodId}/${skill.version}`;
     const change = [`个人技能档案`, `人：${person}`, `任务种类：${body.taskKind}`, `从：${from}`, `到：${proposedVersion}`, `引用：${delivery.run.id}`].join('\n');
-    const reason = `主人把${body.taskKind}后来做成的技能从 ${from} 送到 ${proposedVersion} 去评测。引用 ${delivery.run.id}。候选停在 proposed。`;
+    const reason = `主人把${body.taskKind}后来做成的技能从 ${from} 送到 ${proposedVersion} 去评测。引用 ${delivery.run.id}。候选先记为 proposed，风险为 medium。自动评测可以继续，低风险自动批准不会收下这类候选。`;
     await rsi.propose({
-      target: 'profile', baseVersion, proposedVersion, change, reason, risk: 'low', sourceReceiptRefs,
+      target: 'profile', baseVersion, proposedVersion, change, reason, risk: 'medium', sourceReceiptRefs,
       proposalSignalId: lineupSignal(person, body.taskKind, delivery.run.id),
     }, { owner: scope.owner, tenantId: scope.tenantId });
     return this.view(conversation, scope, actor);

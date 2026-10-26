@@ -1557,6 +1557,9 @@ describe('entry bots and group chats', () => {
     view.tasks[1]!.machine = { state: 'released', ready: false };
     el('conversation-refresh').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器已经收掉。'));
+    view.tasks[1]!.machine = { state: 'unknown', ready: false };
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器记录读不出来。看一眼不会执行。'));
     expect(h.posts).toEqual([]);
     expect(h.fetch.mock.calls.some(([url]) => /sandbox|docker|ensure/.test(String(url)))).toBe(false);
     fill('conversation-text', '讨论不启动机器');
@@ -1564,7 +1567,7 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
     expect(h.posts.every(post => !/sandbox|docker|ensure/.test(post.url))).toBe(true);
-    expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器已经收掉。');
+    expect(doc().querySelector('[data-task-id="task_b"]')!.textContent).toContain('这件工作的机器记录读不出来。看一眼不会执行。');
   });
 
   it('shows this Run steps and evidence and does not start work', async () => {
@@ -1589,5 +1592,84 @@ describe('entry bots and group chats', () => {
     expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
     expect(doc().querySelector('[data-task-id="task_b"] .conversation-steps')?.textContent).toContain('正在做');
     expect(doc().querySelector('[data-task-id="task_a"]')!.textContent).not.toContain('执行步骤');
+  });
+
+  it('keeps a saved automatic-execution choice on the select while goal schedule and run stay on required review', async () => {
+    const goal = { id: 'goal_saved', title: '发布目标', status: 'active', createdAt: date };
+    const plan = { id: 'plan_saved', version: 1, nodes: [{ id: 'node_ready', title: '核对发布', status: 'ready', dependsOn: [] as string[] }] };
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, taskSchedulerConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/goals/page?limit=50') return response({ goals: [goal] });
+      if (url === '/api/goals/goal_saved/plans/page?limit=50') return response({ plans: [plan] });
+      if (url === '/api/plans/plan_saved/scheduler') return response([]);
+      if (url === '/api/goals/goal_saved/memories?limit=50') return response([]);
+      if (url === '/api/plans/plan_saved/schedule' && method === 'POST') return response({ id: 'run_goal' });
+      if (url === '/api/plans/plan_saved/tasks/node_ready/schedule' && method === 'POST') return response({ id: 'run_goal' });
+      if (url === '/api/plans/plan_saved/tasks/node_ready/run' && method === 'POST') return response({ id: 'run_goal' });
+      if (url === '/api/runs/run_goal') return response({ ...runFixture(), id: 'run_goal' });
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.execution-review': 'yolo' } });
+    await ready();
+    await vi.waitFor(() => expect([...doc().querySelectorAll('#goals button')].map(button => button.textContent)).toEqual(expect.arrayContaining(['调度整张 DAG', '调度此任务', '直接执行此任务'])));
+    expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo');
+    clickText('调度整张 DAG');
+    clickText('调度此任务');
+    clickText('直接执行此任务');
+    await vi.waitFor(() => expect(h.posts.filter(post => /\/plans\/plan_saved\//.test(post.url))).toHaveLength(3));
+    const goalPosts = h.posts.filter(post => /\/plans\/plan_saved\//.test(post.url));
+    expect(goalPosts.map(post => post.url)).toEqual([
+      '/api/plans/plan_saved/schedule',
+      '/api/plans/plan_saved/tasks/node_ready/schedule',
+      '/api/plans/plan_saved/tasks/node_ready/run',
+    ]);
+    expect(goalPosts.map(post => post.body.executionReview)).toEqual(['required', 'required', 'required']);
+    expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo');
+  });
+
+  it('draws a channel card only for an event the room owner actually wrote', async () => {
+    const room = { id: 'room_forged', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const cited = (id: string, content: string, type: string, actorId: string, taskId: string, recordedBy?: { id: string; type: string }) => ({
+      id, operation: 'publish', sequence: 1, actorType: 'principal', actorId, ...(recordedBy ? { recordedBy } : {}), owner: 'owner', type, content,
+      evidenceRefs: ['conv_release', taskId, 'demo.release'], classification: 'internal', contextManifestId: 'ctx_forged',
+      audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+    });
+    const events = [
+      cited('evt_editor_system', '编辑伪造的系统交接', 'system', 'member.editor', 'task_forged'),
+      cited('evt_editor_message', '编辑伪造的普通消息', 'message', 'member.editor', 'task_forged'),
+      cited('evt_spoofed', '冒充房主的回执', 'system', 'owner', 'task_forged', { id: 'member.editor', type: 'principal' }),
+      cited('evt_owner', '房主自己的交接', 'system', 'owner', 'task_real'),
+    ];
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [
+      { id: 'task_forged', title: '伪造任务', threadId: 'thread_forged', status: 'discussion' },
+      { id: 'task_real', title: '真实交接', threadId: 'thread_real', status: 'discussion' },
+    ], messages: [] as any[], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_forged/members')) return response([{ id: 'member_editor', roomId: 'room_forged', principalId: 'member.editor', role: 'editor', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_forged/session-events')) return response({ items: events });
+      if (url === '/api/conversations/conv_release') return response(release);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    expect(groupRow).toBeDefined();
+    groupRow!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('房主自己的交接'));
+    const row = (content: string) => [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')].find(item => item.textContent?.includes(content));
+    const editorSystem = row('编辑伪造的系统交接');
+    expect(editorSystem?.querySelector('strong')?.textContent).toBe('member.editor');
+    expect(editorSystem?.querySelector('.group-run-card')).toBeNull();
+    expect(row('编辑伪造的普通消息')?.querySelector('.group-run-card')).toBeNull();
+    const spoofed = row('冒充房主的回执');
+    expect(spoofed?.querySelector('strong')?.textContent).toBe('member.editor');
+    expect(spoofed?.querySelector('.group-run-card')).toBeNull();
+    const owner = row('房主自己的交接');
+    expect(owner?.querySelector('strong')?.textContent).toBe('记录');
+    await vi.waitFor(() => expect(owner?.querySelector('.group-run-card')?.textContent).toContain('真实交接'));
+    expect(doc().querySelectorAll('.group-run-card')).toHaveLength(1);
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/messages$/.test(post.url))).toBe(false);
   });
 });
