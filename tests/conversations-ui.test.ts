@@ -1273,17 +1273,37 @@ describe('entry bots and group chats', () => {
     expect(updated?.querySelector('textarea')).toBeNull();
     const handoffCard = cards().find(item => item.dataset.handoff === 'task_new_1' && item.dataset.card === 'handoff');
     release.tasks[0] = { ...release.tasks[0], status: 'running', createdAt: new Date(Date.now() - 26 * 3_600_000).toISOString() };
+    release.tasks[1] = { ...release.tasks[1], createdAt: new Date(Date.now() - 26 * 3_600_000).toISOString() };
     release.tasks.push({ id: 'task_failed', title: '清单写失败', threadId: 'thread_failed', status: 'failed', createdAt: date });
+    release.tasks.push({ id: 'task_done_plain', title: '没有证据的完成', threadId: 'thread_plain', status: 'succeeded', createdAt: date });
+    release.tasks.push({ id: 'task_done_evidence', title: '有证据的完成', threadId: 'thread_evidence', status: 'succeeded', createdAt: date, execution: { steps: [], evidence: ['清单'] } });
+    release.tasks.push({ id: 'task_private', title: '生命线上的私事', threadId: 'thread_private', status: 'discussion', createdAt: date });
     for (let index = 0; index < 3; index += 1) release.tasks.push({ id: `task_run_${index}`, title: `并行 ${index}`, threadId: `thread_run_${index}`, status: 'running', createdAt: date });
+    const roomEvents = events.get('room_handoff') ?? [];
+    for (const taskId of ['task_failed', 'task_done_plain', 'task_done_evidence', 'task_run_0', 'task_run_1', 'task_run_2']) {
+      roomEvents.push({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date });
+    }
+    events.set('room_handoff', roomEvents);
+    groupRow?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_failed'));
     const postsBeforeBoard = h.posts.length;
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="doing"]')?.textContent ?? '').toContain('不要记两次'));
     expect(el('channel-board').hidden).toBe(false);
     const doing = doc().querySelector('[data-column="doing"]');
-    expect(doing?.textContent).toContain('已停留 1 天');
+    expect(doing?.textContent).toContain('从记下起已停留 1 天');
     expect(doing?.textContent).toContain('进行中 4');
-    expect(doc().querySelector('[data-column="blocked"]')?.textContent).toContain('请核对发布说明');
-    expect(doc().querySelector('[data-column="blocked"]')?.textContent).toContain('需要你');
+    const blocked = doc().querySelector('[data-column="blocked"]');
+    expect(blocked?.textContent).toContain('请核对发布说明');
+    expect(blocked?.textContent).toContain('需要你');
+    expect(blocked?.textContent).toContain('从记下起已停留 1 天');
+    expect(blocked?.textContent).not.toContain('阻塞已超过 4 小时');
+    const review = doc().querySelector('[data-column="review"]');
+    expect(review?.textContent).toContain('没有证据的完成');
+    expect(review?.textContent).toContain('有证据的完成');
+    expect(doc().querySelector('[data-column="done"]')?.textContent).toContain('完成 0');
+    expect(el('channel-board').textContent).not.toContain('生命线上的私事');
+    expect(el('channel-board').textContent).not.toContain('发布方案');
     expect(el('channel-board-failures').textContent).toContain('清单写失败');
     expect(el('channel-board-note').textContent).toContain('发布进行中已有 4 件。先完成或转交。');
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_new_0"]')!.click();
@@ -1306,6 +1326,94 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-tasks').textContent ?? '').not.toContain('请核对发布说明');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
   });
+  it('keeps each room board to the tasks that room handed off', async () => {
+    const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
+    const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; evidenceRefs?: string[]; createdAt: string }>>();
+    const membersByRoom = new Map<string, Array<{ id: string; roomId: string; principalId: string; role: string; status: string; invitedBy: string; createdAt: string; updatedAt: string }>>();
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [
+      { id: 'task_alpha', title: '甲房间的事', threadId: 'thread_alpha', status: 'discussion', createdAt: date },
+      { id: 'task_beta', title: '乙房间的事', threadId: 'thread_beta', status: 'discussion', createdAt: date },
+      { id: 'task_private', title: '生命线上的私事', threadId: 'thread_private', status: 'running', createdAt: date },
+    ], messages: [] as Array<{ id: string; role: string; text: string; createdAt: string; route: { status: string; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: string } }>, hasEarlierMessages: false };
+    let roomSerial = 0;
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      const roomId = decodeURIComponent(String(url).match(/\/rooms\/([^/?]+)/)?.[1] ?? '');
+      if (url === '/api/rooms' && method === 'POST') {
+        roomSerial += 1;
+        const room = { id: `room_board_${roomSerial}`, title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        rooms.unshift(room);
+        return response(room);
+      }
+      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (String(url).endsWith('/members') && method === 'POST') {
+        const member = { id: `member_${roomId}_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
+        membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
+        return response(member);
+      }
+      if (String(url).endsWith('/members')) return response(membersByRoom.get(roomId) ?? []);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([]);
+      if (String(url).endsWith('/goals') && method === 'POST') return response({ id: `goal_${roomId}`, title: body.title, status: 'active', createdAt: date, roomId: body.roomId });
+      if (String(url).includes('/context-manifests')) return response({ id: `ctx_${roomId}` });
+      if (String(url).includes('/session-events') && method === 'POST') {
+        const list = events.get(roomId) ?? [];
+        const event = { id: `evt_${roomId}_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        list.push(event);
+        events.set(roomId, list);
+        return response(event);
+      }
+      if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
+      if (url === '/api/conversations' && method === 'POST' && body?.agentId === 'demo.release') return response(release);
+      if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
+      if (url === '/api/conversations/conv_release/messages' && method === 'POST') {
+        const title = String(body.newTask?.title ?? '');
+        const created = release.tasks.find(task => task.title === title) ?? { id: `task_new_${release.tasks.length}`, title, threadId: `thread_new_${release.tasks.length}`, status: 'discussion', createdAt: date };
+        if (!release.tasks.some(task => task.id === created.id)) release.tasks.push(created);
+        release.revision += 1;
+        const route = { status: 'routed', reason: 'new-task', taskIds: [created.id], candidateTaskIds: [] as string[], focusEffect: body.focus };
+        const message = { id: `message_${release.messages.length}`, role: 'user', text: body.text, createdAt: date, route };
+        release.messages.push(message);
+        return response({ conversation: release, message, response: '已记录讨论，未触发执行。' });
+      }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const makeRoom = async (title: string, sentence: string) => {
+      el('gb-new-group').click();
+      const box = [...doc().querySelectorAll('#group-candidates label')].find(label => label.textContent?.includes('发布'));
+      box?.querySelector('input')?.click();
+      el<HTMLInputElement>('group-title').value = title;
+      el<HTMLFormElement>('group-create').requestSubmit();
+      await vi.waitFor(() => expect([...el<HTMLSelectElement>('group-handoff').options].map(option => option.textContent)).toContain('交给发布'));
+      el<HTMLSelectElement>('group-handoff').value = 'demo.release';
+      el<HTMLTextAreaElement>('group-text').value = sentence;
+      el<HTMLFormElement>('group-composer').requestSubmit();
+      await vi.waitFor(() => expect(el('group-transcript').textContent).toContain(sentence));
+    };
+    const boardText = () => el('channel-board').textContent ?? '';
+    await makeRoom('甲房间', '甲房间的事');
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(boardText()).toContain('甲房间的事'));
+    expect(boardText()).not.toContain('乙房间的事');
+    expect(boardText()).not.toContain('生命线上的私事');
+    expect(boardText()).not.toContain('发布方案');
+    await makeRoom('乙房间', '乙房间的事');
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(boardText()).toContain('乙房间的事'));
+    expect(boardText()).not.toContain('甲房间的事');
+    expect(boardText()).not.toContain('生命线上的私事');
+    const alpha = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('甲房间'));
+    alpha?.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('甲房间的事'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(boardText()).toContain('甲房间的事'));
+    expect(boardText()).not.toContain('乙房间的事');
+    expect(boardText()).not.toContain('生命线上的私事');
+    expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$/.test(post.url))).toBe(false);
+  });
+
   it('lets a group message name a member bot and copies that speaker onto the AEEIS discussion', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; createdAt: string }>>();

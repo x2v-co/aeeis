@@ -1630,25 +1630,20 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'review', title: '待验收' },
   { id: 'done', title: '完成' },
 ];
-function boardColumn(status: string, hasEvidence: boolean): BoardColumn | 'failed' {
+function boardColumn(status: string): BoardColumn | 'failed' {
   if (status === 'failed' || status === 'cancelled' || status === 'unreadable') return 'failed';
   if (status === 'discussion') return 'capture';
   if (status === 'preparing' || status === 'queued') return 'ready';
   if (status === 'planning' || status === 'running' || status === 'reviewing') return 'doing';
   if (status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused' || status === 'unknown') return 'blocked';
-  if (status === 'succeeded') return hasEvidence ? 'review' : 'done';
+  if (status === 'succeeded') return 'review';
   return 'capture';
-}
-function taskHasEvidence(view: ConversationView, task: ConversationTaskView): boolean {
-  if (task.execution?.evidence?.length) return true;
-  const delivery = view.lastDelivery?.taskId === task.id ? view.lastDelivery : undefined;
-  return Boolean(delivery?.artifactTitles?.length);
 }
 function taskAgeLabel(createdAt: string | undefined): string | undefined {
   if (!createdAt) return;
   const hours = (Date.now() - Date.parse(createdAt)) / 3_600_000;
   if (!Number.isFinite(hours) || hours < 24) return;
-  return `已停留 ${Math.floor(hours / 24)} 天`;
+  return `从记下起已停留 ${Math.floor(hours / 24)} 天`;
 }
 function blockedCaption(status: string): string {
   if (status === 'waiting_external') return '等外部';
@@ -1672,15 +1667,19 @@ function hideChannelBoard(): void {
   $('channel-task-body')?.replaceChildren();
   if (transcript) transcript.hidden = false;
 }
-function channelBoardIds(): string[] {
-  const ids = new Set<string>(handoffViews.keys());
-  const people = new Set(['aeeis', ...groupMembers.map(member => member.principalId)]);
-  for (const agentId of people) {
-    const summary = lifeSummary(agentId);
-    if (summary) ids.add(summary.id);
+function channelCitations(): Array<{ conversationId: string; taskId: string; agentId?: string }> {
+  const seen = new Set<string>();
+  const citations: Array<{ conversationId: string; taskId: string; agentId?: string }> = [];
+  for (const event of groupEvents) {
+    const cite = handoffCitation(event);
+    if (!cite || seen.has(`${cite.conversationId}\0${cite.taskId}`)) continue;
+    seen.add(`${cite.conversationId}\0${cite.taskId}`);
+    citations.push(cite);
   }
-  if (conversation?.agentId && people.has(conversation.agentId)) ids.add(conversation.id);
-  return [...ids];
+  return citations;
+}
+function channelBoardIds(): string[] {
+  return [...new Set(channelCitations().map(cite => cite.conversationId))];
 }
 async function showChannelBoard(): Promise<void> {
   const roomId = openGroupId;
@@ -1707,8 +1706,14 @@ function renderChannelBoard(): void {
   if (transcript) transcript.hidden = channelBoardOpen;
   if (empty) empty.hidden = channelBoardOpen || groupEvents.some(event => event.operation !== 'retract');
   if (!channelBoardOpen || !columns || !failures) return;
-  const cards = [...handoffViews.values()].flatMap(view => view.tasks.map(task => ({ view, task, owner: botById(view.agentId ?? '')?.name ?? view.agentId ?? '这个人' })));
-  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status, taskHasEvidence(card.view, card.task)) }));
+  const cards = channelCitations().flatMap(cite => {
+    const view = handoffViews.get(cite.conversationId);
+    const task = view?.tasks.find(item => item.id === cite.taskId);
+    if (!view || !task) return [];
+    const owner = botById(cite.agentId ?? view.agentId ?? '')?.name ?? cite.agentId ?? view.agentId ?? '这个人';
+    return [{ view, task, owner }];
+  });
+  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status) }));
   const failed = placed.filter(card => card.column === 'failed');
   failures.replaceChildren();
   failures.append(document.createTextNode(failed.length ? `有 ${failed.length} 件失败或读不到` : '没有失败或读不到的事'));
@@ -1717,7 +1722,7 @@ function renderChannelBoard(): void {
   const loads = new Map<string, number>();
   for (const card of doing) loads.set(card.owner, (loads.get(card.owner) ?? 0) + 1);
   const wip = [...loads.entries()].filter(([, count]) => count > 3).map(([owner, count]) => `${owner}进行中已有 ${count} 件。先完成或转交。`);
-  if (note) note.textContent = ['这六列读的是频道里已经记下的事。看一眼不会执行，也不会改讨论焦点。', ...wip].join(' ');
+  if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip].join(' ');
   columns.replaceChildren();
   for (const column of BOARD_COLUMNS) {
     const section = element('section', '', 'channel-board-column');
@@ -1740,10 +1745,6 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   if (blocked) button.append(element('small', blocked));
   const age = taskAgeLabel(task.createdAt);
   if (age) button.append(element('small', age));
-  if (boardColumn(task.status, taskHasEvidence(view, task)) === 'blocked') {
-    const hours = task.createdAt ? (Date.now() - Date.parse(task.createdAt)) / 3_600_000 : 0;
-    if (hours >= 4) button.append(element('small', '阻塞已超过 4 小时'));
-  }
   button.addEventListener('click', () => openChannelTask(view, task, owner));
   return button;
 }
@@ -1930,6 +1931,7 @@ function leaveGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  handoffViews.clear();
   groupDraftOpen = false;
   hideChannelArtifact();
   hideChannelBoard();
@@ -1947,6 +1949,8 @@ function clearOpenGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
+  handoffViews.clear();
+  hideChannelBoard();
   localStorage.removeItem('aeeis.group');
 }
 function showRoster(focused = true): void {
@@ -2401,7 +2405,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; groupEvents = []; hideChannelArtifact(); hideChannelBoard(); }
+  if (openGroupId !== id) { groupMembers = []; groupEvents = []; handoffViews.clear(); hideChannelArtifact(); hideChannelBoard(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
