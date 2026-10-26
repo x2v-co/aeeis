@@ -179,7 +179,7 @@ describe('Brain and knowledge mutation hooks', () => {
     const brain = new GovernedBrain();
     const claim = brain.addClaim(claimInput, 'owner');
     const changes = brain.changeAudit.list().length;
-    vi.spyOn(brain, 'addClaim').mockImplementation(() => { throw new Error('save failed'); });
+    vi.spyOn(brain as unknown as { insertClaim: () => never }, 'insertClaim').mockImplementation(() => { throw new Error('save failed'); });
     expect(() => brain.replaceClaims(claim.scopeRef, [claim.id], { ...claimInput, content: 'replacement' }, 'owner')).toThrow('save failed');
     const active = brain.read(claim.scopeRef, 'owner');
     expect(active.map(item => item.content)).toEqual(['first']);
