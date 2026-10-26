@@ -143,6 +143,29 @@ function clipTitle(value: string): string {
   const trimmed = value.trim();
   return trimmed.length > 80 ? `${trimmed.slice(0, 79)}…` : trimmed;
 }
+export interface LifePresence {
+  state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown';
+  label: string;
+  taskId?: string;
+  taskTitle?: string;
+}
+/** Roster line for one person. Titles only; questions, plans, and instructions stay on the Run. */
+export function lifePresence(items: ReadonlyArray<{ id: string; title: string; status: string }>): LifePresence {
+  const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
+    : status === 'unknown' ? 1
+    : status === 'failed' ? 2
+    : status === 'paused' ? 3
+    : status === 'planning' || status === 'reviewing' ? 4
+    : status === 'running' || status === 'queued' || status === 'preparing' ? 5
+    : 9;
+  const lead = items.filter(item => rank(item.status) < 9).sort((left, right) => rank(left.status) - rank(right.status))[0];
+  if (!lead) return { state: 'idle', label: '空闲' };
+  const ranked = rank(lead.status);
+  const state = ranked === 0 ? 'waiting' as const : ranked === 1 ? 'unknown' as const : ranked === 2 ? 'blocked' as const : ranked === 3 ? 'paused' as const : ranked === 4 ? 'thinking' as const : 'working' as const;
+  const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
+  const taskTitle = clipTitle(lead.title);
+  return { state, label, taskId: lead.id, ...(taskTitle ? { taskTitle } : {}) };
+}
 /** Titles and step state from the frozen plan. Instructions, hashes, and artifact bodies stay on the Run. */
 function executionView(run: AgentRun | undefined): { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } | undefined {
   if (!run) return;
@@ -347,7 +370,20 @@ export class ConversationService {
     return this.view(conversation, scope, actor);
   }
   async list(scope: Ownership) {
-    return (await this.store.list(scope)).map(({ id, title, revision, updatedAt, focusTaskId, tasks, agentId }) => ({ id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, ...(agentId ? { agentId } : {}) }));
+    const conversations = await this.store.list(scope);
+    return Promise.all(conversations.map(async ({ id, title, revision, updatedAt, focusTaskId, tasks, agentId }) => {
+      const items = await Promise.all(tasks.map(async task => {
+        if (!task.latestRunId) return { id: task.id, title: task.title, status: task.pendingMessageId ? 'preparing' : 'discussion' };
+        try {
+          const run = await this.runs.get(task.latestRunId, scope);
+          return { id: task.id, title: task.title, status: run.status };
+        } catch (error) {
+          if (error instanceof NotFound) return { id: task.id, title: task.title, status: 'discussion' };
+          throw error;
+        }
+      }));
+      return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}) };
+    }));
   }
   async get(id: string, scope: Ownership, actor?: Principal) { return this.view(await this.store.get(id, scope), scope, actor); }
 

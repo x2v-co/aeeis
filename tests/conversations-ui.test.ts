@@ -680,6 +680,27 @@ describe('single-entry conversation workbench', () => {
 });
 
 describe('entry bots and group chats', () => {
+  it('shows another person waiting on the roster from the life list without opening them', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/conversations' && request.method !== 'POST') {
+        return response([
+          fixture(),
+          { id: 'conv_release', title: '发布', revision: 2, agentId: 'demo.release', taskCount: 1, presence: { state: 'waiting', label: '等你', taskId: 'task_r', taskTitle: '发布口径' } },
+          { id: 'conv_research', title: '研究', revision: 1, agentId: 'demo.research', taskCount: 1, presence: { state: 'blocked', label: '卡住', taskId: 'task_s', taskTitle: '公开资料' } },
+        ]);
+      }
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('发布'));
+    const release = doc().querySelector<HTMLElement>('[data-bot-id="demo.release"]')!;
+    const research = doc().querySelector<HTMLElement>('[data-bot-id="demo.research"]')!;
+    expect(release.textContent).toContain('等你 · 发布口径');
+    expect(release.querySelector('.roster-avatar')?.getAttribute('data-state')).toBe('waiting');
+    expect(research.textContent).toContain('卡住 · 公开资料');
+    expect(research.querySelector('.roster-avatar')?.getAttribute('data-state')).toBe('blocked');
+    expect(h.posts.some(post => post.url.includes('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
+  });
   it('opens a roster bot on that person\'s life thread and keeps the Run explicit', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const h = harness(undefined, { handler: (url, request) => {
@@ -704,7 +725,7 @@ describe('entry bots and group chats', () => {
     expect(bots.textContent).toContain('工作');
     expect(bots.textContent).toContain('研究');
     expect(bots.textContent).toContain('纪要');
-    expect(bots.textContent).toContain('在');
+    expect(bots.textContent).toContain('空闲');
     expect(bots.textContent).toContain('2 件事');
     expect(bots.textContent).not.toContain('开始对话');
     const draft = el<HTMLTextAreaElement>('conversation-text');
@@ -724,7 +745,9 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url === '/api/conversations')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
     expect(JSON.stringify(h.posts)).not.toContain('先别发出去');
     expect(draft.value).toBe('');
-    expect(el('entry-presence').textContent).toBe('在');
+    expect(el('entry-presence').textContent).toBe('空闲');
+    expect(el('bot-status').textContent).toContain('空闲');
+    expect(el('bot-status').textContent).toContain('看一眼不会执行');
     expect(el('group-panel').hidden).toBe(true);
     const postsBeforeComputer = h.posts.length;
     el('entry-computer').click();
@@ -948,7 +971,7 @@ describe('entry bots and group chats', () => {
       expect(el('entry-title').textContent).toBe('发布');
       expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
     });
-    expect(el('entry-presence').textContent).toBe('在');
+    expect(el('entry-presence').textContent).toBe('空闲');
     expect(h.posts.find(post => post.body?.agentId === 'demo.release')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
     expect(h.posts.some(post => post.url === '/api/rooms' && post.body?.description === '私聊')).toBe(false);
     el<HTMLTextAreaElement>('conversation-text').value = '发布口径先记在这里';
@@ -1107,12 +1130,16 @@ describe('entry bots and group chats', () => {
     };
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
-    await vi.waitFor(() => expect(cards().find(item => item.dataset.handoff === 'task_new_1')?.textContent).toContain('待批准：核对发布说明'));
-    const updated = cards().find(item => item.dataset.handoff === 'task_new_1');
-    expect(updated?.textContent).toContain('待回答：哪一版说明？');
+    await vi.waitFor(() => expect(cards().find(item => item.dataset.card === 'approval')?.textContent).toContain('待批准：核对发布说明'));
+    const updated = cards().find(item => item.dataset.handoff === 'task_new_1' && item.dataset.card === 'handoff');
+    const approval = cards().find(item => item.dataset.card === 'approval');
+    const question = cards().find(item => item.dataset.card === 'question');
     expect(updated?.textContent).toContain('执行步骤：核对清单 还没到 · 写下结论 正在做');
     expect(updated?.textContent).toContain('证据：工作区清单');
-    expect(updated?.textContent).toContain('待批准');
+    expect(approval?.textContent).toContain('这里只读，不会执行');
+    expect(question?.textContent).toContain('待回答：哪一版说明？');
+    expect(approval?.querySelector('[data-approve]')).toBeNull();
+    expect(question?.querySelector('textarea')).toBeNull();
     expect(updated?.querySelector('[data-approve]')).toBeNull();
     expect(updated?.querySelector('textarea')).toBeNull();
     clickText('打开发布', updated!);

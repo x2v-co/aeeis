@@ -92,7 +92,8 @@ interface ConversationMessageView {
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
 }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string }
+interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; presence?: LifePresence }
 interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
 interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
@@ -1410,21 +1411,44 @@ function taskCountOf(item: ConversationSummary | undefined): number | undefined 
   const tasks = (item as ConversationView).tasks;
   return Array.isArray(tasks) ? tasks.length : undefined;
 }
-function lifeTaskCount(agentId: string): number | undefined {
-  if (conversation && lifeAgent(conversation) === agentId) return conversation.tasks.length;
-  return taskCountOf(lifeSummary(agentId));
+function presenceFromTasks(tasks: Array<{ id: string; title: string; status: string }>): LifePresence {
+  const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
+    : status === 'unknown' ? 1
+    : status === 'failed' ? 2
+    : status === 'paused' ? 3
+    : status === 'planning' || status === 'reviewing' ? 4
+    : status === 'running' || status === 'queued' || status === 'preparing' ? 5
+    : 9;
+  const lead = tasks.filter(task => rank(task.status) < 9).sort((left, right) => rank(left.status) - rank(right.status))[0];
+  if (!lead) return { state: 'idle', label: '空闲' };
+  const ranked = rank(lead.status);
+  const state = ranked === 0 ? 'waiting' as const : ranked === 1 ? 'unknown' as const : ranked === 2 ? 'blocked' as const : ranked === 3 ? 'paused' as const : ranked === 4 ? 'thinking' as const : 'working' as const;
+  const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
+  return { state, label, taskId: lead.id, taskTitle: lead.title };
+}
+function lifePresence(agentId: string): LifePresence {
+  const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
+  const listed = lifeSummary(agentId);
+  const tasks = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
+  if (tasks?.length) {
+    const derived = presenceFromTasks(tasks);
+    if (derived.state !== 'idle') return derived;
+    return { state: 'idle', label: `空闲 · ${tasks.length} 件事` };
+  }
+  if (listed?.presence && listed.presence.state !== 'idle') return listed.presence;
+  const count = taskCountOf(listed);
+  if (count) return { state: 'idle', label: `空闲 · ${count} 件事` };
+  return { state: 'idle', label: '空闲' };
 }
 function lifePresenceLabel(agentId: string): string {
-  const count = lifeTaskCount(agentId);
-  return count ? `${count} 件事` : '在';
+  const presence = lifePresence(agentId);
+  return presence.state === 'idle' || !presence.taskTitle ? presence.label : `${presence.label} · ${presence.taskTitle}`;
 }
 function lifeAvatarState(agentId: string): string {
-  if (!conversation || lifeAgent(conversation) !== agentId) return 'idle';
-  const statuses = conversation.tasks.map(task => task.status);
-  if (statuses.some(status => status === 'running' || status === 'queued' || status === 'preparing')) return 'working';
-  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return 'thinking';
-  if (statuses.some(status => ATTENTION_STATUSES.has(status) || status === 'paused')) return 'waiting';
-  return 'idle';
+  const state = lifePresence(agentId).state;
+  if (state === 'paused') return 'waiting';
+  if (state === 'unknown' || state === 'blocked') return 'blocked';
+  return state;
 }
 function rememberAeeisHome(list: ConversationSummary[], loaded?: ConversationSummary): void {
   const stamped = list.find(item => item.agentId === 'aeeis');
@@ -1601,6 +1625,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void 
   const view = handoffViews.get(cite.conversationId);
   const task = view?.tasks.find(candidate => candidate.id === cite.taskId);
   const card = element('div', '', 'group-run-card');
+  card.dataset.card = 'handoff';
   card.dataset.handoff = cite.taskId;
   const named = cite.agentId ? botById(cite.agentId) : undefined;
   const viewed = !named && view?.agentId ? botById(view.agentId) : undefined;
@@ -1612,8 +1637,6 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void 
     card.append(element('small', task.title));
     const state = task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status);
     card.append(element('small', state));
-    if (task.pendingApproval) card.append(element('small', `待批准：${task.pendingApproval.summary}`, 'conversation-plan'));
-    if (task.pendingQuestion) card.append(element('small', `待回答：${task.pendingQuestion.text}`, 'conversation-question'));
     if (task.execution?.steps.length) {
       card.append(element('small', executionLine(task.execution), 'conversation-steps'));
       if (task.execution.evidence?.length) card.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
@@ -1628,6 +1651,18 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary): void 
     card.append(open);
   }
   item.append(card);
+  if (!task) return;
+  const decision = (kind: string, title: string, copy: string) => {
+    const extra = element('div', '', 'group-run-card');
+    extra.dataset.card = kind;
+    extra.dataset.handoff = cite.taskId;
+    extra.append(element('strong', title), element('small', copy), element('small', '在这个人的对话里处理。这里只读，不会执行。'));
+    item.append(extra);
+  };
+  if (task.pendingApproval) decision('approval', '审批', `待批准：${task.pendingApproval.summary}`);
+  if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
+  if (task.status === 'unknown' || task.status === 'waiting_external') decision('reconcile', '核查', task.status === 'unknown' ? '结果需要核查。' : '还在等外部回执。');
+  if (task.status === 'failed') decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
 }
 async function refreshHandoffViews(): Promise<void> {
   const epoch = ++handoffEpoch;
@@ -1713,6 +1748,13 @@ function syncEntrySurface(): void {
     const copy = $('bot-note-copy');
     if (title) title.textContent = counterpart?.name ?? '成员';
     if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
+  }
+  const botStatus = $('bot-status');
+  if (botStatus) {
+    const personId = view === 'bot' ? activeBotId() : '';
+    const presence = personId ? lifePresence(personId) : undefined;
+    botStatus.hidden = view !== 'bot';
+    botStatus.textContent = presence ? (presence.taskTitle && presence.state !== 'idle' ? `${presence.label} · ${presence.taskTitle}。看一眼不会执行。` : `${presence.label}。看一眼不会执行。`) : '';
   }
   const chatNote = $('chat-note');
   const rename = $('group-rename');

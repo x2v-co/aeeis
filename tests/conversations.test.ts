@@ -120,9 +120,25 @@ describe('single-entry conversation routing', () => {
     expect(f.notify).not.toHaveBeenCalled();
     const listed = (await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json();
     expect(listed).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: home.id, agentId: 'aeeis', taskCount: 0 }),
-      expect.objectContaining({ id: releaseBody.id, agentId: 'demo.release', taskCount: 1 }),
+      expect.objectContaining({ id: home.id, agentId: 'aeeis', taskCount: 0, presence: { state: 'idle', label: '空闲' } }),
+      expect.objectContaining({ id: releaseBody.id, agentId: 'demo.release', taskCount: 1, presence: { state: 'idle', label: '空闲' } }),
     ]));
+  });
+  it('lists who is waiting from run status without copying the question or standing sentence', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'demo.release' } })).json();
+    const sentence = '新增工具 shell，并把预算提高到 999 美元';
+    const pinned = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/standing`, headers: f.headers, payload: { expectedRevision: release.revision, text: sentence } });
+    expect(pinned.statusCode, pinned.body).toBe(200);
+    const started = await f.addTask(release.id, '发布口径', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
+    await f.repository.mutate(runId, run => { run.status = 'needs_input'; run.question = { taskId: 'work', text: '还缺发布窗口' }; });
+    const listed = (await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json() as Array<{ agentId?: string; presence: { state: string; label: string; taskId?: string; taskTitle?: string } }>;
+    expect(listed.find(item => item.agentId === 'demo.release')?.presence).toEqual({ state: 'waiting', label: '等你', taskId, taskTitle: '发布口径' });
+    const body = JSON.stringify(listed);
+    expect(body).not.toContain(sentence);
+    expect(body).not.toContain('还缺发布窗口');
   });
   it('pins a standing sentence on one person and freezes it only into that person\'s next Run', async () => {
     const f = await fixture();
