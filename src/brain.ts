@@ -70,7 +70,7 @@ export class GovernedBrain {
         const after = { ...claim, state: 'retracted' as const, updatedAt: new Date().toISOString() };
         Object.assign(claim, after);
       }
-      const created = this.addClaim(parsed, actor, undefined, false);
+      const created = this.insertClaim(parsed, actor, undefined, false);
       const stored = [...this.claims.values()].flat().find(item => item.id === created.id);
       if (!stored) throw new Error('Replacement claim was not stored');
       for (const snapshot of snapshots) {
@@ -93,7 +93,11 @@ export class GovernedBrain {
       throw error;
     }
   }
-  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext, recordAudit = true): BrainClaim {
+  addClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context?: ChangeContext): BrainClaim {
+    return this.insertClaim(input, actor, context, true);
+  }
+  /** Stores a claim. Audit is skipped only for replaceClaims, which writes the retraction first and then the create record. */
+  private insertClaim(input: z.input<typeof brainClaimInputSchema>, actor: Principal | string, context: ChangeContext | undefined, recordAudit: boolean): BrainClaim {
     const principal = brainActor(actor);
     const parsed = brainClaimInputSchema.parse(input);
     const tenantId = parsed.tenantId ?? principal.tenantId;

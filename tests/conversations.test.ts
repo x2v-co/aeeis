@@ -359,12 +359,13 @@ describe('single-entry conversation routing', () => {
     const accepted = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/practice`, headers: f.headers, payload: { expectedRevision: current.revision, text: `  ${sentence}  `, runId: done.runId } });
     expect(accepted.statusCode, accepted.body).toBe(200);
     expect(accepted.json().revision).toBe(current.revision);
-    const addClaim = brain.addClaim.bind(brain);
-    brain.addClaim = () => { throw new Error('校验失败'); };
+    const writable = brain as unknown as { insertClaim: typeof brain.addClaim };
+    const addClaim = writable.insertClaim.bind(brain);
+    writable.insertClaim = () => { throw new Error('校验失败'); };
     const brokenPractice = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/practice`, headers: f.headers, payload: { expectedRevision: current.revision, text: '新的做法没有写上', runId: done.runId } });
     expect(brokenPractice.statusCode).toBeGreaterThanOrEqual(400);
     expect(practiceClaims().filter(claim => claim.state === 'active')).toEqual([expect.objectContaining({ id: accepted.json().acceptedPractice.claimId, content: sentence })]);
-    brain.addClaim = addClaim;
+    writable.insertClaim = addClaim;
     expect(accepted.json().acceptedPractice).toMatchObject({ text: sentence, runId: done.runId, evidenceRefs: ['artifact_later'] });
     expect(JSON.stringify(accepted.json().acceptedPractice)).not.toContain('SECRET');
     expect(await f.store.get(release.id, scope)).not.toHaveProperty('acceptedPractice');
@@ -503,8 +504,9 @@ describe('single-entry conversation routing', () => {
     expect(promoted.statusCode, promoted.body).toBe(200);
     expect(promoted.json().revision).toBe(rev);
     expect(promoted.json().taskSettings.skills).toEqual([expect.objectContaining({ taskKind: '周报', methodId: 'project-pulse', version: '1', runId: first.runId, evidenceRefs: ['artifact_pulse'] })]);
-    const addSkill = brain.addClaim.bind(brain);
-    brain.addClaim = () => { throw new Error('校验失败'); };
+    const skillBrain = brain as unknown as { insertClaim: typeof brain.addClaim };
+    const addSkill = skillBrain.insertClaim.bind(brain);
+    skillBrain.insertClaim = () => { throw new Error('校验失败'); };
     const brokenSkill = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: second.runId } });
     expect(brokenSkill.statusCode).toBeGreaterThanOrEqual(400);
     expect(profileClaims().filter(claim => claim.state === 'active' && claim.sourceRefs.includes('skill-profile:demo.release:周报'))).toEqual([
@@ -513,7 +515,7 @@ describe('single-entry conversation routing', () => {
     const brokenModel = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/task-model`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', model: 'owner-picked-model' } });
     expect(brokenModel.statusCode).toBeGreaterThanOrEqual(400);
     expect(profileClaims().filter(claim => claim.state === 'active' && claim.sourceRefs.some(ref => ref.startsWith('task-model:')))).toEqual([]);
-    brain.addClaim = addSkill;
+    skillBrain.insertClaim = addSkill;
     expect(JSON.stringify(promoted.json().taskSettings)).not.toContain('SECRET');
     expect(await f.store.get(release.id, scope)).not.toHaveProperty('taskSettings');
     const replaced = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/skill-profile`, headers: f.headers, payload: { expectedRevision: rev, taskKind: '周报', runId: second.runId } });
