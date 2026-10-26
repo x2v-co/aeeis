@@ -142,6 +142,7 @@ const linkedThreadId = window.location.pathname.match(/^\/threads\/(thread_[a-f0
 const readOnlyShare = Boolean(shareToken);
 document.body.classList.toggle('shared-run', readOnlyShare);
 let currentId = linkedRunId ?? (readOnlyShare || linkedThreadId ? '' : localStorage.getItem('aeeis.run') ?? '');
+let entryEpoch = 0;
 document.body.classList.toggle('thread-page', Boolean(linkedThreadId));
 let threadPagesAfter = [0];
 let threadNextAfter: number | undefined;
@@ -179,7 +180,7 @@ let quickRunReady = false;
 let intentPresetsOpen = false;
 let recentRunsOpen = false;
 let attentionInboxOpen = false;
-let currentRunOpen = !minimalMode;
+let currentRunOpen = !minimalMode || Boolean(currentId);
 let polling = false;
 let goalViewSignature = '';
 let modelConfigured = false;
@@ -223,6 +224,7 @@ const directMembers = new Map<string, string>();
 const directOpening = new Set<string>();
 let directIndexKey = '';
 let directIndexPromise: Promise<void> = Promise.resolve();
+const AEEIS_EMPTY_COPY = '这是一个 Bot，可以同时推进多项任务。点开左侧任务只是查看这次执行，其他任务不会因此停掉。';
 let timelineFilter = localStorage.getItem('aeeis.timeline-filter') ?? 'all';
 const MAX_MATERIAL_FILES = 8;
 const MAX_MATERIAL_FILE_BYTES = 1_000_000;
@@ -358,22 +360,195 @@ function setupMinimalSections(): void {
   for (const selector of secondarySelectors) document.querySelector(selector)?.closest('section')?.classList.add('run-secondary');
 }
 setupMinimalSections();
+type ComputerTab = 'run' | 'setup' | 'goals' | 'govern' | 'status';
+let computerOpen = false;
+let computerTab: ComputerTab = 'setup';
+const COMPUTER_TITLES: Record<ComputerTab, string> = {
+  run: '这次运行', setup: '设置', goals: '目标与提醒', govern: '治理', status: '运行状态',
+};
+function presenceOf(status?: string): { state: string; label: string } {
+  if (!status) return { state: 'idle', label: '空闲' };
+  if (status === 'planning' || status === 'reviewing') return { state: 'thinking', label: '思考中' };
+  if (status === 'running' || status === 'queued') return { state: 'working', label: status === 'queued' ? '排队' : '执行中' };
+  if (status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused') return { state: 'waiting', label: '等你' };
+  if (status === 'succeeded') return { state: 'done', label: '完成' };
+  if (status === 'failed' || status === 'unknown' || status === 'cancelled') return { state: 'blocked', label: runStatusLabel(status) };
+  return { state: 'idle', label: runStatusLabel(status) };
+}
+function botPresence(runs: RunSummary[]): { state: string; label: string } {
+  const statuses = runs.map(run => run.status);
+  if (statuses.some(status => status === 'running' || status === 'queued')) return presenceOf('running');
+  if (statuses.some(status => status === 'planning' || status === 'reviewing')) return presenceOf('planning');
+  if (statuses.some(status => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused')) return presenceOf('needs_approval');
+  if (statuses.some(status => status === 'failed' || status === 'unknown')) return presenceOf('failed');
+  if (statuses.some(status => status === 'succeeded')) return presenceOf('succeeded');
+  return presenceOf(undefined);
+}
+function entryShowsBot(): boolean {
+  return !currentRunOpen && !openGroupId && !document.body.classList.contains('group-draft') && !readOnlyShare && !linkedThreadId;
+}
+function syncBotRow(): void {
+  if (conversationEnabled) return;
+  const state = botPresence(runSummaries);
+  const label = $('gb-bot-presence');
+  if (label) label.textContent = runSummaries.length ? `${state.label} · ${runSummaries.length} 项任务` : state.label;
+  const avatar = document.querySelector<HTMLElement>('#gb-bot .roster-avatar');
+  if (avatar) avatar.dataset.state = state.state;
+  const pressed = entryShowsBot();
+  const visible = activeBotId();
+  document.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]').forEach(row => {
+    row.setAttribute('aria-pressed', String(pressed && row.dataset.botId === visible));
+  });
+  syncComposerForBot();
+}
+function syncEmptyCopy(): void {
+  const empty = $('empty');
+  const heading = empty?.querySelector('h2');
+  const copy = empty?.querySelector('p');
+  const bot = botById(activeBotId());
+  if (heading) heading.textContent = entryShowsBot() && bot ? bot.name : 'AEEIS';
+  if (copy) {
+    copy.textContent = !entryShowsBot() || !bot || bot.id === 'aeeis'
+      ? AEEIS_EMPTY_COPY
+      : bot.demo
+        ? '这是演示里的一位 Bot。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
+        : '这位已经准入。单独对话还没有接上，可以在群聊里点名。';
+  }
+}
+function syncComposerForBot(): void {
+  const other = entryShowsBot() && activeBotId() !== 'aeeis';
+  const form = $('quick-run');
+  const input = $<HTMLInputElement>('quick-goal');
+  const submit = document.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]');
+  const busy = form?.dataset.busy === 'true';
+  if (input) {
+    if (!busy) input.disabled = other;
+    input.placeholder = other ? '任务仍交给 AEEIS' : '写下要这个 Bot 推进的结果，然后发送';
+  }
+  if (!submit || busy) return;
+  if (other) {
+    submit.disabled = true;
+    submit.title = '先点回 AEEIS';
+    if (submit.childNodes[0]) submit.childNodes[0].textContent = '先选 AEEIS ';
+    return;
+  }
+  submit.disabled = !quickRunReady;
+  submit.title = quickRunReady ? '发送' : '请先连接模型';
+  if (submit.childNodes[0]) submit.childNodes[0].textContent = quickRunReady ? '发送 ' : '等待连接 ';
+}
+function syncComposerHeading(): void {
+  const heading = document.querySelector('.command-context h2');
+  if (!heading) return;
+  if (openGroupId) heading.textContent = '发到群里';
+  else if (entryShowsBot() && activeBotId() !== 'aeeis') heading.textContent = '任务交给 AEEIS';
+  else heading.textContent = '给 AEEIS 发消息';
+}
+function mirrorShell(titleText: string, presenceText: string, state?: string): void {
+  const title = $('gb-title');
+  const presence = $('gb-presence');
+  const entryTitle = $('entry-title');
+  const entryPresence = $('entry-presence');
+  if (title) title.textContent = titleText;
+  if (entryTitle) entryTitle.textContent = titleText;
+  if (presence) {
+    if (state) presence.dataset.state = state;
+    presence.textContent = presenceText;
+  }
+  if (entryPresence) entryPresence.textContent = presenceText;
+}
+function syncPresence(run?: RunView): void {
+  const title = $('gb-title');
+  const presence = $('gb-presence');
+  syncBotRow();
+  syncComposerHeading();
+  if (conversationEnabled) { syncEntrySurface(); return; }
+  if (!title || !presence) return;
+  if (document.body.classList.contains('group-draft') || groupDraftOpen) {
+    mirrorShell('新建群聊', '2 到 6 人 · AEEIS 始终在场', 'idle');
+    return;
+  }
+  if (openGroupId) {
+    const room = roomSummaries.find(item => item.id === openGroupId);
+    const names = ['AEEIS', ...groupMembers.map(member => participantLabel(member.principalId))];
+    mirrorShell(room?.title ?? '群聊', `${names.length} 人 · ${names.join('、')}`, 'idle');
+    return;
+  }
+  const bot = botById(activeBotId());
+  if (entryShowsBot() && bot && bot.id !== 'aeeis') {
+    mirrorShell(bot.name, bot.demo ? '演示 · 不会单独执行' : '已准入 · 单独对话还没接上', 'idle');
+    syncEmptyCopy();
+    renderBotPlacement();
+    syncShellClasses();
+    return;
+  }
+  const active = Boolean(run && currentRunOpen);
+  const state = presenceOf(active ? run?.status : undefined);
+  const presenceState = active ? state.state : botPresence(runSummaries).state;
+  mirrorShell('AEEIS', active && run ? `${state.label} · ${run.goal}` : (runSummaries.length ? '入口 · 任务都还在跑' : '空闲 · 可以同时交给它几件事'), presenceState);
+  syncEmptyCopy();
+  renderBotPlacement();
+}
+function syncTranscriptEmpty(): void {
+  const empty = $('empty');
+  if (!empty) return;
+  empty.hidden = readOnlyShare || Boolean(linkedThreadId) || currentRunOpen || Boolean(current) || Boolean(openGroupId) || document.body.classList.contains('group-draft');
+  syncEmptyCopy();
+  renderBotPlacement();
+}
+function setComputerOpen(open: boolean, tab?: ComputerTab): void {
+  if (tab) computerTab = tab;
+  computerOpen = open;
+  const panel = $('gb-computer');
+  if (panel) {
+    panel.hidden = !open;
+    panel.dataset.tab = computerTab;
+  }
+  document.body.classList.toggle('computer-open', open);
+  const toggle = $('gb-computer-toggle') as HTMLButtonElement | null;
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', String(open));
+    toggle.textContent = open ? '收起工作台' : '打开它的工作台';
+  }
+  const entryComputer = $('entry-computer') as HTMLButtonElement | null;
+  if (entryComputer) {
+    entryComputer.setAttribute('aria-pressed', String(open));
+    entryComputer.textContent = open ? '关上工作台' : '打开它的工作台';
+  }
+  const title = $('gb-computer-title');
+  if (title) title.textContent = COMPUTER_TITLES[computerTab];
+  document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
+    const selected = open && button.dataset.computerTab === computerTab;
+    button.setAttribute('aria-pressed', String(selected));
+    button.classList.toggle('is-selected', selected);
+  });
+}
+function closeComputer(): void {
+  const tab = computerTab;
+  setComputerOpen(false);
+  if (tab === 'run' && runDetailsMode) setRunDetailsMode(false);
+  if (tab === 'setup' && detailsMode) setDetailsMode(false);
+}
 let runDetailsMode = localStorage.getItem('aeeis.run-details-mode') === '1';
 function syncRunDetailsToggleLabel(): void {
   const control = $('run-details-toggle') as HTMLButtonElement | null;
   if (!control) return;
-  control.textContent = runDetailsMode ? '收起执行详情' : '展开执行详情';
+  control.textContent = runDetailsMode ? '收起工作台' : '打开它的工作台';
   control.setAttribute('aria-expanded', String(runDetailsMode));
-  control.title = runDetailsMode ? '收起证据、图表和事件记录' : '查看证据、图表和事件记录';
+  control.title = runDetailsMode ? '收起图、证据和事件' : '打开它的工作台，查看图、证据和事件';
 }
 function setRunDetailsMode(enabled: boolean): void {
   runDetailsMode = enabled;
   document.body.classList.toggle('run-details-mode', enabled);
   syncRunDetailsToggleLabel();
   localStorage.setItem('aeeis.run-details-mode', enabled ? '1' : '0');
+  if (enabled) setComputerOpen(true, 'run');
 }
 setRunDetailsMode(runDetailsMode);
-($('run-details-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => setRunDetailsMode(!runDetailsMode));
+($('run-details-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  const next = !runDetailsMode;
+  setRunDetailsMode(next);
+  if (!next && computerTab === 'run') setComputerOpen(false);
+});
 function syncCurrentRunToggle(run?: RunView): void {
   const control = $('current-run-toggle') as HTMLButtonElement | null;
   if (!control) return;
@@ -387,14 +562,17 @@ function syncCurrentRunToggle(run?: RunView): void {
   control.dataset.state = currentRunOpen ? 'expanded' : 'ready';
 }
 function setCurrentRunOpen(enabled: boolean): void {
+  const opening = enabled && !currentRunOpen;
   currentRunOpen = enabled;
   if (!enabled && runDetailsMode) setRunDetailsMode(false);
+  if (!enabled && computerTab === 'run') setComputerOpen(false);
   const detail = $('detail');
-  const empty = $('empty');
   if (detail) detail.hidden = !enabled || !current;
   document.body.classList.toggle('run-open', enabled && Boolean(current || currentId));
-  if (empty) empty.hidden = minimalMode || enabled || Boolean(current);
+  if (opening) document.body.classList.remove('roster-focus');
+  syncTranscriptEmpty();
   syncCurrentRunToggle(current);
+  syncPresence(current);
   if (!enabled) $('run-dock').hidden = true;
 }
 setCurrentRunOpen(currentRunOpen);
@@ -475,34 +653,11 @@ function syncDetailsToggleLabel(): void {
   control.dataset.state = detailsMode ? 'expanded' : quickRunReady ? 'ready' : 'attention';
   control.setAttribute('aria-expanded', String(detailsMode));
 }
-function setDetailsMode(enabled: boolean): void {
+function setDetailsMode(enabled: boolean, options?: { reveal?: boolean }): void {
   detailsMode = enabled;
   document.body.classList.toggle('details-mode', enabled);
-  if (!enabled && minimalMode) {
-    // Returning to the minimal surface must clear every secondary disclosure.
-    // Otherwise a previously opened run-details state can keep plan/evidence
-    // sections visible after the settings rail has been hidden.
-    setRunDetailsMode(false);
-    setCurrentRunOpen(false);
-    intentPresetsOpen = false;
-    recentRunsOpen = false;
-    attentionInboxOpen = false;
-    const presets = $('intent-presets');
-    if (presets) presets.hidden = true;
-    const intentToggle = $('intent-toggle') as HTMLButtonElement | null;
-    if (intentToggle) {
-      intentToggle.textContent = '示例';
-      intentToggle.setAttribute('aria-expanded', 'false');
-    }
-    const recentRuns = $('minimal-recent-runs');
-    if (recentRuns) recentRuns.hidden = true;
-    const recentToggle = $('recent-runs-toggle') as HTMLButtonElement | null;
-    if (recentToggle) recentToggle.setAttribute('aria-expanded', 'false');
-    const attentionInbox = $('attention-inbox');
-    if (attentionInbox) attentionInbox.hidden = true;
-    const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;
-    if (attentionToggle) attentionToggle.setAttribute('aria-expanded', 'false');
-  }
+  if (enabled && options?.reveal) setComputerOpen(true, 'setup');
+  if (!enabled && options?.reveal && computerTab === 'setup' && !runDetailsMode) setComputerOpen(false);
   syncDetailsToggleLabel();
   localStorage.setItem('aeeis.details-mode', enabled ? '1' : '0');
   syncConfigurationNotice();
@@ -513,14 +668,14 @@ setDetailsMode(detailsMode);
     openConfiguration();
     return;
   }
-  setDetailsMode(!detailsMode);
+  setDetailsMode(!detailsMode, { reveal: true });
   if (detailsMode) {
     setFocusMode(false);
     $('new-run-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 });
 function openConfiguration(): void {
-  setDetailsMode(true);
+  setDetailsMode(true, { reveal: true });
   setFocusMode(false);
   $('access-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   window.requestAnimationFrame(() => $<HTMLInputElement>('token')?.focus());
@@ -538,7 +693,7 @@ function setIntentPresetsOpen(enabled: boolean): void {
     control.setAttribute('aria-expanded', String(enabled));
   }
 }
-setIntentPresetsOpen(false);
+setIntentPresetsOpen(!currentId && !readOnlyShare && !linkedThreadId);
 ($('intent-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
   const presets = $('intent-presets');
   setIntentPresetsOpen(Boolean(presets?.hidden));
@@ -577,6 +732,77 @@ setAttentionInboxOpen(false);
     window.requestAnimationFrame(() => $('attention-inbox')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
 });
+function showEntry(): void {
+  selectedBotId = 'aeeis';
+  localStorage.setItem('aeeis.bot', 'aeeis');
+  entryEpoch += 1;
+  leaveGroup();
+  stopRunEventStream();
+  currentId = '';
+  current = undefined;
+  localStorage.removeItem('aeeis.run');
+  document.body.classList.remove('roster-focus');
+  document.body.classList.add('draft-open');
+  setCurrentRunOpen(false);
+  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  setIntentPresetsOpen(true);
+  renderBotRoster();
+  renderRunQueue(runSummaries);
+}
+document.querySelectorAll<HTMLButtonElement>('[data-computer-tab]').forEach(button => {
+  button.addEventListener('click', () => {
+    const tab = button.dataset.computerTab as ComputerTab | undefined;
+    if (!tab) return;
+    if (computerOpen && computerTab === tab) {
+      closeComputer();
+      return;
+    }
+    if (tab === 'run') {
+      if (!current && !currentId) return;
+      setRunDetailsMode(true);
+      return;
+    }
+    if (tab === 'setup') setDetailsMode(true, { reveal: true });
+    else setComputerOpen(true, tab);
+  });
+});
+($('gb-computer-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  if (computerOpen) closeComputer();
+  else if (current || currentId) setRunDetailsMode(true);
+  else setComputerOpen(true, 'setup');
+});
+($('gb-computer-close') as HTMLButtonElement | null)?.addEventListener('click', () => closeComputer());
+($('group-person') as HTMLInputElement | null)?.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  addDraftPerson();
+});
+($('gb-back') as HTMLButtonElement | null)?.addEventListener('click', () => showRoster());
+document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link => {
+  link.addEventListener('click', event => {
+    const href = link.getAttribute('href') ?? '';
+    const tabs: Record<string, ComputerTab | 'conversation'> = {
+      '#new-run-panel': 'setup',
+      '#run-workspace': 'conversation',
+      '#goals-panel': 'goals',
+      '#reminders-panel': 'goals',
+      '#rsi-panel': 'govern',
+      '#collaboration-panel': 'govern',
+      '#system-status': 'status',
+    };
+    const target = tabs[href];
+    if (!target) return;
+    event.preventDefault();
+    if (target === 'conversation') {
+      if (current || currentId) setCurrentRunOpen(true);
+      $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    if (target === 'setup') setDetailsMode(true, { reveal: true });
+    else setComputerOpen(true, target);
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  });
+});
 let commandPaletteOpen = false;
 let commandPaletteReturnFocus: HTMLElement | null = null;
 function setCommandPalette(open: boolean, restoreFocus = true): void {
@@ -605,7 +831,10 @@ function executePaletteCommand(command: string): void {
   // A command owns the next focus target. Do not let the palette's close
   // animation restore the element that opened it after the command runs.
   setCommandPalette(false, false);
-  if (command === 'new-run') {
+  if (command === 'new-group') {
+    showGroupDraft();
+  } else if (command === 'new-run') {
+    showEntry();
     $('command-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
     else $<HTMLInputElement>('quick-goal').focus();
@@ -615,13 +844,14 @@ function executePaletteCommand(command: string): void {
       localStorage.setItem('aeeis.run-filter', runFilter);
       renderRunQueue(runSummaries);
       $('run-queue')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      $<HTMLElement>('#runs button')?.focus({ preventScroll: true });
+      document.querySelector<HTMLElement>('#runs button')?.focus({ preventScroll: true });
     } else {
       setAttentionInboxOpen(true);
       $('attention-inbox')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       $<HTMLElement>('#attention-items .is-selected, #attention-items [role="button"]')?.focus({ preventScroll: true });
     }
   } else if (command === 'current') {
+    leaveGroup();
     setCurrentRunOpen(true);
     $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     $<HTMLElement>('#run-title')?.focus({ preventScroll: true });
@@ -630,7 +860,7 @@ function executePaletteCommand(command: string): void {
   } else if (command === 'details') {
     if (!quickRunReady) openConfiguration();
     else {
-      setDetailsMode(true);
+      setDetailsMode(true, { reveal: true });
       setFocusMode(false);
       $('new-run-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -727,6 +957,7 @@ function setQuickRunBusy(busy: boolean, text = ''): void {
 }
 ($('quick-run') as HTMLFormElement | null)?.addEventListener('submit', event => {
   event.preventDefault();
+  if (entryShowsBot() && activeBotId() !== 'aeeis') { message('任务交给 AEEIS。先点回左边的 AEEIS。'); return; }
   const value = $<HTMLInputElement>('quick-goal').value.trim();
   if (!value) { $<HTMLInputElement>('quick-goal').focus(); return; }
   const submit = $('submit') as HTMLButtonElement;
@@ -774,6 +1005,7 @@ window.addEventListener('keydown', event => {
     if (!typing) {
       const key = event.key.toLowerCase();
       if (key === 'n') { event.preventDefault(); executePaletteCommand('new-run'); }
+      else if (key === 'g') { event.preventDefault(); executePaletteCommand('new-group'); }
       else if (key === 'r') { event.preventDefault(); executePaletteCommand('current'); }
       else if (key === 'f') { event.preventDefault(); executePaletteCommand('focus'); }
       else if (key === 'd') { event.preventDefault(); executePaletteCommand('details'); }
@@ -1419,14 +1651,40 @@ async function refreshHandoffViews(): Promise<void> {
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
 }
+
+function leaveGroup(): void {
+  openGroupId = '';
+  groupMembers = [];
+  groupEvents = [];
+  groupDraftOpen = false;
+  localStorage.removeItem('aeeis.group');
+  document.body.classList.remove('group-open', 'group-draft');
+  const panel = $('group-panel');
+  const draft = $('group-draft');
+  const composer = $('group-composer');
+  if (panel) panel.hidden = true;
+  if (draft) draft.hidden = true;
+  if (composer) composer.hidden = true;
+  syncComposerHeading();
+}
 function clearOpenGroup(): void {
   openGroupId = '';
   groupMembers = [];
   groupEvents = [];
   localStorage.removeItem('aeeis.group');
 }
-function showRoster(focused: boolean): void {
+function showRoster(focused = true): void {
   document.body.classList.toggle('roster-focus', focused);
+  if (focused) document.body.classList.remove('draft-open');
+}
+function syncShellClasses(): void {
+  const view = rosterView();
+  document.body.classList.toggle('group-draft', view === 'draft');
+  document.body.classList.toggle('group-open', view === 'group' || view === 'direct');
+  if (view === 'bot' || view === 'draft' || view === 'group' || view === 'direct') {
+    document.body.classList.remove('roster-focus');
+    document.body.classList.add('draft-open');
+  }
 }
 function syncEntrySurface(): void {
   const view = rosterView();
@@ -1476,8 +1734,17 @@ function syncEntrySurface(): void {
   const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
   const entryTitle = $('entry-title');
   const entryPresence = $('entry-presence');
-  if (entryTitle) entryTitle.textContent = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
-  if (entryPresence) entryPresence.textContent = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
+  const titleText = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
+  const presenceText = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
+  if (entryTitle) entryTitle.textContent = titleText;
+  if (entryPresence) entryPresence.textContent = presenceText;
+  const shellTitle = $('gb-title');
+  const shellPresence = $('gb-presence');
+  if (shellTitle) shellTitle.textContent = titleText;
+  if (shellPresence) shellPresence.textContent = presenceText;
+  const stageEmpty = $('empty');
+  if (stageEmpty && conversationEnabled) stageEmpty.hidden = true;
+  syncShellClasses();
   renderBotPlacement();
 }
 function renderBotRoster(): void {
@@ -1603,7 +1870,27 @@ function renameBotGroup(id: string): void {
 }
 function selectBot(id: string): void {
   if (!rosterBots().some(bot => bot.id === id)) return;
-  void openLifeThread(id).catch(error => message(errorMessage(error)));
+  if (conversationEnabled) {
+    void openLifeThread(id).catch(error => message(errorMessage(error)));
+    return;
+  }
+  if (id === 'aeeis') { showEntry(); return; }
+  selectedBotId = id;
+  localStorage.setItem('aeeis.bot', id);
+  entryEpoch += 1;
+  leaveGroup();
+  stopRunEventStream();
+  currentId = '';
+  current = undefined;
+  localStorage.removeItem('aeeis.run');
+  document.body.classList.remove('roster-focus');
+  document.body.classList.add('draft-open');
+  setCurrentRunOpen(false);
+  if (!readOnlyShare && !linkedThreadId && window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  setIntentPresetsOpen(false);
+  renderBotRoster();
+  renderRunQueue(runSummaries);
+  syncPresence();
 }
 async function openLifeThread(agentId: string): Promise<void> {
   if (!conversationEnabled || conversationBusy || conversationAttempt || lifeOpening.has(agentId)) return;
@@ -1751,6 +2038,7 @@ function showGroupDraft(): void {
   draftAgents.clear();
   draftPeople = [];
   groupDraftOpen = true;
+  setCurrentRunOpen(false);
   renderGroupCandidates();
   renderBotRoster();
   updateConversationControls();
@@ -2671,7 +2959,9 @@ $('bots')?.addEventListener('click', event => {
 $('bot-group-draft')?.addEventListener('submit', createBotGroup);
 $('gb-new-bot-group')?.addEventListener('click', () => {
   const draft = $('bot-group-draft');
-  if (draft) draft.hidden = !draft.hidden;
+  if (!draft) return;
+  draft.hidden = !draft.hidden;
+  if (!draft.hidden) $<HTMLInputElement>('bot-group-name')?.focus();
 });
 $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
@@ -2682,10 +2972,9 @@ $('group-rename')?.addEventListener('click', () => { void renameGroup().catch(er
 $('chat-archive')?.addEventListener('click', () => { void archiveOpenChat().catch(error => message(errorMessage(error))); });
 $('entry-back')?.addEventListener('click', () => showRoster(true));
 $('entry-computer')?.addEventListener('click', () => {
-  const open = document.body.classList.toggle('computer-open');
-  const button = $<HTMLButtonElement>('entry-computer');
-  button.setAttribute('aria-pressed', String(open));
-  button.textContent = open ? '关上工作台' : '打开它的工作台';
+  if (computerOpen) closeComputer();
+  else if (current || currentId) setRunDetailsMode(true);
+  else setComputerOpen(true, 'setup');
 });
 
 function attentionCopy(status: string): [string, string] {
@@ -2804,21 +3093,37 @@ function renderRunQueue(runs: RunSummary[]): void {
   const visible = runs.filter(runMatchesFilter);
   list.replaceChildren();
   for (const run of visible) {
-    const item = button(`${run.goal.slice(0, 60)} · ${runStatusLabel(run.status)}`, async () => {
+    const item = button('', async () => {
+      leaveGroup();
+      document.body.classList.remove('roster-focus');
+      document.body.classList.add('draft-open');
+      if (currentId === run.id && current) {
+        setCurrentRunOpen(true);
+        $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       currentId = run.id;
       localStorage.setItem('aeeis.run', run.id);
       current = undefined;
       await refresh();
     });
-    item.className = run.id === currentId ? 'selected' : '';
+    item.className = `roster-row task-row${run.id === currentId && currentRunOpen && !openGroupId ? ' selected' : ''}`;
+    item.dataset.status = run.status;
+    const presence = presenceOf(run.status);
+    const dot = element('span', '', 'task-dot');
+    dot.dataset.state = presence.state;
+    const copy = element('span', '', 'roster-copy');
+    copy.append(element('strong', run.goal), element('small', presence.label));
+    item.append(dot, copy);
     list.append(item);
   }
+  syncBotRow();
   const count = $('run-count');
-  if (count) count.textContent = `${visible.length} / ${runs.length} 个运行`;
+  if (count) count.textContent = `${visible.length} / ${runs.length} 项任务`;
   const empty = $('runs-empty');
   if (empty) {
     empty.hidden = visible.length > 0;
-    empty.textContent = runs.length ? '当前筛选没有运行。' : '还没有运行记录。';
+    empty.textContent = runs.length ? '当前筛选没有任务。' : '还没有任务。先发一条消息。';
   }
   document.querySelectorAll<HTMLButtonElement>('#run-filters [data-run-filter]').forEach(control => {
     const active = control.dataset.runFilter === runFilter;
@@ -2985,36 +3290,54 @@ async function refresh(): Promise<void> {
   ]);
   const runs = runPage.items;
   runSummaries = runs;
-  reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
-  renderAttentionInbox(runs);
+  roomSummaries = rooms;
   agentSummaries = agents;
   agentsLoaded = true;
-  roomSummaries = rooms;
+  reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
+  renderAttentionInbox(runs);
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
   renderBotRoster();
   renderGroups(rooms);
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
   renderRunQueue(runs);
   renderMinimalRecentRuns(runs);
-  if (!currentId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
+  const requestedId = currentId;
+  const epoch = entryEpoch;
+  if (!requestedId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
   let run: RunView;
-  try { run = await api<RunView>(`/runs/${currentId}`); }
+  try { run = await api<RunView>(`/runs/${requestedId}`); }
   catch (error) {
     // A local data directory or tenant can change between sessions. Do not
     // leave the workbench stuck on a stale selection when its Run disappeared.
     if (error instanceof Error && /Unknown run|HTTP 404/.test(error.message)) {
-      currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true; return;
+      if (currentId === requestedId && entryEpoch === epoch) {
+        currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true;
+      }
+      return;
     }
     throw error;
   }
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
   if (DONE_STATUSES.has(run.status)) stopRunEventStream();
-  else ensureRunEventStream(currentId);
+  else ensureRunEventStream(requestedId);
   const [graphs, explanation] = await Promise.all([
-    api<RunGraphsView>(`/runs/${currentId}/graphs`),
-    api<RunExplanation>(`/runs/${currentId}/explanation`),
+    api<RunGraphsView>(`/runs/${requestedId}/graphs`),
+    api<RunExplanation>(`/runs/${requestedId}/explanation`),
   ]);
-  if (current?.id === run.id && current.revision === run.revision) return;
-  current = { ...run, graphs }; render(current); renderExplanation(explanation);
+  if (currentId !== requestedId || entryEpoch !== epoch) return;
+  const keepGroup = Boolean(openGroupId) || document.body.classList.contains('group-draft');
+  if (current?.id === run.id && current.revision === run.revision) {
+    if (!currentRunOpen && !keepGroup) {
+      setCurrentRunOpen(true);
+      render(current);
+      renderExplanation(explanation);
+    }
+    return;
+  }
+  current = { ...run, graphs };
+  if (keepGroup) return;
+  if (!currentRunOpen) setCurrentRunOpen(true);
+  render(current); renderExplanation(explanation);
 }
 
 function reminderQueryString(cursor?: string): string {
@@ -4232,9 +4555,11 @@ function render(run: RunView): void {
   $('run-status').className = `status ${run.status}`;
   updateRunActivity(run);
   renderRunDecision(run);
-  $('empty').hidden = minimalMode || currentRunOpen;
+  syncTranscriptEmpty();
   $('detail').hidden = !currentRunOpen;
   syncCurrentRunToggle(run);
+  syncPresence(run);
+  if (intentPresetsOpen) setIntentPresetsOpen(false);
   updateRunDock(run);
   renderDeliverySummary(run);
   const validationEvent = [...run.events].reverse().find(event => event.type === 'run.failed' && event.data?.validation?.issues?.length);
@@ -4354,7 +4679,7 @@ function render(run: RunView): void {
       const a = positions.get(dependency)!, b = positions.get(node.id)!;
       const path = document.createElementNS(svg.namespaceURI, 'path');
       path.setAttribute('d', `M${a.x+236} ${a.y+48} C${a.x+253} ${a.y+48} ${b.x-17} ${b.y+48} ${b.x} ${b.y+48}`);
-      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#5378a5'); path.setAttribute('stroke-width', '2'); svg.append(path);
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#d4d4d4'); path.setAttribute('stroke-width', '1.5'); svg.append(path);
     }
     canvas.append(svg);
     for (const node of plan.nodes) {
@@ -4593,7 +4918,7 @@ function renderDeliveryArtifact(run: RunView): void {
       if (run.calls.length) box.append(element('small', `已发起 ${run.calls.length} 次模型请求，${completedCalls} 次完成 · ${model}`, 'delivery-runtime-ok'));
       box.append(element('p', isFixture
         ? '当前连接的是本地固定协议桩：它会返回预置 JSON 来验证 AEEIS 流程，不代表真实 LLM 推理。要验证真实模型，需要配置实际 provider endpoint 和 key。'
-        : '请展开执行详情查看模型调用和事件记录。', 'delivery-artifact-warning'));
+        : '请打开它的工作台查看模型调用和事件记录。', 'delivery-artifact-warning'));
     }
     return;
   }
@@ -4893,10 +5218,10 @@ async function initialize(): Promise<void> {
     const quickSubmit = document.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]');
     if (quickSubmit) {
       quickSubmit.disabled = !quickRunReady;
-      quickSubmit.title = quickRunReady ? '启动任务' : '请先连接模型';
+      quickSubmit.title = quickRunReady ? '发送' : '请先连接模型';
       const label = quickSubmit.querySelector('span');
       if (!quickRunReady) quickSubmit.childNodes[0]!.textContent = '等待连接 ';
-      else if (label) quickSubmit.childNodes[0]!.textContent = '启动任务 ';
+      else if (label) quickSubmit.childNodes[0]!.textContent = '发送 ';
     }
     await initializeConversations(status);
     await refresh(); message('');

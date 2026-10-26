@@ -40,6 +40,119 @@ function start(path: string, fetch: any) {
   dom.window.eval(source);
 }
 const response = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
+describe('group chat', () => {
+  it('opens a draft from the roster and refuses a group that is only AEEIS', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/rooms') && init?.method === 'POST') return response({ id: 'room_created', title: '发布协作', status: 'active', createdAt: run.createdAt, updatedAt: run.updatedAt });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
+    dom.window.document.getElementById('gb-new-group')!.click();
+    await vi.waitFor(() => expect(dom.window.document.body.classList.contains('group-draft')).toBe(true));
+    const doc = dom.window.document;
+    expect(doc.getElementById('group-draft')?.hidden).toBe(false);
+    expect(doc.getElementById('detail')?.hidden).toBe(true);
+    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 6');
+    (doc.getElementById('group-title') as HTMLInputElement).value = '发布协作';
+    (doc.getElementById('group-create') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('至少'));
+    expect(fetch.mock.calls.some(call => String(call[0]) === '/api/rooms' && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
+  });
+});
+describe('bot groups', () => {
+  it('shows demo bots in groups and keeps execution on AEEIS', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/runs') && init?.method === 'POST') return response(run);
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('bots')?.textContent).toContain('发布'));
+    const doc = dom.window.document;
+    expect(doc.getElementById('bots')?.textContent).toContain('工作');
+    expect(doc.getElementById('bots')?.textContent).toContain('研究');
+    expect(doc.getElementById('bots')?.textContent).toContain('纪要');
+    const release = [...doc.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]')].find(row => row.dataset.botId === 'demo.release');
+    release?.click();
+    expect(doc.getElementById('gb-title')?.textContent).toBe('发布');
+    expect(doc.getElementById('empty')?.textContent).toContain('不会单独执行');
+    expect(doc.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]')?.disabled).toBe(true);
+    expect(fetch.mock.calls.some(call => String(call[0]).startsWith('/api/runs') && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
+    (doc.getElementById('bot-group-name') as HTMLInputElement).value = '值班';
+    (doc.getElementById('bot-group-draft') as HTMLFormElement).requestSubmit();
+    const duty = [...doc.querySelectorAll<HTMLButtonElement>('#bot-placement button')].find(button => button.textContent === '值班');
+    duty?.click();
+    const heading = [...doc.querySelectorAll('.bot-group-label')].find(item => item.textContent?.startsWith('值班'));
+    expect(heading?.nextElementSibling?.textContent).toContain('发布');
+    doc.getElementById('gb-bot')!.click();
+    expect(doc.getElementById('gb-title')?.textContent).toBe('AEEIS');
+    expect(doc.getElementById('runs')?.textContent).toContain(run.goal);
+  });
+
+  it('replaces the demo roster when an agent is admitted', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      if (String(url).startsWith('/api/agents')) return response([{
+        agentId: 'agent.release', status: 'admitted', discoveredAt: run.createdAt,
+        card: { name: '发布核对', owner: 'demo', capabilities: [], cardVersion: '1' },
+        reputation: { samples: 0, dimensions: {} },
+      }]);
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('bots')?.textContent).toContain('发布核对'));
+    const text = dom.window.document.getElementById('bots')?.textContent ?? '';
+    expect(text).not.toContain('纪要');
+    expect(text).toContain('AEEIS');
+  });
+});
+describe('entry', () => {
+  it('returns to the entry when the Bot is selected and keeps the task in the roster', async () => {
+    const run = fixture();
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
+    const draft = dom.window.document.getElementById('quick-goal') as HTMLInputElement;
+    draft.value = '先别发出去';
+    expect(dom.window.document.getElementById('gb-new-chat')).toBeNull();
+    dom.window.document.getElementById('gb-bot')!.click();
+    const doc = dom.window.document;
+    expect(doc.getElementById('detail')?.hidden).toBe(true);
+    expect(doc.getElementById('empty')?.hidden).toBe(false);
+    expect(doc.body.classList.contains('run-open')).toBe(false);
+    expect(doc.getElementById('gb-title')?.textContent).toBe('AEEIS');
+    expect(doc.getElementById('gb-presence')?.textContent).toContain('任务都还在跑');
+    expect(doc.getElementById('runs')?.textContent).toContain(run.goal);
+    expect(draft.value).toBe('先别发出去');
+    expect(doc.defaultView!.localStorage.getItem('aeeis.run')).toBeNull();
+  });
+});
 describe('run link workbench', () => {
   it('renders filled PDF fields, unknowns, evidence and a PDF download in the actual workbench', async () => {
     const run = fixture(), output = await fillPdf(formSource, profile);
