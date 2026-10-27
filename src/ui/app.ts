@@ -6148,21 +6148,23 @@ function restoreExecutionReview(): void {
   const saved = localStorage.getItem('aeeis.execution-review');
   const select = $<HTMLSelectElement>('execution-review');
   if (!select) return;
-  // Default is auto: the model decides whether a plan stops for approval, and per-action approval still stops writes.
+  // Default is auto: a small task runs, and a real plan waits. YOLO runs the plan too.
   select.value = saved === 'required' || saved === 'yolo' ? saved : 'auto';
 }
 function executionReviewNote(): string {
   const mode = executionReviewValue();
   const decision = currentPlanningDecision();
   const gate = mode === 'yolo'
-    ? '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。'
+    ? 'YOLO：抽出计划也直接做，不再停下来等批准。'
     : mode === 'auto'
       ? (decision.shape === 'direct'
-        ? '自动：这次只有一个只读步骤，由边界放行，不调用规划模型。讨论焦点不会因此改变。'
-        : '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。')
-      : '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+        ? '自动：这是一件小任务，直接做。'
+        : '自动：这次会抽出一份计划，计划出来后再请你批准。')
+      : (decision.shape === 'direct'
+        ? '需要审批：这是一件小任务，仍等你点头再做。'
+        : '需要审批：抽出计划后，等你批准再做。');
   const shape = decision.shape === 'direct'
-    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的审核档放行。'
+    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的权限放行。'
     : `这次先出任务图：${planningRefusal(decision.reason)}。`;
   return `${gate}${shape}`;
 }

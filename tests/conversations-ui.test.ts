@@ -320,7 +320,7 @@ describe('single-entry conversation workbench', () => {
   it('keeps the chosen execution review on the next run and does not execute a noted message', async () => {
     const h = harness(); start(h.fetch); await ready();
     fill('execution-review', 'yolo');
-    expect(el('conversation-execution-note').textContent).toContain('自动执行');
+    expect(el('conversation-execution-note').textContent).toContain('YOLO');
     fill('conversation-text', '只是讨论');
     el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
