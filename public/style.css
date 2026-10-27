@@ -1291,7 +1291,7 @@ body.conversation-mode .composer-route[open] { display: grid; gap: 6px; }
 body.conversation-mode .composer-route label { margin: 0; }
 body.conversation-mode .conversation-actions { justify-content: flex-start; gap: 8px; }
 body.conversation-mode #execution-review { width: auto; flex: none; min-height: 28px; padding: 4px 8px; font-size: 12px; }
-body.conversation-mode #conversation-execute { min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #conversation-note { min-height: 28px; padding: 4px 8px; }
 body.conversation-mode #conversation-execution-note { flex: 1; min-width: 12rem; }
 body.conversation-mode #standing-instruction { flex: none; padding: 8px 16px 0; }
 body.conversation-mode #standing-instruction h3 { margin: 0 0 4px; font-size: 13px; }
@@ -1380,6 +1380,23 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 .conversation-message p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; max-width: 76ch; }
 .conversation-message small { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .conversation-message[data-role="notification"] { border-left: 3px solid var(--line-strong); padding-left: 12px; }
+/* Inline plan card: the plan for one task, under the message that started it. */
+.plan-card { display: grid; gap: 10px; max-width: 76ch; margin: 10px 0 4px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); }
+.plan-card[data-state="awaiting"] { border-color: var(--ink); }
+.plan-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.plan-card-head strong { font-size: 15px; font-weight: 650; letter-spacing: -.02em; }
+.plan-card-status { color: var(--muted); font: 500 11px var(--mono); }
+.plan-card[data-state="awaiting"] .plan-card-status { color: var(--amber); }
+.conversation-message .plan-card-summary { margin: 0; color: var(--ink-soft); }
+.plan-card-steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 14px; line-height: 1.5; }
+.plan-card-steps li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; color: var(--ink-soft); overflow-wrap: anywhere; }
+.plan-card-steps li[data-state="done"], .plan-card-steps li[data-state="current"] { color: var(--ink); }
+.plan-card-mark { color: var(--muted); font: 500 12px/1.5 var(--mono); }
+.plan-card-steps li[data-state="done"] .plan-card-mark { color: var(--cyan); }
+.plan-card-steps li[data-state="current"] .plan-card-mark { color: var(--ink); }
+.plan-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.plan-card-revision { display: grid; gap: 8px; }
+.plan-card-revision[hidden] { display: none; }
 .conversation-message button { margin: 8px 8px 0 0; font-size: 12px; }
 .conversation-panel button { min-height: 36px; }
 .conversation-panel :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }

@@ -1121,6 +1121,20 @@ function conversationTargetTask(): ConversationTaskView | undefined {
   const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : conversation?.focusTaskId);
   return conversation?.tasks.find(task => task.id === id);
 }
+/** What the main send button does now: start work when a Run can start, otherwise only record the message. */
+function conversationSendIntent(): 'discuss' | 'execute' {
+  // Only AEEIS runs work; another Bot's conversation keeps a record and the task still goes to AEEIS.
+  if (!conversation || conversationCorrectionId || !quickRunReady || selectedLifeSpeaker() || rosterView() !== 'entry') return 'discuss';
+  const task = conversationTargetTask();
+  const preparing = Boolean(task && task.status === 'preparing' && !task.runId && !task.latestRunId);
+  const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
+  return preparing || active ? 'discuss' : 'execute';
+}
+/** A new task named after the message, for a send that names no task. Titles need at least two characters. */
+function autoTaskTitle(text: string): string {
+  const line = text.split('\n').map(part => part.trim()).find(Boolean) ?? '';
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
 function openConversationRoute(): void {
   const route = document.querySelector<HTMLDetailsElement>('#conversation-route');
   if (route) route.open = true;
@@ -1143,21 +1157,21 @@ function updateConversationControls(): void {
   $<HTMLTextAreaElement>('conversation-text').readOnly = correcting;
   $<HTMLSelectElement>('conversation-focus-effect').disabled ||= correcting;
   for (const option of $<HTMLSelectElement>('conversation-target').options) option.disabled = correcting && (!option.value || option.value === '__new');
-  $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : '发送讨论';
+  $<HTMLButtonElement>('conversation-send').textContent = correcting ? '保存归属纠正' : conversationSendIntent() === 'execute' ? '发送' : '记下来';
   $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
-  $<HTMLButtonElement>('conversation-execute').disabled = locked || !conversation || conversationNeedsRefresh || !quickRunReady || Boolean(active) || preparing || correcting;
+  $<HTMLButtonElement>('conversation-note').disabled = locked || !conversation || conversationNeedsRefresh || correcting;
   restoreExecutionReview();
-  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。请查看运行，使用原有的批准、回答或取消控件。' : !quickRunReady ? '模型尚未就绪；可以记录讨论，但不能创建执行。' : executionReviewNote();
+  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : rosterView() !== 'entry' ? '这位 Bot 不会单独执行，发送只记下来。要它做事，回到 AEEIS 说。' : executionReviewNote();
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer]').forEach(control => {
+  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer], #conversation-messages button[data-plan-start], #conversation-messages button[data-plan-revise], #conversation-messages button[data-plan-cancel], #conversation-messages button[data-plan-revise-submit], #conversation-messages textarea[data-plan-feedback]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
   const surface = rosterView();
   if (surface === 'group' || surface === 'draft' || surface === 'direct') {
     $<HTMLButtonElement>('conversation-send').disabled = true;
-    $<HTMLButtonElement>('conversation-execute').disabled = true;
+    $<HTMLButtonElement>('conversation-note').disabled = true;
     if (surface === 'direct' && !conversationCorrectionId) {
       $<HTMLButtonElement>('conversation-send').textContent = '先回到这个人';
       $('conversation-execution-note').textContent = '这间私聊只保留会话记录。执行回到这个人的对话里，明确创建 Run。它不会自己回复。';
@@ -2671,6 +2685,70 @@ function executionLine(execution: { steps: Array<{ title: string; state: 'done' 
   const label = (state: 'done' | 'current' | 'waiting') => state === 'done' ? '已完成' : state === 'current' ? '正在做' : '还没到';
   return `执行步骤：${execution.steps.map(step => `${step.title} ${label(step.state)}`).join(' · ')}`;
 }
+/** The plan for one task, shown in the transcript under the message that started it. Its buttons use the same Run commands as the task table. */
+function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): HTMLElement {
+  const card = element('section', '', 'plan-card');
+  card.dataset.planTask = task.id;
+  card.dataset.state = task.pendingApproval ? 'awaiting' : task.status;
+  card.setAttribute('aria-label', `「${task.title}」的计划`);
+  const head = element('div', '', 'plan-card-head');
+  head.append(element('strong', '计划'), element('span', task.pendingApproval ? '等你确认' : task.status === 'preparing' ? '正在准备' : runStatusLabel(task.status), 'plan-card-status'));
+  card.append(head);
+  if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
+  const steps = task.execution?.steps ?? [];
+  if (steps.length) {
+    const list = element('ol', '', 'plan-card-steps');
+    for (const step of steps) {
+      const item = element('li'); item.dataset.state = step.state;
+      const mark = element('span', step.state === 'done' ? '✓' : step.state === 'current' ? '•' : '○', 'plan-card-mark'); mark.setAttribute('aria-hidden', 'true');
+      item.append(mark, element('span', step.title), element('span', step.state === 'done' ? '（已完成）' : step.state === 'current' ? '（正在做）' : '', 'sr-only'));
+      list.append(item);
+    }
+    card.append(list);
+  } else if (['preparing', 'queued', 'planning'].includes(task.status)) card.append(element('p', '正在起草计划…', 'muted'));
+  if (task.runId && task.pendingApproval) {
+    const actions = element('div', '', 'plan-card-actions');
+    const start = dashboardButton('开始', () => approveConversationTask(task, 'task'));
+    start.className = 'decision-primary'; start.dataset.planStart = task.id;
+    const revise = dashboardButton('改一下计划', async () => { revision.hidden = !revision.hidden; if (!revision.hidden) field.focus(); });
+    revise.dataset.planRevise = task.id; revise.setAttribute('aria-expanded', 'false');
+    const cancel = dashboardButton('算了', () => cancelConversationTask(task));
+    cancel.dataset.planCancel = task.id;
+    actions.append(start, revise, cancel);
+    const revision = element('div', '', 'plan-card-revision');
+    const field = element('textarea', '', 'conversation-answer');
+    field.rows = 2; field.maxLength = 8000; field.dataset.planFeedback = task.id; field.value = feedbackDraft;
+    field.placeholder = '想怎么改？它会按你说的重新出一份计划，仍然等你确认。';
+    field.setAttribute('aria-label', `修改「${task.title}」的计划`);
+    const submit = dashboardButton('按这个改', () => rejectConversationTask(task, field.value));
+    submit.dataset.planReviseSubmit = task.id;
+    revision.append(field, submit);
+    revision.hidden = !feedbackDraft;
+    revise.addEventListener('click', () => revise.setAttribute('aria-expanded', String(!revision.hidden)));
+    card.append(actions, revision);
+  }
+  return card;
+}
+async function cancelConversationTask(task: ConversationTaskView): Promise<void> {
+  if (!conversation || !task.runId || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/cancel`, { reason: '在计划卡片上选择了“算了”' });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    void refreshHandoffViews();
+    if (epoch !== conversationEpoch) return;
+    $('conversation-status').textContent = `已取消「${task.title}」，这份计划不会执行。`;
+    $('conversation-error').textContent = '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
 function renderConversation(): void {
   $('conversation-panel').hidden = !conversationEnabled;
   document.body.classList.toggle('conversation-mode', conversationEnabled);
@@ -2797,7 +2875,15 @@ function renderConversation(): void {
       row.append(rank, name, status, actions); taskBody?.append(row);
     });
     $('conversation-tasks').hidden = ordered.length === 0;
-    const messages = $('conversation-messages'); messages.replaceChildren();
+    const messages = $('conversation-messages');
+    const planDrafts = new Map<string, string>();
+    messages.querySelectorAll<HTMLTextAreaElement>('textarea[data-plan-feedback]').forEach(field => {
+      if (field.dataset.planFeedback && field.value) planDrafts.set(field.dataset.planFeedback, field.value);
+    });
+    messages.replaceChildren();
+    // One plan card per task, under the latest message that asked it to run.
+    const planMessage = new Map<string, string>();
+    for (const item of conversation?.messages ?? []) if (item.execution && item.execution.state !== 'cancelled') planMessage.set(item.execution.taskId, item.id);
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
@@ -2829,12 +2915,14 @@ function renderConversation(): void {
             if (conversationBusy || conversationAttempt) return;
             prepareConversationReply(item); $<HTMLSelectElement>('conversation-target').value = id;
             $<HTMLTextAreaElement>('conversation-text').value = item.text; openConversationRoute(); updateConversationControls();
-            $('conversation-status').textContent = '已选择任务。请检查内容，再点击“发送讨论”或“创建执行 Run”；尚未执行。';
+            $('conversation-status').textContent = '已选择任务。请检查内容，再点击“发送”交给它去做，或“只记下来”；尚未执行。';
           }); choice.type = 'button'; row.append(choice);
         }
       }
       const runId = item.notificationRunId ?? item.execution?.runId;
       if (runId) { const view = button('查看此次运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
+      const planTask = item.execution && planMessage.get(item.execution.taskId) === item.id ? conversation?.tasks.find(task => task.id === item.execution!.taskId) : undefined;
+      if (planTask && (planTask.runId === item.execution!.runId || planTask.status === 'preparing')) row.append(conversationPlanCard(planTask, planDrafts.get(planTask.id)));
       messages.append(row);
     }
     $('conversation-earlier').hidden = !conversation?.hasEarlierMessages;
@@ -3261,16 +3349,20 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
   if (!retry) {
     const form = $<HTMLFormElement>('conversation-composer');
     if (!form.reportValidity()) return;
-    if (intent === 'execute' && $<HTMLButtonElement>('conversation-execute').disabled) return;
+    if (intent === 'execute' && conversationSendIntent() !== 'execute') return;
     const target = $<HTMLSelectElement>('conversation-target').value;
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
     const lifeSpeaker = selectedLifeSpeaker();
+    const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
+    // A send that names no task starts a new one and makes it the focus, so the next message (a change to the plan, a follow-up) lands on it.
+    const autoTitle = intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId ? autoTaskTitle(text) : '';
+    if (intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId && autoTitle.length < 2) intent = 'discuss';
     const body = conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
-      : { text: $<HTMLTextAreaElement>('conversation-text').value.trim(), expectedRevision: conversation.revision,
+      : { text, expectedRevision: conversation.revision,
         ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
-        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
-        focus: $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { ...(currentTaskKind() ? { taskKind: currentTaskKind() } : {}), runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
+        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : autoTitle.length >= 2 && intent === 'execute' ? { newTask: { title: autoTitle } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
+        focus: autoTitle.length >= 2 && intent === 'execute' ? 'switch' : $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { ...(currentTaskKind() ? { taskKind: currentTaskKind() } : {}), runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
     saveConversationAttempt();
@@ -3299,7 +3391,8 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     $('conversation-status').textContent = '';
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
-$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-note').addEventListener('click', () => { void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('standing-form')?.addEventListener('submit', event => {
   event.preventDefault();
   void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
@@ -3323,7 +3416,6 @@ $('skill-retract')?.addEventListener('click', () => { void retractSkillProfile()
 $('accepted-practice-retract')?.addEventListener('click', () => {
   void retractPractice().catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
-$('conversation-execute').addEventListener('click', () => { void sendConversation('execute').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('execution-review')?.addEventListener('change', () => {
   localStorage.setItem('aeeis.execution-review', executionReviewValue());
   updateConversationControls();
@@ -4516,7 +4608,8 @@ function restoreExecutionReview(): void {
   const saved = localStorage.getItem('aeeis.execution-review');
   const select = $<HTMLSelectElement>('execution-review');
   if (!select) return;
-  select.value = saved === 'auto' || saved === 'yolo' ? saved : 'required';
+  // Default is auto: the model decides whether a plan stops for approval, and per-action approval still stops writes.
+  select.value = saved === 'required' || saved === 'yolo' ? saved : 'auto';
 }
 function executionReviewNote(): string {
   const mode = executionReviewValue();
