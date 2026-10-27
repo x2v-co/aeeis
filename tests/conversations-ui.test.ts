@@ -1087,6 +1087,31 @@ describe('entry bots and group chats', () => {
     expect(text).toContain('AEEIS');
   });
 
+  it('starts a new group at ten people and keeps a chosen limit', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.group-cap': '3' } });
+    await ready();
+    el('gb-new-group').click();
+    expect(el<HTMLInputElement>('group-cap').value).toBe('3');
+    expect(el('group-count-live').textContent).toContain('1 / 3');
+    el<HTMLInputElement>('group-person').value = '甲';
+    el('group-add-person').click();
+    el<HTMLInputElement>('group-person').value = '乙';
+    el('group-add-person').click();
+    expect(el('group-count-live').textContent).toContain('3 / 3');
+    el<HTMLInputElement>('group-person').value = '丙';
+    el('group-add-person').click();
+    expect(el('error').textContent).toContain('最多 3 人');
+    expect(el('group-people').textContent).not.toContain('丙');
+    fill('group-cap', '10');
+    expect(el('group-count-live').textContent).toContain('3 / 10');
+    expect(dom.window.localStorage.getItem('aeeis.group-cap')).toBe('10');
+    fill('group-cap', '99');
+    expect(el<HTMLInputElement>('group-cap').value).toBe('10');
+    expect(el('error').textContent).toContain('2 到 30');
+    expect(h.posts.some(post => post.url === '/api/rooms')).toBe(false);
+  });
+
   it('refuses a group that is only AEEIS and sends a room message without moving focus', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [
       { id: 'room_backend', title: '后台房间', description: '长期协作', status: 'active', createdAt: date, updatedAt: date },
@@ -1132,7 +1157,7 @@ describe('entry bots and group chats', () => {
     expect(el('groups').textContent ?? '').not.toContain('后台房间');
     el('gb-new-group').click();
     expect(el('group-draft').hidden).toBe(false);
-    expect(el('group-count-live').textContent).toContain('1 / 6');
+    expect(el('group-count-live').textContent).toContain('1 / 10');
     el<HTMLInputElement>('group-title').value = '发布协作';
     el<HTMLFormElement>('group-create').requestSubmit();
     await vi.waitFor(() => expect(el('error').textContent).toContain('至少'));

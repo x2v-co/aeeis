@@ -488,7 +488,7 @@ function syncPresence(run?: RunView): void {
   if (conversationEnabled) { syncEntrySurface(); return; }
   if (!title || !presence) return;
   if (document.body.classList.contains('group-draft') || groupDraftOpen) {
-    mirrorShell('新建群聊', '2 到 6 人 · AEEIS 始终在场', 'idle');
+    mirrorShell('新建群聊', `2 到 ${groupCap()} 人 · AEEIS 始终在场`, 'idle');
     return;
   }
   if (openGroupId) {
@@ -2414,8 +2414,31 @@ async function refreshHandoffViews(): Promise<void> {
   renderGroupTranscript();
   if (!$('channel-studio')?.hidden) renderStudio();
 }
+const GROUP_CAP_KEY = 'aeeis.group-cap';
+const GROUP_CAP_DEFAULT = 10;
+const GROUP_CAP_MIN = 2;
+const GROUP_CAP_MAX = 30;
+function groupCap(): number {
+  const raw = Number(localStorage.getItem(GROUP_CAP_KEY));
+  return Number.isInteger(raw) && raw >= GROUP_CAP_MIN && raw <= GROUP_CAP_MAX ? raw : GROUP_CAP_DEFAULT;
+}
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
+}
+function commitGroupCap(commitInvalid: boolean): void {
+  const input = $<HTMLInputElement>('group-cap');
+  if (!input) return;
+  const value = Math.trunc(Number(input.value));
+  const valid = Number.isInteger(value) && value >= GROUP_CAP_MIN && value <= GROUP_CAP_MAX;
+  if (!valid) {
+    if (!commitInvalid) return;
+    input.value = String(groupCap());
+    message(`人数上限是 ${GROUP_CAP_MIN} 到 ${GROUP_CAP_MAX}。`);
+    return;
+  }
+  localStorage.setItem(GROUP_CAP_KEY, String(value));
+  if (commitInvalid) message('');
+  renderGroupCandidates();
 }
 
 function hideChannelSurfaces(): void {
@@ -2806,7 +2829,7 @@ function renderGroupCandidates(): void {
     box.checked = draftAgents.has(bot.id);
     box.addEventListener('change', () => {
       if (box.checked) {
-        if (groupOccupancy() >= 6) { box.checked = false; message('一个群聊最多 6 人。'); return; }
+        if (groupOccupancy() >= groupCap()) { box.checked = false; message(`一个群聊最多 ${groupCap()} 人。`); return; }
         draftAgents.add(bot.id);
       } else draftAgents.delete(bot.id);
       renderGroupCandidates();
@@ -2826,7 +2849,7 @@ function renderGroupCandidates(): void {
     people.append(row);
   }
   const names = [...draftAgents].map(participantLabel).concat(draftPeople);
-  live.textContent = `${groupOccupancy()} / 6 · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
+  live.textContent = `${groupOccupancy()} / ${groupCap()} · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
   const proposal = $('group-proposal');
   if (proposal) proposal.textContent = groupProposalText();
 }
@@ -2836,12 +2859,12 @@ function groupProposalText(): string {
   const extras = draftPeople.length ? `名单以外：${draftPeople.join('、')}。` : '';
   const reason = $<HTMLInputElement>('group-newcomer-reason')?.value.trim() ?? '';
   const why = reason ? '原因已写下。' : '';
-  return `提议：AEEIS 担任 PM。${roster}${extras}一共 ${groupOccupancy()} / 6。创建前确认这一组。${why}`;
+  return `提议：AEEIS 担任 PM。${roster}${extras}一共 ${groupOccupancy()} / ${groupCap()}。创建前确认这一组。${why}`;
 }
 function reuseRoster(): void {
   for (const bot of rosterBots()) {
     if (bot.id === 'aeeis' || draftAgents.has(bot.id)) continue;
-    if (groupOccupancy() >= 6) break;
+    if (groupOccupancy() >= groupCap()) break;
     draftAgents.add(bot.id);
   }
   renderGroupCandidates();
@@ -2861,6 +2884,8 @@ function showGroupDraft(): void {
   if (person) person.value = '';
   const reason = $<HTMLInputElement>('group-newcomer-reason');
   if (reason) reason.value = '';
+  const cap = $<HTMLInputElement>('group-cap');
+  if (cap) cap.value = String(groupCap());
   renderGroupCandidates();
 }
 function addDraftPerson(): void {
@@ -2868,7 +2893,7 @@ function addDraftPerson(): void {
   const person = input?.value.trim() ?? '';
   if (!person) { input?.focus(); return; }
   if (draftPeople.includes(person) || draftAgents.has(person) || person === 'aeeis') { message('这位已经在群里。'); return; }
-  if (groupOccupancy() >= 6) { message('一个群聊最多 6 人。'); return; }
+  if (groupOccupancy() >= groupCap()) { message(`一个群聊最多 ${groupCap()} 人。`); return; }
   draftPeople = [...draftPeople, person];
   if (input) input.value = '';
   renderGroupCandidates();
@@ -2878,7 +2903,7 @@ async function createGroup(event: Event): Promise<void> {
   const title = $<HTMLInputElement>('group-title')?.value.trim() ?? '';
   if (!title) return;
   if (groupOccupancy() < 2) { message('群聊至少要 AEEIS 和另外一位。'); return; }
-  if (groupOccupancy() > 6) { message('一个群聊最多 6 人。'); return; }
+  if (groupOccupancy() > groupCap()) { message(`一个群聊最多 ${groupCap()} 人。`); return; }
   const room = await api<RoomSummary>('/rooms', { title, description: '群聊' });
   try {
     for (const agentId of draftAgents) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: agentId, role: 'agent' });
@@ -4244,6 +4269,8 @@ $('gb-new-bot-group')?.addEventListener('click', () => {
 $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-reuse')?.addEventListener('click', () => reuseRoster());
+$('group-cap')?.addEventListener('input', () => commitGroupCap(false));
+$('group-cap')?.addEventListener('change', () => commitGroupCap(true));
 $('group-newcomer-reason')?.addEventListener('input', () => {
   const proposal = $('group-proposal');
   if (proposal) proposal.textContent = groupProposalText();

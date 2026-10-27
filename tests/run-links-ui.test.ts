@@ -59,7 +59,7 @@ describe('group chat', () => {
     const doc = dom.window.document;
     expect(doc.getElementById('group-draft')?.hidden).toBe(false);
     expect(doc.getElementById('detail')?.hidden).toBe(true);
-    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 6');
+    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 10');
     (doc.getElementById('group-title') as HTMLInputElement).value = '发布协作';
     (doc.getElementById('group-create') as HTMLFormElement).requestSubmit();
     await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('至少'));

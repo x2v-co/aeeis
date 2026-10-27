@@ -350,12 +350,14 @@
 </section>
 <section id="group-draft" hidden="">
 <h2>新建群聊</h2>
-<p>AEEIS 始终在场。再加入 1 到 5 位：已准入的外部 Agent，或一位成员。内部的规划、研究和复核不会变成单独的联系人。</p>
+<p>AEEIS 始终在场，并算在人数里。再加入其他人：已准入的外部 Agent，或一位成员。内部的规划、研究和复核不会变成单独的联系人。</p>
 <form id="group-create">
 <label for="group-title">名称</label>
 <input id="group-title" required="" maxlength="80" placeholder="例如：发布协作">
-<p id="group-count-live" class="muted">1 / 6 · AEEIS</p>
-<p id="group-proposal" class="muted">提议：AEEIS 担任 PM。优先复用名单里已有的人。一共 1 / 6。创建前确认这一组。</p>
+<label for="group-cap">最多人数</label>
+<input id="group-cap" type="number" min="2" max="30" step="1" value="10" inputmode="numeric" aria-describedby="group-count-live">
+<p id="group-count-live" class="muted">1 / 10 · AEEIS</p>
+<p id="group-proposal" class="muted">提议：AEEIS 担任 PM。优先复用名单里已有的人。一共 1 / 10。创建前确认这一组。</p>
 <button id="group-reuse" type="button">按名单复用</button>
 <label for="group-newcomer-reason">名单以外的人</label>
 <input id="group-newcomer-reason" maxlength="200" placeholder="为什么现有的人不够">
