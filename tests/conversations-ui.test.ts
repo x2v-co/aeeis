@@ -35,6 +35,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     return lives.get(id);
   };
   let principal = 'owner';
+  const ownedBots: Array<Record<string, unknown>> = [];
   const fetch = vi.fn(async (url: string, request: any) => {
     if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
     const custom = options.handler?.(url, request);
@@ -194,6 +195,15 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url === `/api/runs/${runId}`) return response(runFixture());
     if (url.endsWith('/graphs')) return response({ execution: { nodes: [], edges: [] }, evidence: { nodes: [], edges: [] } });
     if (url.endsWith('/explanation')) return response({ schemaVersion: 'run-explanation/1', run: { id: runId, status: 'succeeded', privacy: 'internal', updatedAt: date }, attention: { kind: 'none', nextAction: 'done', blockers: [] }, plan: { tasks: { total: 1, pending: 0, running: 0, succeeded: 1 }, readyTaskIds: [], pendingTaskIds: [] }, execution: { eventCount: 0, modelCalls: { total: 0, started: 0, completed: 0, failed: 0, unknown: 0, discarded: 0 }, tools: { total: 0, completed: 0, failed: 0, unknown: 0 }, delegations: { total: 0, completed: 0, failed: 0, unknown: 0 } }, evidence: { sourceCount: 0, artifactCount: 0, receiptCount: 0, evidenceNodeCount: 0, memoryRefs: [] }, governance: { tools: [], agents: [] }, budget: {} });
+    if (url === '/api/bots' && request?.method === 'POST') {
+      const body = JSON.parse(request.body);
+      const existing = ownedBots.find(bot => bot.id === body.id);
+      if (existing) return response(existing);
+      const bot = { id: body.id ?? `bot_${String(ownedBots.length + 1).padStart(8, '0')}`, name: body.name, mark: body.mark ?? 'letter', color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}) };
+      ownedBots.push(bot);
+      return response(bot);
+    }
+    if (url === '/api/bots') return response(ownedBots);
     if (url.includes('/page?')) return response({ items: [], goals: [] });
     return response([]);
   });
@@ -1106,16 +1116,27 @@ describe('entry bots and group chats', () => {
     el<HTMLFormElement>('bot-create-form').requestSubmit();
     await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核'));
     expect(el('bot-create').hidden).toBe(true);
-    const stored = JSON.parse(dom.window.localStorage.getItem('aeeis.custom-bots') ?? '[]') as Array<{ name: string; color: string; background: string; mark: string }>;
-    expect(stored).toEqual([expect.objectContaining({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' })]);
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' });
     await vi.waitFor(() => expect(el('bot-profile-role').textContent).toContain('核对清单上的每一项'));
     expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
     expect(el('bots').textContent).not.toContain('纪要');
     el('gb-new-group').click();
-    expect(el('group-candidates').textContent ?? '').not.toContain('阿核');
+    expect(el('group-candidates').textContent ?? '').toContain('阿核');
     el('group-reuse').click();
-    expect(el('group-count-live').textContent).toContain('1 / 10');
-    expect(el('group-candidates').textContent ?? '').not.toContain('阿核');
+    expect(el('group-count-live').textContent).toContain('2 / 10');
+    expect(el('group-candidates').textContent ?? '').toContain('阿核');
+  });
+
+  it('uploads a Bot saved in this browser onto the account roster', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_migrated1', name: '阿迁', mark: 'letter', color: '#171717', background: '从这台浏览器迁到账号。' }]) } });
+    await ready();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿迁'));
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁', background: '从这台浏览器迁到账号。' });
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    el('gb-new-group').click();
+    expect(el('group-candidates').textContent ?? '').toContain('阿迁');
   });
 
   it('asks AEEIS to draft a background from a role and saves that text', async () => {
@@ -1137,8 +1158,8 @@ describe('entry bots and group chats', () => {
     expect(el('bots').textContent).not.toContain('纪要');
     el<HTMLFormElement>('bot-create-form').requestSubmit();
     await vi.waitFor(() => expect(el('bots').textContent).toContain('纪要'));
-    const stored = JSON.parse(dom.window.localStorage.getItem('aeeis.custom-bots') ?? '[]') as Array<{ role?: string; background: string }>;
-    expect(stored[0]).toMatchObject({ role: '把讨论收成可以核对的纪要', background: '负责把讨论收成可以核对的纪要。自己不代替人做决定。' });
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '纪要', role: '把讨论收成可以核对的纪要', background: '负责把讨论收成可以核对的纪要。自己不代替人做决定。' });
     expect(h.posts.filter(post => post.url === '/api/bots/background')).toHaveLength(1);
   });
 

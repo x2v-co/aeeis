@@ -59,10 +59,11 @@ import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
+import { OwnedBotConflict, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -393,6 +394,7 @@ export function buildApp(options: Options) {
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
+      if (route === '/api/bots' && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
@@ -425,7 +427,7 @@ export function buildApp(options: Options) {
     if (error instanceof ChannelIdentityUnavailable) return reply.code(503).send({ error: 'Channel identity resolver unavailable; event admission refused' });
     if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound || error instanceof CollaborationTriggerNotFound || error instanceof ProjectionNotFound || error instanceof ReminderNotFound) return reply.code(404).send({ error: error.message });
-    if (error instanceof ReminderConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof ReminderConflict || error instanceof OwnedBotConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof Conflict || error instanceof ThreadConflict) {
       const retrySameRequest = error instanceof ReplayablePreparationError;
       return reply.code(409).send({ error: error.message, ...(retrySameRequest ? { retrySameRequest: true } : {}) });
@@ -715,6 +717,29 @@ export function buildApp(options: Options) {
     const card = agentCardSchema.parse(request.body);
     try { return await options.agentDirectory.discover(card, new Date().toISOString(), principalOf(request).id); }
     catch (error) { throw new Conflict(error instanceof Error ? error.message : 'Agent discovery failed'); }
+  });
+  const ownedBotBody = z.object({
+    id: z.string().regex(/^bot_[a-z0-9-]{8,80}$/).optional(),
+    name: z.string().trim().min(1).max(40),
+    mark: z.enum(OWNED_BOT_MARKS),
+    color: z.enum(OWNED_BOT_COLORS),
+    background: z.string().trim().min(1).max(800),
+    role: z.string().trim().min(1).max(120).optional(),
+  }).strict();
+  app.get('/api/bots', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const principal = principalOf(request);
+    return (await options.ownedBots.list({ owner: principal.id, tenantId: principal.tenantId })).map(visibleOwnedBot);
+  });
+  app.post('/api/bots', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const body = ownedBotBody.parse(request.body);
+    const principal = principalOf(request);
+    const saved = await options.ownedBots.create({
+      name: body.name, mark: body.mark, color: body.color, background: body.background,
+      ...(body.id ? { id: body.id } : {}), ...(body.role ? { role: body.role } : {}),
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
   });
   app.post('/api/bots/background', async request => {
     if (!options.engine) throw new Conflict('模型尚未就绪');

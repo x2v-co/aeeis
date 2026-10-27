@@ -216,6 +216,8 @@ const DEMO_BOTS: RosterBot[] = [
 ];
 let agentSummaries: AgentSummary[] = [];
 let agentsLoaded = false;
+let ownedBotRecords: RosterBot[] = [];
+interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; createdAt?: string; updatedAt?: string }
 let roomSummaries: RoomSummary[] = [];
 let botGroups: BotGroups | undefined;
 let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
@@ -1350,15 +1352,24 @@ function pinLastDelivery(): void {
   updateConversationControls();
 }
 function usingDemoBots(): boolean {
-  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
+  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
 }
 function reservedBotName(name: string): boolean {
   const normalized = name.normalize('NFKC').trim();
   return ['所有人', '团队', 'AEEIS'].some(reserved => reserved.localeCompare(normalized, 'zh', { sensitivity: 'accent' }) === 0);
 }
-/** A Bot stored only in this browser has no server identity, so it cannot join a room. */
+/** A saved Bot joins a room once this account has the profile. A copy still waiting in this browser stays visible and stays out of the room. */
 function roomReadyBot(bot: RosterBot): boolean {
-  return bot.id !== 'aeeis' && !bot.id.startsWith('bot_') && !reservedBotName(bot.name);
+  if (bot.id === 'aeeis' || reservedBotName(bot.name)) return false;
+  if (bot.id.startsWith('bot_')) return ownedBotRecords.some(item => item.id === bot.id);
+  return true;
+}
+function ownedRosterBot(bot: OwnedBotView): RosterBot {
+  return { id: bot.id, name: bot.name, note: '', demo: false, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}) };
+}
+function rememberOwnedBot(bot: OwnedBotView): void {
+  const next = ownedRosterBot(bot);
+  ownedBotRecords = [...ownedBotRecords.filter(item => item.id !== next.id), next];
 }
 function loadCustomBots(): RosterBot[] {
   const raw = localStorage.getItem(CUSTOM_BOTS_KEY);
@@ -1402,8 +1413,26 @@ function rosterBots(): RosterBot[] {
   const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
-  const custom = loadCustomBots();
-  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...custom, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+  const serverIds = new Set(ownedBotRecords.map(bot => bot.id));
+  const pending = loadCustomBots().filter(bot => !serverIds.has(bot.id));
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...pending, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+}
+async function adoptLocalBots(): Promise<void> {
+  const local = loadCustomBots();
+  if (!local.length) return;
+  const kept: RosterBot[] = [];
+  for (const bot of local) {
+    try {
+      const saved = await api<OwnedBotView>('/bots', {
+        id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}),
+      });
+      rememberOwnedBot(saved);
+    } catch {
+      kept.push(bot);
+    }
+  }
+  if (kept.length) saveCustomBots(kept);
+  else localStorage.removeItem(CUSTOM_BOTS_KEY);
 }
 function loadBotGroups(): BotGroups {
   const raw = localStorage.getItem('aeeis.bot-groups');
@@ -4406,10 +4435,6 @@ function closeBotCreate(): void {
 function sameBotName(left: string, right: string): boolean {
   return left.localeCompare(right, 'zh', { sensitivity: 'accent' }) === 0;
 }
-function customBotId(): string {
-  const raw = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(16).slice(2)}`;
-  return `bot_${raw.replace(/[^a-z0-9-]/gi, '').toLowerCase()}`.slice(0, 84);
-}
 function backgroundFailure(error: unknown): string {
   const text = errorMessage(error);
   return text === '模型尚未就绪' ? '模型尚未就绪。可以自己写背景。' : text;
@@ -4430,14 +4455,20 @@ async function saveCreatedBot(event: Event): Promise<void> {
   if (!name) { botCreateStatus('先写下名字。'); $<HTMLInputElement>('bot-create-name')?.focus(); return; }
   if (reservedBotName(name)) { botCreateStatus('请换一个名字。所有人、团队和 AEEIS 留给群里的点名。'); return; }
   if (rosterBots().some(bot => sameBotName(bot.name, name))) { botCreateStatus('这个名字已经在名单上。'); return; }
-  const existing = loadCustomBots();
-  if (existing.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这台浏览器上最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
+  if (ownedBotRecords.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这个账号最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
   if (!background) { botCreateStatus('先写下背景，或给出角色定位再生成。'); $<HTMLTextAreaElement>('bot-create-background')?.focus(); return; }
-  const bot: RosterBot = { id: customBotId(), name, note: '', demo: false, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) };
-  saveCustomBots([...existing, bot]);
-  closeBotCreate();
-  renderBotRoster();
-  selectBot(bot.id);
+  setBotCreatePending(true);
+  botCreateStatus('正在保存。');
+  try {
+    const saved = await api<OwnedBotView>('/bots', { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) });
+    rememberOwnedBot(saved);
+    closeBotCreate();
+    renderBotRoster();
+    selectBot(saved.id);
+  } catch (error) {
+    setBotCreatePending(false);
+    botCreateStatus(errorMessage(error));
+  }
 }
 async function generateBotBackground(): Promise<void> {
   if (botCreateBusy) return;
@@ -5455,16 +5486,19 @@ async function refresh(): Promise<void> {
   if (linkedThreadId) { await refreshThread(); return; }
   if (conversationEnabled) await refreshConversation().catch(error => { $('conversation-error').textContent = errorMessage(error); });
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
-  const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage] = await Promise.all([
+  const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage, owned] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
     api<{ items: CompetitionSummary[] }>('/collaborations/competitions/page?limit=12').then(page => page.items), api<{ items: DebateSummary[] }>('/collaborations/debates/page?limit=12').then(page => page.items), api<ProjectionSummary[]>('/collaborations/projections?limit=12'), api<AgentSummary[]>('/agents?limit=50').catch(() => []),
     api<TriggerPolicySummary[]>('/collaborations/triggers/policies?limit=12').catch(() => []), api<TriggerDecisionSummary[]>('/collaborations/triggers/decisions?limit=20').catch(() => []), api<ReminderPage>(`/reminders/page?limit=20${reminderQuery}`).catch(() => ({ items: [] } as ReminderPage)),
+    api<OwnedBotView[]>('/bots').catch(() => null),
   ]);
   const runs = runPage.items;
   runSummaries = runs;
   roomSummaries = rooms;
   agentSummaries = agents;
   agentsLoaded = true;
+  if (owned) ownedBotRecords = owned.map(ownedRosterBot);
+  await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   renderAttentionInbox(runs);
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);

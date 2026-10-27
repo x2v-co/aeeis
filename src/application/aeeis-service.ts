@@ -30,6 +30,7 @@ import { isAudienceAllowed, normalizeKnowledgeSearchResult, validateKnowledgeHit
 import { contextAudienceSnapshotSchema, createContextAudienceSnapshot, type ContextAudienceSnapshot } from '../context-audience.js';
 import { goalContextSourceHash } from '../context-manifest-binding.js';
 import { PrincipalDirectoryUnavailable, type PrincipalDirectory } from '../security/principal-directory.js';
+import type { OwnedBotStore } from '../owned-bots.js';
 
 export class AeeisNotFound extends Error {}
 export class AeeisConflict extends Error {}
@@ -49,7 +50,7 @@ export class AeeisService {
     if (!this.store.changeAudit) throw new Error('Memory change audit is not configured');
     return this.store.changeAudit;
   }
-  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory) {}
+  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory, private readonly ownedBots?: Pick<OwnedBotStore, 'get'>) {}
 
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
@@ -175,8 +176,14 @@ export class AeeisService {
         if (error instanceof PrincipalDirectoryUnavailable) throw error;
         throw error;
       }
-      if (!entry || entry.principalId !== principalId || entry.tenantId !== tenantId) throw new RoomMembershipConflict('Target principal is not in this tenant');
-      if (entry.status !== 'active') throw new RoomMembershipConflict('Target principal is not active');
+      if (entry && entry.principalId === principalId && entry.tenantId === tenantId) {
+        if (entry.status !== 'active') throw new RoomMembershipConflict('Target principal is not active');
+      } else if (entry) {
+        throw new RoomMembershipConflict('Target principal is not in this tenant');
+      } else {
+        const bot = await this.ownedBots?.get(principalId);
+        if (!bot || bot.tenantId !== tenantId || bot.owner !== invitedBy) throw new RoomMembershipConflict('Target principal is not in this tenant');
+      }
     }
     return this.memberships.add(room.id, principalId, tenantId, role, invitedBy, now);
   }
