@@ -2211,6 +2211,45 @@ describe('entry bots and group chats', () => {
     expect(el('channel-board-note').textContent).not.toContain('还有没读到的交接');
     expect(h.posts).toHaveLength(0);
   });
+  it('does not reread earlier channel pages on the next refresh', async () => {
+    const first = Array.from({ length: 50 }, (_, index) => ({ id: `evt_old_${index}`, operation: 'publish', sequence: index + 1, actorType: 'principal', actorId: 'owner', type: 'message', content: `旧消息 ${index}`, createdAt: date }));
+    const later = { id: 'evt_later', operation: 'publish', sequence: 51, actorType: 'principal', actorId: 'owner', type: 'system', content: '后面的交接', evidenceRefs: ['conv_release', 'task_later', 'demo.release'], createdAt: date };
+    const arrived = { id: 'evt_new', operation: 'publish', sequence: 52, actorType: 'principal', actorId: 'owner', type: 'message', content: '新消息', createdAt: date };
+    const room = { id: 'room_keep', title: '翻页保持', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_later', title: '后面才记下', threadId: 'thread_later', status: 'discussion', createdAt: date }], messages: [], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_keep/members')) return response([{ id: 'member_release', roomId: 'room_keep', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_keep/session-events')) {
+        if (String(url).includes('limit=20')) return response({ items: [] });
+        if (String(url).includes('cursor=51')) return response({ items: [arrived] });
+        if (String(url).includes('cursor=')) return response({ items: [later] });
+        if (String(url).includes('limit=50')) return response({ items: first, nextCursor: '50' });
+        return response({ items: [] });
+      }
+      if (url === '/api/conversations/conv_release') return response(release);
+      return undefined;
+    } });
+    const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_keep/session-events') && !url.includes('limit=20'));
+    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('翻页保持'))!;
+    start(h.fetch);
+    await ready();
+    openRoom().click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('旧消息 0'));
+    expect(el('group-transcript').textContent).not.toContain('后面才记下');
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(el('channel-board').textContent).toContain('后面才记下'));
+    expect(reads().filter(url => url.includes('limit=50') && !url.includes('cursor='))).toHaveLength(1);
+    expect(reads().filter(url => url.includes('cursor=50'))).toHaveLength(1);
+    openRoom().click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('新消息'));
+    expect(el('group-transcript').textContent).toContain('旧消息 0');
+    expect(el('group-transcript').textContent).not.toContain('后面才记下');
+    expect(reads().filter(url => url.includes('limit=50') && !url.includes('cursor='))).toHaveLength(1);
+    expect(reads().filter(url => url.includes('cursor=50'))).toHaveLength(1);
+    expect(reads().filter(url => url.includes('cursor=51'))).toHaveLength(1);
+    expect(h.posts).toHaveLength(0);
+  });
   it('applies acceptance recorded after the first event page while the board is closed', async () => {
     const handoff = { id: 'evt_handoff', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
     const accepted = { id: 'evt_accept', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '验收通过', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };

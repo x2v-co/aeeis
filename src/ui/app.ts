@@ -217,9 +217,13 @@ let groupDraftOpen = false;
 let groupMembers: RoomMemberSummary[] = [];
 let groupEvents: SessionEventSummary[] = [];
 let laterChannelEvents: SessionEventSummary[] = [];
+let liveChannelEvents: SessionEventSummary[] = [];
 let groupEventCursor: string | undefined;
+let channelLoadedRoomId = '';
+let channelEventsCaughtUp = false;
 let channelReadEpoch = 0;
 let channelReadQueue: Promise<void> = Promise.resolve();
+let channelReadFlight: Promise<void> | undefined;
 const handoffViews = new Map<string, ConversationView>();
 let channelBoardOpen = false;
 let channelBoardEpoch = 0;
@@ -1636,7 +1640,39 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
 ];
 interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; lines: string[] }
 function channelLog(): SessionEventSummary[] {
-  return laterChannelEvents.length ? [...groupEvents, ...laterChannelEvents] : groupEvents;
+  if (!laterChannelEvents.length && !liveChannelEvents.length) return groupEvents;
+  return [...groupEvents, ...laterChannelEvents, ...liveChannelEvents];
+}
+function visibleChannelEvents(): SessionEventSummary[] {
+  return liveChannelEvents.length ? [...groupEvents, ...liveChannelEvents] : groupEvents;
+}
+function eventCursor(event: SessionEventSummary | undefined): string | undefined {
+  const sequence = event?.sequence;
+  return typeof sequence === 'number' && Number.isInteger(sequence) && sequence > 0 ? String(sequence) : undefined;
+}
+function noteEventPage(page: SessionEventPage, requestedCursor: string | undefined): void {
+  const next = page.nextCursor;
+  if (next && next !== requestedCursor) {
+    groupEventCursor = next;
+    channelEventsCaughtUp = false;
+    return;
+  }
+  const sequence = eventCursor(page.items?.at(-1));
+  groupEventCursor = sequence ?? requestedCursor;
+  channelEventsCaughtUp = true;
+}
+function resetChannelLog(): void {
+  groupEvents = [];
+  laterChannelEvents = [];
+  liveChannelEvents = [];
+  groupEventCursor = undefined;
+  channelLoadedRoomId = '';
+  channelEventsCaughtUp = false;
+  channelReadEpoch += 1;
+}
+function appendUnseen(items: SessionEventSummary[] | undefined, into: SessionEventSummary[]): void {
+  const seen = new Set(channelLog().map(event => event.id));
+  for (const item of items ?? []) if (!seen.has(item.id)) { into.push(item); seen.add(item.id); }
 }
 function boardDecision(conversationId: string, taskId: string): BoardDecision {
   const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, lines: [] };
@@ -1753,14 +1789,12 @@ function channelBoardIds(): string[] {
   return [...new Set(channelCitations().map(cite => cite.conversationId))];
 }
 async function absorbLaterEventsNow(roomId: string, epoch: number): Promise<void> {
-  for (let page = 0; page < 20 && groupEventCursor && openGroupId === roomId && epoch === channelReadEpoch; page += 1) {
+  for (let page = 0; page < 20 && groupEventCursor && !channelEventsCaughtUp && openGroupId === roomId && channelLoadedRoomId === roomId && epoch === channelReadEpoch; page += 1) {
     const cursor = groupEventCursor;
     const next = await api<SessionEventPage>(`/rooms/${encodeURIComponent(roomId)}/session-events?limit=50&cursor=${encodeURIComponent(cursor)}`).catch(() => undefined);
-    if (!next || openGroupId !== roomId || epoch !== channelReadEpoch) return;
-    const seen = new Set(channelLog().map(event => event.id));
-    for (const item of next.items ?? []) if (!seen.has(item.id)) laterChannelEvents.push(item);
-    if (!next.nextCursor || next.nextCursor === cursor) { groupEventCursor = next.nextCursor; return; }
-    groupEventCursor = next.nextCursor;
+    if (!next || openGroupId !== roomId || channelLoadedRoomId !== roomId || epoch !== channelReadEpoch) return;
+    appendUnseen(next.items, laterChannelEvents);
+    noteEventPage(next, cursor);
   }
 }
 function absorbLaterEvents(roomId: string, epoch: number): Promise<void> {
@@ -1793,7 +1827,7 @@ function renderChannelBoard(): void {
   const empty = $('group-thread-empty');
   if (board) board.hidden = !channelBoardOpen;
   if (transcript) transcript.hidden = channelBoardOpen;
-  if (empty) empty.hidden = channelBoardOpen || groupEvents.some(event => event.operation !== 'retract');
+  if (empty) empty.hidden = channelBoardOpen || visibleChannelEvents().some(event => event.operation !== 'retract');
   if (!channelBoardOpen || !columns || !failures) return;
   const cards = channelCitations().flatMap(cite => {
     const view = handoffViews.get(cite.conversationId);
@@ -1816,10 +1850,10 @@ function renderChannelBoard(): void {
     loads.set(card.ownerId, current);
   }
   const wip = [...loads.values()].filter(item => item.count > 3).map(item => `${item.name}进行中已有 ${item.count} 件。先完成或转交。`);
-  const more = groupEventCursor ? '还有没读到的交接。' : '';
+  const more = !channelEventsCaughtUp && groupEventCursor ? '还有没读到的交接。' : '';
   if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip, more].filter(Boolean).join(' ');
   const moreButton = $('channel-board-more');
-  if (moreButton) moreButton.hidden = !groupEventCursor;
+  if (moreButton) moreButton.hidden = channelEventsCaughtUp || !groupEventCursor;
   columns.replaceChildren();
   for (const column of BOARD_COLUMNS) {
     const section = element('section', '', 'channel-board-column');
@@ -2346,9 +2380,7 @@ function hideChannelSurfaces(): void {
 function leaveGroup(): void {
   openGroupId = '';
   groupMembers = [];
-  groupEvents = [];
-  laterChannelEvents = [];
-  groupEventCursor = undefined;
+  resetChannelLog();
   handoffViews.clear();
   groupDraftOpen = false;
   hideChannelSurfaces();
@@ -2365,9 +2397,7 @@ function leaveGroup(): void {
 function clearOpenGroup(): void {
   openGroupId = '';
   groupMembers = [];
-  groupEvents = [];
-  laterChannelEvents = [];
-  groupEventCursor = undefined;
+  resetChannelLog();
   handoffViews.clear();
   hideChannelSurfaces();
   localStorage.removeItem('aeeis.group');
@@ -2800,9 +2830,7 @@ function renderGroups(rooms: RoomSummary[]): void {
   if (openGroupId && !rooms.some(room => room.id === openGroupId && isManagedChat(room))) {
     openGroupId = '';
     groupMembers = [];
-    groupEvents = [];
-    laterChannelEvents = [];
-    groupEventCursor = undefined;
+    resetChannelLog();
     localStorage.removeItem('aeeis.group');
   }
   list.replaceChildren();
@@ -2826,7 +2854,7 @@ function renderGroups(rooms: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; groupEvents = []; laterChannelEvents = []; groupEventCursor = undefined; handoffViews.clear(); hideChannelSurfaces(); }
+  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -2834,7 +2862,57 @@ async function openGroup(id: string): Promise<void> {
   renderGroups(roomSummaries);
   $<HTMLTextAreaElement>('group-text')?.focus();
 }
-async function loadGroup(id: string): Promise<void> {
+function finishChannelRead(id: string, epoch: number): void {
+  if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
+  renderGroupTranscript();
+  void refreshHandoffViews();
+  if (channelBoardOpen) renderChannelBoard();
+}
+async function refreshLoadedChannel(id: string): Promise<void> {
+  const epoch = channelReadEpoch;
+  const membersPromise = api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`).catch(() => [] as RoomMemberSummary[]);
+  if (!channelEventsCaughtUp && groupEventCursor) {
+    const members = await membersPromise;
+    if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
+    groupMembers = members.filter(member => member.status === 'active');
+    finishChannelRead(id, epoch);
+    await absorbLaterEvents(id, epoch);
+    finishChannelRead(id, epoch);
+    return;
+  }
+  if (channelEventsCaughtUp && groupEventCursor) {
+    const cursor = groupEventCursor;
+    const [members, page] = await Promise.all([
+      membersPromise,
+      api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50&cursor=${encodeURIComponent(cursor)}`).catch((): SessionEventPage => ({ items: [] })),
+    ]);
+    if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
+    groupMembers = members.filter(member => member.status === 'active');
+    appendUnseen(page.items, liveChannelEvents);
+    noteEventPage(page, cursor);
+    finishChannelRead(id, epoch);
+    if (!channelEventsCaughtUp) {
+      await absorbLaterEvents(id, epoch);
+      finishChannelRead(id, epoch);
+    }
+    return;
+  }
+  const [members, events] = await Promise.all([
+    membersPromise,
+    api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50`).catch((): SessionEventPage => ({ items: [] })),
+  ]);
+  if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
+  groupMembers = members.filter(member => member.status === 'active');
+  const held = new Set([...laterChannelEvents, ...liveChannelEvents].map(event => event.id));
+  groupEvents = (events.items ?? []).filter(event => !held.has(event.id));
+  noteEventPage(events, undefined);
+  finishChannelRead(id, epoch);
+  if (!channelEventsCaughtUp) {
+    await absorbLaterEvents(id, epoch);
+    finishChannelRead(id, epoch);
+  }
+}
+async function loadGroupFromStart(id: string): Promise<void> {
   const epoch = ++channelReadEpoch;
   const [members, events] = await Promise.all([
     api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`).catch(() => [] as RoomMemberSummary[]),
@@ -2844,12 +2922,25 @@ async function loadGroup(id: string): Promise<void> {
   groupMembers = members.filter(member => member.status === 'active');
   groupEvents = events.items ?? [];
   laterChannelEvents = [];
-  groupEventCursor = events.nextCursor;
-  await absorbLaterEvents(id, epoch);
-  if (openGroupId !== id || epoch !== channelReadEpoch) return;
-  renderGroupTranscript();
-  void refreshHandoffViews();
-  if (channelBoardOpen) renderChannelBoard();
+  liveChannelEvents = [];
+  channelLoadedRoomId = id;
+  noteEventPage(events, undefined);
+  finishChannelRead(id, epoch);
+  if (!channelEventsCaughtUp) {
+    await absorbLaterEvents(id, epoch);
+    finishChannelRead(id, epoch);
+  }
+}
+function trackChannelRead(run: Promise<void>): Promise<void> {
+  const tracked = run.finally(() => { if (channelReadFlight === tracked) channelReadFlight = undefined; });
+  channelReadFlight = tracked;
+  return tracked;
+}
+async function loadGroup(id: string): Promise<void> {
+  if (channelReadFlight) await channelReadFlight.catch(() => undefined);
+  if (openGroupId !== id) return;
+  if (channelLoadedRoomId === id) return trackChannelRead(refreshLoadedChannel(id));
+  return trackChannelRead(loadGroupFromStart(id));
 }
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
@@ -2886,7 +2977,7 @@ function renderGroupTranscript(): void {
     if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
   });
   list.replaceChildren();
-  for (const event of groupEvents) {
+  for (const event of visibleChannelEvents()) {
     if (event.operation === 'retract') continue;
     const item = element('li', '', 'group-message');
     item.dataset.type = event.type;
@@ -2897,7 +2988,7 @@ function renderGroupTranscript(): void {
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
     list.append(item);
   }
-  if (empty) empty.hidden = channelBoardOpen || groupEvents.some(event => event.operation !== 'retract');
+  if (empty) empty.hidden = channelBoardOpen || visibleChannelEvents().some(event => event.operation !== 'retract');
   const transcript = $('group-transcript');
   if (transcript) transcript.hidden = channelBoardOpen;
   syncGroupSpeaker();
