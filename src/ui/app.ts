@@ -2908,10 +2908,9 @@ async function createGroup(event: Event): Promise<void> {
   groupDraftOpen = false;
   message('');
   await openGroup(room.id);
-  if (reason) {
+  if (reason && newcomers.length) {
     const roster = reused.length ? `复用${reused.join('、')}。` : '';
-    const extra = newcomers.length ? `名单以外的人：${newcomers.join('、')}。原因：${reason}。` : `原因：${reason}。`;
-    await channelPostSession('system', `分工：AEEIS 担任 PM。${roster}${extra}创建前已确认。`);
+    await channelPostSession('system', `分工：AEEIS 担任 PM。${roster}名单以外的人：${newcomers.join('、')}。原因：${reason}。`);
   }
   await refresh();
 }
@@ -4114,10 +4113,14 @@ async function saveChannelMemory(event: Event): Promise<void> {
   const roomId = openGroupId;
   const text = $<HTMLTextAreaElement>('channel-memory-text')?.value.trim() ?? '';
   if (!roomId || !text) return;
-  const goal = await channelGoal();
-  if (!goal || openGroupId !== roomId) return;
   const room = roomSummaries.find(item => item.id === roomId);
   const source = $<HTMLInputElement>('channel-memory-source')?.value.trim() || `频道：${room?.title || '群聊'}`;
+  if (source.startsWith('团队规则') || source.startsWith('带教：')) {
+    message('团队规则从复盘里收，带教从带教里记。这条请换一个来源。');
+    return;
+  }
+  const goal = await channelGoal();
+  if (!goal || openGroupId !== roomId) return;
   const kind = $<HTMLSelectElement>('channel-memory-kind')?.value || 'fact';
   const classification = $<HTMLSelectElement>('channel-memory-class')?.value || 'internal';
   await api(`/goals/${encodeURIComponent(goal.id)}/memories`, { kind, content: text, scope: 'project', classification, source, confidence: 1 });
@@ -4205,7 +4208,7 @@ function studioLabel(agentId: string): { label: string; task: string } {
 function studioHops(): StudioHop[] {
   const hops: StudioHop[] = [];
   for (const event of channelLog()) {
-    if (event.operation === 'retract') continue;
+    if (event.operation === 'retract' || event.type === 'task_update') continue;
     const cite = handoffCitation(event);
     if (!cite) continue;
     hops.push({
@@ -4415,8 +4418,15 @@ async function openChannelStudio(): Promise<void> {
 function inDigestWindow(iso: string | undefined, span: DigestWindow): boolean {
   const time = Date.parse(iso ?? '');
   if (!Number.isFinite(time)) return false;
-  const width = span === 'day' ? 86_400_000 : 7 * 86_400_000;
-  return Date.now() - time <= width && time <= Date.now() + 60_000;
+  const when = new Date(time);
+  const now = new Date();
+  if (when.getTime() > now.getTime() + 60_000) return false;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (span === 'day') return when.getTime() >= today.getTime();
+  const week = new Date(today);
+  const weekday = week.getDay();
+  week.setDate(week.getDate() - (weekday === 0 ? 6 : weekday - 1));
+  return when.getTime() >= week.getTime();
 }
 function digestNeedsYou(): number {
   const seen = new Set<string>();
@@ -4432,21 +4442,31 @@ function digestNeedsYou(): number {
   }
   return count;
 }
+function digestTaskCount(events: SessionEventSummary[], match: (event: SessionEventSummary) => boolean): number {
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (!match(event)) continue;
+    const cite = handoffCitation(event);
+    if (!cite) continue;
+    seen.add(`${cite.conversationId}\0${cite.taskId}`);
+  }
+  return seen.size;
+}
 function renderDigestBody(): void {
   const body = $('channel-digest-body');
   if (!body) return;
   const events = channelLog().filter(event => event.operation !== 'retract' && inDigestWindow(event.createdAt, digestWindow));
-  const handoffs = events.filter(event => Boolean(handoffCitation(event))).length;
-  const blocked = events.filter(event => event.type === 'task_update' && event.content.trim().startsWith('阻塞：')).length;
-  const done = events.filter(event => event.type === 'task_update' && event.content.trim() === '验收通过').length;
+  const handoffs = events.filter(event => event.type !== 'task_update' && Boolean(handoffCitation(event))).length;
+  const blocked = digestTaskCount(events, event => event.type === 'task_update' && event.content.trim().startsWith('阻塞：'));
+  const done = digestTaskCount(events, event => event.type === 'task_update' && event.content.trim() === '验收通过');
   const label = digestWindow === 'day' ? '今日' : '本周';
-  body.replaceChildren(element('p', `${label}：交接 ${handoffs}，阻塞 ${blocked}，完成 ${done}。现在需要你 ${digestNeedsYou()}。`), element('small', '花费记在各件事的抽屉里。'));
+  body.replaceChildren(element('p', `${label}：交接 ${handoffs}，阻塞 ${blocked}，完成 ${done}。现在需要你 ${digestNeedsYou()}。`), element('small', '花费记在各件事的抽屉里。今日和本周按这台机器的本地日历，一周从周一开始。'));
 }
-async function scopedMemories(prefix: string): Promise<{ goal?: GoalSummary; items: MemoryView[] }> {
+async function scopedMemories(selector: { exact?: string; prefix?: string; kind?: string }): Promise<{ goal?: GoalSummary; items: MemoryView[] }> {
   const goal = await listedChannelGoal();
   if (!goal) return { items: [] };
   const memories = await api<MemoryView[]>(`/goals/${encodeURIComponent(goal.id)}/memories?limit=50`).catch(() => [] as MemoryView[]);
-  return { goal, items: memories.filter(item => item.state !== 'retracted' && item.state !== 'superseded' && item.source.startsWith(prefix)) };
+  return { goal, items: memories.filter(item => item.state !== 'retracted' && item.state !== 'superseded' && (!selector.kind || item.kind === selector.kind) && (selector.exact ? item.source === selector.exact : Boolean(selector.prefix && item.source.startsWith(selector.prefix)))) };
 }
 function renderScopedMemories(list: HTMLElement, goal: GoalSummary | undefined, items: MemoryView[], empty: string, reload: () => Promise<void>): void {
   list.replaceChildren();
@@ -4474,7 +4494,7 @@ async function renderTeamRules(): Promise<void> {
   const list = $('channel-rule-list');
   const roomId = openGroupId;
   if (!list || !roomId) return;
-  const loaded = await scopedMemories('团队规则');
+  const loaded = await scopedMemories({ exact: '团队规则', kind: 'decision' });
   if (openGroupId !== roomId) return;
   renderScopedMemories(list, loaded.goal, loaded.items, '这个频道还没有团队规则。', renderTeamRules);
 }
@@ -4532,7 +4552,7 @@ async function renderTeachingSaved(): Promise<void> {
   const list = $('channel-teach-saved');
   const roomId = openGroupId;
   if (!list || !roomId) return;
-  const loaded = await scopedMemories('带教：');
+  const loaded = await scopedMemories({ prefix: '带教：', kind: 'note' });
   if (openGroupId !== roomId) return;
   renderScopedMemories(list, loaded.goal, loaded.items, '这个频道还没有带教草案。', renderTeachingSaved);
 }
@@ -4606,9 +4626,12 @@ $('studio-speed')?.addEventListener('click', () => {
 document.addEventListener('keydown', event => {
   const panel = $('channel-studio');
   if (!panel || panel.hidden) return;
-  const target = event.target as HTMLElement | null;
-  const tag = target?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (target?.closest('button, a, input, textarea, select, summary, [contenteditable="true"]')) return;
+  const role = target?.getAttribute('role');
+  if (role === 'button' || role === 'link' || role === 'checkbox' || role === 'switch' || role === 'textbox') return;
+  const atRoot = !target || target === document.body || target === document.documentElement;
+  if (!atRoot && !panel.contains(target)) return;
   if (event.key === ' ') {
     event.preventDefault();
     if (studioPlaying) { stopStudioPlay(); renderStudio(); }

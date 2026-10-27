@@ -2525,6 +2525,7 @@ describe('entry bots and group chats', () => {
   it('shows the channel studio without executing', async () => {
     const now = new Date().toISOString();
     const handoff = { id: 'evt_handoff', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_run', 'demo.release'], createdAt: now };
+    const blocked = { id: 'evt_block', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '阻塞：等权限', evidenceRefs: ['conv_release', 'task_run', 'demo.release'], createdAt: now };
     const room = { id: 'room_studio', title: '工作室房间', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: now, runId: 'run_pause', latestRunId: 'run_pause' }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
@@ -2532,7 +2533,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/rooms/room_studio/members')) return response([{ id: 'member_release', roomId: 'room_studio', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_studio/session-events')) {
         if (String(url).includes('limit=20')) return response({ items: [] });
-        return response({ items: [handoff] });
+        return response({ items: [handoff, blocked] });
       }
       if (url === '/api/conversations/conv_release') return response(release);
       return undefined;
@@ -2550,9 +2551,16 @@ describe('entry bots and group chats', () => {
     expect(stage.textContent).toContain('执行中');
     expect(stage.textContent).toContain('1 人在忙 · 1 人空闲');
     expect(stage.querySelector('caption')?.textContent).toBe('团队状态');
+    expect(el('studio-replay-caption').textContent).toContain('可以回放 1 次交接');
+    expect(el('channel-studio-body').textContent).not.toContain('阻塞：');
     clickText('关系网', el('channel-studio'));
     expect(el('channel-studio-body').textContent).toContain('你 → 发布');
     expect(el('channel-studio-body').textContent).toContain('1 次 · 单向');
+    const graph = doc().querySelector<HTMLButtonElement>('[data-studio-view="graph"]')!;
+    const space = new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+    graph.dispatchEvent(space);
+    expect(space.defaultPrevented).toBe(false);
+    expect(el('studio-play').textContent).toBe('回放');
     expect(el('studio-replay-caption').textContent).not.toContain('交给发布');
     doc().body.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     expect(el('studio-replay-caption').textContent).toContain('1 / 1');
@@ -2571,18 +2579,31 @@ describe('entry bots and group chats', () => {
     expect(h.posts).toHaveLength(0);
   });
   it('summarizes the channel and keeps teaching on the channel', async () => {
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const todayStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - (weekStart.getDay() === 0 ? 6 : weekStart.getDay() - 1));
+    const now = nowDate.toISOString();
+    const beforeToday = new Date(todayStart.getTime() - 60_000).toISOString();
+    const beforeWeek = new Date(weekStart.getTime() - 60_000).toISOString();
+    const beforeTodayInWeek = Date.parse(beforeToday) >= weekStart.getTime();
     const cite = (taskId: string) => ['conv_release', taskId, 'demo.release'];
-    const mark = (id: string, type: string, content: string, taskId: string) => ({ id, operation: 'publish', actorType: 'principal', actorId: 'owner', type, content, evidenceRefs: cite(taskId), createdAt: now });
+    const mark = (id: string, type: string, content: string, taskId: string, createdAt = now) => ({ id, operation: 'publish', actorType: 'principal', actorId: 'owner', type, content, evidenceRefs: cite(taskId), createdAt });
     const events = [
       mark('evt_run', 'system', '交给发布', 'task_run'),
       mark('evt_block', 'system', '交给待确认', 'task_block'),
       mark('evt_block_note', 'task_update', '阻塞：等权限', 'task_block'),
+      mark('evt_block_again', 'task_update', '阻塞：又卡在定价', 'task_block'),
       mark('evt_done', 'task_update', '验收通过', 'task_done'),
+      mark('evt_yesterday', 'system', '昨天的交接', 'task_old', beforeToday),
+      mark('evt_lastweek', 'system', '上周的交接', 'task_older', beforeWeek),
     ];
+    const weekHandoffs = 2 + (beforeTodayInWeek ? 1 : 0);
     const room = { id: 'room_digest', title: '复盘房间', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const goals: Array<{ id: string; title: string; status: string; createdAt: string; roomId?: string }> = [];
-    const memories: Array<{ id: string; kind: string; scope: string; classification: string; content: string; source: string; confidence: number; state: string }> = [];
+    const memories: Array<{ id: string; kind: string; scope: string; classification: string; content: string; source: string; confidence: number; state: string }> = [
+      { id: 'memory_hand', kind: 'fact', scope: 'project', classification: 'internal', content: '手填的事实', source: '团队规则（手填来源）', confidence: 1, state: 'active' },
+    ];
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [
       { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: now },
       { id: 'task_block', title: '等权限的事', threadId: 'thread_block', status: 'discussion', createdAt: now },
@@ -2617,17 +2638,28 @@ describe('entry bots and group chats', () => {
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('复盘房间'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
     el('channel-digest-open').click();
-    await vi.waitFor(() => expect(el('channel-digest-body').textContent).toContain('本周：交接 4，阻塞 1，完成 1。现在需要你 1。'));
+    await vi.waitFor(() => expect(el('channel-digest-body').textContent).toContain(`本周：交接 ${weekHandoffs}，阻塞 1，完成 1。现在需要你 1。`));
     expect(el('channel-digest-body').textContent).toContain('花费记在各件事的抽屉里');
+    expect(el('channel-digest-body').textContent).not.toContain('上周的交接');
     expect(el('channel-rule-list').textContent).toContain('这个频道还没有团队规则');
+    expect(el('channel-rule-list').textContent).not.toContain('手填的事实');
     expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(0);
     clickText('今日', el('channel-digest'));
-    expect(el('channel-digest-body').textContent).toContain('今日：交接 4，阻塞 1，完成 1。现在需要你 1。');
+    expect(el('channel-digest-body').textContent).toContain('今日：交接 2，阻塞 1，完成 1。现在需要你 1。');
+    expect(el('channel-digest-body').textContent).not.toContain('昨天的交接');
     el<HTMLTextAreaElement>('channel-rule-text').value = '发布风险必须先查变更记录';
     el<HTMLFormElement>('channel-rule-form').requestSubmit();
     await vi.waitFor(() => expect(el('channel-rule-list').textContent).toContain('发布风险必须先查变更记录'));
     expect(el('channel-rule-list').textContent).toContain('来源：团队规则');
+    expect(el('channel-rule-list').textContent).not.toContain('手填的事实');
     expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(1);
+    el('channel-memory-open').click();
+    await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('手填的事实'));
+    el<HTMLTextAreaElement>('channel-memory-text').value = '另一条事实';
+    el<HTMLInputElement>('channel-memory-source').value = '团队规则（手填来源）';
+    el<HTMLFormElement>('channel-memory-form').requestSubmit();
+    expect(el('error').textContent).toContain('这条请换一个来源');
+    expect(h.posts.filter(post => String(post.url).includes('/memories'))).toHaveLength(1);
     expect(h.posts.find(post => String(post.url).includes('/memories'))?.body).toMatchObject({ kind: 'decision', scope: 'project', classification: 'internal', source: '团队规则', content: '发布风险必须先查变更记录' });
     el('channel-teach-open').click();
     await vi.waitFor(() => expect(el('channel-teach-saved').textContent).toContain('这个频道还没有带教草案'));
@@ -2653,7 +2685,7 @@ describe('entry bots and group chats', () => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
       if (url === '/api/rooms' && method === 'POST') {
-        const room = { id: 'room_reuse', title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
+        const room = { id: `room_reuse_${rooms.length}`, title: body.title, description: body.description, status: 'active', createdAt: date, updatedAt: date };
         rooms.unshift(room);
         return response(room);
       }
@@ -2692,6 +2724,14 @@ describe('entry bots and group chats', () => {
     reason.value = '现有的人没有发布权限';
     reason.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     expect(el('group-proposal').textContent).toContain('原因已写下');
+    el<HTMLInputElement>('group-title').value = '只复用';
+    el<HTMLFormElement>('group-create').requestSubmit();
+    await vi.waitFor(() => expect(el('groups').textContent).toContain('只复用'));
+    expect(h.posts.some(post => post.body?.type === 'system')).toBe(false);
+    el('gb-new-group').click();
+    el('group-reuse').click();
+    const nextReason = el<HTMLInputElement>('group-newcomer-reason');
+    nextReason.value = '现有的人没有发布权限';
     el<HTMLInputElement>('group-person').value = 'member.editor';
     el('group-add-person').click();
     expect(el('group-proposal').textContent).toContain('名单以外：member.editor');
@@ -2702,6 +2742,7 @@ describe('entry bots and group chats', () => {
     expect(division?.body.content).toContain('复用发布、研究、纪要');
     expect(division?.body.content).toContain('名单以外的人：member.editor');
     expect(division?.body.content).toContain('原因：现有的人没有发布权限');
+    expect(division?.body.content).not.toContain('创建前已确认');
     expect(division?.body).not.toHaveProperty('evidenceRefs');
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('分工：AEEIS 担任 PM'));
