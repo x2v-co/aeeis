@@ -187,6 +187,14 @@ function executionView(run: AgentRun | undefined): { steps: Array<{ title: strin
   const evidence = [...new Set(run.artifacts.map(item => clipTitle(item.title)).filter(Boolean))].slice(0, 6);
   return evidence.length ? { steps, evidence } : { steps };
 }
+/** The one external action waiting for the owner. Its arguments stay on the Run; the key ties a decision to exactly this call. */
+function pendingAction(run: AgentRun | undefined): { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string } | undefined {
+  const action = run?.actionApproval;
+  if (!run || run.status !== 'needs_approval' || action?.status !== 'pending') return;
+  const step = clipTitle(run.plans.at(-1)?.nodes.find(node => node.id === action.taskId)?.title ?? '');
+  const reason = action.reason.trim();
+  return { kind: action.kind, ref: action.ref, reason: reason.length > 600 ? `${reason.slice(0, 600)}…` : reason, idempotencyKey: action.idempotencyKey, ...(step ? { step } : {}) };
+}
 function pendingQuestion(run: { status: string; question?: { text?: string } } | undefined): { text: string } | undefined {
   if (!run || run.status !== 'needs_input') return;
   const text = run.question?.text?.trim();
@@ -407,13 +415,14 @@ export class ConversationService {
       const memory = taskMemory(run);
       const approval = pendingApproval(run);
       const question = pendingQuestion(run);
+      const action = pendingAction(run);
       let machine: ReturnType<typeof machineView> | undefined;
       if (this.machines && task.latestRunId) {
         try { machine = machineView(await this.machines(task.latestRunId)); }
         catch { machine = { state: 'unknown', ready: false }; }
       }
       const execution = executionView(run);
-      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
+      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);

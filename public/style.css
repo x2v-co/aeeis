@@ -1397,6 +1397,17 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 .plan-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .plan-card-revision { display: grid; gap: 8px; }
 .plan-card-revision[hidden] { display: none; }
+/* Decision card: the one thing a Run needs from you, under its plan. Ochre marks a person is needed. */
+.decision-card { display: grid; gap: 10px; max-width: 76ch; margin: 8px 0 4px; padding: 14px 16px; border: 1px solid var(--amber); border-radius: 12px; background: var(--surface); }
+.decision-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.decision-card-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; color: var(--amber); background: #fbf6ea; font: 500 11px var(--mono); }
+.decision-card-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.decision-card-step { color: var(--muted); font: 500 11px var(--mono); overflow-wrap: anywhere; }
+.decision-card-title { font-size: 15px; font-weight: 650; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.conversation-message .decision-card-note, .conversation-message .decision-card-reason, .conversation-message .decision-card-question { margin: 0; color: var(--ink-soft); }
+.conversation-message .decision-card-reason { padding: 10px 12px; border-radius: 8px; background: var(--paper-deep); }
+.decision-card-actions, .decision-card-more { display: flex; flex-wrap: wrap; gap: 8px; }
+.decision-card-reason[hidden], .decision-card-more[hidden] { display: none; }
 .conversation-message button { margin: 8px 8px 0 0; font-size: 12px; }
 .conversation-panel button { min-height: 36px; }
 .conversation-panel :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }

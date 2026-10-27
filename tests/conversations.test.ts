@@ -1207,6 +1207,33 @@ describe('single-entry conversation routing', () => {
     expect(approvedTask.status).not.toBe('needs_approval');
     expect(f.notify).toHaveBeenCalled();
   });
+  it('exposes one pending action for an owner decision without its arguments, and drops it once decided', async () => {
+    const f = await fixture(), entry = await f.create();
+    const a = await f.addTask(entry.id, '任务甲');
+    const aId = a.message.route.taskIds[0];
+    const started = await f.post(entry.id, { text: '执行任务甲', taskIds: [aId], expectedRevision: a.conversation.revision, intent: 'execute' });
+    expect(started.statusCode, started.body).toBe(202);
+    const runId = started.json().runId;
+    await f.engine.advance(runId);
+    const planned = (await f.fresh(entry.id)).tasks.find((item: { id: string }) => item.id === aId);
+    expect(planned.pendingAction).toBeUndefined();
+    const approved = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/approve`, headers: f.headers, payload: { planHash: planned.pendingApproval.planHash, planVersion: planned.pendingApproval.planVersion } });
+    expect(approved.statusCode, approved.body).toBe(200);
+    // Stand in for a gated tool call (the gate itself is covered by action-approval.test.ts).
+    await f.repository.mutate(runId, run => {
+      run.status = 'needs_approval';
+      run.actionApproval = { status: 'pending', kind: 'tool', ref: 'publish@1', taskId: 'work', idempotencyKey: 'call-key-1', inputHash: 'secret-input-hash', reason: '会对外发布一篇文章', requestedAt: new Date().toISOString() };
+    });
+    const waiting = await f.fresh(entry.id);
+    const task = waiting.tasks.find((item: { id: string }) => item.id === aId);
+    expect(task.status).toBe('needs_approval');
+    expect(task.pendingApproval).toBeUndefined();
+    expect(task.pendingAction).toEqual({ kind: 'tool', ref: 'publish@1', reason: '会对外发布一篇文章', idempotencyKey: 'call-key-1', step: 'Work' });
+    expect(JSON.stringify(waiting)).not.toContain('secret-input-hash');
+    expect(JSON.stringify(waiting)).not.toContain('Complete task');
+    await f.repository.mutate(runId, run => { run.actionApproval = { ...run.actionApproval!, status: 'denied', decision: 'deny' }; run.status = 'running'; });
+    expect((await f.fresh(entry.id)).tasks.find((item: { id: string }) => item.id === aId).pendingAction).toBeUndefined();
+  });
   it('answers and retries from the task row without moving focus, and priority only changes scheduling rank', async () => {
     const f = await fixture(), entry = await f.create();
     const a = await f.addTask(entry.id, '任务甲');

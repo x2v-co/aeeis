@@ -463,6 +463,66 @@ describe('single-entry conversation workbench', () => {
     expect(drop.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/revise-plan'))).toBe(false);
   });
 
+  it('asks for one action decision in the transcript: approve once, deny, why, and always or block under more', async () => {
+    const waitingView = () => {
+      const view = fixture();
+      view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId,
+        pendingAction: { kind: 'tool', ref: 'publish@1', reason: '会对外发布一篇文章', idempotencyKey: 'call-key-1', step: '发布公告' },
+        execution: { steps: [{ title: '写公告', state: 'done' }, { title: '发布公告', state: 'current' }] } } as any;
+      view.messages.push({ id: 'asked', role: 'user', text: '写好并发布公告', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+      return view;
+    };
+    const card = () => doc().querySelector<HTMLElement>('#conversation-messages .decision-card[data-decision-task="task_a"]');
+    const decide = async (decision: string) => {
+      const h = harness(waitingView()); if (dom) dom.window.close(); start(h.fetch); await ready();
+      await vi.waitFor(() => expect(card()).not.toBeNull());
+      if (decision === 'always' || decision === 'block') card()!.querySelector<HTMLButtonElement>('[data-card-more]')!.click();
+      card()!.querySelector<HTMLButtonElement>(`[data-card-decision="${decision}"]`)!.click();
+      await vi.waitFor(() => expect(h.posts.some(post => post.url === `/api/runs/${runId}/approve-action`)).toBe(true));
+      expect(h.posts.find(post => post.url === `/api/runs/${runId}/approve-action`)?.body).toEqual({ idempotencyKey: 'call-key-1', decision });
+      expect(h.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/messages'))).toBe(false);
+    };
+
+    const h = harness(waitingView()); start(h.fetch); await ready();
+    await vi.waitFor(() => expect(card()).not.toBeNull());
+    expect(card()!.dataset.kind).toBe('action');
+    expect(card()!.textContent).toContain('想调用 publish@1');
+    expect(card()!.querySelector('.decision-card-step')?.textContent).toBe('发布公告');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('等你决定一个动作');
+    expect(doc().querySelector('#conversation-messages .plan-card [data-plan-start]')).toBeNull();
+    const reason = card()!.querySelector<HTMLElement>('.decision-card-reason')!;
+    expect(reason.hidden).toBe(true);
+    card()!.querySelector<HTMLButtonElement>('[data-card-why]')!.click();
+    expect(reason.hidden).toBe(false);
+    expect(reason.textContent).toBe('会对外发布一篇文章');
+    expect(card()!.querySelector('[data-card-why]')!.getAttribute('aria-expanded')).toBe('true');
+    expect(card()!.querySelector<HTMLElement>('.decision-card-more')!.hidden).toBe(true);
+    expect([...card()!.querySelectorAll('.decision-card-actions button')].map(item => item.textContent)).toEqual(['批准', '不要', '为什么？', '更多']);
+    expect(h.posts).toHaveLength(0);
+
+    for (const decision of ['once', 'deny', 'always', 'block']) await decide(decision);
+  });
+
+  it('asks the Run question in the transcript and sends the answer', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_input', runId, latestRunId: runId, pendingQuestion: { text: '发布到哪个频道？' },
+      execution: { steps: [{ title: '写公告', state: 'current' }] } } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: '写好并发布公告', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+    const h = harness(view); start(h.fetch); await ready();
+    const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .decision-card[data-kind="question"]'); expect(found).not.toBeNull(); return found!; });
+    expect(card.textContent).toContain('发布到哪个频道？');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('等你回答');
+    card.querySelector<HTMLButtonElement>('[data-question-submit]')!.click();
+    await vi.waitFor(() => expect(el('conversation-error').textContent).toContain('请先写下回答'));
+    expect(h.posts).toHaveLength(0);
+    const field = doc().querySelector<HTMLTextAreaElement>('#conversation-messages textarea[data-question-answer]')!;
+    field.value = '发到 #release';
+    doc().querySelector<HTMLButtonElement>('#conversation-messages [data-question-submit]')!.click();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === `/api/runs/${runId}/answer`)).toBe(true));
+    expect(h.posts.find(post => post.url === `/api/runs/${runId}/answer`)?.body).toEqual({ answer: '发到 #release' });
+    expect(messagePosts(h)).toHaveLength(0);
+  });
+
   it('shows a running plan without decision buttons', async () => {
     const view = fixture();
     view.tasks[0] = { ...view.tasks[0]!, status: 'running', runId, latestRunId: runId,
