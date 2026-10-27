@@ -321,23 +321,23 @@
 <option value="keep">保持焦点（临时提问 / 回复其他任务）</option>
 <option value="switch">切换到本条消息关联的任务</option>
 </select>
-<p id="conversation-send-note" class="muted">发送讨论只保存记录，不生成模型回答。选这个人，只是标明这句话是它说的；它不会自己回复。执行使用“更多设置”中的资料、工具和预算；创建 Run 不代表批准计划。</p>
+<p id="conversation-send-note" class="muted">发送会交给 AEEIS 去做：先出计划，计划显示在对话里。“只记下来”只保存记录，不生成模型回答。选这个人，只是标明这句话是它说的；它不会自己回复，也不会启动执行。执行使用“更多设置”中的资料、工具和预算。</p>
 </details>
 <div class="quick-input-row">
 <label class="sr-only" for="life-speaker">说话人</label>
 <select id="life-speaker" aria-label="说话人"><option value="">你</option></select>
 <label class="sr-only" for="conversation-text">消息</label>
-<textarea id="conversation-text" rows="1" required maxlength="7000" aria-describedby="conversation-send-note" placeholder="写下要推进的事，或补充讨论"></textarea>
-<button id="conversation-send" type="submit">发送讨论</button>
+<textarea id="conversation-text" rows="1" required maxlength="7000" aria-describedby="conversation-send-note" placeholder="说出你想要的结果"></textarea>
+<button id="conversation-send" type="submit">发送</button>
 </div>
 <div class="conversation-actions">
 <label class="sr-only" for="execution-review">执行审核</label>
 <select id="execution-review" aria-describedby="conversation-execution-note">
 <option value="required">需要审批</option>
-<option value="auto">自动</option>
+<option value="auto" selected>自动</option>
 <option value="yolo">自动执行</option>
 </select>
-<button id="conversation-execute" type="button" class="quiet-button">创建执行 Run</button>
+<button id="conversation-note" type="button" class="quiet-button">只记下来</button>
 <p id="conversation-execution-note" class="muted"></p>
 </div>
 </form>

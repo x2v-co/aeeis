@@ -214,11 +214,12 @@ const el = <T extends HTMLElement = HTMLElement>(id: string) => doc().getElement
 function fill(id: string, value: string) { const input = el<HTMLInputElement>(id); input.value = value; input.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }
 function submit() { el('conversation-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); }
 function clickText(text: string, root: ParentNode = doc()) { const control = [...root.querySelectorAll('button')].find(button => button.textContent === text); expect(control, text).toBeDefined(); control!.click(); }
+async function sendReady(label = '发送') { await vi.waitFor(() => { expect(el('conversation-send').textContent).toBe(label); expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false); }); }
 async function ready() { await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案')); }
 const messagePosts = (h: ReturnType<typeof harness>) => h.posts.filter(post => post.url.endsWith('/messages'));
 
 describe('single-entry conversation workbench', () => {
-  it('defaults to discussion, uses the authoritative focus and shows an honest acknowledgement without model execution', async () => {
+  it('only records the message when the model is not ready, uses the authoritative focus and shows an honest acknowledgement', async () => {
     const h = harness(undefined, { model: false }); start(h.fetch); await ready();
     fill('conversation-text', '补充讨论背景'); submit();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执：已记录讨论'));
@@ -227,7 +228,8 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-messages').textContent).toContain('未调用模型');
     expect(el<HTMLAnchorElement>('entry-team').textContent).toBe('多 Bot 频道');
     expect(el<HTMLAnchorElement>('entry-team').getAttribute('href')).toBe('/team/');
-    expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(true);
+    expect(el('conversation-send').textContent).toBe('记下来');
+    expect(el('conversation-execution-note').textContent).toContain('只记下来');
     expect(h.posts.some(post => /\/runs$|\/approve$/.test(post.url))).toBe(false);
     expect(dom.window.getComputedStyle(el('quick-run')).display).toBe('none');
     expect(el('new-run')).not.toBeNull();
@@ -238,7 +240,7 @@ describe('single-entry conversation workbench', () => {
     el('conversation-sync').click();
     await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('周报已完成'));
     expect(el('conversation-focus').textContent).toContain('发布方案');
-    clickText('回复这条消息'); fill('conversation-text', '周报还有哪些问题？'); submit();
+    clickText('回复这条消息'); fill('conversation-text', '周报还有哪些问题？'); el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(messagePosts(h)[0]?.body).toMatchObject({ replyTo: 'notice', focus: 'keep', intent: 'discuss' });
     expect(el('conversation-focus').textContent).toContain('发布方案');
@@ -270,7 +272,7 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts).toHaveLength(0);
     expect(el<HTMLSelectElement>('conversation-target').value).toBe('task_b');
     expect(el('conversation-status').textContent).toContain('尚未执行');
-    submit(); await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    el('conversation-note').click(); await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(messagePosts(h)[0]?.body).toMatchObject({ text: '继续那个任务', replyTo: 'ambiguous', taskIds: ['task_b'], focus: 'keep', intent: 'discuss' });
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
   });
@@ -282,7 +284,8 @@ describe('single-entry conversation workbench', () => {
     clickText('纠正归属');
     expect(el<HTMLTextAreaElement>('conversation-text').readOnly).toBe(true);
     expect(el('conversation-correction-label').textContent).toContain('只属于周报的事实');
-    expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(true);
+    expect(el<HTMLButtonElement>('conversation-note').disabled).toBe(true);
+    expect(el('conversation-send').textContent).toBe('保存归属纠正');
     fill('conversation-target', 'task_b');
     el<HTMLButtonElement>('conversation-send').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
@@ -297,32 +300,32 @@ describe('single-entry conversation workbench', () => {
     expect(el<HTMLTextAreaElement>('conversation-text').readOnly).toBe(false);
   });
 
-  it('creates execution only with its explicit button and forwards bounded options, never approval', async () => {
+  it('starts execution from the send button and forwards bounded options, never approval', async () => {
     const h = harness(); start(h.fetch); await ready();
     fill('conversation-target', '__new'); fill('conversation-task-title', '独立发布检查'); fill('conversation-text', '核查发布风险');
     fill('conversation-focus-effect', 'switch'); fill('materials', '资料 <script>unsafe</script>'); fill('allowed-tools', 'read'); fill('model-budget-tokens', '1200');
-    el('conversation-execute').click();
+    submit();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { executionReview: 'required', planning: 'dag', allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '独立发布检查' }, runOptions: { executionReview: 'auto', planning: 'dag', allowedTools: ['read'], modelBudget: { tokens: 1200 }, materials: [{ content: '资料 <script>unsafe</script>' }] } });
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goal');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('goalId');
     expect(messagePosts(h)[0]?.body.runOptions).not.toHaveProperty('taskExecution');
     expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
   });
 
-  it('keeps the chosen execution review on the next explicit run and does not execute discussion', async () => {
+  it('keeps the chosen execution review on the next run and does not execute a noted message', async () => {
     const h = harness(); start(h.fetch); await ready();
     fill('execution-review', 'yolo');
     expect(el('conversation-execution-note').textContent).toContain('自动执行');
     fill('conversation-text', '只是讨论');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(messagePosts(h)[0]?.body.intent).toBe('discuss');
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
-    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(false));
+    await sendReady();
     expect(el<HTMLSelectElement>('execution-review').value).toBe('yolo');
     fill('conversation-text', '现在执行');
-    el('conversation-execute').click();
+    submit();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
     expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', runOptions: { executionReview: 'yolo', planning: 'direct' } });
     expect(el('conversation-execution-note').textContent).toContain('直接执行');
@@ -336,8 +339,8 @@ describe('single-entry conversation workbench', () => {
     fill('conversation-text', '今天天气怎么样');
     expect(el('conversation-execution-note').textContent).toContain('先出任务图');
     expect(el('conversation-execution-note').textContent).toContain('实时数据');
-    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(false));
-    el('conversation-execute').click();
+    await sendReady();
+    submit();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', runOptions: { planning: 'dag' } });
     fill('allowed-tools', '');
@@ -348,7 +351,7 @@ describe('single-entry conversation workbench', () => {
   it('blocks execution of nonterminal tasks but still accepts discussion', async () => {
     const view = fixture(); view.tasks[0]!.status = 'needs_input';
     const h = harness(view); start(h.fetch); await ready();
-    expect(el<HTMLButtonElement>('conversation-execute').disabled).toBe(true);
+    expect(el('conversation-send').textContent).toBe('记下来');
     expect(el('conversation-execution-note').textContent).toContain('批准、回答或取消');
     fill('conversation-text', '额外背景'); submit();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
@@ -358,14 +361,14 @@ describe('single-entry conversation workbench', () => {
   it('requires an explicit refreshed resend after stale revision conflicts', async () => {
     let fail = true;
     const h = harness(undefined, { handler(url) { if (url.endsWith('/messages') && fail) { fail = false; return response({ error: 'Discussion focus changed' }, 409); } } });
-    start(h.fetch); await ready(); fill('conversation-text', '继续执行'); el('conversation-execute').click();
+    start(h.fetch); await ready(); fill('conversation-text', '继续执行'); submit();
     await vi.waitFor(() => expect(el('conversation-error').textContent).toContain('刷新对话'));
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(true);
     h.view.focusTaskId = 'task_b'; h.view.revision = 5; el('conversation-refresh').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('周报'));
     expect(messagePosts(h)).toHaveLength(1);
     expect(el<HTMLTextAreaElement>('conversation-text').value).toBe('继续执行');
-    el('conversation-execute').click(); await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    submit(); await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
     expect(messagePosts(h)[1]?.body.expectedRevision).toBe(5);
     expect(messagePosts(h)[1]?.key).not.toBe(messagePosts(h)[0]?.key);
     expect(messagePosts(h)[0]?.body.taskIds).toEqual(['task_a']);
@@ -374,7 +377,7 @@ describe('single-entry conversation workbench', () => {
 
   it('keeps the idempotency key when preparation asks to retry the same request', async () => {
     const h = harness(undefined, { handler(url) { if (url.endsWith('/messages')) return response({ error: '结果尚未确认', retrySameRequest: true }, 409); } });
-    start(h.fetch); await ready(); fill('conversation-text', '继续执行'); el('conversation-execute').click();
+    start(h.fetch); await ready(); fill('conversation-text', '继续执行'); submit();
     await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-retry').disabled).toBe(false));
     expect(el('conversation-error').textContent).toContain('结果尚未确认');
     expect(el('conversation-retry-panel').hidden).toBe(false);
@@ -393,10 +396,90 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-messages').textContent).not.toContain(runId);
   });
 
+  it('starts work from one message: a new task named after it, focused, with auto review and no money cap', async () => {
+    const view = fixture(); view.focusTaskId = undefined;
+    const h = harness(view); start(h.fetch);
+    await vi.waitFor(() => expect(el<HTMLSelectElement>('conversation-select').value).toBe(view.id));
+    await sendReady();
+    expect(el<HTMLSelectElement>('execution-review').value).toBe('auto');
+    fill('conversation-text', '把发布流程整理成每周可审批的自动化\n先看最近十次发布');
+    submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    const body = messagePosts(h)[0]?.body;
+    expect(body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '把发布流程整理成每周可审批的自动化' }, runOptions: { executionReview: 'auto' } });
+    expect(body).not.toHaveProperty('taskIds');
+    expect(body.runOptions).not.toHaveProperty('modelBudget');
+    expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
+    await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('把发布流程整理成每周可审批的自动化'));
+  });
+
+  it('keeps a saved review choice instead of the auto default', async () => {
+    const h = harness(); start(h.fetch, { local: { 'aeeis.execution-review': 'required' } }); await ready();
+    expect(el<HTMLSelectElement>('execution-review').value).toBe('required');
+    fill('conversation-text', '核对发布'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'], runOptions: { executionReview: 'required' } });
+  });
+
+  it('shows the plan in the transcript and starts, revises or drops it from the card', async () => {
+    const plannedView = () => {
+      const view = fixture();
+      view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId,
+        pendingApproval: { planVersion: 2, planHash: 'plan-hash-2', summary: '模型请求批准：会改动仓库。整理发布流程' },
+        execution: { steps: [{ title: '读取发布脚本', state: 'waiting' }, { title: '修改 release.yml', state: 'waiting' }] } } as any;
+      view.messages.push({ id: 'asked', role: 'user', text: '整理发布流程', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+      return view;
+    };
+    const h = harness(plannedView()); start(h.fetch); await ready();
+    const card = () => doc().querySelector<HTMLElement>('#conversation-messages .plan-card[data-plan-task="task_a"]');
+    await vi.waitFor(() => expect(card()).not.toBeNull());
+    expect(card()!.dataset.state).toBe('awaiting');
+    expect(card()!.textContent).toContain('等你确认');
+    expect(card()!.textContent).toContain('模型请求批准：会改动仓库。');
+    expect([...card()!.querySelectorAll('.plan-card-steps li')].map(item => item.textContent)).toEqual(['○读取发布脚本', '○修改 release.yml']);
+    expect(el('conversation-send').textContent).toBe('记下来');
+    expect(doc().querySelectorAll('#conversation-messages .plan-card')).toHaveLength(1);
+
+    card()!.querySelector<HTMLButtonElement>('[data-plan-start]')!.click();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === `/api/runs/${runId}/approve`)).toBe(true));
+    expect(h.posts.find(post => post.url === `/api/runs/${runId}/approve`)?.body).toEqual({ planHash: 'plan-hash-2', planVersion: 2 });
+
+    const revise = harness(plannedView()); dom.window.close(); start(revise.fetch); await ready();
+    await vi.waitFor(() => expect(card()).not.toBeNull());
+    const field = card()!.querySelector<HTMLTextAreaElement>('textarea[data-plan-feedback]')!;
+    expect(field.closest<HTMLElement>('.plan-card-revision')!.hidden).toBe(true);
+    card()!.querySelector<HTMLButtonElement>('[data-plan-revise]')!.click();
+    expect(field.closest<HTMLElement>('.plan-card-revision')!.hidden).toBe(false);
+    field.value = '先别改 release.yml，只出报告';
+    card()!.querySelector<HTMLButtonElement>('[data-plan-revise-submit]')!.click();
+    await vi.waitFor(() => expect(revise.posts.some(post => post.url === `/api/runs/${runId}/revise-plan`)).toBe(true));
+    expect(revise.posts.find(post => post.url === `/api/runs/${runId}/revise-plan`)?.body).toEqual({ planVersion: 2, feedback: '先别改 release.yml，只出报告' });
+    expect(revise.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
+
+    const drop = harness(plannedView()); dom.window.close(); start(drop.fetch); await ready();
+    await vi.waitFor(() => expect(card()).not.toBeNull());
+    card()!.querySelector<HTMLButtonElement>('[data-plan-cancel]')!.click();
+    await vi.waitFor(() => expect(drop.posts.some(post => post.url === `/api/runs/${runId}/cancel`)).toBe(true));
+    expect(drop.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/revise-plan'))).toBe(false);
+  });
+
+  it('shows a running plan without decision buttons', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'running', runId, latestRunId: runId,
+      execution: { steps: [{ title: '读取发布脚本', state: 'done' }, { title: '比对手动步骤', state: 'current' }, { title: '演练发布', state: 'waiting' }] } } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: '整理发布流程', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+    const h = harness(view); start(h.fetch); await ready();
+    const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .plan-card'); expect(found).not.toBeNull(); return found!; });
+    expect(card.dataset.state).toBe('running');
+    expect([...card.querySelectorAll<HTMLElement>('.plan-card-steps li')].map(item => item.dataset.state)).toEqual(['done', 'current', 'waiting']);
+    expect(card.querySelector('[data-plan-start], [data-plan-cancel], textarea')).toBeNull();
+    expect(h.posts).toHaveLength(0);
+  });
+
   it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {
     let reject!: (error: Error) => void, attempts = 0;
     const h = harness(undefined, { handler(url) { if (url.endsWith('/messages') && ++attempts === 1) return new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }); } });
-    start(h.fetch); await ready(); fill('conversation-text', '原始执行请求'); el('conversation-execute').click(); el('conversation-execute').click(); submit();
+    start(h.fetch); await ready(); fill('conversation-text', '原始执行请求'); submit(); submit(); el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(el<HTMLTextAreaElement>('conversation-text').disabled).toBe(true);
     reject(new Error('Lost response'));
@@ -828,7 +911,8 @@ describe('entry bots and group chats', () => {
     expect(el('bot-note-copy').textContent).toContain('不会自己回复');
     expect(el('bot-note-copy').textContent).toContain('明确创建 Run');
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
-    expect(el('conversation-send').textContent).toBe('发送讨论');
+    expect(el('conversation-send').textContent).toBe('记下来');
+    expect(el('conversation-execution-note').textContent).toContain('不会单独执行');
     expect(el('conversation-focus').textContent).not.toContain('发布方案');
     expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs') || post.url === '/api/rooms')).toBe(false);
     expect(h.posts.find(post => post.url === '/api/conversations')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
@@ -857,7 +941,7 @@ describe('entry bots and group chats', () => {
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
     expect(el('bot-note').hidden).toBe(true);
-    expect(el<HTMLButtonElement>('conversation-send').textContent).toBe('发送讨论');
+    expect(el<HTMLButtonElement>('conversation-send').textContent).toBe('发送');
     expect(draft.value).toBe('');
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
     expect(h.posts.find(post => post.body?.claimId)?.body).toEqual({ title: 'AEEIS', agentId: 'aeeis', claimId: h.view.id });
@@ -1501,7 +1585,7 @@ describe('entry bots and group chats', () => {
     expect([...home.options].map(option => option.textContent)).toContain('AEEIS');
     expect(home.value).toBe('');
     fill('conversation-text', '这句是我的');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => {
       expect(messagePosts(h)).toHaveLength(1);
       expect(el('conversation-status').textContent).toContain('系统回执');
@@ -1529,7 +1613,7 @@ describe('entry bots and group chats', () => {
     expect(spokenRow?.querySelector('small')?.textContent ?? '').not.toContain('对');
     person.value = '';
     el<HTMLTextAreaElement>('conversation-text').value = '我补充一句';
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('我补充一句'));
     expect(messagePosts(h).at(-1)?.body).not.toHaveProperty('speaker');
     const ownRow = [...doc().querySelectorAll<HTMLElement>('#conversation-messages li')].find(row => row.textContent?.includes('我补充一句'));
@@ -1625,13 +1709,13 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url.endsWith('/standing'))?.body).toEqual({ expectedRevision: 1, text: sentence });
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('已记住这句话'));
     fill('conversation-text', '先讨论，不改嘱咐');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(1);
     expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain(sentence);
     expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
     fill('conversation-text', '开始做这一件');
-    el<HTMLButtonElement>('conversation-execute').click();
+    submit();
     await vi.waitFor(() => {
       expect(messagePosts(h)).toHaveLength(2);
       expect(el('conversation-status').textContent).toContain('系统回执');
@@ -1710,7 +1794,7 @@ describe('entry bots and group chats', () => {
     });
     expect(h.posts.find(post => post.url.endsWith('/standing'))?.body).toEqual({ expectedRevision: 1, text: '周报。先列已完成的条目。周报稿' });
     fill('conversation-text', '讨论不改嘱咐');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.endsWith('/standing'))).toHaveLength(1);
     expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain('先列已完成的条目');
@@ -1742,7 +1826,7 @@ describe('entry bots and group chats', () => {
     expect(accepted?.body).toEqual({ expectedRevision: 1, text: '先核对栏目再交周报', runId });
     expect(accepted?.body).not.toHaveProperty('runOptions');
     fill('conversation-text', '讨论不改做法');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.endsWith('/practice'))).toHaveLength(1);
     expect(JSON.stringify(messagePosts(h).at(-1)?.body)).not.toContain('先核对栏目再交周报');
@@ -1799,7 +1883,7 @@ describe('entry bots and group chats', () => {
     expect(saved?.body).toEqual({ expectedRevision: 1, taskKind: '周报', model: 'fixture' });
     expect(saved?.body).not.toHaveProperty('runOptions');
     fill('conversation-text', '讨论不晋升');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.includes('/skill-profile'))).toHaveLength(3);
     expect(h.posts.filter(post => post.url.endsWith('/task-model'))).toHaveLength(1);
@@ -1807,7 +1891,7 @@ describe('entry bots and group chats', () => {
     fill('conversation-target', '__new');
     fill('conversation-task-title', '下一版周报');
     fill('conversation-text', '按这个种类做');
-    el('conversation-execute').click();
+    submit();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     const executed = messagePosts(h).at(-1)?.body;
     expect(executed.taskKind).toBe('周报');
@@ -1869,7 +1953,7 @@ describe('entry bots and group chats', () => {
     expect(el('task-kind-compare').textContent).toContain('已留下这份档案');
     expect(el<HTMLButtonElement>('task-kind-keep').disabled).toBe(true);
     fill('conversation-text', '讨论不留下');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(h.posts.filter(post => post.url.endsWith('/task-kind/keep'))).toHaveLength(1);
     expect(h.posts.filter(post => post.url.endsWith('/task-kind/propose'))).toHaveLength(1);
@@ -1904,7 +1988,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts).toEqual([]);
     expect(h.fetch.mock.calls.some(([url]) => /sandbox|docker|ensure/.test(String(url)))).toBe(false);
     fill('conversation-text', '讨论不启动机器');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
     expect(h.posts.every(post => !/sandbox|docker|ensure/.test(post.url))).toBe(true);
@@ -1928,7 +2012,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts).toEqual([]);
     expect(h.fetch.mock.calls.some(([url]) => /sandbox|docker|ensure|approve/.test(String(url)))).toBe(false);
     fill('conversation-text', '讨论不推进步骤');
-    submit();
+    el('conversation-note').click();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(messagePosts(h).at(-1)?.body.intent).toBe('discuss');
     expect(doc().querySelector('[data-task-id="task_b"] .conversation-steps')?.textContent).toContain('正在做');
