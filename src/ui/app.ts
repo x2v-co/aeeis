@@ -231,6 +231,16 @@ let channelReadFlight: Promise<void> | undefined;
 const handoffViews = new Map<string, ConversationView>();
 let channelBoardOpen = false;
 let channelBoardEpoch = 0;
+type StudioView = 'floor' | 'graph' | 'timeline';
+type DigestWindow = 'day' | 'week';
+let studioView: StudioView = 'floor';
+let studioPrivacy = false;
+let studioIndex = -1;
+let studioPlaying = false;
+let studioSpeed: 1 | 2 = 1;
+let studioTimer: number | undefined;
+let studioKey = '';
+let digestWindow: DigestWindow = 'week';
 let handoffEpoch = 0;
 const CITATION_ID = /^[a-z][a-z0-9_.-]{1,127}$/;
 const draftAgents = new Set<string>();
@@ -2416,6 +2426,7 @@ async function refreshHandoffViews(): Promise<void> {
     if (view) handoffViews.set(id, view);
   });
   renderGroupTranscript();
+  if (!$('channel-studio')?.hidden) renderStudio();
 }
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
@@ -2424,10 +2435,19 @@ function groupOccupancy(): number {
 function hideChannelSurfaces(): void {
   hideChannelArtifact();
   hideChannelBoard();
+  stopStudioPlay();
+  studioIndex = -1;
+  studioKey = '';
   const memory = $('channel-memory');
   const profile = $('channel-bot');
+  const studio = $('channel-studio');
+  const digest = $('channel-digest');
+  const teach = $('channel-teach');
   if (memory) memory.hidden = true;
   if (profile) profile.hidden = true;
+  if (studio) studio.hidden = true;
+  if (digest) digest.hidden = true;
+  if (teach) teach.hidden = true;
 }
 function leaveGroup(): void {
   openGroupId = '';
@@ -2821,6 +2841,24 @@ function renderGroupCandidates(): void {
   }
   const names = [...draftAgents].map(participantLabel).concat(draftPeople);
   live.textContent = `${groupOccupancy()} / 6 · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
+  const proposal = $('group-proposal');
+  if (proposal) proposal.textContent = groupProposalText();
+}
+function groupProposalText(): string {
+  const reused = [...draftAgents].map(id => participantLabel(id));
+  const roster = reused.length ? `复用${reused.join('、')}。` : '优先复用名单里已有的人。';
+  const extras = draftPeople.length ? `名单以外：${draftPeople.join('、')}。` : '';
+  const reason = $<HTMLInputElement>('group-newcomer-reason')?.value.trim() ?? '';
+  const why = reason ? '原因已写下。' : '';
+  return `提议：AEEIS 担任 PM。${roster}${extras}一共 ${groupOccupancy()} / 6。创建前确认这一组。${why}`;
+}
+function reuseRoster(): void {
+  for (const bot of rosterBots()) {
+    if (bot.id === 'aeeis' || draftAgents.has(bot.id)) continue;
+    if (groupOccupancy() >= 6) break;
+    draftAgents.add(bot.id);
+  }
+  renderGroupCandidates();
 }
 function showGroupDraft(): void {
   clearOpenGroup();
@@ -2829,13 +2867,15 @@ function showGroupDraft(): void {
   draftPeople = [];
   groupDraftOpen = true;
   setCurrentRunOpen(false);
-  renderGroupCandidates();
   renderBotRoster();
   updateConversationControls();
   const title = $<HTMLInputElement>('group-title');
   if (title) { title.value = ''; title.focus(); }
   const person = $<HTMLInputElement>('group-person');
   if (person) person.value = '';
+  const reason = $<HTMLInputElement>('group-newcomer-reason');
+  if (reason) reason.value = '';
+  renderGroupCandidates();
 }
 function addDraftPerson(): void {
   const input = $<HTMLInputElement>('group-person');
@@ -2862,9 +2902,17 @@ async function createGroup(event: Event): Promise<void> {
     throw error;
   }
   roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
+  const reason = $<HTMLInputElement>('group-newcomer-reason')?.value.trim() ?? '';
+  const reused = [...draftAgents].map(id => participantLabel(id));
+  const newcomers = [...draftPeople];
   groupDraftOpen = false;
   message('');
   await openGroup(room.id);
+  if (reason) {
+    const roster = reused.length ? `复用${reused.join('、')}。` : '';
+    const extra = newcomers.length ? `名单以外的人：${newcomers.join('、')}。原因：${reason}。` : `原因：${reason}。`;
+    await channelPostSession('system', `分工：AEEIS 担任 PM。${roster}${extra}创建前已确认。`);
+  }
   await refresh();
 }
 function renderGroups(rooms: RoomSummary[]): void {
@@ -2919,6 +2967,8 @@ function finishChannelRead(id: string, epoch: number): void {
   renderGroupTranscript();
   void refreshHandoffViews();
   if (channelBoardOpen) renderChannelBoard();
+  if (!$('channel-studio')?.hidden) renderStudio();
+  if (!$('channel-digest')?.hidden) renderDigestBody();
 }
 async function refreshLoadedChannel(id: string): Promise<void> {
   const epoch = channelReadEpoch;
@@ -3984,6 +4034,11 @@ $('gb-new-bot-group')?.addEventListener('click', () => {
 });
 $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
+$('group-reuse')?.addEventListener('click', () => reuseRoster());
+$('group-newcomer-reason')?.addEventListener('input', () => {
+  const proposal = $('group-proposal');
+  if (proposal) proposal.textContent = groupProposalText();
+});
 $('group-create')?.addEventListener('submit', event => { void createGroup(event).catch(error => message(errorMessage(error))); });
 $('group-composer')?.addEventListener('submit', event => { void submitGroupMessage(event).catch(error => message(errorMessage(error))); });
 $('channel-artifact-close')?.addEventListener('click', () => hideChannelArtifact());
@@ -4111,12 +4166,476 @@ function openChannelInbox(): void {
   if (!attentionInboxOpen) toggle.click();
   else $('attention-inbox')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+interface StudioHop { id: string; fromId: string; toId: string; fromName: string; toName: string; at: string; content: string; conversationId: string; taskId: string }
+function studioRoster(): Array<{ id: string; name: string; seat: 'meet' | 'desk' }> {
+  const people: Array<{ id: string; name: string; seat: 'meet' | 'desk' }> = [{ id: 'aeeis', name: 'AEEIS', seat: 'meet' }];
+  for (const member of groupMembers) {
+    if (member.status !== 'active' || member.principalId === 'aeeis' || people.some(person => person.id === member.principalId)) continue;
+    people.push({ id: member.principalId, name: participantLabel(member.principalId), seat: 'desk' });
+  }
+  return people;
+}
+function studioWork(agentId: string): Array<{ title: string; column: string }> {
+  return channelCitations().flatMap(cite => {
+    const owner = cite.agentId ?? handoffViews.get(cite.conversationId)?.agentId ?? '';
+    if (owner !== agentId) return [];
+    const view = handoffViews.get(cite.conversationId);
+    const task = view?.tasks.find(item => item.id === cite.taskId);
+    if (!view || !task) return [{ title: cite.taskId, column: 'capture' }];
+    return [{ title: task.title, column: boardColumn(task.status, boardDecision(view.id, task.id), taskRunId(task)) }];
+  });
+}
+function studioLabel(agentId: string): { label: string; task: string } {
+  const work = studioWork(agentId);
+  const pick = (column: string) => work.find(item => item.column === column);
+  const blocked = pick('blocked');
+  if (blocked) return { label: '需要你', task: blocked.title };
+  const doing = pick('doing');
+  if (doing) return { label: '执行中', task: doing.title };
+  const review = pick('review');
+  if (review) return { label: '待验收', task: review.title };
+  const ready = pick('ready');
+  if (ready) return { label: '等待', task: ready.title };
+  const done = pick('done');
+  if (done) return { label: '完成', task: done.title };
+  const any = work[0];
+  if (any) return { label: '待整理', task: any.title };
+  return { label: '空闲', task: '现在没有交给这个人的事' };
+}
+function studioHops(): StudioHop[] {
+  const hops: StudioHop[] = [];
+  for (const event of channelLog()) {
+    if (event.operation === 'retract') continue;
+    const cite = handoffCitation(event);
+    if (!cite) continue;
+    hops.push({
+      id: event.id,
+      fromId: event.actorType === 'agent' ? event.actorId : 'you',
+      toId: cite.agentId ?? '未知',
+      fromName: event.actorType === 'agent' ? participantLabel(event.actorId) : '你',
+      toName: cite.agentId ? participantLabel(cite.agentId) : '这个人',
+      at: event.createdAt,
+      content: event.content,
+      conversationId: cite.conversationId,
+      taskId: cite.taskId,
+    });
+  }
+  return hops;
+}
+function studioEdges(): Array<{ fromId: string; toId: string; fromName: string; toName: string; count: number; latest: StudioHop }> {
+  const map = new Map<string, { fromId: string; toId: string; fromName: string; toName: string; count: number; latest: StudioHop }>();
+  for (const hop of studioHops()) {
+    const key = `${hop.fromId}\0${hop.toId}`;
+    const current = map.get(key);
+    if (current) { current.count += 1; current.latest = hop; }
+    else map.set(key, { fromId: hop.fromId, toId: hop.toId, fromName: hop.fromName, toName: hop.toName, count: 1, latest: hop });
+  }
+  return [...map.values()];
+}
+function studioCaption(): string {
+  const hops = studioHops();
+  if (!hops.length) return '这个频道还没有交接可以回放。空格暂停，左右键单步。';
+  const hop = studioIndex >= 0 ? hops[studioIndex] : undefined;
+  if (!hop) return `可以回放 ${hops.length} 次交接。空格暂停，左右键单步。`;
+  const detail = studioPrivacy ? `${hop.fromName} 和 ${hop.toName} 在协作` : `${hop.fromName} → ${hop.toName}：${hop.content}`;
+  return `${studioIndex + 1} / ${hops.length} · ${detail}`;
+}
+function studioSignature(): string {
+  const people = studioRoster().map(person => { const state = studioLabel(person.id); return `${person.id}:${state.label}:${state.task}`; }).join('\n');
+  const hops = studioHops().map(hop => `${hop.id}:${hop.fromName}:${hop.toName}:${studioPrivacy ? '' : hop.content}`).join('\n');
+  return `${studioView}\u0000${studioPrivacy}\u0000${studioIndex}\u0000${people}\u0000${hops}`;
+}
+function stopStudioPlay(): void {
+  studioPlaying = false;
+  if (studioTimer !== undefined) window.clearInterval(studioTimer);
+  studioTimer = undefined;
+}
+function motionReduced(): boolean {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+}
+function startStudioTimer(): void {
+  if (studioTimer !== undefined) window.clearInterval(studioTimer);
+  studioTimer = window.setInterval(() => {
+    if (studioIndex >= studioHops().length - 1) { stopStudioPlay(); renderStudio(); return; }
+    studioIndex += 1;
+    renderStudio();
+  }, studioSpeed === 2 ? 700 : 1400);
+}
+function studioStep(delta: number): void {
+  const hops = studioHops();
+  if (!hops.length) { studioIndex = -1; renderStudio(); return; }
+  studioIndex = Math.min(hops.length - 1, Math.max(0, studioIndex + delta));
+  renderStudio();
+}
+function playStudio(): void {
+  if (!studioHops().length) { message('这个频道还没有交接可以回放。'); return; }
+  if (motionReduced()) { stopStudioPlay(); studioStep(1); message('已按单步回放。'); return; }
+  if (studioIndex >= studioHops().length - 1) studioIndex = -1;
+  studioPlaying = true;
+  startStudioTimer();
+  studioStep(1);
+}
+function studioPersonButton(person: { id: string; name: string }): HTMLButtonElement {
+  const state = studioLabel(person.id);
+  const button = element('button', '', 'studio-person') as HTMLButtonElement;
+  button.type = 'button';
+  button.dataset.studioPerson = person.id;
+  button.append(element('strong', person.name), element('small', state.label), element('small', state.task));
+  button.addEventListener('click', () => { void openChannelBot(person.id).catch(error => message(errorMessage(error))); });
+  return button;
+}
+function studioHopButton(hop: StudioHop, index: number): HTMLButtonElement {
+  const button = element('button', '', 'studio-hop') as HTMLButtonElement;
+  button.type = 'button';
+  button.dataset.hopIndex = String(index);
+  if (index === studioIndex) button.classList.add('studio-live');
+  const detail = studioPrivacy ? `${hop.fromName} 和 ${hop.toName} 在协作` : hop.content;
+  button.append(element('strong', `${hop.fromName} → ${hop.toName}`), element('small', formatTime(hop.at)), element('small', detail));
+  button.addEventListener('click', () => {
+    studioIndex = index;
+    stopStudioPlay();
+    const view = handoffViews.get(hop.conversationId);
+    const task = view?.tasks.find(item => item.id === hop.taskId);
+    renderStudio();
+    if (!view || !task) { message('正在读取这件事。看一眼不会执行。'); return; }
+    openChannelTask(view, task, hop.toName);
+  });
+  return button;
+}
+function studioTable(): HTMLTableElement {
+  const table = document.createElement('table');
+  table.className = 'studio-status';
+  const caption = document.createElement('caption');
+  caption.textContent = '团队状态';
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const label of ['人', '状态', '当前的事']) { const cell = document.createElement('th'); cell.textContent = label; headRow.append(cell); }
+  head.append(headRow);
+  const body = document.createElement('tbody');
+  for (const person of studioRoster()) {
+    const state = studioLabel(person.id);
+    const row = document.createElement('tr');
+    for (const value of [person.name, state.label, state.task]) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
+    body.append(row);
+  }
+  table.append(caption, head, body);
+  return table;
+}
+function renderStudio(): void {
+  const body = $('channel-studio-body');
+  const caption = $('studio-replay-caption');
+  const play = $('studio-play');
+  const speed = $('studio-speed');
+  if (caption) caption.textContent = studioCaption();
+  if (play) play.textContent = studioPlaying ? '回放中' : '回放';
+  if (speed) speed.textContent = `速度 ${studioSpeed}×`;
+  if (!body) return;
+  const key = studioSignature();
+  if (key === studioKey && body.childElementCount) return;
+  studioKey = key;
+  body.replaceChildren();
+  const stage = element('div', '', 'studio-stage');
+  stage.id = 'channel-studio-stage';
+  stage.append(element('p', studioSummary()));
+  if (studioView === 'graph') appendStudioGraph(stage);
+  else if (studioView === 'timeline') appendStudioTimeline(stage);
+  else appendStudioFloor(stage);
+  body.append(stage, studioTable());
+}
+function studioSummary(): string {
+  const people = studioRoster();
+  const busy = people.filter(person => studioLabel(person.id).label !== '空闲').length;
+  return `${busy} 人在忙 · ${people.length - busy} 人空闲`;
+}
+function appendStudioFloor(stage: HTMLElement): void {
+  const floor = element('div', '', 'studio-floor');
+  const meet = element('section', '', 'studio-seat');
+  const desks = element('section', '', 'studio-seat');
+  meet.append(element('h3', '会议室'));
+  desks.append(element('h3', '工位区'));
+  const roster = studioRoster();
+  for (const person of roster) (person.seat === 'meet' ? meet : desks).append(studioPersonButton(person));
+  if (!roster.some(person => person.seat === 'desk')) desks.append(element('small', '工位区还空着。'));
+  floor.append(meet, desks);
+  stage.append(floor);
+  const hops = studioHops();
+  if (!hops.length) stage.append(element('p', '这个频道还没有交接。'));
+  hops.forEach((hop, index) => stage.append(studioHopButton(hop, index)));
+}
+function appendStudioGraph(stage: HTMLElement): void {
+  const edges = studioEdges();
+  if (!edges.length) { stage.append(element('p', '这个频道还没有交接。')); return; }
+  for (const edge of edges) {
+    const reverse = edges.some(item => item.fromId === edge.toId && item.toId === edge.fromId);
+    const button = element('button', '', 'studio-edge') as HTMLButtonElement;
+    button.type = 'button';
+    button.append(element('strong', `${edge.fromName} → ${edge.toName}`), element('small', reverse ? `${edge.count} 次` : `${edge.count} 次 · 单向`));
+    button.append(element('small', studioPrivacy ? `${edge.fromName} 和 ${edge.toName} 在协作` : edge.latest.content));
+    if (studioHops()[studioIndex]?.id === edge.latest.id) button.classList.add('studio-live');
+    button.addEventListener('click', () => {
+      studioIndex = studioHops().findIndex(hop => hop.id === edge.latest.id);
+      stopStudioPlay();
+      renderStudio();
+    });
+    stage.append(button);
+  }
+}
+function appendStudioTimeline(stage: HTMLElement): void {
+  const hops = studioHops();
+  for (const person of studioRoster()) {
+    const row = element('section', '', 'studio-seat');
+    row.append(element('h3', person.name));
+    const mine = hops.map((hop, index) => ({ hop, index })).filter(item => item.hop.toId === person.id || item.hop.fromId === person.id);
+    if (!mine.length) row.append(element('small', '这一行还没有交接。'));
+    for (const item of mine) row.append(studioHopButton(item.hop, item.index));
+    stage.append(row);
+  }
+}
+async function ensureCitedViews(roomId: string): Promise<void> {
+  await absorbLaterEvents(roomId, channelReadEpoch);
+  if (openGroupId !== roomId) return;
+  await Promise.all(channelBoardIds().map(async id => {
+    if (handoffViews.has(id)) return;
+    try {
+      const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}`);
+      if (openGroupId === roomId && view) handoffViews.set(view.id, view);
+    } catch { return undefined; }
+  }));
+}
+async function openChannelStudio(): Promise<void> {
+  const roomId = openGroupId;
+  const panel = $('channel-studio');
+  if (!roomId || !panel) return;
+  panel.hidden = false;
+  studioKey = '';
+  await ensureCitedViews(roomId);
+  if (openGroupId !== roomId) return;
+  renderStudio();
+}
+function inDigestWindow(iso: string | undefined, span: DigestWindow): boolean {
+  const time = Date.parse(iso ?? '');
+  if (!Number.isFinite(time)) return false;
+  const width = span === 'day' ? 86_400_000 : 7 * 86_400_000;
+  return Date.now() - time <= width && time <= Date.now() + 60_000;
+}
+function digestNeedsYou(): number {
+  const seen = new Set<string>();
+  let count = 0;
+  for (const cite of channelCitations()) {
+    const key = `${cite.conversationId}\0${cite.taskId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const view = handoffViews.get(cite.conversationId);
+    const task = view?.tasks.find(item => item.id === cite.taskId);
+    if (!view || !task) continue;
+    if (boardColumn(task.status, boardDecision(view.id, task.id), taskRunId(task)) === 'blocked') count += 1;
+  }
+  return count;
+}
+function renderDigestBody(): void {
+  const body = $('channel-digest-body');
+  if (!body) return;
+  const events = channelLog().filter(event => event.operation !== 'retract' && inDigestWindow(event.createdAt, digestWindow));
+  const handoffs = events.filter(event => Boolean(handoffCitation(event))).length;
+  const blocked = events.filter(event => event.type === 'task_update' && event.content.trim().startsWith('阻塞：')).length;
+  const done = events.filter(event => event.type === 'task_update' && event.content.trim() === '验收通过').length;
+  const label = digestWindow === 'day' ? '今日' : '本周';
+  body.replaceChildren(element('p', `${label}：交接 ${handoffs}，阻塞 ${blocked}，完成 ${done}。现在需要你 ${digestNeedsYou()}。`), element('small', '花费记在各件事的抽屉里。'));
+}
+async function scopedMemories(prefix: string): Promise<{ goal?: GoalSummary; items: MemoryView[] }> {
+  const goal = await listedChannelGoal();
+  if (!goal) return { items: [] };
+  const memories = await api<MemoryView[]>(`/goals/${encodeURIComponent(goal.id)}/memories?limit=50`).catch(() => [] as MemoryView[]);
+  return { goal, items: memories.filter(item => item.state !== 'retracted' && item.state !== 'superseded' && item.source.startsWith(prefix)) };
+}
+function renderScopedMemories(list: HTMLElement, goal: GoalSummary | undefined, items: MemoryView[], empty: string, reload: () => Promise<void>): void {
+  list.replaceChildren();
+  if (!items.length) { list.append(element('p', empty)); return; }
+  for (const memory of items) {
+    const row = element('article');
+    row.append(element('p', memory.content), element('small', `来源：${memory.source}`));
+    const reason = document.createElement('input');
+    reason.maxLength = 500;
+    reason.placeholder = '撤回原因';
+    reason.setAttribute('aria-label', '撤回原因');
+    const retract = dashboardButton('撤回', async () => {
+      const why = reason.value.trim();
+      if (!why) { message('请先写下撤回原因。'); return; }
+      if (!goal) return;
+      await api(`/goals/${encodeURIComponent(goal.id)}/memories/${encodeURIComponent(memory.id)}/retract`, { reason: why });
+      message('已撤回。');
+      await reload();
+    });
+    row.append(reason, retract);
+    list.append(row);
+  }
+}
+async function renderTeamRules(): Promise<void> {
+  const list = $('channel-rule-list');
+  const roomId = openGroupId;
+  if (!list || !roomId) return;
+  const loaded = await scopedMemories('团队规则');
+  if (openGroupId !== roomId) return;
+  renderScopedMemories(list, loaded.goal, loaded.items, '这个频道还没有团队规则。', renderTeamRules);
+}
+async function openChannelDigest(): Promise<void> {
+  const roomId = openGroupId;
+  const panel = $('channel-digest');
+  if (!roomId || !panel) return;
+  panel.hidden = false;
+  await ensureCitedViews(roomId);
+  if (openGroupId !== roomId) return;
+  renderDigestBody();
+  await renderTeamRules();
+}
+async function saveTeamRule(event: Event): Promise<void> {
+  event.preventDefault();
+  const text = $<HTMLTextAreaElement>('channel-rule-text')?.value.trim() ?? '';
+  const roomId = openGroupId;
+  if (!text || !roomId) return;
+  const goal = await channelGoal();
+  if (!goal || openGroupId !== roomId) return;
+  await api(`/goals/${encodeURIComponent(goal.id)}/memories`, { kind: 'decision', content: text, scope: 'project', classification: 'internal', source: '团队规则', confidence: 1 });
+  const field = $<HTMLTextAreaElement>('channel-rule-text');
+  if (field) field.value = '';
+  message('已收成这个频道的团队规则。看一眼不会执行。');
+  await renderTeamRules();
+}
+function teachingSteps(): string[] {
+  return ($<HTMLTextAreaElement>('channel-teach-steps')?.value ?? '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 12);
+}
+function teachingDraft(): string {
+  return teachingSteps().map((line, index) => `${index + 1}. ${line}`).join('\n');
+}
+function renderTeachingPreview(): void {
+  const list = $('channel-teach-preview');
+  if (!list) return;
+  const steps = teachingSteps();
+  list.replaceChildren();
+  if (!steps.length) { list.append(element('li', '写下步骤后再生成草案。')); return; }
+  for (const step of steps) list.append(element('li', step));
+}
+function renderTeachPeople(): void {
+  const select = $<HTMLSelectElement>('channel-teach-person');
+  if (!select) return;
+  const previous = select.value;
+  select.replaceChildren();
+  for (const person of studioRoster()) {
+    const option = document.createElement('option');
+    option.value = person.id;
+    option.textContent = person.name;
+    select.append(option);
+  }
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+}
+async function renderTeachingSaved(): Promise<void> {
+  const list = $('channel-teach-saved');
+  const roomId = openGroupId;
+  if (!list || !roomId) return;
+  const loaded = await scopedMemories('带教：');
+  if (openGroupId !== roomId) return;
+  renderScopedMemories(list, loaded.goal, loaded.items, '这个频道还没有带教草案。', renderTeachingSaved);
+}
+async function openChannelTeach(): Promise<void> {
+  const panel = $('channel-teach');
+  if (!panel || !openGroupId) return;
+  panel.hidden = false;
+  renderTeachPeople();
+  await renderTeachingSaved();
+}
+async function saveTeachingDraft(): Promise<void> {
+  const text = teachingDraft();
+  const roomId = openGroupId;
+  const agentId = $<HTMLSelectElement>('channel-teach-person')?.value ?? '';
+  if (!text || !roomId || !agentId) { message('先生成草案。'); return; }
+  const goal = await channelGoal();
+  if (!goal || openGroupId !== roomId) return;
+  const name = participantLabel(agentId);
+  await api(`/goals/${encodeURIComponent(goal.id)}/memories`, { kind: 'note', content: text, scope: 'project', classification: 'internal', source: `带教：${name}`, confidence: 1 });
+  message(`已把草案记在这个频道，教给${name}。只影响这个频道。`);
+  await renderTeachingSaved();
+}
+async function keepTeachingProfile(): Promise<void> {
+  const text = teachingDraft();
+  if (!text) { message('先生成草案。'); return; }
+  if (text.length > 500) { message('收进档案的做法最多 500 字。草案可以先记在这个频道。'); return; }
+  const agentId = $<HTMLSelectElement>('channel-teach-person')?.value ?? '';
+  const summary = agentId === 'aeeis' ? aeeisThread() : lifeSummary(agentId);
+  if (!summary) { message('这个人还没有自己的对话。草案可以先记在这个频道。'); return; }
+  const view = await api<ConversationView>(`/conversations/${encodeURIComponent(summary.id)}`);
+  const runId = view.lastDelivery?.runId;
+  if (!runId) { message('这个人还没有一次做成的交付。草案先留在这个频道。'); return; }
+  try {
+    const next = await api<ConversationView>(`/conversations/${encodeURIComponent(summary.id)}/practice`, { expectedRevision: view.revision, text, runId });
+    if (next) handoffViews.set(next.id, next);
+    message(`已收进${participantLabel(agentId)}的档案。只影响这个人。`);
+  } catch (error) { message(errorMessage(error)); }
+}
 $('channel-board-open')?.addEventListener('click', () => { void showChannelBoard().catch(error => message(errorMessage(error))); });
 $('channel-board-more')?.addEventListener('click', () => { void showChannelBoard().catch(error => message(errorMessage(error))); });
 $('channel-board-close')?.addEventListener('click', () => { hideChannelBoard(); renderGroupTranscript(); });
 $('channel-memory-open')?.addEventListener('click', () => { void openChannelMemory().catch(error => message(errorMessage(error))); });
 $('channel-memory-close')?.addEventListener('click', () => { const panel = $('channel-memory'); if (panel) panel.hidden = true; });
 $('channel-memory-form')?.addEventListener('submit', event => { void saveChannelMemory(event).catch(error => message(errorMessage(error))); });
+$('channel-studio-open')?.addEventListener('click', () => { void openChannelStudio().catch(error => message(errorMessage(error))); });
+$('channel-studio-close')?.addEventListener('click', () => { stopStudioPlay(); const panel = $('channel-studio'); if (panel) panel.hidden = true; });
+$('channel-studio')?.addEventListener('click', event => {
+  const target = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-studio-view]');
+  if (!target || !$('channel-studio')?.contains(target)) return;
+  const view = target.dataset.studioView;
+  if (view !== 'floor' && view !== 'graph' && view !== 'timeline') return;
+  studioView = view;
+  studioKey = '';
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-studio-view]')) button.setAttribute('aria-pressed', button === target ? 'true' : 'false');
+  renderStudio();
+});
+$('studio-privacy')?.addEventListener('change', () => {
+  studioPrivacy = $<HTMLInputElement>('studio-privacy')?.checked === true;
+  studioKey = '';
+  renderStudio();
+});
+$('studio-play')?.addEventListener('click', () => playStudio());
+$('studio-pause')?.addEventListener('click', () => { stopStudioPlay(); renderStudio(); });
+$('studio-prev')?.addEventListener('click', () => { stopStudioPlay(); studioStep(-1); });
+$('studio-next')?.addEventListener('click', () => { stopStudioPlay(); studioStep(1); });
+$('studio-speed')?.addEventListener('click', () => {
+  studioSpeed = studioSpeed === 1 ? 2 : 1;
+  if (studioPlaying) startStudioTimer();
+  renderStudio();
+});
+document.addEventListener('keydown', event => {
+  const panel = $('channel-studio');
+  if (!panel || panel.hidden) return;
+  const target = event.target as HTMLElement | null;
+  const tag = target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+  if (event.key === ' ') {
+    event.preventDefault();
+    if (studioPlaying) { stopStudioPlay(); renderStudio(); }
+    else playStudio();
+  } else if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+    event.preventDefault();
+    stopStudioPlay();
+    studioStep(event.key === 'ArrowRight' ? 1 : -1);
+  }
+});
+$('channel-digest-open')?.addEventListener('click', () => { void openChannelDigest().catch(error => message(errorMessage(error))); });
+$('channel-digest-close')?.addEventListener('click', () => { const panel = $('channel-digest'); if (panel) panel.hidden = true; });
+$('channel-digest')?.addEventListener('click', event => {
+  const target = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-digest-window]');
+  if (!target || !$('channel-digest')?.contains(target)) return;
+  const next = target.dataset.digestWindow;
+  if (next !== 'day' && next !== 'week') return;
+  digestWindow = next;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-digest-window]')) button.setAttribute('aria-pressed', button === target ? 'true' : 'false');
+  renderDigestBody();
+});
+$('channel-rule-form')?.addEventListener('submit', event => { void saveTeamRule(event).catch(error => message(errorMessage(error))); });
+$('channel-teach-open')?.addEventListener('click', () => { void openChannelTeach().catch(error => message(errorMessage(error))); });
+$('channel-teach-close')?.addEventListener('click', () => { const panel = $('channel-teach'); if (panel) panel.hidden = true; });
+$('channel-teach-draft')?.addEventListener('click', () => renderTeachingPreview());
+$('channel-teach-save')?.addEventListener('click', () => { void saveTeachingDraft().catch(error => message(errorMessage(error))); });
+$('channel-teach-profile')?.addEventListener('click', () => { void keepTeachingProfile().catch(error => message(errorMessage(error))); });
 $('channel-bot-close')?.addEventListener('click', () => { const panel = $('channel-bot'); if (panel) panel.hidden = true; });
 $('channel-inbox')?.addEventListener('click', () => openChannelInbox());
 $('channel-task-close')?.addEventListener('click', () => {
