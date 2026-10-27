@@ -721,7 +721,8 @@ export function buildApp(options: Options) {
     const body = z.object({ role: z.string().trim().min(1).max(120) }).strict().parse(request.body);
     const header = request.headers['idempotency-key'];
     const key = typeof header === 'string' && /^[A-Za-z0-9._:-]{8,200}$/.test(header) ? header : `bot-background-${randomUUID()}`;
-    return options.engine.draftBotBackground(body.role, key);
+    const principal = principalOf(request);
+    return options.engine.draftBotBackground(body.role, key, { owner: principal.id, tenantId: principal.tenantId });
   });
   app.post('/api/agents/discover-url', async request => {
     if (!options.agentDirectory) throw new Conflict('Agent registry is not configured');

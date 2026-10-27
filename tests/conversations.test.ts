@@ -85,6 +85,34 @@ describe('single-entry conversation routing', () => {
     expect(f.model.complete).not.toHaveBeenCalled();
     expect(f.notify).not.toHaveBeenCalled();
   });
+  it('keeps a room sentence on the entry without opening a task', async () => {
+    const f = await fixture(), entry = await f.create();
+    const first = await f.addTask(entry.id, '发布方案');
+    const focus = first.conversation.focusTaskId;
+    const noted = await f.post(entry.id, {
+      text: '来自群聊「发布协作」：今天先到这里',
+      unassigned: true,
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: first.conversation.revision,
+    });
+    expect(noted.statusCode, noted.body).toBe(200);
+    const body = noted.json();
+    expect(body.message.route).toMatchObject({ status: 'general', reason: 'unassigned', taskIds: [] });
+    expect(body.conversation.focusTaskId).toBe(focus);
+    expect(body.conversation.tasks.map((task: { title: string }) => task.title)).toEqual(['发布方案']);
+    expect(body.conversation.messages.at(-1).text).toContain('今天先到这里');
+    const mixed = await f.post(entry.id, {
+      text: '不能一边不归属一边开任务',
+      unassigned: true,
+      newTask: { title: '不该出现' },
+      intent: 'discuss',
+      focus: 'keep',
+      expectedRevision: body.conversation.revision,
+    });
+    expect(mixed.statusCode).toBe(409);
+    expect((await f.fresh(entry.id)).tasks).toHaveLength(1);
+  });
   it('keeps one life thread per person and records discussion without a Run', async () => {
     const f = await fixture();
     const home = await f.create();

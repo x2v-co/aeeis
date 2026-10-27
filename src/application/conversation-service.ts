@@ -80,6 +80,8 @@ const messageSchema = z.object({
   replyTo: idSchema.optional(),
   correctsMessageId: idSchema.optional(),
   newTask: z.object({ title: z.string().trim().min(2).max(200) }).strict().optional(),
+  /** Keep the sentence on the conversation without opening or joining a task. */
+  unassigned: z.literal(true).optional(),
   focus: z.enum(['keep', 'switch']).default('keep'),
   intent: z.enum(['discuss', 'execute']).default('discuss'),
   /** Who is speaking. Missing means the authenticated owner, role user. */
@@ -226,6 +228,10 @@ export function routeConversationMessage(conversation: Conversation, input: z.in
   const route = (status: ConversationRoute['status'], reason: ConversationRoute['reason'], taskIds: string[] = [], candidates: string[] = []): ConversationRoute => ({
     status, reason, taskIds, candidateTaskIds: candidates, focusEffect: input.focus,
   });
+  if (input.unassigned) {
+    if (input.newTask || input.taskIds || input.replyTo || input.correctsMessageId || input.intent !== 'discuss') throw new Conflict('An unassigned note cannot target a task or start work');
+    return route('general', 'unassigned');
+  }
   if (input.newTask) {
     if (input.taskIds || input.replyTo) throw new Conflict('A new task cannot also target an existing message or task');
     return route('routed', 'new-task');
