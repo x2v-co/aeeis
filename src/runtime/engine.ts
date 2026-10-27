@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { principalAudience, validatePrincipal, type Ownership } from '../security/principal.js';
 import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSchema, decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema, fillablePdfArtifactSchema } from './contracts.js';
 import { automaticReviewCanClear, directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
+import { actionRef, approveActionSchema, decideAction, normalizeActionPolicy, withActionDecision, type ActionCandidate, type ActionVerdict } from './action-policy.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -95,7 +96,35 @@ export function isAutoRetryableInterruption(run: Pick<AgentRun, 'pendingTool' | 
   return receipt?.status === 'unknown' && receipt.provider === 'aeeis-recovery' && receipt.errorCode === 'worker_interrupted';
 }
 function assertReviewVersion(run: AgentRun, version: number): void {
+  if (run.actionApproval?.status === 'pending') throw new Conflict('这件 Run 在等一个动作的批准，不是计划的批准');
   if (run.status !== 'needs_approval' || run.plans.at(-1)?.version !== version) throw new Conflict('计划已更新或不在等待批准，请刷新后重试');
+}
+/**
+ * Settles one external side effect against the Run's frozen action policy. On `ask` the pending call is
+ * kept and the Run waits; on `refuse` the caller drops the pending call and the executor sees why.
+ */
+function gateExternalAction(current: AgentRun, live: Step, candidate: ActionCandidate, pending: { taskId: string; idempotencyKey: string; input: unknown }): ActionVerdict {
+  const verdict = decideAction(current.actionPolicy, current.origin, current.executionReview, candidate);
+  const ref = actionRef(candidate);
+  if (verdict.decision === 'allow') {
+    if (verdict.rule === 'allow') event(current, 'action.allowed', { taskId: pending.taskId, ref });
+    return verdict;
+  }
+  if (verdict.decision === 'ask') {
+    current.actionApproval = {
+      status: 'pending', kind: candidate.kind, ref, taskId: pending.taskId, idempotencyKey: pending.idempotencyKey,
+      inputHash: digest(pending.input ?? null), reason: verdict.reason, requestedAt: now(),
+    };
+    current.status = 'needs_approval';
+    event(current, 'action.approval_requested', { taskId: pending.taskId, ref, idempotencyKey: pending.idempotencyKey, rule: verdict.rule, reason: verdict.reason });
+    return verdict;
+  }
+  const toolId = candidate.kind === 'tool' ? candidate.id : 'delegate';
+  const message = `${verdict.reason}. Nothing was run. Continue without it, or finish with explicit limitations.`;
+  live.observations.push({ tool: toolId, argument: ref.slice(0, 200), result: { error: { recoverable: true, errorCode: 'action_refused', message } } });
+  event(current, 'tool.failed_recoverable', { taskId: pending.taskId, toolId, errorCode: 'action_refused', message });
+  event(current, 'action.refused', { taskId: pending.taskId, ref, rule: verdict.rule, reason: verdict.reason });
+  return verdict;
 }
 const plannerApprovalRequestSchema = z.object({
   needed: z.boolean(),
@@ -840,6 +869,11 @@ export class AgentEngine {
   private resourceRegistry: ResourceRegistry | undefined;
   private readonly maxRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RECOVERABLE_TOOL_FAILURES ?? 3);
   private readonly maxRunRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RUN_RECOVERABLE_TOOL_FAILURES ?? 8);
+  /** Counts the failure just recorded, so the limit matches the check made before recording one. */
+  private assertRecoverableFailureBudget(current: AgentRun, taskId: string, message: string): void {
+    const failures = current.events.filter(item => item.type === 'tool.failed_recoverable');
+    if (failures.filter(item => item.data.taskId === taskId).length > this.maxRecoverableToolFailures || failures.length > this.maxRunRecoverableToolFailures) throw new Error(message);
+  }
   private readonly finalCallTimeoutMs = z.coerce.number().int().positive().parse(process.env.AEEIS_FINAL_CALL_TIMEOUT_MS ?? 180_000);
   /** r79 csv: only an operator-set AEEIS_FINAL_CALL_TIMEOUT_MS caps final-only calls; by default they get the Run share. */
   private readonly finalCallTimeoutConfigured = process.env.AEEIS_FINAL_CALL_TIMEOUT_MS !== undefined;
@@ -886,6 +920,7 @@ export class AgentEngine {
     const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
+    const actionPolicy = normalizeActionPolicy(request.actionPolicy);
     // Keep requestSchema composable for the existing HTTP/Thread .omit() paths.
     if (request.planning === 'direct') {
       const decision = planningDecision(request);
@@ -1081,7 +1116,7 @@ export class AgentEngine {
       capabilityCatalogVersion: 1, approvedAgents,
       ...(resourceSnapshot ? { resourceSnapshot } : {}),
       ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}),
-      ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), model: selectedModel.pin,
+      ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), ...(actionPolicy ? { actionPolicy } : {}), ...(request.origin && request.origin !== 'owner' ? { origin: request.origin } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
       ...(evolutionSelection.traffic.length ? { evolutionTraffic: evolutionSelection.traffic } : {}),
@@ -1244,6 +1279,24 @@ export class AgentEngine {
         const grant = input.duration === 'once' ? 'once' as const : undefined;
         run.approval = { planHash, planVersion, approved: true, actor: run.owner, at: now(), ...(grant ? { grant } : {}) };
         run.status = 'running'; event(run, 'plan.approved', { planHash, planVersion, actor: run.owner, grant: input.duration ?? 'task' });
+      } else if (action === 'approve-action') {
+        const input = approveActionSchema.parse(body);
+        const pending = run.actionApproval;
+        if (run.status !== 'needs_approval' || pending?.status !== 'pending') throw new Conflict('这件 Run 没有等待批准的动作');
+        if (pending.idempotencyKey !== input.idempotencyKey) throw new Conflict('等待批准的动作已变化，请刷新后重试');
+        const call = pending.kind === 'tool' ? run.pendingTool : run.pendingDelegation;
+        if (!call || call.idempotencyKey !== pending.idempotencyKey) throw new Conflict('等待批准的调用已经不在了');
+        const approved = input.decision === 'once' || input.decision === 'always';
+        const policy = withActionDecision(run.actionPolicy, pending.ref, input.decision);
+        if (policy) run.actionPolicy = policy;
+        run.actionApproval = { ...pending, status: approved ? 'approved' : 'denied', decision: input.decision, actor: run.owner, decidedAt: now() };
+        if (!approved) {
+          if (pending.kind === 'tool') delete run.pendingTool; else delete run.pendingDelegation;
+          const toolId = pending.kind === 'tool' ? pending.ref.split('@')[0]! : 'delegate';
+          run.steps.find(step => step.taskId === pending.taskId)?.observations.push({ tool: toolId, argument: pending.ref, result: { error: { recoverable: true, errorCode: 'action_declined', message: `The owner declined ${pending.ref}. Nothing was run. Continue without it, or finish with explicit limitations.` } } });
+        }
+        run.status = 'running';
+        event(run, approved ? 'action.approved' : 'action.denied', { taskId: pending.taskId, ref: pending.ref, idempotencyKey: pending.idempotencyKey, decision: input.decision, actor: run.owner });
       } else if (action === 'revise-plan') {
         const { planVersion, feedback } = revisePlanSchema.parse(body);
         assertReviewVersion(run, planVersion);
@@ -2465,6 +2518,11 @@ export class AgentEngine {
           timeoutMs: 60_000, requestedAt: now(),
         };
         event(current, 'tool.requested', { taskId: node.id, toolId: decision.toolId, toolVersion: decision.toolVersion, idempotencyKey: current.pendingTool.idempotencyKey });
+        const verdict = gateExternalAction(current, live, { kind: 'tool', id: decision.toolId, version: decision.toolVersion, capabilities: approved.capabilities }, { taskId: node.id, idempotencyKey: current.pendingTool.idempotencyKey, input: decision.input });
+        if (verdict.decision === 'refuse') {
+          delete current.pendingTool;
+          this.assertRecoverableFailureBudget(current, node.id, 'External tool was refused by the owner action policy');
+        }
       } else if (decision.type === 'delegate' && !(current.allowedAgents ?? []).includes(decision.agentId)) {
         // r79 pdf2: the model copied the schema example ("…-agent-id" / "bounded delegated goal") although no Agent was
         // approved. Nothing was delegated, so return it to the executor like any rejected tool input instead of run.failed.
@@ -2504,6 +2562,11 @@ export class AgentEngine {
         const pending: PendingDelegation = { agentId: decision.agentId, ...(approvedAgent ? { cardDigest: approvedAgent.cardDigest } : {}), taskBrief, contextPack: contextInput, grant, mode: decision.mode, idempotencyKey: `${current.id}:${current.calls.at(-1)!.id}:${decision.agentId}` };
         current.pendingDelegation = pending;
         event(current, 'agent.requested', { taskId: node.id, agentId: decision.agentId, contextVersion: contextInput.id, idempotencyKey: pending.idempotencyKey });
+        const verdict = gateExternalAction(current, live, { kind: 'agent', id: decision.agentId }, { taskId: node.id, idempotencyKey: pending.idempotencyKey, input: { goal: decision.goal, expectedOutput: decision.expectedOutput } });
+        if (verdict.decision === 'refuse') {
+          delete current.pendingDelegation;
+          this.assertRecoverableFailureBudget(current, node.id, 'External Agent delegation was refused by the owner action policy');
+        }
       } else {
         let contentCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', problems: [] as string[], movedUnknowns: 0, cappedUnknowns: 0, derivedInferences: 0, autoLabeledInferences: 0 };
         let evidenceCheck = { result: 'rejected' as 'ok' | 'fixed' | 'rejected', invalidRefs: [] as string[], missingEvidence: false, droppedClaims: 0, mappedRefs: 0, removedRefs: 0, observedCount: observed.size };

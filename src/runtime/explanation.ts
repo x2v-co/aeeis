@@ -21,7 +21,7 @@ export interface RunExplanation {
     updatedAt: string;
   };
   attention: {
-    kind: 'none' | 'approve_plan' | 'provide_input' | 'reconcile_external' | 'resume' | 'review' | 'inspect_failure';
+    kind: 'none' | 'approve_plan' | 'approve_action' | 'provide_input' | 'reconcile_external' | 'resume' | 'review' | 'inspect_failure';
     nextAction: string;
     blockers: Array<{ kind: string; detail: string; refs: string[] }>;
   };
@@ -77,6 +77,10 @@ function countState(counter: Counter, state: string): void {
 }
 
 function attentionFor(run: AgentRun): RunExplanation['attention'] {
+  if (run.status === 'needs_approval' && run.actionApproval?.status === 'pending') {
+    const pending = run.actionApproval;
+    return { kind: 'approve_action', nextAction: `决定这一个动作：仅这一次、以后都允许、拒绝或阻止。原因：${pending.reason.slice(0, 240)}。`, blockers: [{ kind: 'action_approval', detail: `等待批准动作 ${pending.ref}`, refs: [pending.ref, pending.idempotencyKey] }] };
+  }
   if (run.status === 'needs_approval') {
     const asked = run.executionReview === 'auto' && run.approval?.reason ? `模型请求批准（不可信判断）：${run.approval.reason.slice(0, 240)}。` : '';
     return { kind: 'approve_plan', nextAction: `${asked}核对并批准当前计划的精确 hash 后继续执行。`, blockers: [{ kind: 'approval', detail: run.approval ? `等待批准计划 ${run.approval.planHash}` : '当前计划尚未批准', refs: run.approval?.planHash ? [run.approval.planHash] : [] }] };

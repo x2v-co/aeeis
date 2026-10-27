@@ -77,6 +77,7 @@ npm run dev
 - `POST /api/runs/:id/edit-plan`：`{ planVersion, plan: { summary, nodes } }`，保存为新的用户编辑版本；任务 ID 必须唯一，依赖须存在且无环，任务数量为 1–12。
 - `POST /api/runs/:id/budgets`：`{ planVersion, modelBudget?, externalBudget? }`，保存本次运行的预算；模型支持 `tokens`、`moneyUsd`，外部支持 `calls`、`tokens`、`moneyUsd`。`null` 清除对应预算，省略则保留原值。
 - `POST /api/runs/:id/approve`：必须提交 `{ planVersion, planHash }`，也可同时提交预算。版本过期或状态已变化返回 `409`，只批准并执行最新版本。预算包含规划阶段的累计用量；金额预算要求可核验的模型价格。
+- `POST /api/runs/:id/approve-action`：`{ idempotencyKey, decision }`，`decision` 为 `once`、`always`、`deny` 或 `block`。计划批准之后，单个外部动作（工具调用或外部代理委托）可能还需要主人决定：创建 Run 时可以提交 `actionPolicy: { allow, block }`（精确的 `toolId`、`toolId@version` 或 `agent:<id>`），它随 Run 冻结。`block` 中的动作在所有审核档下都直接拒绝、不出卡片；`allow` 中的动作直接执行。Run 的 `origin` 为 `routine`、`webhook`、`channel` 或 `agent` 时，非只读动作在 `required` 和 `auto` 下等待主人批准，在 `yolo` 下直接拒绝，`allow` 也不能绕过这一条。等待时 Run 停在 `needs_approval`，`actionApproval.status` 为 `pending`，此时计划的 `approve` 返回 `409`。`always` 和 `block` 只改这件 Run 冻结的清单。主人发起、没有提交 `actionPolicy` 的 Run 行为不变。
 
 任务标题最多 200 字符，目标、证据要求和计划摘要最多 4000 字符，反馈最多 8000 字符。绑定已有领域任务的运行保留原有指令不可变约束。读取运行详情会返回 `canEdit`，只读页面不显示编辑入口。
 
