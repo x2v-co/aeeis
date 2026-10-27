@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AEEIS · 项目 Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23171717'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-family='Arial' font-size='32' fill='%23ffffff'%3EA%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=20261027-phase2c">
+<link rel="stylesheet" href="/style.css?v=20261027-phase3">
 </head>
 <body class="gb">
 <a class="skip-link" href="#quick-goal">跳到消息</a>
@@ -376,6 +376,10 @@
 <label for="group-title">名称</label>
 <input id="group-title" required="" maxlength="80" placeholder="例如：发布协作">
 <p id="group-count-live" class="muted">1 / 6 · AEEIS</p>
+<p id="group-proposal" class="muted">提议：AEEIS 担任 PM。优先复用名单里已有的人。一共 1 / 6。创建前确认这一组。</p>
+<button id="group-reuse" type="button">按名单复用</button>
+<label for="group-newcomer-reason">名单以外的人</label>
+<input id="group-newcomer-reason" maxlength="200" placeholder="为什么现有的人不够">
 <div id="group-candidates">
 </div>
 <div class="group-person-row">
@@ -395,6 +399,9 @@
 <span class="group-head-actions">
 <button id="channel-board-open" type="button" class="quiet-button">任务板</button>
 <button id="channel-memory-open" type="button" class="quiet-button">频道记忆</button>
+<button id="channel-studio-open" type="button" class="quiet-button">工作室</button>
+<button id="channel-digest-open" type="button" class="quiet-button">复盘</button>
+<button id="channel-teach-open" type="button" class="quiet-button">带教</button>
 <button id="channel-inbox" type="button" class="quiet-button">收件箱</button>
 <button id="group-rename" type="button" class="quiet-button">改名</button>
 <button id="chat-archive" type="button" class="quiet-button">归档</button>
@@ -446,6 +453,64 @@
 <textarea id="channel-memory-text" maxlength="2000" required placeholder="写下要记住的事实"></textarea>
 <button type="submit">记下</button>
 </form>
+</section>
+<section id="channel-studio" hidden>
+<div class="group-head">
+<h3>工作室</h3>
+<button id="channel-studio-close" type="button" class="quiet-button">回到消息</button>
+</div>
+<p class="muted">这是这个频道的空间视图。点人或交接回到频道里看。工作室只读，看一眼不会执行。</p>
+<div class="studio-toolbar">
+<button type="button" class="quiet-button" data-studio-view="floor" aria-pressed="true">工作室</button>
+<button type="button" class="quiet-button" data-studio-view="graph">关系网</button>
+<button type="button" class="quiet-button" data-studio-view="timeline">时间线</button>
+<label><input id="studio-privacy" type="checkbox"> 只看谁和谁在协作</label>
+</div>
+<div id="channel-studio-body"></div>
+<div class="studio-replay">
+<button id="studio-play" type="button">回放</button>
+<button id="studio-pause" type="button">暂停</button>
+<button id="studio-prev" type="button">上一步</button>
+<button id="studio-next" type="button">下一步</button>
+<button id="studio-speed" type="button">速度 1×</button>
+<p id="studio-replay-caption" class="muted">可以回放这个频道里的交接。空格暂停，左右键单步。</p>
+</div>
+</section>
+<section id="channel-digest" hidden>
+<div class="group-head">
+<h3>复盘</h3>
+<button id="channel-digest-close" type="button" class="quiet-button">收起</button>
+</div>
+<p class="muted">按这个频道已经记下的事汇总。不会调用模型，也不会执行。</p>
+<div class="studio-toolbar">
+<button type="button" class="quiet-button" data-digest-window="day">今日</button>
+<button type="button" class="quiet-button" data-digest-window="week" aria-pressed="true">本周</button>
+</div>
+<div id="channel-digest-body"></div>
+<form id="channel-rule-form">
+<label for="channel-rule-text">团队规则</label>
+<textarea id="channel-rule-text" maxlength="500" required placeholder="例如：发布风险必须先查变更记录"></textarea>
+<button type="submit">收成团队规则</button>
+</form>
+<div id="channel-rule-list"></div>
+</section>
+<section id="channel-teach" hidden>
+<div class="group-head">
+<h3>带教</h3>
+<button id="channel-teach-close" type="button" class="quiet-button">收起</button>
+</div>
+<p class="muted">一行一个步骤。草案先记在这个频道，只影响这里。收进档案仍要这个人有一次做成并带证据。看一眼不会执行。</p>
+<label for="channel-teach-person">教给谁</label>
+<select id="channel-teach-person"></select>
+<label for="channel-teach-steps">步骤</label>
+<textarea id="channel-teach-steps" maxlength="2000" placeholder="一行一个步骤"></textarea>
+<div class="studio-toolbar">
+<button id="channel-teach-draft" type="button">生成草案</button>
+<button id="channel-teach-save" type="button">记在这个频道</button>
+<button id="channel-teach-profile" type="button">收进这个人的档案</button>
+</div>
+<ol id="channel-teach-preview"></ol>
+<div id="channel-teach-saved"></div>
 </section>
 <section id="channel-bot" hidden>
 <div class="group-head">
