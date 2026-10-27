@@ -9,6 +9,7 @@ import type { Receipt, ToolInvocation } from '../integrations.js';
 import type { ProjectSourceSyncReceipt } from '../project-sources.js';
 import type { AgentFailure, AgentProgressEvent, ApprovedAgent, DelegationReceipt, DelegationRequest } from '../agent-gateway.js';
 import type { ActiveEvolution } from '../evolution-activation.js';
+import { actionOriginSchema, actionPolicySchema, type ActionDecision, type ActionOrigin, type ActionPolicy } from './action-policy.js';
 
 export const materialSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -89,6 +90,10 @@ export const requestSchema = z.object({
     model: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/),
     provider: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/).optional(),
   }).strict().optional(),
+  /** Owner's exact allow and block refs for external side effects, frozen on the Run. */
+  actionPolicy: actionPolicySchema.optional(),
+  /** Who started this Run. Missing means the owner. A non-owner origin only adds review. */
+  origin: actionOriginSchema.optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -389,6 +394,16 @@ export interface AgentRun {
   /** Frozen at creation. Missing means the planner proposes the task graph. */
   planning?: 'direct' | 'dag';
   approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string; grant?: 'once' };
+  /** Frozen at creation and widened only by this Run's own action decisions. */
+  actionPolicy?: ActionPolicy;
+  /** Frozen at creation. Missing means the owner started the Run. */
+  origin?: ActionOrigin;
+  /** One external side effect waiting for, or settled by, an owner decision. It is separate from plan approval. */
+  actionApproval?: {
+    status: 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string;
+    idempotencyKey: string; inputHash: string; reason: string; requestedAt: string;
+    decision?: ActionDecision; actor?: string; decidedAt?: string;
+  };
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;

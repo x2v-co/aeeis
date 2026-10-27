@@ -49,6 +49,7 @@ interface RunGraphsView {
 interface RunView extends RunSummary {
   workingMemoryEnabled?: boolean;
   canEdit?: boolean;
+  actionApproval?: { status: 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string; idempotencyKey: string; reason: string; decision?: string };
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
   revision: number; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string; requestHash?: string };
@@ -4825,11 +4826,37 @@ function renderRunDecision(run: RunView): void {
   const reviewActions = $('decision-review-actions');
   if (review && reviewGrid && reviewTasks && reviewActions) {
     const isReview = run.status === 'needs_approval';
+    const pendingAction = run.actionApproval?.status === 'pending' ? run.actionApproval : undefined;
     review.hidden = !isReview;
     reviewGrid.replaceChildren();
     reviewTasks.replaceChildren();
     reviewActions.replaceChildren();
-    if (isReview && plan) {
+    if (isReview && pendingAction) {
+      const reviewValues: Array<[string, string]> = [
+        ['动作', `${pendingAction.kind === 'agent' ? '交给外部代理' : '调用工具'} ${pendingAction.ref}`],
+        ['任务', pendingAction.taskId],
+        ['为什么要问', pendingAction.reason],
+      ];
+      for (const [label, value] of reviewValues) {
+        const item = element('div', '', 'review-fact');
+        item.append(element('small', label), element('strong', value));
+        reviewGrid.append(item);
+      }
+      reviewTasks.append(element('p', '计划已经批准。这一步里的这个动作需要你单独决定。拒绝或阻止时不会执行它，Run 会继续，执行器会知道原因。', 'muted'));
+      if (!readOnlyShare && run.canEdit !== false) {
+        const decide = (decision: 'once' | 'always' | 'deny' | 'block') => () => command('approve-action', { idempotencyKey: pendingAction.idempotencyKey, decision });
+        const once = button('仅这一次', decide('once'));
+        once.className = 'decision-primary';
+        once.dataset.actionDecision = 'once';
+        const always = button('这件 Run 里以后都允许', decide('always'));
+        always.dataset.actionDecision = 'always';
+        const deny = button('拒绝这一次', decide('deny'));
+        deny.dataset.actionDecision = 'deny';
+        const block = button('在这件 Run 里阻止', decide('block'));
+        block.dataset.actionDecision = 'block';
+        reviewActions.append(once, always, deny, block);
+      }
+    } else if (isReview && plan) {
       const modelBudget = [run.modelBudget?.tokens === undefined ? '' : `${run.modelBudget.tokens.toLocaleString()} tokens`, run.modelBudget?.moneyUsd === undefined ? '' : `$${run.modelBudget.moneyUsd.toFixed(2)}`].filter(Boolean).join(' / ') || '未设置';
       const externalBudget = [run.externalBudget?.calls === undefined ? '' : `${run.externalBudget.calls} 次调用`, run.externalBudget?.tokens === undefined ? '' : `${run.externalBudget.tokens.toLocaleString()} tokens`, run.externalBudget?.moneyUsd === undefined ? '' : `$${run.externalBudget.moneyUsd.toFixed(2)}`].filter(Boolean).join(' / ') || '未设置';
       const reviewValues: Array<[string, string]> = [
@@ -4903,6 +4930,7 @@ function renderRunDecision(run: RunView): void {
       };
     };
     if (run.status === 'queued' && taskSchedulerConfigured) installAction('恢复调度', () => command('dispatch'));
+    else if (run.status === 'needs_approval' && run.actionApproval?.status === 'pending') { /* The action card above carries the decision. */ }
     else if (run.status === 'needs_approval' && plan && !readOnlyShare && run.canEdit !== false) installAction('批准并执行', planReview(run, command, true).approve);
     else if (run.status === 'needs_input' || run.status === 'unknown') installAction(run.status === 'unknown' ? '填写核查说明' : '补充信息', async () => {
       openInputPanel(run.status === 'unknown' ? 'reconcile' : 'answer');
