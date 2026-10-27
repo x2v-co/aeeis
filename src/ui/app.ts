@@ -198,7 +198,6 @@ let eventStreamRefreshQueued = false;
 let reminderNextCursor: string | undefined;
 let reminderItems: ReminderSummary[] = [];
 let reminderStatusFilter = '';
-let runDockObserver: IntersectionObserver | undefined;
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
@@ -598,7 +597,6 @@ function setCurrentRunOpen(enabled: boolean): void {
   syncTranscriptEmpty();
   syncCurrentRunToggle(current);
   syncPresence(current);
-  if (!enabled) $('run-dock').hidden = true;
 }
 setCurrentRunOpen(currentRunOpen);
 ($('current-run-toggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
@@ -632,27 +630,6 @@ function setupRunPhaseNavigation(): void {
   });
 }
 setupRunPhaseNavigation();
-function setupRunDock(): void {
-  const workspace = $('run-workspace');
-  const dock = $('run-dock');
-  if (!workspace || !dock || !('IntersectionObserver' in window)) return;
-  runDockObserver = new IntersectionObserver(([entry]) => {
-    dock.hidden = Boolean(entry?.isIntersecting) || $('detail').hidden;
-  }, { threshold: 0.08, rootMargin: '-72px 0px 0px' });
-  runDockObserver.observe(workspace);
-}
-setupRunDock();
-function updateRunDock(run: RunView): void {
-  const dock = $('run-dock');
-  if (!dock) return;
-  $('run-dock-title').textContent = run.goal;
-  $('run-dock-meta').textContent = `${runStatusLabel(run.status)} · ${run.events.length} 条事件 · ${run.artifacts.length} 个产物`;
-  dock.dataset.status = run.status;
-  if ($('detail').hidden) dock.hidden = true;
-}
-($('run-dock-jump') as HTMLButtonElement | null)?.addEventListener('click', () => {
-  $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-});
 let focusMode = localStorage.getItem('aeeis.focus-mode') === '1';
 function setFocusMode(enabled: boolean): void {
   focusMode = enabled;
@@ -913,11 +890,6 @@ document.querySelectorAll<HTMLButtonElement>('#command-list [data-command]').for
   control.addEventListener('click', () => executePaletteCommand(control.dataset.command ?? ''));
 });
 document.querySelector('[data-command-close]')?.addEventListener('click', () => setCommandPalette(false));
-($('run-pulse-close') as HTMLButtonElement | null)?.addEventListener('click', () => { $('run-pulse').hidden = true; });
-($('run-pulse-jump') as HTMLButtonElement | null)?.addEventListener('click', () => {
-  $('run-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  $('run-pulse').hidden = true;
-});
 ($('command-search') as HTMLInputElement | null)?.addEventListener('input', event => filterCommandPalette((event.target as HTMLInputElement).value));
 document.querySelectorAll<HTMLButtonElement>('#run-filters [data-run-filter]').forEach(control => {
   control.addEventListener('click', () => {
@@ -3328,17 +3300,66 @@ function executionLine(execution: { steps: Array<{ title: string; state: 'done' 
   const label = (state: 'done' | 'current' | 'waiting') => state === 'done' ? '已完成' : state === 'current' ? '正在做' : '还没到';
   return `执行步骤：${execution.steps.map(step => `${step.title} ${label(step.state)}`).join(' · ')}`;
 }
-/** The plan for one task, shown in the transcript under the message that started it. Its buttons use the same Run commands as the task table. */
+/** One plain word for where a task's Run stands, and the colour that word is shown in. */
+function taskStatusWord(task: ConversationTaskView): { word: string; tone: 'quiet' | 'ink' | 'attention' | 'done' | 'stuck' } {
+  switch (task.status) {
+    case 'preparing': case 'queued': case 'planning': return { word: '起草中', tone: 'quiet' };
+    case 'needs_approval': return task.pendingApproval ? { word: '等你确认计划', tone: 'quiet' } : { word: '需要你', tone: 'attention' };
+    case 'needs_input': return { word: '需要你', tone: 'attention' };
+    case 'running': case 'waiting_external': case 'reviewing': return { word: '执行中', tone: 'ink' };
+    case 'succeeded': return { word: '已完成', tone: 'done' };
+    case 'failed': case 'unknown': return { word: '卡住了', tone: 'stuck' };
+    case 'cancelled': return { word: '已取消', tone: 'quiet' };
+    case 'paused': return { word: '已暂停', tone: 'quiet' };
+    default: return { word: runStatusLabel(task.status), tone: 'quiet' };
+  }
+}
+/** One sentence on what the Run is doing now, or what it needs. */
+function taskActivity(task: ConversationTaskView): string {
+  const steps = task.execution?.steps ?? [];
+  const index = Math.max(0, steps.findIndex(step => step.state !== 'done'));
+  const at = steps.length ? `第 ${Math.min(index + 1, steps.length)} 步 / 共 ${steps.length} 步` : '';
+  const title = steps[index]?.title;
+  const evidence = task.execution?.evidence?.length ?? 0;
+  switch (task.status) {
+    case 'preparing': case 'queued': case 'planning': return '正在起草计划。';
+    case 'needs_approval': return task.pendingApproval ? '计划好了，点“开始”它就去做。' : `停在${at || '当前这一步'}，等你决定一个动作。`;
+    case 'needs_input': return `停在${at || '当前这一步'}，等你回答一个问题。`;
+    case 'running': return title ? `正在做${at}：${title}。` : '正在做。';
+    case 'waiting_external': return `在等外部回执${at ? `（${at}）` : ''}。`;
+    case 'reviewing': return '在复核结果。';
+    case 'paused': return `已暂停${at ? `，停在${at}` : ''}。`;
+    case 'succeeded': return evidence ? `做完了，留下 ${evidence} 份证据。` : '做完了。';
+    case 'failed': return `在${at || '执行中'}卡住了。可以重试，或打开工作台看原因。`;
+    case 'unknown': return '有一次调用结果未知，需要你核查后才能继续。';
+    case 'cancelled': return '已取消，不会再执行。';
+    default: return '';
+  }
+}
+/** A task's Run, shown in the transcript under the message that started it: status, what it is doing, progress and the plan. Its buttons use the same Run commands as the task table. */
 function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): HTMLElement {
   const card = element('section', '', 'plan-card');
   card.dataset.planTask = task.id;
   card.dataset.state = task.pendingApproval ? 'awaiting' : task.status;
-  card.setAttribute('aria-label', `「${task.title}」的计划`);
+  const status = taskStatusWord(task);
+  card.dataset.tone = status.tone;
+  card.setAttribute('aria-label', `「${task.title}」的运行`);
   const head = element('div', '', 'plan-card-head');
-  head.append(element('strong', '计划'), element('span', task.pendingApproval ? '等你确认' : task.pendingAction && task.status === 'needs_approval' ? '等你决定一个动作' : task.pendingQuestion && task.status === 'needs_input' ? '等你回答' : task.status === 'preparing' ? '正在准备' : runStatusLabel(task.status), 'plan-card-status'));
+  head.append(element('strong', task.title, 'plan-card-title'), element('span', status.word, 'plan-card-status'));
   card.append(head);
-  if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
+  const activity = taskActivity(task);
+  if (activity) card.append(element('p', activity, 'plan-card-activity'));
   const steps = task.execution?.steps ?? [];
+  if (steps.length) {
+    const done = steps.filter(step => step.state === 'done').length;
+    const strip = element('div', '', 'plan-card-progress');
+    strip.setAttribute('role', 'progressbar'); strip.setAttribute('aria-label', '进度');
+    strip.setAttribute('aria-valuemin', '0'); strip.setAttribute('aria-valuemax', String(steps.length)); strip.setAttribute('aria-valuenow', String(done));
+    strip.setAttribute('aria-valuetext', `${done} / ${steps.length} 步已完成`);
+    const fill = element('span'); fill.style.width = `${Math.round((done / steps.length) * 100)}%`;
+    strip.append(fill); card.append(strip);
+  }
+  if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
   if (steps.length) {
     const list = element('ol', '', 'plan-card-steps');
     for (const step of steps) {
@@ -3348,7 +3369,7 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
       list.append(item);
     }
     card.append(list);
-  } else if (['preparing', 'queued', 'planning'].includes(task.status)) card.append(element('p', '正在起草计划…', 'muted'));
+  }
   if (task.runId && task.pendingApproval) {
     const actions = element('div', '', 'plan-card-actions');
     const start = dashboardButton('开始', () => approveConversationTask(task, 'task'));
@@ -3669,7 +3690,11 @@ function rememberLifeSummary(view: ConversationView): void {
 }
 function acceptConversation(view: ConversationView): void {
   if (conversation?.id === view.id && conversation.revision > view.revision) return;
+  // A task that finishes while you watch opens its results in the workbench. A first load or another conversation never does.
+  const before = conversation?.id === view.id ? new Map(conversation.tasks.map(task => [task.id, task.status])) : undefined;
+  const finished = before ? view.tasks.find(task => task.status === 'succeeded' && task.runId && before.has(task.id) && !['succeeded', 'failed', 'cancelled', 'discussion', 'unreadable'].includes(before.get(task.id)!)) : undefined;
   conversation = view;
+  if (finished?.runId && rosterView() === 'entry') void revealFinishedRun(finished.runId).catch(() => undefined);
   rememberLifeSummary(view);
   localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
   renderConversation();
@@ -3890,6 +3915,18 @@ let openMemoryForRunId = '';
 async function openConversationMemory(runId: string): Promise<void> {
   openMemoryForRunId = runId;
   await openConversationRun(runId);
+}
+/** Loads a finished Run into the workbench and opens it, without scrolling or moving keyboard focus. */
+async function revealFinishedRun(runId: string): Promise<void> {
+  const epoch = conversationEpoch;
+  const run = await api<RunView>(`/runs/${encodeURIComponent(runId)}`);
+  const [graphs, explanation] = await Promise.all([api<RunGraphsView>(`/runs/${encodeURIComponent(runId)}/graphs`), api<RunExplanation>(`/runs/${encodeURIComponent(runId)}/explanation`)]);
+  if (epoch !== conversationEpoch || rosterView() !== 'entry') return;
+  currentId = runId; current = { ...run, graphs }; localStorage.setItem('aeeis.run', runId);
+  setCurrentRunOpen(true); render(current); renderExplanation(explanation);
+  // Open the run pane for now only; setRunDetailsMode would also remember it for every later visit.
+  runDetailsMode = true; document.body.classList.add('run-details-mode'); syncRunDetailsToggleLabel();
+  setComputerOpen(true, 'run');
 }
 async function openConversationRun(runId: string): Promise<void> {
   const epoch = conversationEpoch;
@@ -5216,7 +5253,7 @@ async function refresh(): Promise<void> {
   renderMinimalRecentRuns(runs);
   const requestedId = currentId;
   const epoch = entryEpoch;
-  if (!requestedId) { stopRunEventStream(); setCurrentRunOpen(false); $('run-dock').hidden = true; return; }
+  if (!requestedId) { stopRunEventStream(); setCurrentRunOpen(false); return; }
   let run: RunView;
   try { run = await api<RunView>(`/runs/${requestedId}`); }
   catch (error) {
@@ -5224,7 +5261,7 @@ async function refresh(): Promise<void> {
     // leave the workbench stuck on a stale selection when its Run disappeared.
     if (error instanceof Error && /Unknown run|HTTP 404/.test(error.message)) {
       if (currentId === requestedId && entryEpoch === epoch) {
-        currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false); $('run-dock').hidden = true;
+        currentId = ''; current = undefined; localStorage.removeItem('aeeis.run'); setCurrentRunOpen(false);
       }
       return;
     }
@@ -5295,36 +5332,6 @@ function queueEventStreamRefresh(): void {
   }, 0);
 }
 
-let runPulseTimer: number | undefined;
-function showRunPulse(eventName: string, data?: { phase?: string; reason?: string }): void {
-  if (document.hidden) return;
-  const labels: Record<string, string> = {
-    'run.updated': '运行状态已更新',
-    'run.planned': '执行计划已经生成',
-    'run.approved': '计划已批准，准备执行',
-    'run.started': 'Agent 已开始执行',
-    'run.completed': '运行已完成，证据已保存',
-    'run.failed': '运行遇到问题，需要关注',
-    'tool.requested': 'Agent 正在等待工具回执',
-    'tool.completed': '工具已返回，正在整理证据',
-    'tool.failed': '工具调用失败，需要关注',
-    'tool.unknown': '工具结果需要核查',
-    'tool.reconciled': '工具结果已核查，运行可以继续',
-    'agent.progress': '外部 Agent 有新的进展',
-    'agent.completed': '外部 Agent 已完成委托',
-    'agent.failed': '外部 Agent 调用失败',
-    'agent.unknown': '外部 Agent 结果需要核查',
-    'external.budget_stopped': '外部预算已触发安全停止',
-  };
-  const pulse = $('run-pulse');
-  const text = $('run-pulse-message');
-  if (!pulse || !text) return;
-  text.textContent = labels[eventName] ?? describeEvent(eventName, data, true);
-  pulse.hidden = false;
-  if (runPulseTimer !== undefined) window.clearTimeout(runPulseTimer);
-  runPulseTimer = window.setTimeout(() => { pulse.hidden = true; }, 5200);
-}
-
 function waitForOnline(signal: AbortSignal): Promise<void> {
   if (navigator.onLine) return Promise.resolve();
   return new Promise(resolve => {
@@ -5366,25 +5373,14 @@ async function consumeRunEventStream(runId: string, generation: number): Promise
         let boundary = buffer.indexOf('\n\n');
         while (boundary >= 0) {
           const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); boundary = buffer.indexOf('\n\n');
-          let id: string | undefined; let name = 'message'; let data = '';
+          let id: string | undefined; let name = 'message';
           for (const line of frame.split(/\r?\n/)) {
             if (line.startsWith('id: ')) id = line.slice(4).trim();
             else if (line.startsWith('event: ')) name = line.slice(7).trim();
-            else if (line.startsWith('data: ')) data += line.slice(6);
           }
           if (id && /^\d+$/.test(id)) eventStreamCursor = btoa(JSON.stringify({ seq: Number(id) })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-          if (name !== 'heartbeat' && name !== 'timeout') {
-            let eventName = name;
-            let phase: string | undefined;
-            try {
-              const payload = data ? JSON.parse(data) as { type?: unknown; eventType?: unknown; data?: { phase?: unknown } } : undefined;
-              if (typeof payload?.type === 'string') eventName = payload.type;
-              else if (typeof payload?.eventType === 'string') eventName = payload.eventType;
-              if (typeof payload?.data?.phase === 'string') phase = payload.data.phase;
-            } catch { /* the refresh still handles non-JSON event payloads */ }
-            showRunPulse(eventName, phase ? { phase } : undefined);
-            queueEventStreamRefresh();
-          }
+          // Any event refreshes the Run; the timeline and the transcript card show what changed.
+          if (name !== 'heartbeat' && name !== 'timeout') queueEventStreamRefresh();
         }
       }
     } catch (error) {
@@ -6501,7 +6497,6 @@ function render(run: RunView): void {
   syncCurrentRunToggle(run);
   syncPresence(run);
   if (intentPresetsOpen) setIntentPresetsOpen(false);
-  updateRunDock(run);
   renderDeliverySummary(run);
   const validationEvent = [...run.events].reverse().find(event => event.type === 'run.failed' && event.data?.validation?.issues?.length);
   const validationText = validationEvent?.data?.validation?.issues?.slice(0, 3).map(issue => `${issue.path ?? '$'}：${issue.message ?? '格式不符合要求'}`).join('；');
