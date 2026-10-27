@@ -222,6 +222,8 @@ let groupEventCursor: string | undefined;
 let channelLoadedRoomId = '';
 let channelEventsCaughtUp = false;
 let channelReadEpoch = 0;
+const CHANNEL_TRANSCRIPT_PAGE = 50;
+let channelHistoryPages = 1;
 let channelReadQueue: Promise<void> = Promise.resolve();
 let channelReadFlight: Promise<void> | undefined;
 const handoffViews = new Map<string, ConversationView>();
@@ -1643,8 +1645,16 @@ function channelLog(): SessionEventSummary[] {
   if (!laterChannelEvents.length && !liveChannelEvents.length) return groupEvents;
   return [...groupEvents, ...laterChannelEvents, ...liveChannelEvents];
 }
+function channelReadableEvents(): SessionEventSummary[] {
+  return channelLog().filter(event => event.operation !== 'retract');
+}
+function earlierChannelCount(): number {
+  return Math.max(0, channelReadableEvents().length - channelHistoryPages * CHANNEL_TRANSCRIPT_PAGE);
+}
 function visibleChannelEvents(): SessionEventSummary[] {
-  return liveChannelEvents.length ? [...groupEvents, ...liveChannelEvents] : groupEvents;
+  const readable = channelReadableEvents();
+  const keep = channelHistoryPages * CHANNEL_TRANSCRIPT_PAGE;
+  return readable.length > keep ? readable.slice(-keep) : readable;
 }
 function eventCursor(event: SessionEventSummary | undefined): string | undefined {
   const sequence = event?.sequence;
@@ -1668,6 +1678,7 @@ function resetChannelLog(): void {
   groupEventCursor = undefined;
   channelLoadedRoomId = '';
   channelEventsCaughtUp = false;
+  channelHistoryPages = 1;
   channelReadEpoch += 1;
 }
 function appendUnseen(items: SessionEventSummary[] | undefined, into: SessionEventSummary[]): void {
@@ -1738,6 +1749,7 @@ function channelCancelHolds(task: ConversationTaskView, decision: BoardDecision)
 function boardColumn(status: string, decision?: BoardDecision, runId?: string): BoardColumn | 'failed' {
   if (decision?.cancelled && !runId && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'failed';
   if (status === 'failed' || status === 'cancelled' || status === 'unreadable') return 'failed';
+  if (decision && blockNoteCurrent(status, decision)) return 'blocked';
   if (status === 'discussion') return 'capture';
   if (status === 'preparing' || status === 'queued') return 'ready';
   if (status === 'planning' || status === 'running' || status === 'reviewing') return 'doing';
@@ -1874,6 +1886,8 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   button.append(element('strong', task.title), element('small', owner), element('small', taskStateLabel(task)));
   const blocked = blockedCaption(task.status);
   if (blocked) button.append(element('small', blocked));
+  const blockNote = blockNoteCurrent(task.status, decision);
+  if (blockNote) button.append(element('small', `阻塞：${blockNote}`));
   if (decision.assigneeId) button.append(element('small', `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取`));
   if (decision.conflicts.length) button.append(element('small', '已被领取'));
   if (decision.accepted) button.append(element('small', '已验收'));
@@ -2349,7 +2363,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
 async function refreshHandoffViews(): Promise<void> {
   const epoch = ++handoffEpoch;
   const roomId = openGroupId;
-  const ids = [...new Set(groupEvents.flatMap(event => {
+  const ids = [...new Set(visibleChannelEvents().flatMap(event => {
     const cite = handoffCitation(event);
     return cite ? [cite.conversationId] : [];
   }))];
@@ -2977,6 +2991,20 @@ function renderGroupTranscript(): void {
     if (field.dataset.reject) rejectDrafts.set(field.dataset.reject, field.value);
   });
   list.replaceChildren();
+  const earlier = earlierChannelCount();
+  if (earlier > 0) {
+    const row = element('li', '', 'group-earlier');
+    const older = element('button', `查看更早的消息 · 还有 ${earlier} 条`, 'quiet-button') as HTMLButtonElement;
+    older.type = 'button';
+    older.dataset.earlierMessages = String(earlier);
+    older.addEventListener('click', () => {
+      channelHistoryPages += 1;
+      renderGroupTranscript();
+      void refreshHandoffViews();
+    });
+    row.append(older);
+    list.append(row);
+  }
   for (const event of visibleChannelEvents()) {
     if (event.operation === 'retract') continue;
     const item = element('li', '', 'group-message');
