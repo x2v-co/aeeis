@@ -597,6 +597,51 @@ describe('single-entry conversation workbench', () => {
     expect(doc().body.classList.contains('computer-open')).toBe(false);
   });
 
+  it('keeps every setting on one Settings page and opens it from the old links', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    expect([...doc().querySelectorAll('#gb-computer .gb-pane')].map(pane => (pane as HTMLElement).dataset.pane)).toEqual(['run', 'setup', 'status']);
+    expect([...doc().querySelectorAll('#gb-computer [data-computer-tab]')].map(button => button.textContent)).toEqual(['设置', '状态']);
+    expect(doc().querySelectorAll('[data-computer-tab="goals"], [data-computer-tab="govern"]')).toHaveLength(0);
+    const setup = doc().querySelector<HTMLElement>('#gb-computer .gb-pane[data-pane="setup"]')!;
+    const order = ['new-run-panel', 'access-panel', 'goals-panel', 'reminders-panel', 'rsi-panel', 'collaboration-panel'].map(id => {
+      const found = doc().getElementById(id)!;
+      expect(setup.contains(found), id).toBe(true);
+      return [...setup.querySelectorAll('[id]')].indexOf(found);
+    });
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect([...setup.querySelectorAll('nav.settings-index a')].map(link => link.textContent)).toEqual(['默认与边界', '访问', '目标、Room 与提醒', '自我改进', '协作']);
+    doc().querySelector<HTMLAnchorElement>('nav.workbench-nav a[href="#rsi-panel"]')!.click();
+    expect(doc().body.classList.contains('computer-open')).toBe(true);
+    expect(el('gb-computer').dataset.tab).toBe('setup');
+    expect(el('gb-computer-title').textContent).toBe('设置');
+    expect(h.posts).toHaveLength(0);
+  });
+
+  it('shows the defaults the next run will use under the entry composer, and opens Settings to change them', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    const line = () => el('entry-defaults-text').textContent;
+    await vi.waitFor(() => expect(el('entry-defaults').hidden).toBe(false));
+    expect(line()).toBe('默认：自动审核 · 不设金额上限 · 不调用工具 · 隐私：内部');
+    fill('execution-review', 'required');
+    expect(line()).toContain('每份计划都要你批准');
+    fill('model-budget-usd', '2'); el('model-budget-usd').dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    fill('model-budget-tokens', '50000');
+    fill('allowed-tools', 'read, write, grep');
+    fill('privacy', 'confidential');
+    expect(line()).toBe('默认：每份计划都要你批准 · 金额上限 $2 · 50,000 tokens 上限 · 工具：read、write 等 3 个 · 隐私：机密');
+    fill('conversation-text', '按默认做'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body.runOptions).toMatchObject({ executionReview: 'required', modelBudget: { tokens: 50000, moneyUsd: 2 }, allowedTools: ['read', 'write', 'grep'], privacy: 'confidential' });
+    el('entry-defaults-edit').click();
+    await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
+    expect(doc().body.classList.contains('computer-open')).toBe(true);
+    expect(el('gb-computer').dataset.tab).toBe('setup');
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('发布'));
+    expect(el('entry-defaults').hidden).toBe(true);
+    dom.window.localStorage.removeItem('aeeis.execution-review');
+  });
+
   it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {
     let reject!: (error: Error) => void, attempts = 0;
     const h = harness(undefined, { handler(url) { if (url.endsWith('/messages') && ++attempts === 1) return new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }); } });

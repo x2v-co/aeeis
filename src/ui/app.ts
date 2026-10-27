@@ -384,11 +384,11 @@ function setupMinimalSections(): void {
   for (const selector of secondarySelectors) document.querySelector(selector)?.closest('section')?.classList.add('run-secondary');
 }
 setupMinimalSections();
-type ComputerTab = 'run' | 'setup' | 'goals' | 'govern' | 'status';
+type ComputerTab = 'run' | 'setup' | 'status';
 let computerOpen = false;
 let computerTab: ComputerTab = 'setup';
 const COMPUTER_TITLES: Record<ComputerTab, string> = {
-  run: '这次运行', setup: '设置', goals: '目标与提醒', govern: '治理', status: '运行状态',
+  run: '这次运行', setup: '设置', status: '运行状态',
 };
 function presenceOf(status?: string): { state: string; label: string } {
   if (!status) return { state: 'idle', label: '空闲' };
@@ -786,10 +786,10 @@ document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link
     const tabs: Record<string, ComputerTab | 'conversation'> = {
       '#new-run-panel': 'setup',
       '#run-workspace': 'conversation',
-      '#goals-panel': 'goals',
-      '#reminders-panel': 'goals',
-      '#rsi-panel': 'govern',
-      '#collaboration-panel': 'govern',
+      '#goals-panel': 'setup',
+      '#reminders-panel': 'setup',
+      '#rsi-panel': 'setup',
+      '#collaboration-panel': 'setup',
       '#system-status': 'status',
     };
     const target = tabs[href];
@@ -803,6 +803,13 @@ document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link
     if (target === 'setup') setDetailsMode(true, { reveal: true });
     else setComputerOpen(true, target);
     window.requestAnimationFrame(() => document.querySelector<HTMLElement>(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  });
+});
+// The Settings page's own index: jump within the open pane without changing the URL.
+document.querySelectorAll<HTMLAnchorElement>('nav.settings-index a').forEach(link => {
+  link.addEventListener('click', event => {
+    event.preventDefault();
+    document.querySelector<HTMLElement>(link.getAttribute('href') ?? '')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 });
 let commandPaletteOpen = false;
@@ -1154,6 +1161,7 @@ function updateConversationControls(): void {
   $<HTMLButtonElement>('conversation-send').disabled = locked || !conversation || conversationNeedsRefresh || (correcting && !conversation?.tasks.some(task => task.id === target));
   $<HTMLButtonElement>('conversation-note').disabled = locked || !conversation || conversationNeedsRefresh || correcting;
   restoreExecutionReview();
+  syncEntryDefaults();
   $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : rosterView() !== 'entry' ? '这位 Bot 不会单独执行，发送只记下来。要它做事，回到 AEEIS 说。' : executionReviewNote();
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
@@ -4156,6 +4164,14 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy']) {
+  $(id)?.addEventListener('input', () => syncEntryDefaults());
+  $(id)?.addEventListener('change', () => syncEntryDefaults());
+}
+$('entry-defaults-edit')?.addEventListener('click', () => {
+  setDetailsMode(true, { reveal: true });
+  window.requestAnimationFrame(() => $('run-options')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+});
 $('conversation-note').addEventListener('click', () => { void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 $('standing-form')?.addEventListener('submit', event => {
   event.preventDefault();
@@ -5972,6 +5988,26 @@ function executionReviewNote(): string {
     : `这次先出任务图：${planningRefusal(decision.reason)}。`;
   return `${gate}${shape}`;
 }
+/** One line under the entry composer: what the next run will use, read from the Settings fields it is sent with. */
+function entryDefaultsText(): string {
+  const review = executionReviewValue();
+  const parts = [review === 'yolo' ? '计划不停，直接执行' : review === 'auto' ? '自动审核' : '每份计划都要你批准'];
+  const money = $<HTMLInputElement>('model-budget-usd')?.value.trim();
+  const tokens = $<HTMLInputElement>('model-budget-tokens')?.value.trim();
+  parts.push(money ? `金额上限 $${money}` : '不设金额上限');
+  if (tokens) parts.push(`${Number(tokens).toLocaleString()} tokens 上限`);
+  const tools = $<HTMLInputElement>('allowed-tools') ? listedIds('allowed-tools') : [];
+  parts.push(!tools.length ? '不调用工具' : tools.length <= 2 ? `工具：${tools.join('、')}` : `工具：${tools.slice(0, 2).join('、')} 等 ${tools.length} 个`);
+  const privacy = $<HTMLSelectElement>('privacy');
+  if (privacy) parts.push(`隐私：${privacy.selectedOptions[0]?.textContent ?? privacy.value}`);
+  return `默认：${parts.join(' · ')}`;
+}
+function syncEntryDefaults(): void {
+  const line = $('entry-defaults');
+  if (!line) return;
+  line.hidden = !conversation || rosterView() !== 'entry';
+  $('entry-defaults-text').textContent = entryDefaultsText();
+}
 function goalExecutionOptions(): Record<string, unknown> {
   return { ...runOptions(false), executionReview: 'required' };
 }
@@ -7109,6 +7145,7 @@ async function initialize(): Promise<void> {
       const allowedTools = $<HTMLInputElement>('allowed-tools');
       if (!allowedTools.dataset.initialized) {
         if (!allowedTools.value.trim()) allowedTools.value = toolCatalog.defaultAllowedTools.join(', ');
+        syncEntryDefaults();
         allowedTools.dataset.initialized = 'true';
       }
       if (toolHelp) toolHelp.textContent = toolCatalog.tools.length

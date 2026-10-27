@@ -158,8 +158,6 @@
 </section>
 <nav class="gb-roster-foot" aria-label="工作台">
 <button type="button" data-computer-tab="setup">设置</button>
-<button type="button" data-computer-tab="goals">目标</button>
-<button type="button" data-computer-tab="govern">治理</button>
 <button type="button" data-computer-tab="status">状态</button>
 </nav>
 </aside>
@@ -320,6 +318,7 @@
 <p id="conversation-execution-note" class="muted"></p>
 </div>
 </form>
+<p id="entry-defaults" class="entry-defaults" hidden><span id="entry-defaults-text"></span> <button id="entry-defaults-edit" type="button" class="quiet-button" aria-describedby="entry-defaults-text">改</button></p>
 <div id="conversation-retry-panel" class="conversation-retry" hidden>
 <p>发送结果尚未确认。原请求和幂等键已保留；重试不会创建重复执行。请先确认原请求，再发送新内容。</p>
 <button id="conversation-retry" type="button">重试原请求</button>
@@ -728,8 +727,6 @@
 </div>
 <nav class="gb-computer-nav" aria-label="工作台分页">
 <button type="button" data-computer-tab="setup">设置</button>
-<button type="button" data-computer-tab="goals">目标</button>
-<button type="button" data-computer-tab="govern">治理</button>
 <button type="button" data-computer-tab="status">状态</button>
 </nav>
 <div class="gb-pane" data-pane="run">
@@ -830,11 +827,13 @@
 </section>
 </div>
 <div class="gb-pane" data-pane="setup">
-<div id="access-panel" class="access">
-<label for="token">本地访问令牌（若已配置）</label>
-<input id="token" type="password" autocomplete="off">
-<button id="connect">连接</button>
-</div>
+<nav class="settings-index" aria-label="设置分区">
+<a href="#new-run-panel">默认与边界</a>
+<a href="#settings-access">访问</a>
+<a href="#settings-goals">目标、Room 与提醒</a>
+<a href="#rsi-panel">自我改进</a>
+<a href="#collaboration-panel">协作</a>
+</nav>
 <section id="new-run-panel" class="rail-primary new-run-card">
 <h2>新运行</h2>
 <form id="new-run">
@@ -916,8 +915,15 @@
 <input id="brain-query" maxlength="2000" placeholder="例如：发布回滚策略">
 <p class="muted">填写检索词后只注入匹配 claims，减少长期运行的上下文膨胀；必须同时填写 Brain scope。</p>
 </section>
+<section id="settings-access" class="settings-section" aria-labelledby="settings-access-title">
+<h2 id="settings-access-title">访问</h2>
+<div id="access-panel" class="access">
+<label for="token">本地访问令牌（若已配置）</label>
+<input id="token" type="password" autocomplete="off">
+<button id="connect">连接</button>
 </div>
-<div class="gb-pane" data-pane="goals">
+</section>
+<div id="settings-goals" class="settings-group">
 <section class="rail-primary">
 <h2>创建领域目标</h2>
 <form id="new-goal">
@@ -1025,7 +1031,6 @@
 <button id="reminders-more" hidden="">加载更早提醒</button>
 </section>
 </div>
-<div class="gb-pane" data-pane="govern">
 <section id="rsi-panel" class="advanced-panel">
 <h2>RSI 改进机会</h2>
 <nav id="improvement-signals" aria-label="RSI 改进机会">
