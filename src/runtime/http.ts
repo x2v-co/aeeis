@@ -716,6 +716,13 @@ export function buildApp(options: Options) {
     try { return await options.agentDirectory.discover(card, new Date().toISOString(), principalOf(request).id); }
     catch (error) { throw new Conflict(error instanceof Error ? error.message : 'Agent discovery failed'); }
   });
+  app.post('/api/bots/background', async request => {
+    if (!options.engine) throw new Conflict('模型尚未就绪');
+    const body = z.object({ role: z.string().trim().min(1).max(120) }).strict().parse(request.body);
+    const header = request.headers['idempotency-key'];
+    const key = typeof header === 'string' && /^[A-Za-z0-9._:-]{8,200}$/.test(header) ? header : `bot-background-${randomUUID()}`;
+    return options.engine.draftBotBackground(body.role, key);
+  });
   app.post('/api/agents/discover-url', async request => {
     if (!options.agentDirectory) throw new Conflict('Agent registry is not configured');
     const body = z.object({ url: z.string().url().max(2000) }).strict().parse(request.body);

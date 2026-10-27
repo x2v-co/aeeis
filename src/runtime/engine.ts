@@ -19,6 +19,7 @@ import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelP
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
 import { ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected } from './model.js';
+import { BotBackgroundError, composeBotBackground } from '../bot-background.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
@@ -902,6 +903,18 @@ export class AgentEngine {
     if (this.resolver?.health) return this.resolver.health();
     if (this.resolver) return { ready: true, detail: 'model catalog resolver configured; provider health probe not configured', checkedAt: now() };
     return { ready: false, detail: 'model configuration required', checkedAt: now() };
+  }
+  /** Draft a Bot background from a role. This call does not create a Run or save the Bot. */
+  async draftBotBackground(role: string, idempotencyKey: string): Promise<{ background: string }> {
+    const adapter = this.defaultModel ?? (this.resolver ? (await this.resolver.resolve({ capability: 'agent', privacy: 'internal' })).adapter : undefined);
+    if (!adapter) throw new Conflict('模型尚未就绪');
+    try {
+      return await composeBotBackground(adapter, role, idempotencyKey);
+    } catch (error) {
+      if (error instanceof ModelOutcomeUnknown) throw new Conflict('结果不明，背景没有留下');
+      if (error instanceof BotBackgroundError) throw new Conflict(error.message);
+      throw error;
+    }
   }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   /** A thread conveys no Goal or Room rights. Check the domain's live ACLs

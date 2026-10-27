@@ -110,6 +110,7 @@
 <small id="bot-count">
 </small>
 </div>
+<button id="gb-new-bot" type="button">新建</button>
 <button id="gb-new-bot-group" type="button">分组</button>
 </div>
 <form id="bot-group-draft" hidden="">
@@ -1175,6 +1176,27 @@
 </div>
 </aside>
 </main>
+<div id="bot-create" class="bot-create" hidden>
+<form id="bot-create-form">
+<h2>新建 Bot</h2>
+<p>写下名字、样子和背景。也可以只给一个角色定位，生成背景后再保存。</p>
+<span id="bot-create-preview" class="roster-avatar bot-create-preview" data-mark="letter" aria-hidden="true">B</span>
+<label for="bot-create-name">名字</label>
+<input id="bot-create-name" maxlength="40" placeholder="给这位起个名字">
+<div id="bot-create-marks" class="bot-create-choices" role="radiogroup" aria-label="样子"></div>
+<div id="bot-create-colors" class="bot-create-choices" role="radiogroup" aria-label="颜色"></div>
+<label for="bot-create-background">背景</label>
+<textarea id="bot-create-background" maxlength="800" rows="4" placeholder="自己写：它是谁，负责什么"></textarea>
+<label for="bot-create-role">角色定位</label>
+<input id="bot-create-role" maxlength="120" placeholder="例如：把讨论收成可以核对的纪要">
+<p id="bot-create-status" role="status"></p>
+<div class="bot-create-actions">
+<button id="bot-create-generate" type="button">生成背景</button>
+<button id="bot-create-cancel" type="button">取消</button>
+<button type="submit">保存</button>
+</div>
+</form>
+</div>
 <script type="module" src="/app.js">
 </script>
 </body>

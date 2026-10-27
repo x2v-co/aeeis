@@ -202,7 +202,11 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
 function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string> } = {}) {
   dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
-  for (const [key, value] of Object.entries(saved.local ?? {})) dom.window.localStorage.setItem(key, value);
+  if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
+  for (const [key, value] of Object.entries(saved.local ?? {})) {
+    if (value === '') dom.window.localStorage.removeItem(key);
+    else dom.window.localStorage.setItem(key, value);
+  }
   for (const [key, value] of Object.entries(saved.session ?? {})) dom.window.sessionStorage.setItem(key, value);
   dom.window.fetch = fetch; dom.window.setInterval = (() => 1) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -1085,6 +1089,52 @@ describe('entry bots and group chats', () => {
     const text = el('bots').textContent ?? '';
     expect(text).not.toContain('纪要');
     expect(text).toContain('AEEIS');
+  });
+
+  it('starts with AEEIS and saves a Bot designed from scratch', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '' } });
+    await ready();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('AEEIS'));
+    expect(el('bots').textContent).not.toContain('纪要');
+    expect(el('bot-create').hidden).toBe(true);
+    el('gb-new-bot').click();
+    expect(el('bot-create').hidden).toBe(false);
+    el<HTMLInputElement>('bot-create-name').value = '阿核';
+    el<HTMLTextAreaElement>('bot-create-background').value = '核对清单上的每一项，自己不发对外消息。';
+    doc().querySelector<HTMLButtonElement>('#bot-create-colors button[data-color="#176b45"]')!.click();
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核'));
+    expect(el('bot-create').hidden).toBe(true);
+    const stored = JSON.parse(dom.window.localStorage.getItem('aeeis.custom-bots') ?? '[]') as Array<{ name: string; color: string; background: string; mark: string }>;
+    expect(stored).toEqual([expect.objectContaining({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' })]);
+    await vi.waitFor(() => expect(el('bot-profile-role').textContent).toContain('核对清单上的每一项'));
+    expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
+    expect(el('bots').textContent).not.toContain('纪要');
+  });
+
+  it('asks AEEIS to draft a background from a role and saves that text', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/bots/background' && request.method === 'POST') {
+        const body = JSON.parse(request.body);
+        return response({ background: `负责${body.role}。自己不代替人做决定。` });
+      }
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '' } });
+    await ready();
+    el('gb-new-bot').click();
+    el<HTMLInputElement>('bot-create-name').value = '纪要';
+    el<HTMLInputElement>('bot-create-role').value = '把讨论收成可以核对的纪要';
+    el('bot-create-generate').click();
+    await vi.waitFor(() => expect(el<HTMLTextAreaElement>('bot-create-background').value).toContain('把讨论收成可以核对的纪要'));
+    expect(el('bot-create-status').textContent).toContain('看过之后再保存');
+    expect(el('bots').textContent).not.toContain('纪要');
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('纪要'));
+    const stored = JSON.parse(dom.window.localStorage.getItem('aeeis.custom-bots') ?? '[]') as Array<{ role?: string; background: string }>;
+    expect(stored[0]).toMatchObject({ role: '把讨论收成可以核对的纪要', background: '负责把讨论收成可以核对的纪要。自己不代替人做决定。' });
+    expect(h.posts.filter(post => post.url === '/api/bots/background')).toHaveLength(1);
   });
 
   it('starts a new group at ten people and keeps a chosen limit', async () => {

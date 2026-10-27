@@ -201,7 +201,14 @@ let reminderStatusFilter = '';
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
-interface RosterBot { id: string; name: string; note: string; demo: boolean }
+type BotMark = 'letter' | 'round' | 'square' | 'diamond' | 'drop';
+interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string }
+interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string }
+const CUSTOM_BOTS_KEY = 'aeeis.custom-bots';
+const CUSTOM_BOT_CAP = 30;
+const BOT_MARKS: BotMark[] = ['letter', 'round', 'square', 'diamond', 'drop'];
+const BOT_MARK_LABEL: Record<BotMark, string> = { letter: '名字', round: '圆', square: '方', diamond: '菱', drop: '角' };
+const BOT_COLORS = ['#171717', '#6b4a32', '#b42318', '#c2410c', '#a16207', '#176b45', '#0f766e', '#1d4e89', '#6d28d9', '#be185d', '#57534e'];
 const DEMO_BOTS: RosterBot[] = [
   { id: 'demo.release', name: '发布', note: '对照发布清单', demo: true },
   { id: 'demo.research', name: '研究', note: '整理公开资料', demo: true },
@@ -1343,13 +1350,52 @@ function pinLastDelivery(): void {
   updateConversationControls();
 }
 function usingDemoBots(): boolean {
-  return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
+  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') === '1' && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
+}
+function loadCustomBots(): RosterBot[] {
+  const raw = localStorage.getItem(CUSTOM_BOTS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const bots: RosterBot[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const bot = item as Partial<StoredBot>;
+      if (typeof bot.id !== 'string' || !/^bot_[a-z0-9-]{8,80}$/.test(bot.id)) continue;
+      if (typeof bot.name !== 'string' || !bot.name.trim() || bot.name.trim().length > 40) continue;
+      if (typeof bot.mark !== 'string' || !BOT_MARKS.includes(bot.mark as BotMark)) continue;
+      if (typeof bot.color !== 'string' || !BOT_COLORS.includes(bot.color)) continue;
+      if (typeof bot.background !== 'string' || !bot.background.trim() || bot.background.trim().length > 800) continue;
+      const mark = bot.mark as BotMark;
+      const role = typeof bot.role === 'string' ? bot.role.trim().slice(0, 120) : '';
+      bots.push({
+        id: bot.id, name: bot.name.trim(), note: '', demo: false, mark, color: bot.color, background: bot.background.trim(), ...(role ? { role } : {}),
+      });
+      if (bots.length >= CUSTOM_BOT_CAP) break;
+    }
+    return bots;
+  } catch {
+    return [];
+  }
+}
+function saveCustomBots(bots: RosterBot[]): void {
+  const stored: StoredBot[] = bots.slice(0, CUSTOM_BOT_CAP).map(bot => ({
+    id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}),
+  }));
+  localStorage.setItem(CUSTOM_BOTS_KEY, JSON.stringify(stored));
+}
+function botDutyLine(bot: RosterBot | undefined): string {
+  if (bot?.background) return bot.role ? `角色：${bot.role}。背景：${bot.background}` : `背景：${bot.background}`;
+  if (bot?.note) return `职责：${bot.note}`;
+  return '职责还没有单独写下。';
 }
 function rosterBots(): RosterBot[] {
   const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
-  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+  const custom = loadCustomBots();
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...custom, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
 }
 function loadBotGroups(): BotGroups {
   const raw = localStorage.getItem('aeeis.bot-groups');
@@ -2524,7 +2570,7 @@ function syncEntrySurface(): void {
     if (title) title.textContent = counterpart?.name ?? '成员';
     if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
     const role = $('bot-profile-role');
-    if (role) role.textContent = counterpart?.note ? `职责：${counterpart.note}` : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+    if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
   }
   const botStatus = $('bot-status');
   if (botStatus) {
@@ -2578,8 +2624,11 @@ function renderBotRoster(): void {
     item.className = 'bot-row';
     item.dataset.botId = bot.id;
     if (bot.id === 'aeeis') item.id = 'gb-bot';
-    const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
+    const avatar = element('span', bot.mark && bot.mark !== 'letter' ? '' : (bot.name.slice(0, 1) || 'B'), 'roster-avatar');
     avatar.dataset.state = lifeAvatarState(bot.id);
+    if (bot.mark) avatar.dataset.mark = bot.mark;
+    if (bot.color) avatar.style.background = bot.color;
+    avatar.setAttribute('aria-hidden', 'true');
     const copy = element('span', '', 'roster-copy');
     const presence = element('small', lifePresenceLabel(bot.id));
     copy.append(element('strong', bot.name), presence);
@@ -4266,6 +4315,127 @@ $('gb-new-bot-group')?.addEventListener('click', () => {
   draft.hidden = !draft.hidden;
   if (!draft.hidden) $<HTMLInputElement>('bot-group-name')?.focus();
 });
+let botCreateMark: BotMark = 'letter';
+let botCreateColor = BOT_COLORS[0]!;
+function paintBotCreate(): void {
+  const preview = $('bot-create-preview');
+  const name = $<HTMLInputElement>('bot-create-name')?.value.trim() ?? '';
+  if (preview) {
+    preview.dataset.mark = botCreateMark;
+    preview.style.background = botCreateColor;
+    preview.textContent = botCreateMark === 'letter' ? (name.slice(0, 1) || 'B') : '';
+  }
+  document.querySelectorAll<HTMLButtonElement>('#bot-create-marks button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.mark === botCreateMark));
+  });
+  document.querySelectorAll<HTMLButtonElement>('#bot-create-colors button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.color === botCreateColor));
+  });
+}
+function renderBotCreateChoices(): void {
+  const marks = $('bot-create-marks');
+  const colors = $('bot-create-colors');
+  if (!marks || !colors || marks.childElementCount) return;
+  for (const mark of BOT_MARKS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.mark = mark;
+    button.className = 'roster-avatar';
+    button.style.background = BOT_COLORS[0]!;
+    button.textContent = mark === 'letter' ? '名' : '';
+    button.setAttribute('aria-label', BOT_MARK_LABEL[mark]);
+    button.addEventListener('click', () => { botCreateMark = mark; paintBotCreate(); });
+    marks.append(button);
+  }
+  for (const color of BOT_COLORS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.color = color;
+    button.style.background = color;
+    button.setAttribute('aria-label', color);
+    button.addEventListener('click', () => { botCreateColor = color; paintBotCreate(); });
+    colors.append(button);
+  }
+}
+function botCreateStatus(text: string): void {
+  const status = $('bot-create-status');
+  if (status) status.textContent = text;
+}
+function openBotCreate(): void {
+  const panel = $('bot-create');
+  if (!panel) return;
+  renderBotCreateChoices();
+  botCreateMark = 'letter';
+  botCreateColor = BOT_COLORS[0]!;
+  $<HTMLFormElement>('bot-create-form')?.reset();
+  botCreateStatus('');
+  panel.hidden = false;
+  paintBotCreate();
+  $<HTMLInputElement>('bot-create-name')?.focus();
+}
+function closeBotCreate(): void {
+  const panel = $('bot-create');
+  if (panel) panel.hidden = true;
+}
+function sameBotName(left: string, right: string): boolean {
+  return left.localeCompare(right, 'zh', { sensitivity: 'accent' }) === 0;
+}
+function customBotId(): string {
+  const raw = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(16).slice(2)}`;
+  return `bot_${raw.replace(/[^a-z0-9-]/gi, '').toLowerCase()}`.slice(0, 84);
+}
+function backgroundFailure(error: unknown): string {
+  const text = errorMessage(error);
+  return text === '模型尚未就绪' ? '模型尚未就绪。可以自己写背景。' : text;
+}
+async function generatedBackground(role: string): Promise<string> {
+  if (!modelConfigured) throw new Error('模型尚未就绪。可以自己写背景。');
+  const drafted = await api<{ background?: string }>('/bots/background', { role }, 'POST', `bot-background-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`);
+  const background = drafted.background?.trim().slice(0, 800) ?? '';
+  if (!background) throw new Error('背景没有生成');
+  return background;
+}
+async function saveCreatedBot(event: Event): Promise<void> {
+  event.preventDefault();
+  const name = $<HTMLInputElement>('bot-create-name')?.value.trim().slice(0, 40) ?? '';
+  const role = $<HTMLInputElement>('bot-create-role')?.value.trim().slice(0, 120) ?? '';
+  let background = $<HTMLTextAreaElement>('bot-create-background')?.value.trim().slice(0, 800) ?? '';
+  if (!name) { botCreateStatus('先写下名字。'); $<HTMLInputElement>('bot-create-name')?.focus(); return; }
+  if (rosterBots().some(bot => sameBotName(bot.name, name))) { botCreateStatus('这个名字已经在名单上。'); return; }
+  const existing = loadCustomBots();
+  if (existing.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这台浏览器上最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
+  if (!background && role) {
+    botCreateStatus('正在生成背景。');
+    try { background = await generatedBackground(role); }
+    catch (error) { botCreateStatus(backgroundFailure(error)); return; }
+    const field = $<HTMLTextAreaElement>('bot-create-background');
+    if (field) field.value = background;
+  }
+  if (!background) { botCreateStatus('先写下背景，或给出角色定位再生成。'); $<HTMLTextAreaElement>('bot-create-background')?.focus(); return; }
+  const bot: RosterBot = { id: customBotId(), name, note: '', demo: false, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) };
+  saveCustomBots([...existing, bot]);
+  closeBotCreate();
+  renderBotRoster();
+  selectBot(bot.id);
+}
+async function generateBotBackground(): Promise<void> {
+  const role = $<HTMLInputElement>('bot-create-role')?.value.trim() ?? '';
+  if (!role) { botCreateStatus('先写下角色定位。'); $<HTMLInputElement>('bot-create-role')?.focus(); return; }
+  botCreateStatus('正在生成背景。');
+  try {
+    const background = await generatedBackground(role);
+    const field = $<HTMLTextAreaElement>('bot-create-background');
+    if (field) field.value = background;
+    botCreateStatus('背景已生成。看过之后再保存。');
+  } catch (error) {
+    botCreateStatus(backgroundFailure(error));
+  }
+}
+$('gb-new-bot')?.addEventListener('click', () => openBotCreate());
+$('bot-create-cancel')?.addEventListener('click', () => closeBotCreate());
+$('bot-create-generate')?.addEventListener('click', () => { void generateBotBackground(); });
+$('bot-create-name')?.addEventListener('input', () => paintBotCreate());
+$('bot-create-form')?.addEventListener('submit', event => { void saveCreatedBot(event).catch(error => botCreateStatus(backgroundFailure(error))); });
 $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-reuse')?.addEventListener('click', () => reuseRoster());
@@ -4383,7 +4553,7 @@ async function openChannelBot(agentId: string): Promise<void> {
     catch { view = undefined; }
   }
   body.replaceChildren();
-  body.append(element('p', `${name} · ${bot?.note ? `职责：${bot.note}` : '职责还没有单独写下。'}`));
+  body.append(element('p', `${name} · ${botDutyLine(bot)}`));
   body.append(element('small', lifePresenceLabel(agentId)));
   body.append(element('small', '权限仍是现在这套：讨论不授权，执行要单独创建 Run。批准、登录和密钥留在和 AEEIS 的对话里。'));
   const remembered = view?.standingInstruction?.trim();
