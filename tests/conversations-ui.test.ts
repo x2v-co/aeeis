@@ -434,7 +434,8 @@ describe('single-entry conversation workbench', () => {
     const card = () => doc().querySelector<HTMLElement>('#conversation-messages .plan-card[data-plan-task="task_a"]');
     await vi.waitFor(() => expect(card()).not.toBeNull());
     expect(card()!.dataset.state).toBe('awaiting');
-    expect(card()!.textContent).toContain('等你确认');
+    expect(card()!.querySelector('.plan-card-status')?.textContent).toBe('等你确认计划');
+    expect(card()!.querySelector('.plan-card-activity')?.textContent).toBe('计划好了，点“开始”它就去做。');
     expect(card()!.textContent).toContain('模型请求批准：会改动仓库。');
     expect([...card()!.querySelectorAll('.plan-card-steps li')].map(item => item.textContent)).toEqual(['○读取发布脚本', '○修改 release.yml']);
     expect(el('conversation-send').textContent).toBe('记下来');
@@ -488,7 +489,8 @@ describe('single-entry conversation workbench', () => {
     expect(card()!.dataset.kind).toBe('action');
     expect(card()!.textContent).toContain('想调用 publish@1');
     expect(card()!.querySelector('.decision-card-step')?.textContent).toBe('发布公告');
-    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('等你决定一个动作');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('需要你');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-activity')?.textContent).toBe('停在第 2 步 / 共 2 步，等你决定一个动作。');
     expect(doc().querySelector('#conversation-messages .plan-card [data-plan-start]')).toBeNull();
     const reason = card()!.querySelector<HTMLElement>('.decision-card-reason')!;
     expect(reason.hidden).toBe(true);
@@ -511,7 +513,8 @@ describe('single-entry conversation workbench', () => {
     const h = harness(view); start(h.fetch); await ready();
     const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .decision-card[data-kind="question"]'); expect(found).not.toBeNull(); return found!; });
     expect(card.textContent).toContain('发布到哪个频道？');
-    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('等你回答');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('需要你');
+    expect(doc().querySelector('#conversation-messages .plan-card .plan-card-activity')?.textContent).toBe('停在第 1 步 / 共 1 步，等你回答一个问题。');
     card.querySelector<HTMLButtonElement>('[data-question-submit]')!.click();
     await vi.waitFor(() => expect(el('conversation-error').textContent).toContain('请先写下回答'));
     expect(h.posts).toHaveLength(0);
@@ -533,7 +536,65 @@ describe('single-entry conversation workbench', () => {
     expect(card.dataset.state).toBe('running');
     expect([...card.querySelectorAll<HTMLElement>('.plan-card-steps li')].map(item => item.dataset.state)).toEqual(['done', 'current', 'waiting']);
     expect(card.querySelector('[data-plan-start], [data-plan-cancel], textarea')).toBeNull();
+    expect(card.querySelector('.plan-card-title')?.textContent).toBe('发布方案');
+    expect(card.querySelector('.plan-card-status')?.textContent).toBe('执行中');
+    expect(card.dataset.tone).toBe('ink');
+    expect(card.querySelector('.plan-card-activity')?.textContent).toBe('正在做第 2 步 / 共 3 步：比对手动步骤。');
+    const progress = card.querySelector<HTMLElement>('.plan-card-progress')!;
+    expect(progress.getAttribute('role')).toBe('progressbar');
+    expect([progress.getAttribute('aria-valuenow'), progress.getAttribute('aria-valuemax'), progress.getAttribute('aria-valuetext')]).toEqual(['1', '3', '1 / 3 步已完成']);
+    expect(progress.querySelector('span')!.style.width).toBe('33%');
     expect(h.posts).toHaveLength(0);
+  });
+
+  it('says where each Run stands in one plain word and one sentence', async () => {
+    const cases: Array<[string, string, string, string, any?]> = [
+      ['planning', '起草中', 'quiet', '正在起草计划。'],
+      ['waiting_external', '执行中', 'ink', '在等外部回执（第 1 步 / 共 2 步）。'],
+      ['reviewing', '执行中', 'ink', '在复核结果。'],
+      ['paused', '已暂停', 'quiet', '已暂停，停在第 1 步 / 共 2 步。'],
+      ['succeeded', '已完成', 'done', '做完了，留下 2 份证据。', { evidence: ['清单', '演练日志'] }],
+      ['failed', '卡住了', 'stuck', '在第 1 步 / 共 2 步卡住了。可以重试，或打开工作台看原因。'],
+      ['unknown', '卡住了', 'stuck', '有一次调用结果未知，需要你核查后才能继续。'],
+      ['cancelled', '已取消', 'quiet', '已取消，不会再执行。'],
+    ];
+    for (const [status, word, tone, sentence, extra] of cases) {
+      const view = fixture();
+      view.tasks[0] = { ...view.tasks[0]!, status, runId, latestRunId: runId,
+        execution: { steps: status === 'planning' ? [] : [{ title: '读取', state: status === 'succeeded' ? 'done' : 'current' }, { title: '演练', state: status === 'succeeded' ? 'done' : 'waiting' }], ...(extra ?? {}) } } as any;
+      view.messages.push({ id: 'asked', role: 'user', text: '整理发布流程', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+      const h = harness(view); if (dom) dom.window.close(); start(h.fetch); await ready();
+      const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .plan-card'); expect(found).not.toBeNull(); return found!; });
+      expect([card.querySelector('.plan-card-status')?.textContent, card.dataset.tone, card.querySelector('.plan-card-activity')?.textContent], status).toEqual([word, tone, sentence]);
+      expect(Boolean(card.querySelector('.plan-card-progress')), status).toBe(status !== 'planning');
+    }
+  });
+
+  it('opens the workbench on a Run that finishes while you watch, without moving focus or remembering it', async () => {
+    const running = () => {
+      const view = fixture();
+      view.tasks[0] = { ...view.tasks[0]!, status: 'running', runId, latestRunId: runId, execution: { steps: [{ title: '核对证据', state: 'current' }] } } as any;
+      view.messages.push({ id: 'asked', role: 'user', text: '核对证据', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+      return view;
+    };
+    const h = harness(running()); start(h.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('#conversation-messages .plan-card')?.getAttribute('data-state')).toBe('running'));
+    expect(doc().body.classList.contains('computer-open')).toBe(false);
+    const typing = el<HTMLTextAreaElement>('conversation-text'); typing.focus();
+    h.view.tasks[0] = { ...h.view.tasks[0]!, status: 'succeeded', execution: { steps: [{ title: '核对证据', state: 'done' }], evidence: ['核对结果'] } } as any;
+    h.view.revision++;
+    el('conversation-refresh').click();
+    await vi.waitFor(() => expect(doc().body.classList.contains('computer-open')).toBe(true));
+    expect(el('gb-computer').dataset.tab).toBe('run');
+    await vi.waitFor(() => expect(el('run-title').textContent).toBe('周报执行'));
+    expect(doc().activeElement).toBe(typing);
+    expect(dom.window.localStorage.getItem('aeeis.run-details-mode')).not.toBe('1');
+    expect(h.posts).toHaveLength(0);
+
+    const settled = running(); settled.tasks[0]!.status = 'succeeded';
+    const again = harness(settled); dom.window.close(); start(again.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('#conversation-messages .plan-card')?.getAttribute('data-state')).toBe('succeeded'));
+    expect(doc().body.classList.contains('computer-open')).toBe(false);
   });
 
   it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {
@@ -676,8 +737,9 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts).toHaveLength(0);
     await vi.waitFor(() => expect(push).toBeTypeOf('function'));
     push!(`id: 6\nevent: model.started\ndata: ${JSON.stringify({ seq: 6, type: 'model.started', data: { phase: 'compaction', callId: 'call_compact_2' } })}\n\n`);
-    await vi.waitFor(() => expect(el('run-pulse-message').textContent).toContain('开始整理任务记忆（摘要不是证据）'));
-    expect(el('run-pulse').hidden).toBe(false);
+    // The pop-up activity toast is gone; the streamed phase still reaches the timeline above.
+    expect(doc().getElementById('run-pulse')).toBeNull();
+    expect(doc().getElementById('run-dock')).toBeNull();
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts).toHaveLength(0);
   });
