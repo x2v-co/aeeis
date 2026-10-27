@@ -2287,6 +2287,50 @@ describe('entry bots and group chats', () => {
     expect(el('channel-board').hidden).toBe(true);
     expect(h.posts).toHaveLength(0);
   });
+  it('keeps transcript buttons when a refresh brings nothing new', async () => {
+    const handoff = { id: 'evt_handoff', operation: 'publish', sequence: 1, actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
+    const room = { id: 'room_still', title: '按钮还在', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } }], messages: [], hasEarlierMessages: false };
+    const events = [handoff];
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_still/members')) return response([{ id: 'member_release', roomId: 'room_still', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([]);
+      if (url === '/api/goals' && method === 'POST') return response({ id: 'goal_still', title: '按钮还在', status: 'active', createdAt: date, roomId: 'room_still' });
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_still' });
+      if (String(url).includes('/rooms/room_still/session-events') && method === 'POST') {
+        const body = request?.body ? JSON.parse(request.body) : {};
+        const event = { id: `evt_${events.length}`, operation: 'publish', sequence: events.length + 1, actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        events.push(event);
+        return response(event);
+      }
+      if (String(url).includes('/rooms/room_still/session-events')) {
+        if (String(url).includes('limit=20')) return response({ items: [] });
+        if (String(url).includes('cursor=')) return response({ items: [] });
+        return response({ items: events });
+      }
+      if (url === '/api/conversations/conv_release') return response(release);
+      if (url === `/api/runs/${runId}`) return response({ id: runId, status: 'succeeded', calls: [], plans: [], artifacts: [], context: { sources: [] }, toolReceipts: [] });
+      return undefined;
+    } });
+    const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_still/session-events') && !url.includes('limit=20'));
+    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('按钮还在'))!;
+    start(h.fetch);
+    await ready();
+    openRoom().click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-accept-task]')).toBeTruthy());
+    const accept = doc().querySelector<HTMLButtonElement>('[data-accept-task]')!;
+    const before = reads().length;
+    openRoom().click();
+    await vi.waitFor(() => expect(reads().length).toBeGreaterThan(before));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(accept.isConnected).toBe(true);
+    expect(doc().querySelector('[data-accept-task]')).toBe(accept);
+    accept.click();
+    await vi.waitFor(() => expect(el('error').textContent).toContain('已验收「待验收的清单」'));
+    expect(h.posts.some(post => post.body?.content === '验收通过')).toBe(true);
+  });
   it('says when a block pauses the run and lets channel marks be cleared', async () => {
     const room = { id: 'room_marks', title: '标注', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const goals: Array<{ id: string; title: string; status: string; createdAt: string; roomId?: string }> = [];

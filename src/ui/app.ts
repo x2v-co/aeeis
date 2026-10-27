@@ -224,6 +224,7 @@ let channelEventsCaughtUp = false;
 let channelReadEpoch = 0;
 const CHANNEL_TRANSCRIPT_PAGE = 50;
 let channelHistoryPages = 1;
+let channelTranscriptKey = '';
 let channelReadQueue: Promise<void> = Promise.resolve();
 let channelReadFlight: Promise<void> | undefined;
 const handoffViews = new Map<string, ConversationView>();
@@ -1656,6 +1657,41 @@ function visibleChannelEvents(): SessionEventSummary[] {
   const keep = channelHistoryPages * CHANNEL_TRANSCRIPT_PAGE;
   return readable.length > keep ? readable.slice(-keep) : readable;
 }
+function citedTaskSignature(event: SessionEventSummary): string {
+  const cite = handoffCitation(event);
+  if (!cite) return '';
+  const view = handoffViews.get(cite.conversationId);
+  const task = view?.tasks.find(item => item.id === cite.taskId);
+  if (!view || !task) return 'pending';
+  const delivery = view.lastDelivery?.taskId === task.id ? view.lastDelivery : undefined;
+  return JSON.stringify({
+    person: cite.agentId ?? view.agentId ?? '',
+    title: task.title,
+    status: task.status,
+    runId: task.runId ?? '',
+    latestRunId: task.latestRunId ?? '',
+    approval: task.pendingApproval?.summary ?? '',
+    question: task.pendingQuestion?.text ?? '',
+    steps: (task.execution?.steps ?? []).map(step => `${step.state}:${step.title}`),
+    evidence: task.execution?.evidence ?? [],
+    plan: delivery?.planSummary ?? '',
+    artifacts: delivery?.artifactTitles ?? [],
+    deliveryRun: delivery?.runId ?? '',
+  });
+}
+function channelTranscriptSignature(): string {
+  const members = groupMembers.map(member => `${member.principalId}:${member.status}:${participantLabel(member.principalId)}`).join('\n');
+  const events = visibleChannelEvents().map(event => [
+    event.id,
+    event.operation ?? '',
+    event.type,
+    eventAuthor(event),
+    event.content,
+    (event.evidenceRefs ?? []).join(' '),
+    citedTaskSignature(event),
+  ].join('\u001f')).join('\u001e');
+  return `${channelHistoryPages}\u0000${earlierChannelCount()}\u0000${members}\u0000${events}`;
+}
 function eventCursor(event: SessionEventSummary | undefined): string | undefined {
   const sequence = event?.sequence;
   return typeof sequence === 'number' && Number.isInteger(sequence) && sequence > 0 ? String(sequence) : undefined;
@@ -1679,6 +1715,7 @@ function resetChannelLog(): void {
   channelLoadedRoomId = '';
   channelEventsCaughtUp = false;
   channelHistoryPages = 1;
+  channelTranscriptKey = '';
   channelReadEpoch += 1;
 }
 function appendUnseen(items: SessionEventSummary[] | undefined, into: SessionEventSummary[]): void {
@@ -2959,8 +2996,13 @@ async function loadGroup(id: string): Promise<void> {
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
   const empty = $('group-thread-empty');
-  const members = $('group-members');
   if (!list) return;
+  if (empty) empty.hidden = channelBoardOpen || channelReadableEvents().length > 0;
+  list.hidden = channelBoardOpen;
+  const key = channelTranscriptSignature();
+  if (key === channelTranscriptKey) return;
+  channelTranscriptKey = key;
+  const members = $('group-members');
   if (members) {
     const archive = (id: string) => {
       const button = document.createElement('button');
@@ -3016,9 +3058,6 @@ function renderGroupTranscript(): void {
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
     list.append(item);
   }
-  if (empty) empty.hidden = channelBoardOpen || visibleChannelEvents().some(event => event.operation !== 'retract');
-  const transcript = $('group-transcript');
-  if (transcript) transcript.hidden = channelBoardOpen;
   syncGroupSpeaker();
   renderMentions();
 }
