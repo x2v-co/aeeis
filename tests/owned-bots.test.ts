@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/runtime/http.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
+import { InMemoryStore } from '../src/adapters/in-memory-store.js';
+import { AeeisService } from '../src/application/aeeis-service.js';
+import { InMemoryRoomMembershipRepository } from '../src/room-membership.js';
 import { InMemoryOwnedBotStore, JsonOwnedBotStore, OWNED_BOT_CAP, OwnedBotConflict } from '../src/owned-bots.js';
 
 const profile = { name: '阿核', mark: 'letter' as const, color: '#176b45', background: '核对清单上的每一项。' };
@@ -71,6 +74,42 @@ describe('owned bots', () => {
       const taken = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer bob' }, payload: { ...profile, id: saved.id } });
       expect(taken.statusCode).toBe(409);
       expect(taken.json().error).toContain('另一个账号');
+    } finally { await app.close(); await bots.close(); }
+  });
+
+  it('renames and removes a Bot, and shows that name to other people in the room', async () => {
+    const bots = new InMemoryOwnedBotStore();
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships, undefined, bots);
+    const app = buildApp({
+      repository: new InMemoryRunRepository(), domain, ownedBots: bots,
+      principalTokens: {
+        alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
+        bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] },
+      },
+    });
+    try {
+      const created = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: profile });
+      expect(created.statusCode).toBe(200);
+      const saved = created.json() as { id: string };
+      const renamed = await app.inject({ method: 'PATCH', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '阿核二' } });
+      expect(renamed.statusCode).toBe(200);
+      expect(renamed.json()).toMatchObject({ id: saved.id, name: '阿核二' });
+      const foreign = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer bob' } });
+      expect(foreign.statusCode).toBe(404);
+      const room = await app.inject({ method: 'POST', url: '/api/rooms', headers: { authorization: 'Bearer alice' }, payload: { title: '一组', description: '群聊' } });
+      expect(room.statusCode).toBe(200);
+      const roomId = room.json().id as string;
+      expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer alice' }, payload: { principalId: 'bob', role: 'editor' } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer alice' }, payload: { principalId: saved.id, role: 'agent' } })).statusCode).toBe(200);
+      const members = await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer bob' } });
+      expect(members.statusCode).toBe(200);
+      expect(members.json()).toEqual(expect.arrayContaining([expect.objectContaining({ principalId: saved.id, displayName: '阿核二' })]));
+      const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice' } });
+      expect(removed.statusCode).toBe(200);
+      expect(await bots.list(scope)).toEqual([]);
+      const again = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '新人' } });
+      expect(again.statusCode).toBe(200);
     } finally { await app.close(); await bots.close(); }
   });
 });

@@ -59,7 +59,7 @@ import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
-import { OwnedBotConflict, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
@@ -394,7 +394,7 @@ export function buildApp(options: Options) {
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
-      if (route === '/api/bots' && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
+      if ((route === '/api/bots' || route === '/api/bots/:id') && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
@@ -422,7 +422,7 @@ export function buildApp(options: Options) {
     if (error instanceof DeviceSessionNotFound) return reply.code(401).send({ error: 'Unknown device session' });
     if (error instanceof DeviceSessionConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof NotFound || error instanceof EvolutionNotFound) return reply.code(404).send({ error: error.message });
-    if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound || error instanceof OwnedBotNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof PrincipalDirectoryUnavailable) return reply.code(503).send({ error: 'Principal directory unavailable; invitation refused' });
     if (error instanceof ChannelIdentityUnavailable) return reply.code(503).send({ error: 'Channel identity resolver unavailable; event admission refused' });
     if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
@@ -741,6 +741,25 @@ export function buildApp(options: Options) {
     }, { owner: principal.id, tenantId: principal.tenantId });
     return visibleOwnedBot(saved);
   });
+  const ownedBotId = z.string().regex(/^bot_[a-z0-9-]{8,80}$/);
+  const ownedBotPatch = ownedBotBody.omit({ id: true });
+  app.patch<{ Params: { id: string } }>('/api/bots/:id', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const id = ownedBotId.parse(request.params.id);
+    const body = ownedBotPatch.parse(request.body);
+    const principal = principalOf(request);
+    const saved = await options.ownedBots.update(id, {
+      name: body.name, mark: body.mark, color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}),
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
+  });
+  app.delete<{ Params: { id: string } }>('/api/bots/:id', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const id = ownedBotId.parse(request.params.id);
+    const principal = principalOf(request);
+    await options.ownedBots.remove(id, { owner: principal.id, tenantId: principal.tenantId });
+    return { removed: true, id };
+  });
   app.post('/api/bots/background', async request => {
     if (!options.engine) throw new Conflict('模型尚未就绪');
     const body = z.object({ role: z.string().trim().min(1).max(120) }).strict().parse(request.body);
@@ -815,7 +834,15 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { id: string } }>('/api/rooms/:id/members', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    const principal = principalOf(request); return options.domain.listRoomMembers(request.params.id, principal.id, principal.tenantId);
+    const principal = principalOf(request);
+    const members = await options.domain.listRoomMembers(request.params.id, principal.id, principal.tenantId);
+    if (!options.ownedBots) return members;
+    return Promise.all(members.map(async member => {
+      if (!member.principalId.startsWith('bot_')) return member;
+      const bot = await options.ownedBots?.get(member.principalId);
+      if (!bot || bot.tenantId !== principal.tenantId) return member;
+      return { ...member, displayName: bot.name };
+    }));
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/members', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');

@@ -44,10 +44,13 @@ export interface OwnedBotStore {
   list(scope: Ownership): Promise<OwnedBot[]>;
   get(id: string): Promise<OwnedBot | undefined>;
   create(input: CreateOwnedBotInput, scope: Ownership, now?: string): Promise<OwnedBot>;
+  update(id: string, input: CreateOwnedBotInput, scope: Ownership, now?: string): Promise<OwnedBot>;
+  remove(id: string, scope: Ownership): Promise<void>;
   close(): Promise<void>;
 }
 
 export class OwnedBotConflict extends Error {}
+export class OwnedBotNotFound extends Error {}
 
 export function reservedBotName(name: string): boolean {
   const normalized = name.normalize('NFKC').trim();
@@ -94,6 +97,25 @@ export function decideOwnedBotCreate(existing: readonly OwnedBot[], input: Creat
   return { bot, inserted: true };
 }
 
+export function decideOwnedBotUpdate(existing: readonly OwnedBot[], id: string, input: CreateOwnedBotInput, scope: Ownership, now: string): OwnedBot {
+  const found = existing.find(bot => bot.id === id);
+  if (!found || found.owner !== scope.owner || found.tenantId !== scope.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+  const name = input.name.normalize('NFKC').trim();
+  const background = input.background.trim();
+  const role = input.role?.trim();
+  if (reservedBotName(name)) throw new OwnedBotConflict('请换一个名字。所有人、团队和 AEEIS 留给群里的点名。');
+  if (!name || name.length > 40) throw new OwnedBotConflict('先写下名字。');
+  if (!background || background.length > 800) throw new OwnedBotConflict('先写下背景，或给出角色定位再生成。');
+  if (!OWNED_BOT_MARKS.includes(input.mark)) throw new OwnedBotConflict('样子没有选好。');
+  if (!(OWNED_BOT_COLORS as readonly string[]).includes(input.color)) throw new OwnedBotConflict('颜色没有选好。');
+  const mine = existing.filter(bot => bot.owner === scope.owner && bot.tenantId === scope.tenantId && bot.id !== id);
+  if (mine.some(bot => sameBotName(bot.name, name))) throw new OwnedBotConflict('这个名字已经在名单上。');
+  return ownedBotSchema.parse({
+    id: found.id, owner: found.owner, tenantId: found.tenantId, name, mark: input.mark, color: input.color, background,
+    ...(role ? { role } : {}), createdAt: found.createdAt, updatedAt: now,
+  });
+}
+
 function sortBots(bots: readonly OwnedBot[]): OwnedBot[] {
   return [...bots].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
 }
@@ -122,6 +144,21 @@ export class InMemoryOwnedBotStore implements OwnedBotStore {
       const decision = decideOwnedBotCreate(this.bots, input, scope, now);
       if (decision.inserted) this.bots.push(structuredClone(decision.bot));
       return structuredClone(decision.bot);
+    });
+  }
+  async update(id: string, input: CreateOwnedBotInput, scope: Ownership, now = new Date().toISOString()): Promise<OwnedBot> {
+    return this.queue.run(() => {
+      const next = decideOwnedBotUpdate(this.bots, id, input, scope, now);
+      const index = this.bots.findIndex(bot => bot.id === next.id);
+      this.bots[index] = structuredClone(next);
+      return structuredClone(next);
+    });
+  }
+  async remove(id: string, scope: Ownership): Promise<void> {
+    return this.queue.run(() => {
+      const found = this.bots.find(bot => bot.id === id);
+      if (!found || found.owner !== scope.owner || found.tenantId !== scope.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+      this.bots.splice(this.bots.indexOf(found), 1);
     });
   }
   async close(): Promise<void> {}
@@ -171,6 +208,22 @@ export class JsonOwnedBotStore implements OwnedBotStore {
       const decision = decideOwnedBotCreate(this.state.bots, input, scope, now);
       if (decision.inserted) this.persist({ bots: [...this.state.bots, decision.bot] });
       return structuredClone(decision.bot);
+    });
+  }
+  async update(id: string, input: CreateOwnedBotInput, scope: Ownership, now = new Date().toISOString()): Promise<OwnedBot> {
+    return this.queue.run(() => {
+      if (!this.loaded || !this.lockOwned) throw new Error('Owned Bot store is not open');
+      const next = decideOwnedBotUpdate(this.state.bots, id, input, scope, now);
+      this.persist({ bots: this.state.bots.map(bot => bot.id === next.id ? next : bot) });
+      return structuredClone(next);
+    });
+  }
+  async remove(id: string, scope: Ownership): Promise<void> {
+    return this.queue.run(() => {
+      if (!this.loaded || !this.lockOwned) throw new Error('Owned Bot store is not open');
+      const found = this.state.bots.find(bot => bot.id === id);
+      if (!found || found.owner !== scope.owner || found.tenantId !== scope.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+      this.persist({ bots: this.state.bots.filter(bot => bot.id !== id) });
     });
   }
   async close(): Promise<void> {
@@ -231,6 +284,31 @@ export class PostgresOwnedBotStore implements OwnedBotStore {
       if ((error as { code?: string }).code === '23505') throw new OwnedBotConflict('这个身份已经属于另一个账号');
       throw error;
     } finally { client.release(); }
+  }
+  async update(id: string, input: CreateOwnedBotInput, scope: Ownership, now = new Date().toISOString()): Promise<OwnedBot> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await postgresAdvisoryXactLock(client, 'aeeis:owned-bots', `${scope.tenantId}\0${scope.owner}`);
+      const mine = await client.query<{ state: unknown }>('SELECT state FROM aeeis_owned_bots WHERE owner=$1 AND tenant_id=$2', [scope.owner, scope.tenantId]);
+      const byId = await client.query<{ state: unknown }>('SELECT state FROM aeeis_owned_bots WHERE id=$1', [id]);
+      const existing = mine.rows.map(row => readBot(row.state));
+      for (const row of byId.rows) {
+        const bot = readBot(row.state);
+        if (!existing.some(item => item.id === bot.id)) existing.push(bot);
+      }
+      const next = decideOwnedBotUpdate(existing, id, input, scope, now);
+      await client.query('UPDATE aeeis_owned_bots SET state=$2 WHERE id=$1', [next.id, next]);
+      await client.query('COMMIT');
+      return next;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+  async remove(id: string, scope: Ownership): Promise<void> {
+    const result = await this.pool.query('DELETE FROM aeeis_owned_bots WHERE id=$1 AND owner=$2 AND tenant_id=$3', [id, scope.owner, scope.tenantId]);
+    if (result.rowCount !== 1) throw new OwnedBotNotFound('没有这位 Bot');
   }
   async close(): Promise<void> { await this.pool.end(); }
 }

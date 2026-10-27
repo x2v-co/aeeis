@@ -113,6 +113,8 @@
 <button id="gb-new-bot" type="button">新建</button>
 <button id="gb-new-bot-group" type="button">分组</button>
 </div>
+<p id="bot-local-note" class="muted" hidden></p>
+<button id="bot-local-claim" type="button" class="quiet-button" hidden>写入这个账号</button>
 <form id="bot-group-draft" hidden="">
 <input id="bot-group-name" maxlength="40" placeholder="分组名称">
 <button type="submit">创建</button>
@@ -221,6 +223,10 @@
 <section id="bot-note" hidden>
 <h3 id="bot-note-title">AEEIS</h3>
 <p id="bot-profile-role" class="muted"></p>
+<div id="bot-profile-actions" hidden>
+<button id="bot-profile-edit" type="button">修改</button>
+<button id="bot-profile-remove" type="button" class="quiet-button">移除</button>
+</div>
 <p id="bot-status" class="muted"></p>
 <p id="bot-profile-boundary" class="muted">边界：它不会自己回复，也不会执行。点名和交接只记成讨论。批准、登录和密钥留在和 AEEIS 的对话里。</p>
 <p id="bot-note-copy"></p>

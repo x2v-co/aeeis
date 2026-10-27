@@ -195,6 +195,21 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url === `/api/runs/${runId}`) return response(runFixture());
     if (url.endsWith('/graphs')) return response({ execution: { nodes: [], edges: [] }, evidence: { nodes: [], edges: [] } });
     if (url.endsWith('/explanation')) return response({ schemaVersion: 'run-explanation/1', run: { id: runId, status: 'succeeded', privacy: 'internal', updatedAt: date }, attention: { kind: 'none', nextAction: 'done', blockers: [] }, plan: { tasks: { total: 1, pending: 0, running: 0, succeeded: 1 }, readyTaskIds: [], pendingTaskIds: [] }, execution: { eventCount: 0, modelCalls: { total: 0, started: 0, completed: 0, failed: 0, unknown: 0, discarded: 0 }, tools: { total: 0, completed: 0, failed: 0, unknown: 0 }, delegations: { total: 0, completed: 0, failed: 0, unknown: 0 } }, evidence: { sourceCount: 0, artifactCount: 0, receiptCount: 0, evidenceNodeCount: 0, memoryRefs: [] }, governance: { tools: [], agents: [] }, budget: {} });
+    if (url.startsWith('/api/bots/') && url !== '/api/bots/background') {
+      const id = decodeURIComponent(url.slice('/api/bots/'.length));
+      if (request?.method === 'DELETE') {
+        const index = ownedBots.findIndex(bot => bot.id === id);
+        if (index >= 0) ownedBots.splice(index, 1);
+        return response({ removed: true, id });
+      }
+      if (request?.method === 'PATCH') {
+        const body = JSON.parse(request.body);
+        const bot = ownedBots.find(item => item.id === id);
+        if (!bot) return response({ error: '没有这位 Bot' }, 404);
+        Object.assign(bot, body);
+        return response(bot);
+      }
+    }
     if (url === '/api/bots' && request?.method === 'POST') {
       const body = JSON.parse(request.body);
       const existing = ownedBots.find(bot => bot.id === body.id);
@@ -1119,24 +1134,76 @@ describe('entry bots and group chats', () => {
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
     expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' });
     await vi.waitFor(() => expect(el('bot-profile-role').textContent).toContain('核对清单上的每一项'));
+    expect(el('bot-profile-actions').hidden).toBe(false);
+    el('bot-profile-edit').click();
+    expect(el('bot-create').hidden).toBe(false);
+    el<HTMLInputElement>('bot-create-name').value = '阿核二';
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核二'));
+    const patch = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/bot_') && call[1]?.method === 'PATCH');
+    expect(patch).toBeTruthy();
+    expect(JSON.parse(patch?.[1].body).name).toBe('阿核二');
     expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
     expect(el('bots').textContent).not.toContain('纪要');
     el('gb-new-group').click();
-    expect(el('group-candidates').textContent ?? '').toContain('阿核');
+    expect(el('group-candidates').textContent ?? '').toContain('阿核二');
     el('group-reuse').click();
     expect(el('group-count-live').textContent).toContain('2 / 10');
-    expect(el('group-candidates').textContent ?? '').toContain('阿核');
+    expect(el('group-candidates').textContent ?? '').toContain('阿核二');
+    dom.window.confirm = () => true;
+    el('bot-profile-remove').click();
+    await vi.waitFor(() => expect(el('bots').textContent).not.toContain('阿核'));
   });
 
-  it('uploads a Bot saved in this browser onto the account roster', async () => {
+  it('writes a browser Bot onto this account when asked, and stops after the server refuses', async () => {
     const h = harness();
-    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_migrated1', name: '阿迁', mark: 'letter', color: '#171717', background: '从这台浏览器迁到账号。' }]) } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_migrated1', name: '阿迁', mark: 'letter', color: '#171717', background: '从这台浏览器迁到账号。' }]) } });
     await ready();
+    expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
+    expect(el('bots').textContent).not.toContain('阿迁');
+    expect(el('bot-local-note').textContent).toContain('阿迁');
+    el('bot-local-claim').click();
     await vi.waitFor(() => expect(el('bots').textContent).toContain('阿迁'));
-    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁', background: '从这台浏览器迁到账号。' });
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁' });
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
     el('gb-new-group').click();
     expect(el('group-candidates').textContent ?? '').toContain('阿迁');
+  });
+
+  it('keeps a refused browser Bot off the roster and does not send it again', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/bots' && request?.method === 'POST') return response({ error: '这个名字已经在名单上。' }, 409);
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_samename1', name: '纪要', mark: 'letter', color: '#171717', background: '和账号上的重名。' }]) } });
+    await ready();
+    el('bot-local-claim').click();
+    await vi.waitFor(() => expect(el('bot-local-note').textContent).toContain('这个名字已经在名单上'));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+    expect(el('bots').textContent).not.toContain('纪要');
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+  });
+
+  it('leaves a previous account Bot off this account', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots-account': 'someone-else', 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_leftover1', name: '阿留', mark: 'letter', color: '#171717', background: '上一个账号留下的。' }]) } });
+    await ready();
+    expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
+    expect(el('bots').textContent).not.toContain('阿留');
+    expect(el('bot-local-note').textContent).toContain('上一个账号');
+    expect(el('bot-local-claim').hidden).toBe(true);
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(0);
   });
 
   it('asks AEEIS to draft a background from a role and saves that text', async () => {
@@ -1299,7 +1366,7 @@ describe('entry bots and group chats', () => {
     expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', unassigned: true });
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
-    expect(el('group-transcript').textContent).toContain('入口收下了这句话，记成讨论「请 @发布 看一下」');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「请 @发布 看一下」');
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
@@ -1387,7 +1454,7 @@ describe('entry bots and group chats', () => {
     expect(messagePosts(h)[1]?.body).not.toHaveProperty('newTask');
     expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
     expect(el('group-transcript').textContent).toContain('没有拆给多个人');
-    expect(el('group-transcript').textContent).toContain('入口收下了这句话，记成讨论「请 @AEEIS发布 看一下」');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「请 @AEEIS发布 看一下」');
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「整理发布风险」'));
@@ -1545,7 +1612,7 @@ describe('entry bots and group chats', () => {
     expect(messagePosts(h)[1]?.url).toBe('/api/conversations/conv_release/messages');
     expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '不要记两次' } });
     expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
-    expect(el('group-transcript').textContent).toContain('入口收下了这句话，记成讨论「不要记两次」。已请发布回应。');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「不要记两次」。已请发布回应。');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('不要记两次');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
@@ -1594,7 +1661,7 @@ describe('entry bots and group chats', () => {
     expect(named[4]?.body).not.toHaveProperty('runOptions');
     expect(named[5]?.url).toBe('/api/conversations/conv_release/messages');
     expect(named[5]?.body).toMatchObject({ text: '来自群聊「发布协作」：@发布 看一下清单', expectedRevision: 2, intent: 'discuss', focus: 'keep' });
-    expect(el('group-transcript').textContent).toContain('入口收下了这句话，记成讨论「@发布 看一下清单」。已请发布回应。');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「@发布 看一下清单」。已请发布回应。');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     release.tasks[1] = {
       ...release.tasks[1],

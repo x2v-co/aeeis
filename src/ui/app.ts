@@ -12,7 +12,7 @@ interface ThreadRun extends RunSummary { threadSequence: number; privacy?: strin
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
 interface RoomSummary { id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
-interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string }
+interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string; displayName?: string }
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
   sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system';
@@ -202,9 +202,10 @@ let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
 type BotMark = 'letter' | 'round' | 'square' | 'diamond' | 'drop';
-interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string }
-interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string }
+interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string }
+interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; held?: string }
 const CUSTOM_BOTS_KEY = 'aeeis.custom-bots';
+const LOCAL_BOT_ACCOUNT = 'aeeis.custom-bots-account';
 const CUSTOM_BOT_CAP = 30;
 const BOT_MARKS: BotMark[] = ['letter', 'round', 'square', 'diamond', 'drop'];
 const BOT_MARK_LABEL: Record<BotMark, string> = { letter: '名字', round: '圆', square: '方', diamond: '菱', drop: '角' };
@@ -217,6 +218,8 @@ const DEMO_BOTS: RosterBot[] = [
 let agentSummaries: AgentSummary[] = [];
 let agentsLoaded = false;
 let ownedBotRecords: RosterBot[] = [];
+let localBotsAdopted = false;
+let localBotNote = '';
 interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; createdAt?: string; updatedAt?: string }
 let roomSummaries: RoomSummary[] = [];
 let botGroups: BotGroups | undefined;
@@ -1358,7 +1361,7 @@ function reservedBotName(name: string): boolean {
   const normalized = name.normalize('NFKC').trim();
   return ['所有人', '团队', 'AEEIS'].some(reserved => reserved.localeCompare(normalized, 'zh', { sensitivity: 'accent' }) === 0);
 }
-/** A saved Bot joins a room once this account has the profile. A copy still waiting in this browser stays visible and stays out of the room. */
+/** A saved Bot joins a room once this account has the profile. A copy still waiting in this browser stays off the roster until this person writes it onto the account. */
 function roomReadyBot(bot: RosterBot): boolean {
   if (bot.id === 'aeeis' || reservedBotName(bot.name)) return false;
   if (bot.id.startsWith('bot_')) return ownedBotRecords.some(item => item.id === bot.id);
@@ -1388,8 +1391,9 @@ function loadCustomBots(): RosterBot[] {
       if (typeof bot.background !== 'string' || !bot.background.trim() || bot.background.trim().length > 800) continue;
       const mark = bot.mark as BotMark;
       const role = typeof bot.role === 'string' ? bot.role.trim().slice(0, 120) : '';
+      const held = typeof bot.held === 'string' ? bot.held : '';
       bots.push({
-        id: bot.id, name: bot.name.trim(), note: '', demo: false, mark, color: bot.color, background: bot.background.trim(), ...(role ? { role } : {}),
+        id: bot.id, name: bot.name.trim(), note: '', demo: false, mark, color: bot.color, background: bot.background.trim(), ...(role ? { role } : {}), ...(held ? { held } : {}),
       });
       if (bots.length >= CUSTOM_BOT_CAP) break;
     }
@@ -1400,7 +1404,7 @@ function loadCustomBots(): RosterBot[] {
 }
 function saveCustomBots(bots: RosterBot[]): void {
   const stored: StoredBot[] = bots.slice(0, CUSTOM_BOT_CAP).map(bot => ({
-    id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}),
+    id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}), ...(bot.held ? { held: bot.held } : {}),
   }));
   localStorage.setItem(CUSTOM_BOTS_KEY, JSON.stringify(stored));
 }
@@ -1413,26 +1417,84 @@ function rosterBots(): RosterBot[] {
   const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
-  const serverIds = new Set(ownedBotRecords.map(bot => bot.id));
-  const pending = loadCustomBots().filter(bot => !serverIds.has(bot.id));
-  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...pending, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
 }
-async function adoptLocalBots(): Promise<void> {
+function claimableLocalBots(): RosterBot[] {
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  if (account && sessionPrincipal && account !== sessionPrincipal) return [];
+  const serverIds = new Set(ownedBotRecords.map(bot => bot.id));
+  return loadCustomBots().filter(bot => !bot.held && !serverIds.has(bot.id));
+}
+function renderLocalBotNote(): void {
+  const note = $('bot-local-note');
+  const claim = $('bot-local-claim');
+  if (!note || !claim) return;
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  const stored = loadCustomBots();
+  const claimable = claimableLocalBots();
+  if (localBotNote) {
+    note.hidden = false;
+    note.textContent = localBotNote;
+    claim.hidden = claimable.length === 0;
+    return;
+  }
+  if (account && sessionPrincipal && account !== sessionPrincipal && stored.some(bot => !bot.held)) {
+    note.hidden = false;
+    note.textContent = '这台浏览器还有上一个账号留下的 Bot，没有写入当前账号。';
+    claim.hidden = true;
+    return;
+  }
+  if (claimable.length) {
+    note.hidden = false;
+    note.textContent = `这台浏览器还有${claimable.map(bot => bot.name).join('、')}，还没写入这个账号。`;
+    claim.hidden = false;
+    return;
+  }
+  note.hidden = true;
+  note.textContent = '';
+  claim.hidden = true;
+}
+async function writeLocalBots(): Promise<void> {
+  if (!sessionPrincipal) return;
+  localStorage.setItem(LOCAL_BOT_ACCOUNT, sessionPrincipal);
   const local = loadCustomBots();
-  if (!local.length) return;
   const kept: RosterBot[] = [];
+  const reasons: string[] = [];
   for (const bot of local) {
+    if (bot.held) { kept.push(bot); continue; }
     try {
       const saved = await api<OwnedBotView>('/bots', {
         id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}),
       });
       rememberOwnedBot(saved);
-    } catch {
-      kept.push(bot);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        const reason = errorMessage(error);
+        kept.push({ ...bot, held: reason });
+        reasons.push(`${bot.name}：${reason}`);
+      } else kept.push(bot);
     }
   }
   if (kept.length) saveCustomBots(kept);
   else localStorage.removeItem(CUSTOM_BOTS_KEY);
+  const held = kept.filter(bot => bot.held);
+  if (reasons.length) localBotNote = `没有写入这个账号。${reasons.join(' ')}`;
+  else if (held.length) localBotNote ||= `没有写入这个账号。${held.map(bot => `${bot.name}：${bot.held}`).join(' ')}`;
+  else localBotNote = '';
+}
+async function adoptLocalBots(): Promise<void> {
+  if (localBotsAdopted || !sessionPrincipal) return;
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  if (account !== sessionPrincipal) return;
+  localBotsAdopted = true;
+  await writeLocalBots();
+}
+async function claimLocalBots(): Promise<void> {
+  if (!sessionPrincipal) return;
+  localBotsAdopted = true;
+  await writeLocalBots();
+  renderBotRoster();
+  renderGroups(roomSummaries);
 }
 function loadBotGroups(): BotGroups {
   const raw = localStorage.getItem('aeeis.bot-groups');
@@ -1568,7 +1630,7 @@ function aeeisThread(): { id: string; revision: number } | undefined {
   return conversation;
 }
 function participantLabel(principalId: string): string {
-  return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
+  return botById(principalId)?.name ?? groupMembers.find(member => member.principalId === principalId)?.displayName ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
 }
 function eventWriter(event: SessionEventSummary): { id: string; type: 'principal' | 'agent' | 'system' } {
   return event.recordedBy ?? { id: event.actorId, type: event.actorType };
@@ -2608,6 +2670,8 @@ function syncEntrySurface(): void {
     if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
     const role = $('bot-profile-role');
     if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+    const actions = $('bot-profile-actions');
+    if (actions) actions.hidden = !counterpart || counterpart.id === 'aeeis' || !ownedBotRecords.some(bot => bot.id === counterpart.id);
   }
   const botStatus = $('bot-status');
   if (botStatus) {
@@ -2622,7 +2686,7 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。每句话都留在这间房里，入口收下并记成一条讨论。@群里的一个人，是请那个人回应，这句话仍留在入口。@所有人或点到多个人时，入口只记一条，不拆开。选一位说话人，只是标明这句话是谁说的，入口同样收下。选「交给」会再请那个人回应。都不会执行，也不会调用模型。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+    : '这是群聊。每句话都留在这间房里，入口收下这句话。@群里的一个人，是请那个人回应，这句话仍留在入口。@所有人或点到多个人时，入口只记一条，不拆开。选一位说话人，只是标明这句话是谁说的，入口同样收下。选「交给」会再请那个人回应，并记成一条讨论。都不会执行，也不会调用模型。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。@AEEIS、没点名，入口都会收下。@群里的一个人是请他回应。@所有人仍记成一条。不执行，也不调用模型。';
@@ -2686,6 +2750,7 @@ function renderBotRoster(): void {
   const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
   if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
   for (const bot of loose) renderRow(bot);
+  renderLocalBotNote();
   for (const room of roomSummaries.filter(item => item.status === 'active' && item.description === '私聊')) {
     const principalId = directMembers.get(room.id);
     if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
@@ -3374,10 +3439,10 @@ async function submitGroupMessage(event: Event): Promise<void> {
     const entryMode = chosen?.id === 'aeeis' ? 'handoff' : (!chosen && !asked && !crowd && addressed ? 'entry' : 'intake');
     const entryError = await handTo(home, title => {
       if (chosen?.id === 'aeeis') return `已交给AEEIS，记为讨论「${title}」。未执行，对方不会自己回复。`;
-      if (asked) return `入口收下了这句话，记成讨论「${title}」。已请${asked.name}回应。未执行，讨论焦点不变。`;
-      if (crowd) return `入口记下了这句话，记成讨论「${title}」。没有拆给多个人，也未执行。`;
+      if (asked) return `入口收下了这句话「${title}」。已请${asked.name}回应。未执行，讨论焦点不变。`;
+      if (crowd) return `入口记下了这句话「${title}」。没有拆给多个人，也未执行。`;
       if (addressed) return `已记为入口讨论「${title}」。未执行，讨论焦点不变。`;
-      return `入口收下了这句话，记成讨论「${title}」。未执行，讨论焦点不变。`;
+      return `入口收下了这句话「${title}」。未执行，讨论焦点不变。`;
     }, entryMode);
     const askedError = asked
       ? await handTo(asked, title => chosen
@@ -4359,6 +4424,7 @@ $('gb-new-bot-group')?.addEventListener('click', () => {
 });
 let botCreateMark: BotMark = 'letter';
 let botCreateColor = BOT_COLORS[0]!;
+let botEditId = '';
 let botCreateTicket = 0;
 let botCreateBusy = false;
 function paintBotCreate(): void {
@@ -4415,6 +4481,7 @@ function setBotCreatePending(pending: boolean): void {
 function openBotCreate(): void {
   const panel = $('bot-create');
   if (!panel) return;
+  botEditId = '';
   botCreateTicket += 1;
   setBotCreatePending(false);
   renderBotCreateChoices();
@@ -4427,10 +4494,48 @@ function openBotCreate(): void {
   $<HTMLInputElement>('bot-create-name')?.focus();
 }
 function closeBotCreate(): void {
+  botEditId = '';
   botCreateTicket += 1;
   setBotCreatePending(false);
   const panel = $('bot-create');
   if (panel) panel.hidden = true;
+}
+function openBotEdit(bot: RosterBot): void {
+  const panel = $('bot-create');
+  if (!panel) return;
+  botEditId = bot.id;
+  botCreateTicket += 1;
+  setBotCreatePending(false);
+  renderBotCreateChoices();
+  botCreateMark = bot.mark ?? 'letter';
+  botCreateColor = bot.color ?? BOT_COLORS[0]!;
+  $<HTMLFormElement>('bot-create-form')?.reset();
+  const name = $<HTMLInputElement>('bot-create-name');
+  const role = $<HTMLInputElement>('bot-create-role');
+  const background = $<HTMLTextAreaElement>('bot-create-background');
+  if (name) name.value = bot.name;
+  if (role) role.value = bot.role ?? '';
+  if (background) background.value = bot.background ?? '';
+  botCreateStatus('');
+  panel.hidden = false;
+  paintBotCreate();
+  name?.focus();
+}
+async function removeOwnedBot(id: string): Promise<void> {
+  const bot = ownedBotRecords.find(item => item.id === id);
+  if (!bot) return;
+  if (!window.confirm(`移除${bot.name}。这个账号的名额会空出来。`)) return;
+  for (const room of roomSummaries) {
+    try {
+      const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`);
+      if (members.some(member => member.principalId === id && member.status === 'active')) await api(`/rooms/${encodeURIComponent(room.id)}/members/${encodeURIComponent(id)}`, undefined, 'DELETE');
+    } catch { /* 这间房不由这个账号管理时，成员记录留在原处。 */ }
+  }
+  await api(`/bots/${encodeURIComponent(id)}`, undefined, 'DELETE');
+  ownedBotRecords = ownedBotRecords.filter(item => item.id !== id);
+  if (selectedBotId === id) { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
+  renderBotRoster();
+  selectBot('aeeis');
 }
 function sameBotName(left: string, right: string): boolean {
   return left.localeCompare(right, 'zh', { sensitivity: 'accent' }) === 0;
@@ -4454,13 +4559,16 @@ async function saveCreatedBot(event: Event): Promise<void> {
   const background = $<HTMLTextAreaElement>('bot-create-background')?.value.trim().slice(0, 800) ?? '';
   if (!name) { botCreateStatus('先写下名字。'); $<HTMLInputElement>('bot-create-name')?.focus(); return; }
   if (reservedBotName(name)) { botCreateStatus('请换一个名字。所有人、团队和 AEEIS 留给群里的点名。'); return; }
-  if (rosterBots().some(bot => sameBotName(bot.name, name))) { botCreateStatus('这个名字已经在名单上。'); return; }
-  if (ownedBotRecords.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这个账号最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
+  if (rosterBots().some(bot => bot.id !== botEditId && sameBotName(bot.name, name))) { botCreateStatus('这个名字已经在名单上。'); return; }
+  if (!botEditId && ownedBotRecords.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这个账号最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
   if (!background) { botCreateStatus('先写下背景，或给出角色定位再生成。'); $<HTMLTextAreaElement>('bot-create-background')?.focus(); return; }
   setBotCreatePending(true);
   botCreateStatus('正在保存。');
+  const editing = botEditId;
   try {
-    const saved = await api<OwnedBotView>('/bots', { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) });
+    const saved = editing
+      ? await api<OwnedBotView>(`/bots/${encodeURIComponent(editing)}`, { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) }, 'PATCH')
+      : await api<OwnedBotView>('/bots', { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) });
     rememberOwnedBot(saved);
     closeBotCreate();
     renderBotRoster();
@@ -4491,6 +4599,9 @@ async function generateBotBackground(): Promise<void> {
   }
 }
 $('gb-new-bot')?.addEventListener('click', () => openBotCreate());
+$('bot-local-claim')?.addEventListener('click', () => { void claimLocalBots().catch(error => { localBotNote = errorMessage(error); renderLocalBotNote(); }); });
+$('bot-profile-edit')?.addEventListener('click', () => { const bot = botById(activeBotId()); if (bot) openBotEdit(bot); });
+$('bot-profile-remove')?.addEventListener('click', () => { void removeOwnedBot(activeBotId()).catch(error => message(errorMessage(error))); });
 $('bot-create-cancel')?.addEventListener('click', () => closeBotCreate());
 $('bot-create-generate')?.addEventListener('click', () => { void generateBotBackground(); });
 $('bot-create-name')?.addEventListener('input', () => paintBotCreate());
