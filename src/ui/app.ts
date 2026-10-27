@@ -86,7 +86,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -1176,7 +1176,7 @@ function updateConversationControls(): void {
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
-  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer], #conversation-messages button[data-plan-start], #conversation-messages button[data-plan-revise], #conversation-messages button[data-plan-cancel], #conversation-messages button[data-plan-revise-submit], #conversation-messages textarea[data-plan-feedback]').forEach(control => {
+  document.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>('#conversation-tasks button[data-change-focus], #conversation-tasks button[data-priority], #conversation-tasks button[data-approve], #conversation-tasks button[data-approve-once], #conversation-tasks button[data-reject-submit], #conversation-tasks button[data-answer-submit], #conversation-tasks button[data-retry], #conversation-tasks button[data-run-pause], #conversation-tasks button[data-run-resume], #conversation-tasks button[data-reconcile-submit], #conversation-tasks textarea[data-answer], #conversation-tasks textarea[data-reconcile], #conversation-tasks textarea[data-reject], #group-transcript button[data-approve], #group-transcript button[data-approve-once], #group-transcript button[data-reject-submit], #group-transcript button[data-answer-submit], #group-transcript textarea[data-reject], #group-transcript textarea[data-answer], #conversation-messages button[data-plan-start], #conversation-messages button[data-plan-revise], #conversation-messages button[data-plan-cancel], #conversation-messages button[data-plan-revise-submit], #conversation-messages textarea[data-plan-feedback], #conversation-messages button[data-card-decision], #conversation-messages button[data-question-submit], #conversation-messages textarea[data-question-answer]').forEach(control => {
     control.disabled = control.dataset.boundary === 'true' || locked || (Boolean(control.dataset.priority) && conversationNeedsRefresh);
   });
   const surface = rosterView();
@@ -3286,7 +3286,7 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
   card.dataset.state = task.pendingApproval ? 'awaiting' : task.status;
   card.setAttribute('aria-label', `「${task.title}」的计划`);
   const head = element('div', '', 'plan-card-head');
-  head.append(element('strong', '计划'), element('span', task.pendingApproval ? '等你确认' : task.status === 'preparing' ? '正在准备' : runStatusLabel(task.status), 'plan-card-status'));
+  head.append(element('strong', '计划'), element('span', task.pendingApproval ? '等你确认' : task.pendingAction && task.status === 'needs_approval' ? '等你决定一个动作' : task.pendingQuestion && task.status === 'needs_input' ? '等你回答' : task.status === 'preparing' ? '正在准备' : runStatusLabel(task.status), 'plan-card-status'));
   card.append(head);
   if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
   const steps = task.execution?.steps ?? [];
@@ -3322,6 +3322,82 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
     card.append(actions, revision);
   }
   return card;
+}
+/** What the Run is waiting on from you, shown under its plan: one external action to decide, or one question to answer. */
+function conversationDecisionCard(task: ConversationTaskView, answerDraft = ''): HTMLElement | undefined {
+  const action = task.runId && task.status === 'needs_approval' ? task.pendingAction : undefined;
+  const question = task.runId && task.status === 'needs_input' ? task.pendingQuestion : undefined;
+  if (!action && !question) return;
+  const card = element('section', '', 'decision-card');
+  card.dataset.decisionTask = task.id;
+  card.dataset.kind = action ? 'action' : 'question';
+  const head = element('div', '', 'decision-card-head');
+  head.append(element('span', '需要你', 'decision-card-badge'));
+  if (action?.step) head.append(element('span', action.step, 'decision-card-step'));
+  card.append(head);
+  if (action) {
+    card.setAttribute('aria-label', `「${task.title}」等你决定一个动作`);
+    card.append(element('strong', action.kind === 'agent' ? `想交给外部代理 ${action.ref}` : `想调用 ${action.ref}`, 'decision-card-title'));
+    card.append(element('p', '计划已经批准，这一步里的这个动作要你单独点头。不要时它不会执行，任务会接着做，并知道你没同意。', 'decision-card-note'));
+    const why = element('p', action.reason || '没有附带原因。', 'decision-card-reason');
+    why.hidden = true; why.id = `decision-reason-${task.id}`;
+    const actions = element('div', '', 'decision-card-actions');
+    const approve = dashboardButton('批准', () => decideConversationAction(task, 'once'));
+    approve.className = 'decision-primary'; approve.dataset.cardDecision = 'once';
+    const deny = dashboardButton('不要', () => decideConversationAction(task, 'deny'));
+    deny.dataset.cardDecision = 'deny';
+    const whyButton = dashboardButton('为什么？', async () => { why.hidden = !why.hidden; whyButton.setAttribute('aria-expanded', String(!why.hidden)); });
+    whyButton.dataset.cardWhy = task.id; whyButton.setAttribute('aria-expanded', 'false'); whyButton.setAttribute('aria-controls', why.id);
+    const more = element('div', '', 'decision-card-more'); more.hidden = true; more.id = `decision-more-${task.id}`;
+    const moreButton = dashboardButton('更多', async () => { more.hidden = !more.hidden; moreButton.setAttribute('aria-expanded', String(!more.hidden)); });
+    moreButton.dataset.cardMore = task.id; moreButton.setAttribute('aria-expanded', 'false'); moreButton.setAttribute('aria-controls', more.id);
+    const always = dashboardButton('这件任务里以后都允许', () => decideConversationAction(task, 'always'));
+    always.dataset.cardDecision = 'always';
+    const block = dashboardButton('这件任务里一直阻止', () => decideConversationAction(task, 'block'));
+    block.dataset.cardDecision = 'block';
+    more.append(always, block);
+    actions.append(approve, deny, whyButton, moreButton);
+    card.append(actions, why, more);
+    return card;
+  }
+  card.setAttribute('aria-label', `「${task.title}」等你回答`);
+  card.append(element('strong', '它需要你补一句', 'decision-card-title'), element('p', question!.text, 'decision-card-question'));
+  const field = element('textarea', '', 'conversation-answer');
+  field.rows = 2; field.maxLength = 8000; field.dataset.questionAnswer = task.id; field.value = answerDraft;
+  field.placeholder = '回答后它从当前这一步接着做';
+  field.setAttribute('aria-label', `回答「${task.title}」的问题`);
+  const submit = dashboardButton('回答', () => answerConversationTask(task, field.value));
+  submit.className = 'decision-primary'; submit.dataset.questionSubmit = task.id;
+  const actions = element('div', '', 'decision-card-actions'); actions.append(submit);
+  card.append(field, actions);
+  return card;
+}
+async function decideConversationAction(task: ConversationTaskView, decision: 'once' | 'always' | 'deny' | 'block'): Promise<void> {
+  const action = task.pendingAction;
+  if (!conversation || !task.runId || !action || conversationBusy || conversationAttempt) return;
+  const epoch = conversationEpoch, runId = task.runId;
+  conversationBusy = true; updateConversationControls();
+  try {
+    await api(`/runs/${encodeURIComponent(runId)}/approve-action`, { idempotencyKey: action.idempotencyKey, decision });
+    if (epoch !== conversationEpoch) return;
+    await refreshConversation(false, true);
+    if (epoch !== conversationEpoch) return;
+    if (currentId === runId) await refresh();
+    void refreshHandoffViews();
+    if (epoch !== conversationEpoch) return;
+    const done: Record<typeof decision, string> = {
+      once: `已批准 ${action.ref} 这一次，「${task.title}」接着做。`,
+      always: `已允许 ${action.ref}，这件任务里以后不再问。`,
+      deny: `没有执行 ${action.ref}，「${task.title}」会接着做，并知道你没同意。`,
+      block: `已阻止 ${action.ref}，这件任务里不会再执行它。`,
+    };
+    $('conversation-status').textContent = done[decision];
+    $('conversation-error').textContent = '';
+  } catch (error) {
+    if (epoch !== conversationEpoch) return;
+    $('conversation-error').textContent = errorMessage(error);
+    if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 async function cancelConversationTask(task: ConversationTaskView): Promise<void> {
   if (!conversation || !task.runId || conversationBusy || conversationAttempt) return;
@@ -3474,6 +3550,10 @@ function renderConversation(): void {
     messages.querySelectorAll<HTMLTextAreaElement>('textarea[data-plan-feedback]').forEach(field => {
       if (field.dataset.planFeedback && field.value) planDrafts.set(field.dataset.planFeedback, field.value);
     });
+    const questionDrafts = new Map<string, string>();
+    messages.querySelectorAll<HTMLTextAreaElement>('textarea[data-question-answer]').forEach(field => {
+      if (field.dataset.questionAnswer && field.value) questionDrafts.set(field.dataset.questionAnswer, field.value);
+    });
     messages.replaceChildren();
     // One plan card per task, under the latest message that asked it to run.
     const planMessage = new Map<string, string>();
@@ -3516,7 +3596,11 @@ function renderConversation(): void {
       const runId = item.notificationRunId ?? item.execution?.runId;
       if (runId) { const view = button('查看此次运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
       const planTask = item.execution && planMessage.get(item.execution.taskId) === item.id ? conversation?.tasks.find(task => task.id === item.execution!.taskId) : undefined;
-      if (planTask && (planTask.runId === item.execution!.runId || planTask.status === 'preparing')) row.append(conversationPlanCard(planTask, planDrafts.get(planTask.id)));
+      if (planTask && (planTask.runId === item.execution!.runId || planTask.status === 'preparing')) {
+        row.append(conversationPlanCard(planTask, planDrafts.get(planTask.id)));
+        const decision = conversationDecisionCard(planTask, questionDrafts.get(planTask.id));
+        if (decision) row.append(decision);
+      }
       messages.append(row);
     }
     $('conversation-earlier').hidden = !conversation?.hasEarlierMessages;
