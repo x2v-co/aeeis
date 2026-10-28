@@ -1791,7 +1791,7 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'review', title: '待验收' },
   { id: 'done', title: '完成' },
 ];
-interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; lines: string[] }
+interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[] }
 function channelLog(): SessionEventSummary[] {
   if (!laterChannelEvents.length && !liveChannelEvents.length) return groupEvents;
   return [...groupEvents, ...laterChannelEvents, ...liveChannelEvents];
@@ -1873,12 +1873,22 @@ function appendUnseen(items: SessionEventSummary[] | undefined, into: SessionEve
   for (const item of items ?? []) if (!seen.has(item.id)) { into.push(item); seen.add(item.id); }
 }
 function boardDecision(conversationId: string, taskId: string): BoardDecision {
-  const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, released: false, lines: [] };
+  const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, released: false, handedUp: false, lines: [] };
   for (const event of channelLog()) {
-    if (event.operation === 'retract' || event.type !== 'task_update' || !roomOwnerWrote(event)) continue;
+    if (event.operation === 'retract' || !roomOwnerWrote(event)) continue;
     const refs = event.evidenceRefs ?? [];
     if (!refs.includes(conversationId) || !refs.includes(taskId)) continue;
     const content = event.content.trim();
+    if (event.type === 'system' && content.startsWith('已交给AEEIS')) {
+      const primaryConversation = refs.find(id => id.startsWith('conv_') && CITATION_ID.test(id));
+      const primaryTask = refs.find(id => id.startsWith('task_') && CITATION_ID.test(id));
+      if (primaryConversation !== conversationId || primaryTask !== taskId) {
+        decision.handedUp = true;
+        decision.lines.push(content);
+      }
+      continue;
+    }
+    if (event.type !== 'task_update') continue;
     const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION_ID.test(id) && Boolean(botById(id)));
     if (content.startsWith('领取：')) {
       if (!agentId) continue;
@@ -2037,6 +2047,7 @@ function renderChannelBoard(): void {
     const task = view?.tasks.find(item => item.id === cite.taskId);
     if (!view || !task) return [];
     const decision = boardDecision(cite.conversationId, task.id);
+    if (decision.handedUp) return [];
     const ownerId = decision.released ? '' : (cite.agentId ?? view.agentId ?? '');
     const owner = decision.released ? '待领取' : (botById(ownerId)?.name ?? (ownerId || '这个人'));
     return [{ view, task, owner, ownerId, decision }];
@@ -4550,7 +4561,7 @@ function openBotEdit(bot: RosterBot): void {
 async function removeOwnedBot(id: string): Promise<void> {
   const bot = ownedBotRecords.find(item => item.id === id);
   if (!bot) return;
-  if (!window.confirm(`移除${bot.name}。这位会从房间里撤下，名额空出来。这个编号留下。还没开始做的事会退回待领取。`)) return;
+  if (!window.confirm(`移除${bot.name}。这位会从房间里撤下，名额空出来。这个编号留下。还要人处理的事会交给 AEEIS。`)) return;
   await api(`/bots/${encodeURIComponent(id)}`, undefined, 'DELETE');
   ownedBotRecords = ownedBotRecords.filter(item => item.id !== id);
   if (selectedBotId === id) { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }

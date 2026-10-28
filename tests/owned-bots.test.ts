@@ -148,7 +148,7 @@ describe('owned bots', () => {
     } finally { await app.close(); await bots.close(); }
   });
 
-  it('returns an open task to the channel and keeps a running task in place', async () => {
+  it('writes open work onto AEEIS and keeps a running task in place', async () => {
     const bots = new InMemoryOwnedBotStore();
     const memberships = new InMemoryRoomMembershipRepository();
     const domain = new AeeisService(new InMemoryStore(), [], memberships, undefined, bots);
@@ -181,10 +181,22 @@ describe('owned bots', () => {
       expect(cited.statusCode).toBe(200);
       const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice', 'content-type': 'application/json' }, payload: '' });
       expect(removed.statusCode).toBe(200);
-      expect(removed.json().returned).toEqual([{ id: 'task_note', title: '整理纪要' }]);
+      const handed = removed.json().returned as Array<{ id: string; title: string; entryConversationId: string; entryTaskId: string }>;
+      expect(handed).toEqual([expect.objectContaining({ id: 'task_note', title: '整理纪要' })]);
+      expect(handed[0]?.entryConversationId).toMatch(/^conv_/);
+      expect(handed[0]?.entryTaskId).toMatch(/^task_/);
+      const entry = await conversations.get(handed[0]!.entryConversationId, scope);
+      expect(entry.agentId).toBe('aeeis');
+      expect(entry.tasks).toEqual([expect.objectContaining({ id: handed[0]!.entryTaskId, title: '整理纪要' })]);
       expect((await conversations.get(life.id, scope)).tasks).toEqual([expect.objectContaining({ id: 'task_note', title: '整理纪要' })]);
       const events = await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/session-events?limit=20`, headers: { authorization: 'Bearer alice' } });
-      expect(events.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'task_update', content: '退回待领取：整理纪要', evidenceRefs: [life.id, 'task_note'] })]));
+      const items = events.json().items as Array<{ type: string; content: string; evidenceRefs: string[] }>;
+      expect(items.some(item => item.content.startsWith('退回待领取'))).toBe(false);
+      expect(items).toEqual(expect.arrayContaining([expect.objectContaining({
+        type: 'system',
+        content: '已交给AEEIS，记为讨论「整理纪要」。原来的事还在。',
+        evidenceRefs: [handed[0]!.entryConversationId, handed[0]!.entryTaskId, 'aeeis', life.id, 'task_note'],
+      })]));
       const busy = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '阿忙' } });
       const busyId = busy.json().id as string;
       const running = runWithSignals();
@@ -207,6 +219,9 @@ describe('owned bots', () => {
       });
       const released = await app.inject({ method: 'DELETE', url: `/api/bots/${lostId}`, headers: { authorization: 'Bearer alice' } });
       expect(released.statusCode).toBe(200);
+      const lostHand = released.json().returned as Array<{ id: string; title: string; entryConversationId: string; entryTaskId: string }>;
+      expect(lostHand).toEqual([expect.objectContaining({ id: 'task_lost', title: '记录不在了', entryConversationId: handed[0]!.entryConversationId })]);
+      expect((await conversations.get(handed[0]!.entryConversationId, scope)).tasks.map(task => task.title)).toEqual(['整理纪要', '记录不在了']);
       expect(await bots.list(scope)).toEqual([expect.objectContaining({ id: busyId, name: '阿忙' })]);
     } finally { await app.close(); await bots.close(); }
   });
