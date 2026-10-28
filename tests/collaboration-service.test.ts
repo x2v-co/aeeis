@@ -131,6 +131,10 @@ describe('durable collaboration service', () => {
   it('accepts a 20-round debate and rejects 21', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-rounds-'))); await repository.init();
     const service = new CollaborationService(repository);
+    const defaults = await service.createDebate({ taskId: 'task.rounds.default', contextVersion: 'ctx.rounds.default', participantAgentIds: ['agent.one', 'agent.two'] });
+    expect(defaults.room.maxRounds).toBe(20);
+    expect(defaults.room.maxMessagesPerAgent).toBe(20);
+    expect(defaults.room.maxTotalMessages).toBeUndefined();
     const created = await service.createDebate({ taskId: 'task.rounds', contextVersion: 'ctx.rounds', participantAgentIds: ['agent.one'], maxRounds: 20, maxMessagesPerAgent: 1 });
     expect(created.room.maxRounds).toBe(20);
     const full = await service.createDebate({ taskId: 'task.rounds.full', contextVersion: 'ctx.rounds.full', participantAgentIds: Array.from({ length: 12 }, (_, index) => `agent.r${index}`), maxRounds: 20, maxMessagesPerAgent: 20, maxTotalMessages: 240 });

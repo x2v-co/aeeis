@@ -100,7 +100,7 @@ const debateInputSchema = z.object({
   modelBudget: collaborationBudgetSchema.optional(),
   taskId: id, contextVersion: id, goal: z.string().max(8000).optional(), participantAgentIds: z.array(id).min(1).max(12),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(z.object({ id, text: z.string().min(1).max(4000), evidenceRefs: z.array(id).max(100) }).strict()).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
-  maxRounds: z.number().int().min(1).max(20).default(4), maxMessagesPerAgent: z.number().int().min(1).max(20).default(4),
+  maxRounds: z.number().int().min(1).max(20).default(20), maxMessagesPerAgent: z.number().int().min(1).max(20).default(20),
   maxTotalMessages: z.number().int().min(1).max(1000).optional(),
 }).strict();
 

@@ -16,6 +16,22 @@ const event = {
 };
 
 describe('durable collaboration triggers', () => {
+  it('opens a debate at 20 rounds and 20 messages per bot when the policy omits both', async () => {
+    const collaborationRepository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-trigger-default-rounds-')));
+    const triggerStore = new FileCollaborationTriggerStore(await mkdtemp(join(tmpdir(), 'aeeis-trigger-default-rounds-store-')));
+    await collaborationRepository.init(); await triggerStore.init();
+    try {
+      const collaboration = new CollaborationService(collaborationRepository);
+      const triggers = new CollaborationTriggerService(triggerStore, collaboration);
+      const policy = await triggers.createPolicy({ id: 'policy.default.rounds', name: 'Default rounds', enabled: true, eventTypes: ['review.completed'], action: { type: 'debate', participantAgentIds: ['agent.one', 'agent.two'] } }, scope);
+      expect(policy.action).toMatchObject({ maxRounds: 20, maxMessagesPerAgent: 20 });
+      await triggers.evaluate({ ...event, eventId: 'review:default:rounds' }, scope);
+      const [debate] = await collaboration.listDebates(scope);
+      expect(debate!.room.maxRounds).toBe(20);
+      expect(debate!.room.maxMessagesPerAgent).toBe(20);
+    } finally { await triggerStore.close(); await collaborationRepository.close(); }
+  });
+
   it('serializes different events through one cooldown window', async () => {
     const collaborationRepository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-trigger-concurrent-collab-')));
     const triggerStore = new FileCollaborationTriggerStore(await mkdtemp(join(tmpdir(), 'aeeis-trigger-concurrent-store-')));
