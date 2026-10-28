@@ -2562,11 +2562,18 @@ describe('entry bots and group chats', () => {
       { id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } },
       { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: date, runId: 'run_pause', latestRunId: 'run_pause' },
     );
-    events.set('room_phase', ['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })));
+    release.tasks.push({ id: 'task_back', title: '退回的纪要', threadId: 'thread_back', status: 'discussion', createdAt: date });
+    events.set('room_phase', [
+      ...['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })),
+      { id: 'evt_back', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给纪要', evidenceRefs: ['conv_release', 'task_back', 'demo.release'], createdAt: date },
+      { id: 'evt_back_return', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '退回待领取：退回的纪要', evidenceRefs: ['conv_release', 'task_back'], createdAt: date },
+    ]);
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_ready'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
+    expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('退回的纪要');
+    expect(doc().querySelector('[data-column="capture"]')?.textContent).not.toContain('退回的纪要');
     const postsBefore = h.posts.length;
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
     clickText('领取', el('channel-task-body'));

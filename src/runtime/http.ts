@@ -61,6 +61,7 @@ import type { SessionEventService } from '../session-events.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
 import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
@@ -768,9 +769,17 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     const record = await options.ownedBots.recall(id);
     if (!record || record.owner !== principal.id || record.tenantId !== principal.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const returned = record.retiredAt ? [] : await releaseHeldBotTasks({
+      botId: id, scope,
+      ...(options.conversationStore ? { conversations: options.conversationStore } : {}),
+      ...(options.domain ? { domain: options.domain } : {}),
+      ...(options.sessionEvents ? { sessionEvents: options.sessionEvents } : {}),
+      runs: options.repository,
+    });
     if (!record.retiredAt && options.domain) await options.domain.releasePrincipalFromRooms(id, principal.id, principal.tenantId);
-    await options.ownedBots.remove(id, { owner: principal.id, tenantId: principal.tenantId });
-    return { removed: true, id };
+    await options.ownedBots.remove(id, scope);
+    return { removed: true, id, ...(returned.length ? { returned } : {}) };
   });
   app.post('/api/bots/background', async request => {
     if (!options.engine) throw new Conflict('模型尚未就绪');

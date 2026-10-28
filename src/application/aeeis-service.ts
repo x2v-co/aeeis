@@ -50,7 +50,7 @@ export class AeeisService {
     if (!this.store.changeAudit) throw new Error('Memory change audit is not configured');
     return this.store.changeAudit;
   }
-  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory, private readonly ownedBots?: Pick<OwnedBotStore, 'get'>) {}
+  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory, private readonly ownedBots?: Pick<OwnedBotStore, 'get' | 'recall'>) {}
 
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
@@ -169,6 +169,8 @@ export class AeeisService {
     if (inviterRole !== 'owner' && inviterRole !== 'editor') throw new RoomMembershipConflict('Room editor role required to manage members');
     if (principalId === (room.owner ?? 'owner')) throw new RoomMembershipConflict('Room owner is already a member');
     if (!['editor', 'viewer', 'agent'].includes(role)) throw new RoomMembershipConflict('Invalid room member role');
+    const remembered = await this.ownedBots?.recall(principalId);
+    if (remembered?.retiredAt) throw new RoomMembershipConflict('这个身份已经撤下。');
     if (this.principalDirectory) {
       let entry;
       try { entry = await this.principalDirectory.lookup(principalId, tenantId); }
@@ -201,6 +203,11 @@ export class AeeisService {
     const role = await this.roomRole(room, principalId, tenantId);
     if (!role || !['owner', 'editor', 'agent'].includes(role)) throw new RoomMembershipConflict('Room writer role required for Session events');
     return room;
+  }
+
+  async activeRoomIdsFor(principalId: string, tenantId: string): Promise<string[]> {
+    if (!this.memberships) return [];
+    return this.memberships.activeRoomIds(principalId, tenantId);
   }
 
   /** Drop this principal from every room in the tenant. Used when the owner
