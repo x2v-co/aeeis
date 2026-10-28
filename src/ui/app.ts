@@ -94,7 +94,7 @@ interface ConversationMessageView {
   execution?: { runId: string; taskId: string; state: string };
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; presence?: LifePresence }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; hasStandingInstruction?: boolean; presence?: LifePresence }
 interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
 interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
@@ -2710,14 +2710,14 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。每句话都留在这间房里。没有点名时，这句话送到其他成员的对话；不必回复的成员在房间里留一个表情，表示收到或当下的情绪。回执合成一条，只写这次送到的人。@某一位时，这一位和 AEEIS 同时接收；写了常驻要求的其他成员会再被提醒，其余成员留一个表情。说话人不会再收到自己的这句话。@所有人同样按没点名送达。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+    : '这是群聊。每句话都留在这间房里。没有点名时，这句话送到其他成员的对话。写了常驻要求的成员会被提醒看一下，其余成员留一个 👍 表示收到。回执合成一条，只写这次送到的人。@某一位时，这一位和 AEEIS 同时接收；写了常驻要求的其他成员会再被提醒。没有收到这句话的成员不留表情。说话人不会再收到自己的这句话。@所有人同样按没点名送达。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，成员用一个表情表示收到。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，成员用 👍 表示收到；写了常驻要求的成员会被提醒。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收。';
   const sendNote = $('group-send-note');
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
-    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没有点名时，其他成员收到后留一个表情。@某一位时，这一位和 AEEIS 同时接收。选一位说话人，只是标明这句话是谁说的。';
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没有点名时，其余成员用 👍 表示收到，写了常驻要求的成员会被提醒。@某一位时，这一位和 AEEIS 同时接收。没有收到这句话的成员不留表情。选一位说话人，只是标明这句话是谁说的。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -3340,26 +3340,15 @@ function clipEntryText(value: string, max: number): string {
   const last = sliced.charCodeAt(sliced.length - 1);
   return last >= 0xD800 && last <= 0xDBFF ? sliced.slice(0, -1) : sliced;
 }
-function memberCue(bot: RosterBot): string {
-  return [lifeSummary(bot.id)?.standingInstruction, bot.role, bot.background, bot.note].map(item => item?.trim() ?? '').filter(Boolean).join('\n');
-}
-function memberEmoji(bot: RosterBot): string {
-  const text = memberCue(bot);
-  if (/担心|风险|谨慎|小心|疑问/.test(text)) return '🤔';
-  if (/高兴|开心|欢迎|庆祝|顺利/.test(text)) return '😄';
-  if (/纪要|记录|整理|汇总/.test(text)) return '📝';
-  if (/审|核对|发布|清单|检查/.test(text)) return '👀';
-  if (/研究|查找|资料|阅读/.test(text)) return '🔍';
-  return '👍';
-}
 function memberNeedsReply(bot: RosterBot): boolean {
-  return Boolean(lifeSummary(bot.id)?.standingInstruction?.trim());
+  const summary = lifeSummary(bot.id);
+  return Boolean(summary?.standingInstruction?.trim() || summary?.hasStandingInstruction);
 }
 function spokenBy(bot: RosterBot, spoken: { type: 'agent' | 'principal'; id: string } | undefined): boolean {
   return spoken?.type === 'agent' && spoken.id === bot.id;
 }
-function emojiMarks(bots: RosterBot[]): string {
-  return bots.map(bot => `${bot.name} ${memberEmoji(bot)}`).join('、');
+function receiptMarks(bots: RosterBot[]): string {
+  return bots.map(bot => `${bot.name} 👍`).join('、');
 }
 function groupAgentBots(): RosterBot[] {
   const ids = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
@@ -3497,23 +3486,30 @@ async function submitGroupMessage(event: Event): Promise<void> {
         if (error) errors.push(error);
         else delivered.push(bot);
       }
-      if (delivered.length) {
+      const acked = delivered.filter(bot => !memberNeedsReply(bot));
+      const reminded = delivered.filter(memberNeedsReply);
+      const line = [
+        acked.length ? `已送到${receiptMarks(acked)}。` : '',
+        reminded.length ? `提醒${reminded.map(bot => bot.name).join('、')}按常驻要求看一下。` : '',
+      ].filter(Boolean).join('');
+      if (line) {
         try {
-          await postSession('system', `已送到${emojiMarks(delivered)}。`);
+          await postSession('system', line);
         } catch (error) {
-          errors.push(`句子已送到对话，房间里的表情没有写上。${errorMessage(error)}`);
+          errors.push(`句子已送到对话，房间里的回执没有写上。${errorMessage(error)}`);
         }
       }
     } else {
       const targets = rawPointed.filter(bot => !spokenBy(bot, spoken));
       const homeIn = members.some(bot => bot.id === home.id);
       const others = members.filter(bot => bot.id !== 'aeeis' && !rawPointed.some(item => item.id === bot.id));
-      const replyTo = others.filter(memberNeedsReply);
-      const emojiBots = others.filter(bot => !memberNeedsReply(bot));
-      const suffix = [
-        replyTo.length ? `提醒${replyTo.map(bot => bot.name).join('、')}按常驻要求看一下。` : '',
-        emojiBots.length ? `${emojiMarks(emojiBots)}。` : '',
-      ].filter(Boolean).join('');
+      const reminded: RosterBot[] = [];
+      for (const bot of others.filter(memberNeedsReply)) {
+        const error = await handTo(bot, () => '', 'intake', false);
+        if (error) errors.push(error);
+        else reminded.push(bot);
+      }
+      const suffix = reminded.length ? `提醒${reminded.map(bot => bot.name).join('、')}按常驻要求看一下。` : '';
       const announced = askedAeeis && homeIn ? 'aeeis' : (targets[targets.length - 1]?.id ?? '');
       let aeeisError = '';
       if (homeIn) {
@@ -3540,10 +3536,6 @@ async function submitGroupMessage(event: Event): Promise<void> {
           errors.push(error);
           pointedErrors.set(bot.id, error);
         }
-      }
-      for (const bot of replyTo) {
-        const error = await handTo(bot, () => '', 'intake', false);
-        if (error) errors.push(error);
       }
       if (!announced && suffix) {
         try {

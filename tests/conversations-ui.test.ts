@@ -2004,7 +2004,7 @@ describe('entry bots and group chats', () => {
     speaker.value = '';
     el<HTMLTextAreaElement>('group-text').value = '这句是我的';
     el<HTMLFormElement>('group-composer').requestSubmit();
-    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已送到AEEIS 👍、发布 👀。'));
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已送到AEEIS 👍、发布 👍。'));
     const own = h.posts.filter(post => post.url.endsWith('/session-events') && post.body?.type === 'message');
     expect(own.at(-1)?.body).not.toHaveProperty('actor');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
