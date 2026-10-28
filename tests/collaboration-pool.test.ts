@@ -105,6 +105,57 @@ describe('internal competition model pool', () => {
     expect(finished.closeReason).toContain('message bound');
   });
 
+  it('continues into the next round when the latest round is already complete', async () => {
+    const prior = (speaker: string) => ({ schemaVersion: 'debate-message/1', messageId: `message.${speaker}`, debateId: 'debate.continue', round: 1, speakerAgentId: speaker, type: 'position', content: 'Already said', claimRefs: [], contextVersion: 'ctx.pool' });
+    let record: any = { id: 'debate.continue', status: 'active', room: { debateId: 'debate.continue', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 20, maxMessagesPerAgent: 20, messages: [prior('agent.one'), prior('agent.two')] } };
+    const calls: string[] = [];
+    const service = {
+      getDebate: async () => record,
+      appendMessage: async (_id: string, message: any) => { record = { ...record, room: { ...record.room, messages: [...record.room.messages, message] } }; return record; },
+      closeDebate: async (_id: string, reason: string) => { record = { ...record, status: 'closed', closeReason: reason }; return record; },
+    };
+    const runner = new ModelPoolDebateOrchestrator(service, new Map([
+      ['agent.one', { pin, complete: async () => { calls.push('one'); return { value: { type: 'position', content: 'Next', claimRefs: [] } }; } } as ModelAdapter],
+      ['agent.two', { pin, complete: async () => { calls.push('two'); return { value: { type: 'decision', content: 'Decision', claimRefs: [] } }; } } as ModelAdapter],
+    ]));
+    const finished = await runner.run('debate.continue');
+    expect(calls).toEqual(['one', 'two']);
+    expect(finished.room.messages.map((message: { round: number }) => message.round)).toEqual([1, 1, 2, 2]);
+    expect(finished.closeReason).toContain('decision');
+  });
+
+  it('continues an uncapped debate after a completed round and stops when every allowance is spent', async () => {
+    const prior = (speaker: string) => ({ schemaVersion: 'debate-message/1', messageId: `message.${speaker}`, debateId: 'debate.allowance', round: 1, speakerAgentId: speaker, type: 'position', content: 'Already said', claimRefs: [], contextVersion: 'ctx.pool' });
+    let open: any = { id: 'debate.open', status: 'active', room: { debateId: 'debate.open', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], messages: [prior('agent.one'), prior('agent.two')] } };
+    const openCalls: number[] = [];
+    const openService = {
+      getDebate: async () => open,
+      appendMessage: async (_id: string, message: any) => { open = { ...open, room: { ...open.room, messages: [...open.room.messages, message] } }; return open; },
+      closeDebate: async (_id: string, reason: string) => { open = { ...open, status: 'closed', closeReason: reason }; return open; },
+    };
+    await new ModelPoolDebateOrchestrator(openService, new Map([
+      ['agent.one', { pin, complete: async () => { openCalls.push(1); return { value: { type: 'position', content: 'Next', claimRefs: [] } }; } } as ModelAdapter],
+      ['agent.two', { pin, complete: async () => { openCalls.push(2); return { value: { type: 'decision', content: 'Decision', claimRefs: [] } }; } } as ModelAdapter],
+    ])).run('debate.open');
+    expect(openCalls).toEqual([1, 2]);
+    expect(open.room.messages.at(-1).round).toBe(2);
+
+    let capped: any = { id: 'debate.allowance', status: 'active', room: { debateId: 'debate.allowance', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 20, maxMessagesPerAgent: 1, messages: [prior('agent.one'), prior('agent.two')] } };
+    let cappedCalls = 0;
+    const cappedService = {
+      getDebate: async () => capped,
+      appendMessage: async (_id: string, message: any) => { capped = { ...capped, room: { ...capped.room, messages: [...capped.room.messages, message] } }; return capped; },
+      closeDebate: async (_id: string, reason: string) => { capped = { ...capped, status: 'closed', closeReason: reason }; return capped; },
+    };
+    const finished = await new ModelPoolDebateOrchestrator(cappedService, new Map([
+      ['agent.one', { pin, complete: async () => { cappedCalls += 1; return { value: { type: 'position', content: 'Next', claimRefs: [] } }; } } as ModelAdapter],
+      ['agent.two', { pin, complete: async () => { cappedCalls += 1; return { value: { type: 'position', content: 'Next', claimRefs: [] } }; } } as ModelAdapter],
+    ])).run('debate.allowance');
+    expect(cappedCalls).toBe(0);
+    expect(finished.room.messages).toHaveLength(2);
+    expect(finished.closeReason).toContain('bound');
+  });
+
   it('resumes a persisted debate round without duplicating messages after restart', async () => {
     let record: any = { id: 'debate.resume', status: 'active', room: { debateId: 'debate.resume', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 2, maxMessagesPerAgent: 2, messages: [{ schemaVersion: 'debate-message/1', messageId: 'message.existing', debateId: 'debate.resume', round: 1, speakerAgentId: 'agent.one', type: 'position', content: 'Already persisted', claimRefs: [], contextVersion: 'ctx.pool' }] } };
     const calls: string[] = [];

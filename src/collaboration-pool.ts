@@ -220,7 +220,10 @@ export class ModelPoolDebateOrchestrator {
           if (!record.room.messages.some(item => item.messageId === message.messageId)) record = await this.service.appendMessage(debateId, message, scope, response.attemptId);
           record = await this.reviewMessages(debateId, scope);
         }
-        if (!spoke) break;
+        if (spoke) continue;
+        const perAgent = record.room.maxMessagesPerAgent;
+        const anyoneRemaining = record.room.participantAgentIds.some(agentId => perAgent === undefined || record.room.messages.filter(message => message.speakerAgentId === agentId).length < perAgent);
+        if (!anyoneRemaining) break;
       }
       return await this.adjudicate(debateId, 'Debate reached its configured round or message bound', scope);
     } catch (error) {
