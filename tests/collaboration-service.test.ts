@@ -128,6 +128,15 @@ describe('durable collaboration service', () => {
     } finally { await repository.close(); }
   });
 
+  it('accepts a 20-round debate and rejects 21', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-rounds-'))); await repository.init();
+    const service = new CollaborationService(repository);
+    const created = await service.createDebate({ taskId: 'task.rounds', contextVersion: 'ctx.rounds', participantAgentIds: ['agent.one'], maxRounds: 20, maxMessagesPerAgent: 1 });
+    expect(created.room.maxRounds).toBe(20);
+    await expect(service.createDebate({ taskId: 'task.rounds.over', contextVersion: 'ctx.rounds.over', participantAgentIds: ['agent.one'], maxRounds: 21, maxMessagesPerAgent: 1 })).rejects.toThrow();
+    await repository.close();
+  });
+
   it('persists bounded debate messages and close state', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-'))); await repository.init();
     const service = new CollaborationService(repository);

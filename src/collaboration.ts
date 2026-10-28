@@ -87,7 +87,7 @@ export const debateRoomSchema = z.object({
   debateId: id, taskId: id, contextVersion: id, participantAgentIds: z.array(id).min(1).max(12),
   goal: z.string().max(8000).optional(),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(contextClaimSchema).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
-  maxRounds: z.number().int().min(1).max(12), maxMessagesPerAgent: z.number().int().min(1).max(100),
+  maxRounds: z.number().int().min(1).max(20), maxMessagesPerAgent: z.number().int().min(1).max(100),
   maxTotalMessages: z.number().int().min(1).max(1000).optional(), messages: z.array(debateMessageSchema).max(1000),
   moderation: z.array(debateModerationSchema).max(1000).default([]), moderatorReviews: z.array(debateModeratorReviewSchema).max(1000).default([]), adjudication: debateAdjudicationSchema.optional(),
 }).strict();
