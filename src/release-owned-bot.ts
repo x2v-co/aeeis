@@ -6,7 +6,7 @@ import { RoomMembershipConflict } from './room-membership.js';
 import { isTerminalRun } from './runtime/run-reconcile.js';
 import { NotFound, type RunRepository } from './runtime/repository.js';
 import type { Ownership } from './security/principal.js';
-import type { SessionEventService } from './session-events.js';
+import type { SessionEvent, SessionEventService } from './session-events.js';
 
 const citationId = /^[a-z][a-z0-9_.-]{1,127}$/;
 const ENTRY_AGENT = 'aeeis';
@@ -43,9 +43,14 @@ export async function releaseHeldBotTasks(input: {
   }
   if (running.length) throw new OwnedBotConflict(`先停下或转交正在做的事：${running.join('、')}。`);
   if (!held.length) return [];
+  const cancelledInRoom = new Map<string, Set<string>>();
+  const pending = input.domain && input.sessionEvents
+    ? await tasksStillNeedingAPerson(held, input.botId, life.id, input.scope, input.domain, input.sessionEvents, cancelledInRoom)
+    : held;
+  if (!pending.length) return [];
   const entry = await input.conversation.create({ title: 'AEEIS', agentId: ENTRY_AGENT }, input.scope);
   const released: ReleasedBotTask[] = [];
-  for (const task of held) {
+  for (const task of pending) {
     const title = task.title.trim().slice(0, 180);
     const entryTitle = title.length >= 2 ? title : '接手的事';
     const posted = await input.conversation.post(entry.id, {
@@ -63,7 +68,7 @@ export async function releaseHeldBotTasks(input: {
     const roomIds = await input.domain.activeRoomIdsFor(input.botId, input.scope.tenantId);
     for (const roomId of roomIds) {
       try {
-        await handTasksUpInRoom(roomId, input.botId, life.id, released, input.scope, input.sessionEvents);
+        await handTasksUpInRoom(roomId, input.botId, life.id, released, cancelledInRoom.get(roomId) ?? new Set(), input.scope, input.sessionEvents);
       } catch (error) {
         if (!(error instanceof AeeisNotFound || error instanceof AeeisConflict || error instanceof RoomMembershipConflict)) throw error;
       }
@@ -72,7 +77,68 @@ export async function releaseHeldBotTasks(input: {
   return released;
 }
 
-async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, tasks: readonly ReleasedBotTask[], scope: Ownership, sessionEvents: SessionEventService): Promise<void> {
+/** A channel cancel lives on the room, not on the task. Skip a task only when
+ * every room that cites it still has that cancel, and the room owner has not
+ * taken it back. A missing Run still needs a person. */
+async function tasksStillNeedingAPerson(held: readonly ConversationTask[], botId: string, lifeId: string, scope: Ownership, domain: AeeisService, sessionEvents: SessionEventService, cancelledInRoom: Map<string, Set<string>>): Promise<ConversationTask[]> {
+  const roomIds = await domain.activeRoomIdsFor(botId, scope.tenantId);
+  const citedRooms = new Map<string, Set<string>>();
+  let unreadable = false;
+  for (const roomId of roomIds) {
+    try {
+      const mark = await channelMark(roomId, lifeId, new Set(held.map(task => task.id)), scope, sessionEvents);
+      cancelledInRoom.set(roomId, mark.cancelled);
+      for (const taskId of mark.cited) {
+        const rooms = citedRooms.get(taskId) ?? new Set<string>();
+        rooms.add(roomId);
+        citedRooms.set(taskId, rooms);
+      }
+    } catch (error) {
+      if (!(error instanceof AeeisNotFound || error instanceof AeeisConflict || error instanceof RoomMembershipConflict)) throw error;
+      unreadable = true;
+    }
+  }
+  if (unreadable) return [...held];
+  return held.filter(task => {
+    if (task.latestRunId) return true;
+    const rooms = citedRooms.get(task.id);
+    const cancelled = rooms ? [...rooms].filter(roomId => cancelledInRoom.get(roomId)?.has(task.id)) : [];
+    return !rooms || cancelled.length < rooms.size;
+  });
+}
+
+async function channelMark(roomId: string, lifeId: string, taskIds: ReadonlySet<string>, scope: Ownership, sessionEvents: SessionEventService): Promise<{ cited: Set<string>; cancelled: Set<string> }> {
+  const cited = new Set<string>();
+  const cancelled = new Set<string>();
+  let after = 0;
+  for (let page = 0; page < 50; page += 1) {
+    const result = await sessionEvents.page(roomId, scope.owner, scope.tenantId, 200, after);
+    for (const event of result.items) {
+      if (event.operation === 'retract') continue;
+      const taskId = event.evidenceRefs.find(id => taskIds.has(id));
+      const conversationId = event.evidenceRefs.find(id => id.startsWith('conv_') && citationId.test(id));
+      if (!taskId || conversationId !== lifeId) continue;
+      cited.add(taskId);
+      if (event.type !== 'task_update' || !roomOwnerWrote(event, scope.owner)) continue;
+      const content = event.content.trim();
+      if (content.startsWith('取消：')) cancelled.add(taskId);
+      else if (content.startsWith('撤回取消：') || content.startsWith('分派给 ') || content.startsWith('转交给 ')) cancelled.delete(taskId);
+    }
+    if (!result.nextCursor) return { cited, cancelled };
+    const next = Number(result.nextCursor);
+    if (!Number.isInteger(next) || next <= after) return { cited, cancelled };
+    after = next;
+  }
+  return { cited, cancelled };
+}
+
+function roomOwnerWrote(event: SessionEvent, actorId: string): boolean {
+  const writer = event.recordedBy ?? { id: event.actorId, type: event.actorType };
+  if (writer.type !== 'principal') return false;
+  return event.owner ? writer.id === event.owner : writer.id === actorId;
+}
+
+async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, tasks: readonly ReleasedBotTask[], holdBack: ReadonlySet<string>, scope: Ownership, sessionEvents: SessionEventService): Promise<void> {
   const handed = new Set<string>();
   let after = 0;
   for (let page = 0; page < 50; page += 1) {
@@ -89,7 +155,7 @@ async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, 
       if (!refs.includes(botId)) continue;
       const conversationId = refs.find(id => id.startsWith('conv_') && citationId.test(id));
       const task = tasks.find(item => item.id === taskId);
-      if (!task || conversationId !== lifeId) continue;
+      if (!task || conversationId !== lifeId || holdBack.has(task.id)) continue;
       handed.add(task.id);
       await sessionEvents.create(roomId, {
         ...(event.goalId === undefined ? {} : { goalId: event.goalId }),
