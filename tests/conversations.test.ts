@@ -162,8 +162,10 @@ describe('single-entry conversation routing', () => {
     const runId = started.runId as string;
     const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
     await f.repository.mutate(runId, run => { run.status = 'needs_input'; run.question = { taskId: 'work', text: '还缺发布窗口' }; });
-    const listed = (await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json() as Array<{ agentId?: string; presence: { state: string; label: string; taskId?: string; taskTitle?: string } }>;
+    const listed = (await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json() as Array<{ agentId?: string; hasStandingInstruction?: boolean; presence: { state: string; label: string; taskId?: string; taskTitle?: string } }>;
     expect(listed.find(item => item.agentId === 'demo.release')?.presence).toEqual({ state: 'waiting', label: '等你', taskId, taskTitle: '发布口径' });
+    expect(listed.find(item => item.agentId === 'demo.release')?.hasStandingInstruction).toBe(true);
+    expect(listed.filter(item => item.agentId !== 'demo.release').every(item => item.hasStandingInstruction === undefined)).toBe(true);
     const body = JSON.stringify(listed);
     expect(body).not.toContain(sentence);
     expect(body).not.toContain('还缺发布窗口');
