@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { debateIngressRound } from './collaboration.js';
 import type { CollaborationService, DebateRecord } from './collaboration-service.js';
 import type { Ownership } from './security/principal.js';
 import type { CollaborationTriggerEvent } from './collaboration-triggers.js';
@@ -94,7 +95,7 @@ export class FeishuDebateIngress {
     }
     const parsedContent = parseFeishuContent(body.event.message.content);
     const structured = parseStructuredMessage(parsedContent);
-    const round = structured?.round ?? Math.max(1, Math.min(debate.room.maxRounds, Math.max(0, ...debate.room.messages.map(message => message.round)) || 1));
+    const round = debateIngressRound(debate.room, structured?.round);
     const message = {
       schemaVersion: 'debate-message/1' as const,
       messageId, debateId: debate.id, round, speakerAgentId,

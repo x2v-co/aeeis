@@ -197,14 +197,19 @@ export class ModelPoolDebateOrchestrator {
       record = await this.reviewMessages(debateId, scope);
       if (record.room.messages.some(message => message.type === 'decision')) return await this.adjudicate(debateId, 'debate reached a decision', scope);
       const highestRound = record.room.messages.reduce((highest, message) => Math.max(highest, message.round), 0);
-      for (let round = Math.max(1, highestRound); round <= record.room.maxRounds; round += 1) {
+      for (let round = Math.max(1, highestRound); ; round += 1) {
+        record = await this.service.getDebate(debateId, scope);
+        if (record.status !== 'active') return record;
+        if (record.room.maxRounds !== undefined && round > record.room.maxRounds) break;
+        let spoke = false;
         for (const agentId of record.room.participantAgentIds) {
           record = await this.service.getDebate(debateId, scope);
           if (record.status !== 'active') return record;
           if (record.room.messages.some(message => message.type === 'decision')) return await this.adjudicate(debateId, 'debate reached a decision', scope);
           if (record.room.messages.some(message => message.round === round && message.speakerAgentId === agentId)) continue;
-          if (record.room.messages.filter(message => message.speakerAgentId === agentId).length >= record.room.maxMessagesPerAgent) continue;
+          if (record.room.maxMessagesPerAgent !== undefined && record.room.messages.filter(message => message.speakerAgentId === agentId).length >= record.room.maxMessagesPerAgent) continue;
           if (record.room.messages.length >= (record.room.maxTotalMessages ?? 1000)) return await this.adjudicate(debateId, 'Debate reached its message bound', scope);
+          spoke = true;
           const response = await this.call(debateId, `participant:${round}:${agentId}`, agentId, debateSystem, { room: record.room, round, speakerAgentId: agentId }, scope);
           const output = debateMessageOutputSchema.parse(response.value);
           const message = {
@@ -215,6 +220,10 @@ export class ModelPoolDebateOrchestrator {
           if (!record.room.messages.some(item => item.messageId === message.messageId)) record = await this.service.appendMessage(debateId, message, scope, response.attemptId);
           record = await this.reviewMessages(debateId, scope);
         }
+        if (spoke) continue;
+        const perAgent = record.room.maxMessagesPerAgent;
+        const anyoneRemaining = record.room.participantAgentIds.some(agentId => perAgent === undefined || record.room.messages.filter(message => message.speakerAgentId === agentId).length < perAgent);
+        if (!anyoneRemaining) break;
       }
       return await this.adjudicate(debateId, 'Debate reached its configured round or message bound', scope);
     } catch (error) {

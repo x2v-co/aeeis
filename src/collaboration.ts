@@ -87,7 +87,7 @@ export const debateRoomSchema = z.object({
   debateId: id, taskId: id, contextVersion: id, participantAgentIds: z.array(id).min(1).max(12),
   goal: z.string().max(8000).optional(),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(contextClaimSchema).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
-  maxRounds: z.number().int().min(1).max(12), maxMessagesPerAgent: z.number().int().min(1).max(100),
+  maxRounds: z.number().int().min(1).optional(), maxMessagesPerAgent: z.number().int().min(1).optional(),
   maxTotalMessages: z.number().int().min(1).max(1000).optional(), messages: z.array(debateMessageSchema).max(1000),
   moderation: z.array(debateModerationSchema).max(1000).default([]), moderatorReviews: z.array(debateModeratorReviewSchema).max(1000).default([]), adjudication: debateAdjudicationSchema.optional(),
 }).strict();
@@ -137,14 +137,21 @@ export function isSupportedDebateDecision(room: DebateRoom, message: DebateMessa
       && (review.status === 'flagged' || review.violations.length > 0 || review.missingClaimRefs.length > 0));
 }
 
+export function debateIngressRound(room: DebateRoom, requested?: number): number {
+  if (requested !== undefined) return requested;
+  const highest = room.messages.reduce((max, message) => Math.max(max, message.round), 0);
+  const round = Math.max(1, highest);
+  return room.maxRounds === undefined ? round : Math.min(room.maxRounds, round);
+}
+
 export function appendDebateMessage(room: DebateRoom, messageInput: DebateMessage): DebateRoom {
   const message = debateMessageSchema.parse(messageInput);
   if (message.debateId !== room.debateId || message.contextVersion !== room.contextVersion) throw new Error('Debate message is bound to another room or context');
   if (!room.participantAgentIds.includes(message.speakerAgentId)) throw new Error('Agent is not a debate participant');
   if (new Set(room.participantAgentIds).size !== room.participantAgentIds.length) throw new Error('Debate participants must be unique');
-  if (message.round > room.maxRounds) throw new Error('Debate round limit reached');
+  if (room.maxRounds !== undefined && message.round > room.maxRounds) throw new Error('Debate round limit reached');
   if (room.maxTotalMessages !== undefined && room.messages.length >= room.maxTotalMessages) throw new Error('Debate total message limit reached');
-  if (room.messages.filter(item => item.speakerAgentId === message.speakerAgentId).length >= room.maxMessagesPerAgent) throw new Error('Agent message limit reached');
+  if (room.maxMessagesPerAgent !== undefined && room.messages.filter(item => item.speakerAgentId === message.speakerAgentId).length >= room.maxMessagesPerAgent) throw new Error('Agent message limit reached');
   if (room.messages.some(item => item.messageId === message.messageId)) throw new Error('Debate message already exists');
   if (message.replyTo && !room.messages.some(item => item.messageId === message.replyTo)) throw new Error('Debate reply target is missing');
   const moderation = moderateDebateMessage(room, message);

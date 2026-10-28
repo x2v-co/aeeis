@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adjudicateDebate, appendDebateMessage, runCompetition } from '../src/collaboration.js';
+import { adjudicateDebate, appendDebateMessage, debateIngressRound, runCompetition } from '../src/collaboration.js';
 import type { CompetitionBrief, DebateRoom } from '../src/collaboration.js';
 
 const brief: CompetitionBrief = { schemaVersion: 'competition-brief/1', taskId: 'task.1', contextVersion: 'ctx.1', goal: 'Choose a supported plan', participantAgentIds: ['agent.1', 'agent.2'], expectedResultType: 'plan/1', maxRounds: 2, blindEvaluation: true };
@@ -28,6 +28,10 @@ describe('bounded debate', () => {
     expect(appendDebateMessage(room, message).messages).toHaveLength(1);
     expect(() => appendDebateMessage(appendDebateMessage(room, message), message)).toThrow('message limit');
     expect(() => appendDebateMessage({ ...room, messages: [message] }, { ...message, messageId: 'message.2' })).toThrow('total message');
+    const open: DebateRoom = { debateId: 'debate.open', taskId: 'task.1', contextVersion: 'ctx.1', participantAgentIds: ['agent.1'], messages: [] };
+    expect(appendDebateMessage(open, { ...message, debateId: 'debate.open', messageId: 'message.open', round: 30 }).messages).toHaveLength(1);
+    expect(debateIngressRound(open)).toBe(1);
+    expect(debateIngressRound({ ...open, maxRounds: 2, messages: [{ ...message, round: 5 }] })).toBe(2);
   });
 
   it('records Moderator evidence violations and holds unsupported decisions', () => {

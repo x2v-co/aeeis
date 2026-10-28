@@ -46,8 +46,8 @@ const competitionActionSchema = z.object({
 }).strict();
 const debateActionSchema = z.object({
   type: z.literal('debate'), participantAgentIds: z.array(id).min(1).max(12),
-  maxRounds: z.number().int().min(1).max(12).default(4), maxMessagesPerAgent: z.number().int().min(1).max(20).default(4),
-  maxTotalMessages: z.number().int().min(1).max(100).optional(),
+  maxRounds: z.number().int().min(1).optional(), maxMessagesPerAgent: z.number().int().min(1).optional(),
+  maxTotalMessages: z.number().int().min(1).max(1000).optional(),
   dispatch: z.enum(['create', 'run']).default('create'),
 }).strict();
 export const collaborationTriggerActionSchema = z.discriminatedUnion('type', [competitionActionSchema, debateActionSchema]);
