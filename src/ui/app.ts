@@ -2710,14 +2710,14 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。每句话都留在这间房里。没有点名时，群里每位成员都接收这句话，并按自己的常驻要求、角色、背景或职责作出反应。@某一位时，这一位和 AEEIS 同时接收；AEEIS 再提醒其他按设定需要回应的成员。@所有人同样送到每位成员。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+    : '这是群聊。每句话都留在这间房里。没有点名时，这句话送到其他成员的对话；不必回复的成员在房间里留一个表情，表示收到或当下的情绪。回执合成一条，只写这次送到的人。@某一位时，这一位和 AEEIS 同时接收；写了常驻要求的其他成员会再被提醒，其余成员留一个表情。说话人不会再收到自己的这句话。@所有人同样按没点名送达。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，每位成员都接收并按设定作出反应。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收，AEEIS 再提醒其他需要回应的成员。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，成员用一个表情表示收到。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收。';
   const sendNote = $('group-send-note');
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
-    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没有点名时，每位成员都接收。@某一位时，这一位和 AEEIS 同时接收，AEEIS 再提醒其他需要回应的成员。选一位说话人，只是标明这句话是谁说的。';
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没有点名时，其他成员收到后留一个表情。@某一位时，这一位和 AEEIS 同时接收。选一位说话人，只是标明这句话是谁说的。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -3340,17 +3340,26 @@ function clipEntryText(value: string, max: number): string {
   const last = sliced.charCodeAt(sliced.length - 1);
   return last >= 0xD800 && last <= 0xDBFF ? sliced.slice(0, -1) : sliced;
 }
-function memberSetting(bot: RosterBot): string {
-  const standing = lifeSummary(bot.id)?.standingInstruction?.trim();
-  if (standing) return `按常驻要求「${clipEntryText(standing, 80)}」`;
-  if (bot.role?.trim()) return `按角色「${bot.role.trim()}」`;
-  if (bot.background?.trim()) return `按背景「${clipEntryText(bot.background.trim(), 80)}」`;
-  if (bot.note?.trim()) return `按职责「${bot.note.trim()}」`;
-  return '';
+function memberCue(bot: RosterBot): string {
+  return [lifeSummary(bot.id)?.standingInstruction, bot.role, bot.background, bot.note].map(item => item?.trim() ?? '').filter(Boolean).join('\n');
 }
-function memberReaction(bot: RosterBot): string {
-  const setting = memberSetting(bot);
-  return setting ? `${setting}作出反应。` : '还没有单独设定，这句话留在对话里。';
+function memberEmoji(bot: RosterBot): string {
+  const text = memberCue(bot);
+  if (/担心|风险|谨慎|小心|疑问/.test(text)) return '🤔';
+  if (/高兴|开心|欢迎|庆祝|顺利/.test(text)) return '😄';
+  if (/纪要|记录|整理|汇总/.test(text)) return '📝';
+  if (/审|核对|发布|清单|检查/.test(text)) return '👀';
+  if (/研究|查找|资料|阅读/.test(text)) return '🔍';
+  return '👍';
+}
+function memberNeedsReply(bot: RosterBot): boolean {
+  return Boolean(lifeSummary(bot.id)?.standingInstruction?.trim());
+}
+function spokenBy(bot: RosterBot, spoken: { type: 'agent' | 'principal'; id: string } | undefined): boolean {
+  return spoken?.type === 'agent' && spoken.id === bot.id;
+}
+function emojiMarks(bots: RosterBot[]): string {
+  return bots.map(bot => `${bot.name} ${memberEmoji(bot)}`).join('、');
 }
 function groupAgentBots(): RosterBot[] {
   const ids = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
@@ -3381,6 +3390,7 @@ async function recordRosterHandoff(
   postSession: (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => Promise<unknown>,
   receipt: (title: string) => string,
   mode: 'intake' | 'entry' | 'handoff',
+  announce = true,
 ): Promise<string> {
   const kind = room?.description === '私聊' ? '私聊' : '群聊';
   const roomTitle = room?.title || kind;
@@ -3431,7 +3441,7 @@ async function recordRosterHandoff(
   } finally {
     if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
   }
-  if (handoffError || !recorded) return handoffError;
+  if (handoffError || !recorded || !announce) return handoffError;
   const cited = mode === 'handoff' && CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
   const refs = cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : (CITATION_ID.test(conversationId) ? [conversationId] : undefined);
   try {
@@ -3467,7 +3477,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
   let handoffError = '';
   const chosen = selectedHandoffBot();
   const inGroup = room?.description !== '私聊';
-  const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff') => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode);
+  const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff', announce = true) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode, announce);
   const home = botById('aeeis');
   if (!inGroup) {
     if (mentionsAeeis(text) && home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`, 'entry');
@@ -3475,48 +3485,71 @@ async function submitGroupMessage(event: Event): Promise<void> {
     const named = mentionedGroupBots(text);
     const addressed = mentionsAeeis(text);
     const everyone = mentionOf('所有人', text) || mentionOf('团队', text);
-    const pointed = chosen && chosen.id !== 'aeeis' ? [chosen] : (chosen ? [] : named);
-    const askedAeeis = Boolean(chosen?.id === 'aeeis' || (addressed && pointed.length === 0 && !everyone));
-    const broadcast = pointed.length === 0 && !askedAeeis;
-    const members = groupAgentBots();
+    const rawPointed = chosen && chosen.id !== 'aeeis' ? [chosen] : (chosen ? [] : named);
+    const askedAeeis = Boolean(chosen?.id === 'aeeis' || (addressed && rawPointed.length === 0 && !everyone));
+    const broadcast = rawPointed.length === 0 && !askedAeeis;
+    const members = groupAgentBots().filter(bot => !spokenBy(bot, spoken));
     const errors: string[] = [];
     if (broadcast) {
+      const delivered: RosterBot[] = [];
       for (const bot of members) {
-        const error = await handTo(bot, title => bot.id === 'aeeis'
-          ? `入口收下了这句话「${title}」。群里每位成员都已接收。${memberReaction(bot)}`
-          : `${bot.name}已接收「${title}」。${memberReaction(bot)}`, 'intake');
+        const error = await handTo(bot, () => '', 'intake', false);
         if (error) errors.push(error);
+        else delivered.push(bot);
+      }
+      if (delivered.length) {
+        try {
+          await postSession('system', `已送到${emojiMarks(delivered)}。`);
+        } catch (error) {
+          errors.push(`句子已送到对话，房间里的表情没有写上。${errorMessage(error)}`);
+        }
       }
     } else {
-      const aeeisMode = askedAeeis ? (chosen?.id === 'aeeis' ? 'handoff' as const : 'entry' as const) : 'intake' as const;
-      const aeeisError = await handTo(home, title => {
-        if (chosen?.id === 'aeeis') return `已交给AEEIS，记为讨论「${title}」。未执行，讨论焦点不变。${memberReaction(home)}`;
-        if (askedAeeis) return `已记为入口讨论「${title}」。未执行，讨论焦点不变。${memberReaction(home)}`;
-        return `入口收下了这句话「${title}」。已请${pointed.map(bot => bot.name).join('、')}回应。`;
-      }, aeeisMode);
-      if (aeeisError) errors.push(aeeisError);
+      const targets = rawPointed.filter(bot => !spokenBy(bot, spoken));
+      const homeIn = members.some(bot => bot.id === home.id);
+      const others = members.filter(bot => bot.id !== 'aeeis' && !rawPointed.some(item => item.id === bot.id));
+      const replyTo = others.filter(memberNeedsReply);
+      const emojiBots = others.filter(bot => !memberNeedsReply(bot));
+      const suffix = [
+        replyTo.length ? `提醒${replyTo.map(bot => bot.name).join('、')}按常驻要求看一下。` : '',
+        emojiBots.length ? `${emojiMarks(emojiBots)}。` : '',
+      ].filter(Boolean).join('');
+      const announced = askedAeeis && homeIn ? 'aeeis' : (targets[targets.length - 1]?.id ?? '');
+      let aeeisError = '';
+      if (homeIn) {
+        const aeeisMode = askedAeeis ? (chosen?.id === 'aeeis' ? 'handoff' as const : 'entry' as const) : 'intake' as const;
+        aeeisError = await handTo(home, title => {
+          const line = chosen?.id === 'aeeis'
+            ? `已交给AEEIS，记为讨论「${title}」。未执行，讨论焦点不变。`
+            : askedAeeis
+              ? `已记为入口讨论「${title}」。未执行，讨论焦点不变。`
+              : `入口收下了这句话「${title}」。已请${rawPointed.map(bot => bot.name).join('、')}回应。`;
+          return announced === 'aeeis' ? `${line}${suffix}` : line;
+        }, aeeisMode, askedAeeis);
+        if (aeeisError) errors.push(aeeisError);
+      }
       const pointedErrors = new Map<string, string>();
-      for (const bot of pointed) {
-        const error = await handTo(bot, title => chosen
-          ? `已交给${bot.name}，记为讨论「${title}」。这句话也留在入口。${memberReaction(bot)}`
-          : `已请${bot.name}回应，记为讨论「${title}」。这句话也留在入口。${memberReaction(bot)}`, 'handoff');
+      for (const bot of targets) {
+        const error = await handTo(bot, title => {
+          const line = chosen
+            ? `已交给${bot.name}，记为讨论「${title}」。这句话也留在入口。`
+            : `已请${bot.name}回应，记为讨论「${title}」。这句话也留在入口。`;
+          return bot.id === announced ? `${line}${suffix}` : line;
+        }, 'handoff');
         if (error) {
           errors.push(error);
           pointedErrors.set(bot.id, error);
         }
       }
-      const reminded: string[] = [];
-      for (const bot of members) {
-        if (bot.id === 'aeeis' || pointed.some(item => item.id === bot.id) || !memberSetting(bot)) continue;
-        const error = await handTo(bot, title => `AEEIS 提醒${bot.name}看一下「${title}」。${memberReaction(bot)}`, 'intake');
+      for (const bot of replyTo) {
+        const error = await handTo(bot, () => '', 'intake', false);
         if (error) errors.push(error);
-        else reminded.push(bot.name);
       }
-      if (reminded.length) {
+      if (!announced && suffix) {
         try {
-          await postSession('system', `AEEIS 看过各位的设定，提醒${reminded.join('、')}回应。`);
+          await postSession('system', suffix);
         } catch (error) {
-          errors.push(`提醒已送到对话，群里的提醒没有写上。${errorMessage(error)}`);
+          errors.push(`句子已送到对话，房间里的表情没有写上。${errorMessage(error)}`);
         }
       }
       if (chosen && !(chosen.id === 'aeeis' ? aeeisError : pointedErrors.get(chosen.id))) {
