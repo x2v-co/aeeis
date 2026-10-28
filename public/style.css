@@ -1059,8 +1059,6 @@ body.gb .gb-computer-head strong { font-size: 14px; }
 body.gb .gb-pane { display: none; flex: 1; min-height: 0; overflow: auto; padding: 4px 14px 28px; }
 body.gb #gb-computer[data-tab="run"] .gb-pane[data-pane="run"],
 body.gb #gb-computer[data-tab="setup"] .gb-pane[data-pane="setup"],
-body.gb #gb-computer[data-tab="goals"] .gb-pane[data-pane="goals"],
-body.gb #gb-computer[data-tab="govern"] .gb-pane[data-pane="govern"],
 body.gb #gb-computer[data-tab="status"] .gb-pane[data-pane="status"] { display: block; }
 body.gb #gb-computer[data-tab="run"] .minimal-detail-section { display: block !important; }
 body.gb .gb-pane > section,
@@ -1358,6 +1356,15 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 .conversation-message p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; max-width: 76ch; }
 .conversation-message small { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .conversation-message[data-role="notification"] { border-left: 3px solid var(--line-strong); padding-left: 12px; }
+/* Defaults line under the entry composer: what the next run will use, one link to change it. */
+.entry-defaults { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0; padding: 0 16px 10px; color: var(--muted); font: 500 11px/1.5 var(--mono); }
+.entry-defaults[hidden] { display: none; }
+.entry-defaults button { min-height: 24px; padding: 2px 8px; font: 500 11px var(--mono); }
+/* Settings page index: one pane, sections in order. */
+.settings-index { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.settings-index a { padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); font-size: 12px; text-decoration: none; }
+.settings-index a:hover { border-color: var(--ink); }
+.settings-section, .settings-group { margin-top: 24px; }
 /* Inline plan card: the plan for one task, under the message that started it. */
 .plan-card { display: grid; gap: 10px; max-width: 76ch; margin: 10px 0 4px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); }
 .plan-card[data-state="awaiting"] { border-color: var(--ink); }

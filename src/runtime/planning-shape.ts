@@ -80,11 +80,18 @@ function clip(value: string, max: number): string {
   return last >= 0xD800 && last <= 0xDBFF ? sliced.slice(0, -1) : sliced;
 }
 
+/** The words a person reads for a goal: the conversation's 当前请求 line when the goal carries that envelope, otherwise the goal, on one line. */
+export function directRequestText(goal: string): string {
+  const request = /(?:^|\n)当前请求：([\s\S]*)$/.exec(goal)?.[1]?.trim();
+  return (request || goal.trim()).replace(/\s+/g, ' ');
+}
+
 /** A one-node plan whose instruction is the goal. The caller hashes the validated draft. */
 export function directPlanDraft(goal: string): { summary: string; nodes: Array<{ id: 'deliver'; title: string; instruction: string; dependsOn: [] }> } {
   const instruction = goal.trim();
+  const request = directRequestText(instruction);
   return {
-    summary: clip(`直接执行：${instruction}`, DIRECT_INSTRUCTION_LIMIT),
-    nodes: [{ id: 'deliver', title: clip(instruction, 80), instruction, dependsOn: [] }],
+    summary: clip(`直接执行：${request}`, DIRECT_INSTRUCTION_LIMIT),
+    nodes: [{ id: 'deliver', title: clip(request, 80), instruction, dependsOn: [] }],
   };
 }

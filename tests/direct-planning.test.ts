@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
-import { directApprovalReason, planningDecision } from '../src/runtime/planning-shape.js';
+import { directApprovalReason, directPlanDraft, planningDecision } from '../src/runtime/planning-shape.js';
 
 const pin = { model: 'fixture', endpoint: 'http://127.0.0.1', promptVersion: 'fixture/1' };
 
@@ -35,6 +35,16 @@ describe('direct planning', () => {
     expect(planningDecision({ goal: '给客户发邮件' }).reason).toBe('external_effect');
     expect(planningDecision({ goal: '读', taskExecution: { domainPlanId: 'plan', taskId: 'task' } }).reason).toBe('domain_task');
     expect(planningDecision({ goal: '读'.repeat(4001) }).reason).toBe('length');
+  });
+
+  it('titles a conversation run by its request, not by the speaker and task lines', () => {
+    const goal = '私聊：agent:demo.release\n说话人：user:alice\n任务：发布清单\n当前请求：按清单\n  逐条核对';
+    expect(directPlanDraft(goal)).toEqual({
+      summary: '直接执行：按清单 逐条核对',
+      nodes: [{ id: 'deliver', title: '按清单 逐条核对', instruction: goal, dependsOn: [] }],
+    });
+    expect(directPlanDraft('  读这张纸条  ').nodes[0]!.title).toBe('读这张纸条');
+    expect(directPlanDraft('说话人：user:alice\n任务：空\n当前请求：  ').nodes[0]!.title).toBe('说话人：user:alice 任务：空 当前请求：');
   });
 
   it('writes one hashed step without a planner call and still honors the review gate', async () => {
