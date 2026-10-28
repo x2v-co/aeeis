@@ -4163,6 +4163,11 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     $('conversation-status').textContent = '';
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
+$('conversation-text').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
+});
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());

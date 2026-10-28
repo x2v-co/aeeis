@@ -642,6 +642,24 @@ describe('single-entry conversation workbench', () => {
     dom.window.localStorage.removeItem('aeeis.execution-review');
   });
 
+  it('sends on Enter, keeps Shift+Enter and IME composition as typing, and ignores Enter mid-send', async () => {
+    const h = harness(); start(h.fetch); await ready(); await sendReady();
+    const text = el<HTMLTextAreaElement>('conversation-text');
+    const press = (init: KeyboardEventInit) => { const event = new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }); text.dispatchEvent(event); return event.defaultPrevented; };
+    fill('conversation-text', '第一行');
+    expect(press({ shiftKey: true })).toBe(false);
+    expect(press({ isComposing: true })).toBe(false);
+    expect(messagePosts(h)).toHaveLength(0);
+    expect(press({})).toBe(true);
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body.text).toBe('第一行');
+    press({});
+    await sendReady();
+    expect(messagePosts(h)).toHaveLength(1);
+    press({});
+    expect(messagePosts(h)).toHaveLength(1);
+  });
+
   it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {
     let reject!: (error: Error) => void, attempts = 0;
     const h = harness(undefined, { handler(url) { if (url.endsWith('/messages') && ++attempts === 1) return new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }); } });
