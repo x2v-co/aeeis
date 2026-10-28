@@ -3,7 +3,7 @@ import type { ConversationStore, ConversationTask } from './conversations.js';
 import { OwnedBotConflict } from './owned-bots.js';
 import { RoomMembershipConflict } from './room-membership.js';
 import { isTerminalRun } from './runtime/run-reconcile.js';
-import type { RunRepository } from './runtime/repository.js';
+import { NotFound, type RunRepository } from './runtime/repository.js';
 import type { Ownership } from './security/principal.js';
 import type { SessionEventService } from './session-events.js';
 
@@ -28,12 +28,12 @@ export async function releaseHeldBotTasks(input: {
   const open: ConversationTask[] = [];
   for (const task of life.tasks) {
     if (!task.latestRunId) { open.push(task); continue; }
-    let terminal = false;
-    if (input.runs) {
-      try { terminal = isTerminalRun(await input.runs.get(task.latestRunId, input.scope)); }
-      catch { terminal = false; }
+    if (!input.runs) { running.push(task.title); continue; }
+    try {
+      if (!isTerminalRun(await input.runs.get(task.latestRunId, input.scope))) running.push(task.title);
+    } catch (error) {
+      if (!(error instanceof NotFound)) running.push(task.title);
     }
-    if (!terminal) running.push(task.title);
   }
   if (running.length) throw new OwnedBotConflict(`先停下或转交正在做的事：${running.join('、')}。`);
   if (open.length && input.domain && input.sessionEvents) {

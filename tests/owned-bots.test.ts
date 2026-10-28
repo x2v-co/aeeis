@@ -10,6 +10,7 @@ import { AeeisService } from '../src/application/aeeis-service.js';
 import { InMemoryRoomMembershipRepository } from '../src/room-membership.js';
 import { InMemorySessionEventRepository, SessionEventService } from '../src/session-events.js';
 import { InMemoryOwnedBotStore, JsonOwnedBotStore, OWNED_BOT_CAP, OwnedBotConflict } from '../src/owned-bots.js';
+import { runWithSignals } from './support/rsi-proposal.js';
 
 const profile = { name: '阿核', mark: 'letter' as const, color: '#176b45', background: '核对清单上的每一项。' };
 const scope = { owner: 'alice', tenantId: 'team-a' };
@@ -153,8 +154,9 @@ describe('owned bots', () => {
     const domain = new AeeisService(new InMemoryStore(), [], memberships, undefined, bots);
     const conversations = new InMemoryConversationStore();
     const sessionEvents = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const repository = new InMemoryRunRepository();
     const app = buildApp({
-      repository: new InMemoryRunRepository(), domain, ownedBots: bots, conversationStore: conversations, sessionEvents,
+      repository, domain, ownedBots: bots, conversationStore: conversations, sessionEvents,
       principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } },
     });
     const life = {
@@ -185,13 +187,26 @@ describe('owned bots', () => {
       expect(events.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'task_update', content: '退回待领取：整理纪要', evidenceRefs: [life.id, 'task_note'] })]));
       const busy = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '阿忙' } });
       const busyId = busy.json().id as string;
+      const running = runWithSignals();
+      running.id = 'run_00000000-0000-4000-8000-0000000000bb';
+      running.status = 'running';
+      await repository.create(running);
       await conversations.create({
         ...life, id: 'conv_00000000-0000-4000-8000-0000000000bb', agentId: busyId, title: '阿忙',
-        tasks: [{ id: 'task_busy', threadId: 'thread_00000000-0000-4000-8000-0000000000bb', title: '还在核对', createdAt: '2026-10-28T00:00:00.000Z', latestRunId: 'run_00000000-0000-4000-8000-0000000000bb' }],
+        tasks: [{ id: 'task_busy', threadId: 'thread_00000000-0000-4000-8000-0000000000bb', title: '还在核对', createdAt: '2026-10-28T00:00:00.000Z', latestRunId: running.id }],
       });
       const blocked = await app.inject({ method: 'DELETE', url: `/api/bots/${busyId}`, headers: { authorization: 'Bearer alice' } });
       expect(blocked.statusCode).toBe(409);
       expect(blocked.json().error).toContain('还在核对');
+      expect(await bots.list(scope)).toEqual([expect.objectContaining({ id: busyId, name: '阿忙' })]);
+      const lost = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '阿失' } });
+      const lostId = lost.json().id as string;
+      await conversations.create({
+        ...life, id: 'conv_00000000-0000-4000-8000-0000000000cc', agentId: lostId, title: '阿失',
+        tasks: [{ id: 'task_lost', threadId: 'thread_00000000-0000-4000-8000-0000000000cc', title: '记录不在了', createdAt: '2026-10-28T00:00:00.000Z', latestRunId: 'run_00000000-0000-4000-8000-0000000000cc' }],
+      });
+      const released = await app.inject({ method: 'DELETE', url: `/api/bots/${lostId}`, headers: { authorization: 'Bearer alice' } });
+      expect(released.statusCode).toBe(200);
       expect(await bots.list(scope)).toEqual([expect.objectContaining({ id: busyId, name: '阿忙' })]);
     } finally { await app.close(); await bots.close(); }
   });
