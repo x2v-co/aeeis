@@ -35,6 +35,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     return lives.get(id);
   };
   let principal = 'owner';
+  const ownedBots: Array<Record<string, unknown>> = [];
   const fetch = vi.fn(async (url: string, request: any) => {
     if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
     const custom = options.handler?.(url, request);
@@ -194,6 +195,32 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url === `/api/runs/${runId}`) return response(runFixture());
     if (url.endsWith('/graphs')) return response({ execution: { nodes: [], edges: [] }, evidence: { nodes: [], edges: [] } });
     if (url.endsWith('/explanation')) return response({ schemaVersion: 'run-explanation/1', run: { id: runId, status: 'succeeded', privacy: 'internal', updatedAt: date }, attention: { kind: 'none', nextAction: 'done', blockers: [] }, plan: { tasks: { total: 1, pending: 0, running: 0, succeeded: 1 }, readyTaskIds: [], pendingTaskIds: [] }, execution: { eventCount: 0, modelCalls: { total: 0, started: 0, completed: 0, failed: 0, unknown: 0, discarded: 0 }, tools: { total: 0, completed: 0, failed: 0, unknown: 0 }, delegations: { total: 0, completed: 0, failed: 0, unknown: 0 } }, evidence: { sourceCount: 0, artifactCount: 0, receiptCount: 0, evidenceNodeCount: 0, memoryRefs: [] }, governance: { tools: [], agents: [] }, budget: {} });
+    if (url.startsWith('/api/bots/') && url !== '/api/bots/background') {
+      const id = decodeURIComponent(url.slice('/api/bots/'.length));
+      if (request?.method === 'DELETE') {
+        const type = request.headers?.['content-type'];
+        if (typeof type === 'string' && type.includes('application/json') && (request.body === undefined || request.body === '')) return response({ error: 'Invalid HTTP request' }, 400);
+        const index = ownedBots.findIndex(bot => bot.id === id);
+        if (index >= 0) ownedBots.splice(index, 1);
+        return response({ removed: true, id });
+      }
+      if (request?.method === 'PATCH') {
+        const body = JSON.parse(request.body);
+        const bot = ownedBots.find(item => item.id === id);
+        if (!bot) return response({ error: '没有这位 Bot' }, 404);
+        Object.assign(bot, body);
+        return response(bot);
+      }
+    }
+    if (url === '/api/bots' && request?.method === 'POST') {
+      const body = JSON.parse(request.body);
+      const existing = ownedBots.find(bot => bot.id === body.id);
+      if (existing) return response(existing);
+      const bot = { id: body.id ?? `bot_${String(ownedBots.length + 1).padStart(8, '0')}`, name: body.name, mark: body.mark ?? 'letter', color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}) };
+      ownedBots.push(bot);
+      return response(bot);
+    }
+    if (url === '/api/bots') return response(ownedBots);
     if (url.includes('/page?')) return response({ items: [], goals: [] });
     return response([]);
   });
@@ -202,7 +229,11 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
 function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string> } = {}) {
   dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
-  for (const [key, value] of Object.entries(saved.local ?? {})) dom.window.localStorage.setItem(key, value);
+  if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
+  for (const [key, value] of Object.entries(saved.local ?? {})) {
+    if (value === '') dom.window.localStorage.removeItem(key);
+    else dom.window.localStorage.setItem(key, value);
+  }
   for (const [key, value] of Object.entries(saved.session ?? {})) dom.window.sessionStorage.setItem(key, value);
   dom.window.fetch = fetch; dom.window.setInterval = (() => 1) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -316,7 +347,7 @@ describe('single-entry conversation workbench', () => {
   it('keeps the chosen execution review on the next run and does not execute a noted message', async () => {
     const h = harness(); start(h.fetch); await ready();
     fill('execution-review', 'yolo');
-    expect(el('conversation-execution-note').textContent).toContain('自动执行');
+    expect(el('conversation-execution-note').textContent).toContain('YOLO');
     fill('conversation-text', '只是讨论');
     el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
@@ -1150,6 +1181,185 @@ describe('entry bots and group chats', () => {
     expect(text).toContain('AEEIS');
   });
 
+  it('starts with AEEIS and saves a Bot designed from scratch', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '' } });
+    await ready();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('AEEIS'));
+    expect(el('bots').textContent).toContain('纪要');
+    expect(el('bot-create').hidden).toBe(true);
+    el('gb-new-bot').click();
+    expect(el('bot-create').hidden).toBe(false);
+    el<HTMLInputElement>('bot-create-name').value = '阿核';
+    el<HTMLTextAreaElement>('bot-create-background').value = '核对清单上的每一项，自己不发对外消息。';
+    doc().querySelector<HTMLButtonElement>('#bot-create-colors button[data-color="#176b45"]')!.click();
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核'));
+    expect(el('bot-create').hidden).toBe(true);
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' });
+    await vi.waitFor(() => expect(el('bot-profile-role').textContent).toContain('核对清单上的每一项'));
+    expect(el('bot-profile-actions').hidden).toBe(false);
+    el('bot-profile-edit').click();
+    expect(el('bot-create').hidden).toBe(false);
+    el<HTMLInputElement>('bot-create-name').value = '阿核二';
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核二'));
+    const patch = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/bot_') && call[1]?.method === 'PATCH');
+    expect(patch).toBeTruthy();
+    expect(JSON.parse(patch?.[1].body).name).toBe('阿核二');
+    expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
+    expect(el('bots').textContent).not.toContain('纪要');
+    el('gb-new-group').click();
+    expect(el('group-candidates').textContent ?? '').toContain('阿核二');
+    el('group-reuse').click();
+    expect(el('group-count-live').textContent).toContain('2 / 10');
+    expect(el('group-candidates').textContent ?? '').toContain('阿核二');
+    dom.window.confirm = () => true;
+    el('bot-profile-remove').click();
+    await vi.waitFor(() => expect(el('bots').textContent).not.toContain('阿核'));
+    const deletion = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/') && call[1]?.method === 'DELETE');
+    expect(deletion?.[1].headers['content-type']).toBeUndefined();
+  });
+
+  it('writes a browser Bot onto this account when asked, and stops after the server refuses', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_migrated1', name: '阿迁', mark: 'letter', color: '#171717', background: '从这台浏览器迁到账号。' }]) } });
+    await ready();
+    expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
+    expect(el('bots').textContent).not.toContain('阿迁');
+    expect(el('bot-local-note').textContent).toContain('阿迁');
+    el('bot-local-claim').click();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿迁'));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁' });
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+    el('gb-new-group').click();
+    expect(el('group-candidates').textContent ?? '').toContain('阿迁');
+  });
+
+  it('keeps a refused browser Bot off the roster and does not send it again', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/bots' && request?.method === 'POST') return response({ error: '这个名字已经在名单上。' }, 409);
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_samename1', name: '纪要', mark: 'letter', color: '#171717', background: '和账号上的重名。' }]) } });
+    await ready();
+    el('bot-local-claim').click();
+    await vi.waitFor(() => expect(el('bot-local-note').textContent).toContain('这个名字已经在名单上'));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+    expect(el('bots').textContent).not.toContain('纪要');
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
+  });
+
+  it('leaves a previous account Bot off this account', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots-account': 'someone-else', 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_leftover1', name: '阿留', mark: 'letter', color: '#171717', background: '上一个账号留下的。' }]) } });
+    await ready();
+    expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
+    expect(el('bots').textContent).not.toContain('阿留');
+    expect(el('bot-local-note').textContent).toContain('上一个账号');
+    expect(el('bot-local-claim').hidden).toBe(true);
+    const calls = h.fetch.mock.calls.length;
+    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
+    expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(0);
+  });
+
+  it('asks AEEIS to draft a background from a role and saves that text', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/bots/background' && request.method === 'POST') {
+        const body = JSON.parse(request.body);
+        return response({ background: `负责${body.role}。自己不代替人做决定。` });
+      }
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0' } });
+    await ready();
+    el('gb-new-bot').click();
+    el<HTMLInputElement>('bot-create-name').value = '纪要';
+    el<HTMLInputElement>('bot-create-role').value = '把讨论收成可以核对的纪要';
+    el('bot-create-generate').click();
+    await vi.waitFor(() => expect(el<HTMLTextAreaElement>('bot-create-background').value).toContain('把讨论收成可以核对的纪要'));
+    expect(el('bot-create-status').textContent).toContain('看过之后再保存');
+    expect(el('bots').textContent).not.toContain('纪要');
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    await vi.waitFor(() => expect(el('bots').textContent).toContain('纪要'));
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '纪要', role: '把讨论收成可以核对的纪要', background: '负责把讨论收成可以核对的纪要。自己不代替人做决定。' });
+    expect(h.posts.filter(post => post.url === '/api/bots/background')).toHaveLength(1);
+  });
+
+  it('keeps a role on the form until the owner generates and saves the background', async () => {
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/bots/background' && request.method === 'POST') return pending.then(() => response({ background: '生成后的背景。' }));
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.demo-roster': '0' } });
+    await ready();
+    el('gb-new-bot').click();
+    el<HTMLInputElement>('bot-create-name').value = '阿核';
+    el<HTMLInputElement>('bot-create-role').value = '核对发布清单';
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    expect(el('bot-create-status').textContent).toContain('先写下背景');
+    expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
+    expect(el('bots').textContent).not.toContain('阿核');
+    el<HTMLInputElement>('bot-create-name').value = '所有人';
+    el<HTMLTextAreaElement>('bot-create-background').value = '点名会重叠。';
+    el<HTMLFormElement>('bot-create-form').requestSubmit();
+    expect(el('bot-create-status').textContent).toContain('请换一个名字');
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    el<HTMLInputElement>('bot-create-name').value = '阿核';
+    el<HTMLTextAreaElement>('bot-create-background').value = '';
+    el('bot-create-generate').click();
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('bot-create-generate').disabled).toBe(true));
+    expect(el<HTMLButtonElement>('bot-create-save').disabled).toBe(true);
+    expect(el<HTMLButtonElement>('bot-create-cancel').disabled).toBe(false);
+    el('bot-create-generate').click();
+    el('bot-create-cancel').click();
+    expect(el('bot-create').hidden).toBe(true);
+    release?.();
+    await vi.waitFor(() => expect(h.posts.filter(post => post.url === '/api/bots/background')).toHaveLength(1));
+    expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
+    el('gb-new-bot').click();
+    expect(el<HTMLTextAreaElement>('bot-create-background').value).toBe('');
+    expect(el('bots').textContent).not.toContain('阿核');
+  });
+
+  it('starts a new group at ten people and keeps a chosen limit', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.group-cap': '3' } });
+    await ready();
+    el('gb-new-group').click();
+    expect(el<HTMLInputElement>('group-cap').value).toBe('3');
+    expect(el('group-count-live').textContent).toContain('1 / 3');
+    el<HTMLInputElement>('group-person').value = '甲';
+    el('group-add-person').click();
+    el<HTMLInputElement>('group-person').value = '乙';
+    el('group-add-person').click();
+    expect(el('group-count-live').textContent).toContain('3 / 3');
+    el<HTMLInputElement>('group-person').value = '丙';
+    el('group-add-person').click();
+    expect(el('error').textContent).toContain('最多 3 人');
+    expect(el('group-people').textContent).not.toContain('丙');
+    fill('group-cap', '10');
+    expect(el('group-count-live').textContent).toContain('3 / 10');
+    expect(dom.window.localStorage.getItem('aeeis.group-cap')).toBe('10');
+    fill('group-cap', '99');
+    expect(el<HTMLInputElement>('group-cap').value).toBe('10');
+    expect(el('error').textContent).toContain('2 到 30');
+    expect(h.posts.some(post => post.url === '/api/rooms')).toBe(false);
+  });
+
   it('refuses a group that is only AEEIS and sends a room message without moving focus', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [
       { id: 'room_backend', title: '后台房间', description: '长期协作', status: 'active', createdAt: date, updatedAt: date },
@@ -1195,7 +1405,7 @@ describe('entry bots and group chats', () => {
     expect(el('groups').textContent ?? '').not.toContain('后台房间');
     el('gb-new-group').click();
     expect(el('group-draft').hidden).toBe(false);
-    expect(el('group-count-live').textContent).toContain('1 / 6');
+    expect(el('group-count-live').textContent).toContain('1 / 10');
     el<HTMLInputElement>('group-title').value = '发布协作';
     el<HTMLFormElement>('group-create').requestSubmit();
     await vi.waitFor(() => expect(el('error').textContent).toContain('至少'));
@@ -1219,8 +1429,11 @@ describe('entry bots and group chats', () => {
     const message = calls.find(call => call.url.endsWith('/session-events') && call.method === 'POST');
     expect(message?.body).toMatchObject({ goalId: 'goal_group', type: 'message', content: '请 @发布 看一下', contextManifestId: 'ctx_group' });
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '请 @发布 看一下' } });
+    expect(messagePosts(h)[0]?.url).toBe(`/api/conversations/${h.view.id}/messages`);
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', unassigned: true });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「请 @发布 看一下」');
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
@@ -1247,7 +1460,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
-  it('records an @AEEIS mention as an entry discussion and leaves other mentions in the room', async () => {
+  it('records every group sentence on the entry and keeps a private mention separate', async () => {
     const view = fixture();
     view.tasks = view.tasks.map(task => task.id === 'task_a' ? { ...task, status: 'running', runId, latestRunId: runId } : task);
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
@@ -1300,30 +1513,35 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('group-text').value = '请 @AEEIS发布 看一下';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('请 @AEEIS发布 看一下'));
-    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '请 @所有人 看一下' } });
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', unassigned: true });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', unassigned: true, expectedRevision: 2 });
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('newTask');
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
     expect(el('group-transcript').textContent).toContain('没有拆给多个人');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「请 @AEEIS发布 看一下」');
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「整理发布风险」'));
     const mention = messagePosts(h);
-    expect(mention).toHaveLength(2);
-    expect(mention[1]?.body).toEqual({
+    expect(mention).toHaveLength(3);
+    expect(mention[2]?.body).toEqual({
       text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
-      expectedRevision: 2,
+      expectedRevision: 3,
       newTask: { title: '整理发布风险' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(mention[1]?.body).not.toHaveProperty('runOptions');
+    expect(mention[2]?.body).not.toHaveProperty('runOptions');
     const roomEvents = [...events.values()].flat().filter(event => event.content.includes('整理发布风险') || event.content.includes('入口讨论'));
     expect(roomEvents.map(event => event.type)).toEqual(['message', 'system']);
     const receipt = [...doc().querySelectorAll<HTMLElement>('#group-transcript [data-type="system"]')].find(item => item.textContent?.includes('整理发布风险'));
     expect(receipt?.textContent).toContain('记录');
     expect(receipt?.textContent).toContain('未执行，讨论焦点不变');
     expect(el('conversation-focus').textContent).toContain('发布方案');
-    const created = doc().querySelector<HTMLElement>('[data-task-id="task_new_3"]');
+    const created = doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]');
     expect(created?.textContent).toContain('整理发布风险');
     expect(created?.textContent).toContain('仅讨论，未执行');
     expect(created?.dataset.focused).toBe('false');
@@ -1343,11 +1561,11 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('conversation-text').value = '发布口径先记在这里';
     el('conversation-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('发布口径先记在这里'));
-    expect(messagePosts(h)).toHaveLength(3);
-    expect(messagePosts(h)[2]?.url).toBe('/api/conversations/conv_life_1/messages');
-    expect(messagePosts(h)[2]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
-    expect(messagePosts(h)[2]?.body).not.toHaveProperty('speaker');
-    expect(messagePosts(h)[2]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)).toHaveLength(4);
+    expect(messagePosts(h)[3]?.url).toBe('/api/conversations/conv_life_1/messages');
+    expect(messagePosts(h)[3]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
+    expect(messagePosts(h)[3]?.body).not.toHaveProperty('speaker');
+    expect(messagePosts(h)[3]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
@@ -1359,24 +1577,24 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 记下私聊';
     el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已记为入口讨论「记下私聊」'));
-    expect(messagePosts(h)).toHaveLength(4);
-    expect(messagePosts(h)[3]?.url).toBe(`/api/conversations/${view.id}/messages`);
-    expect(messagePosts(h)[3]?.body).toMatchObject({
+    expect(messagePosts(h)).toHaveLength(5);
+    expect(messagePosts(h)[4]?.url).toBe(`/api/conversations/${view.id}/messages`);
+    expect(messagePosts(h)[4]?.body).toMatchObject({
       text: '来自私聊「member.editor」：@AEEIS 记下私聊',
-      expectedRevision: 3,
+      expectedRevision: 4,
       newTask: { title: '记下私聊' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(messagePosts(h)[3]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[4]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('记下私聊');
     expect(el('conversation-messages').textContent).toContain('发布口径先记在这里');
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
-    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('整理发布风险');
+    expect(doc().querySelector('[data-task-id="task_new_2"]')?.textContent).toContain('整理发布风险');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_2"]')?.dataset.focused).toBe('false');
+    expect(doc().querySelector('[data-task-id="task_new_3"]')?.textContent).toContain('记下私聊');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_3"]')?.dataset.focused).toBe('false');
-    expect(doc().querySelector('[data-task-id="task_new_4"]')?.textContent).toContain('记下私聊');
-    expect(doc().querySelector<HTMLElement>('[data-task-id="task_new_4"]')?.dataset.focused).toBe('false');
     expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
     expect(el('conversation-messages').textContent).not.toContain('发布口径先记在这里');
     expect(typed.value).toBe('');
@@ -1452,35 +1670,43 @@ describe('entry bots and group chats', () => {
     handoff.value = 'demo.release';
     el<HTMLTextAreaElement>('group-text').value = '@AEEIS 不要记两次';
     el<HTMLFormElement>('group-composer').requestSubmit();
-    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已交给发布，记为讨论「不要记两次」。未执行，对方不会自己回复。'));
-    expect(messagePosts(h)).toHaveLength(1);
-    expect(messagePosts(h)[0]?.url).toBe('/api/conversations/conv_release/messages');
-    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '不要记两次' } });
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已交给发布，记为讨论「不要记两次」。这句话也留在入口。未执行，对方不会自己回复。'));
+    expect(messagePosts(h)).toHaveLength(2);
+    expect(messagePosts(h)[0]?.url).toBe(`/api/conversations/${h.view.id}/messages`);
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', unassigned: true, expectedRevision: 1 });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
-    expect(el('group-transcript').textContent).not.toContain('已记为入口讨论');
+    expect(messagePosts(h)[1]?.url).toBe('/api/conversations/conv_release/messages');
+    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'discuss', focus: 'keep', newTask: { title: '不要记两次' } });
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「不要记两次」。已请发布回应。');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('不要记两次');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
     handoff.value = 'demo.release';
     el<HTMLTextAreaElement>('group-text').value = '请核对发布说明';
     el<HTMLFormElement>('group-composer').requestSubmit();
     const cards = () => [...doc().querySelectorAll<HTMLElement>('.group-run-card')];
     await vi.waitFor(() => expect(cards().find(item => item.dataset.card === 'task' && item.dataset.handoff === 'task_new_1')?.textContent).toContain('仅讨论，未执行'));
     const posted = messagePosts(h);
-    expect(posted).toHaveLength(2);
+    expect(posted).toHaveLength(4);
     expect(h.posts.find(post => post.url === '/api/conversations' && post.body?.agentId === 'demo.release')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
-    expect(posted[1]?.url).toBe('/api/conversations/conv_release/messages');
-    expect(posted[1]?.body).toEqual({
+    expect(posted[2]?.url).toBe(`/api/conversations/${h.view.id}/messages`);
+    expect(posted[2]?.body).toMatchObject({ text: '来自群聊「发布协作」：请核对发布说明', expectedRevision: 2, intent: 'discuss', focus: 'keep', unassigned: true });
+    expect(posted[2]?.body).not.toHaveProperty('newTask');
+    expect(posted[3]?.url).toBe('/api/conversations/conv_release/messages');
+    expect(posted[3]?.body).toEqual({
       text: '来自群聊「发布协作」：请核对发布说明',
       expectedRevision: 1,
       newTask: { title: '请核对发布说明' },
       focus: 'keep',
       intent: 'discuss',
     });
-    expect(posted[1]?.body).not.toHaveProperty('runOptions');
-    expect(posted[1]?.body).not.toHaveProperty('speaker');
+    expect(posted[3]?.body).not.toHaveProperty('runOptions');
+    expect(posted[3]?.body).not.toHaveProperty('speaker');
     const system = h.posts.filter(post => post.url.endsWith('/session-events') && post.body?.type === 'system');
     expect(system.at(-1)?.body).toMatchObject({
-      content: '已交给发布，记为讨论「请核对发布说明」。未执行，对方不会自己回复。',
+      content: '已交给发布，记为讨论「请核对发布说明」。这句话也留在入口。未执行，对方不会自己回复。',
       evidenceRefs: ['conv_release', 'task_new_1', 'demo.release'],
     });
     const card = cards().find(item => item.dataset.handoff === 'task_new_1');
@@ -1491,6 +1717,18 @@ describe('entry bots and group chats', () => {
     expect(card?.querySelector('textarea')).toBeNull();
     expect(card?.querySelector('button')?.textContent).toBe('打开发布');
     expect(el<HTMLSelectElement>('group-handoff').value).toBe('');
+    expect(el('conversation-focus').textContent).toContain('发布方案');
+    el<HTMLTextAreaElement>('group-text').value = '@发布 看一下清单';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已请发布回应，记为讨论「@发布 看一下清单」。这句话也留在入口。'));
+    const named = messagePosts(h);
+    expect(named).toHaveLength(6);
+    expect(named[4]?.body).toMatchObject({ text: '来自群聊「发布协作」：@发布 看一下清单', expectedRevision: 3, intent: 'discuss', focus: 'keep', unassigned: true });
+    expect(named[4]?.body).not.toHaveProperty('newTask');
+    expect(named[4]?.body).not.toHaveProperty('runOptions');
+    expect(named[5]?.url).toBe('/api/conversations/conv_release/messages');
+    expect(named[5]?.body).toMatchObject({ text: '来自群聊「发布协作」：@发布 看一下清单', expectedRevision: 2, intent: 'discuss', focus: 'keep' });
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话「@发布 看一下清单」。已请发布回应。');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     release.tasks[1] = {
       ...release.tasks[1],
@@ -1593,7 +1831,9 @@ describe('entry bots and group chats', () => {
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
     expect(el('conversation-tasks').textContent ?? '').not.toContain('请核对发布说明');
+    expect(doc().querySelector('[data-task-id="task_new_3"]')).toBeNull();
     expect(doc().querySelector('[data-task-id="task_a"]')?.textContent).toContain('发布方案');
+    expect(doc().querySelector<HTMLElement>('[data-task-id="task_a"]')?.dataset.focused).toBe('true');
   });
   it('keeps each room board to the tasks that room handed off', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
@@ -1735,17 +1975,29 @@ describe('entry bots and group chats', () => {
     const roomMessage = h.posts.find(post => post.url.endsWith('/session-events'));
     expect(roomMessage?.body).toMatchObject({ type: 'message', content: '我来对照清单', actor: { type: 'agent', id: 'demo.release' } });
     expect(roomMessage?.body).not.toHaveProperty('runOptions');
-    expect(messagePosts(h)).toHaveLength(0);
-    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
-    el<HTMLFormElement>('group-composer').requestSubmit();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(messagePosts(h)[0]?.body).toMatchObject({
-      text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
+      text: '来自群聊「发布协作」：我来对照清单',
       intent: 'discuss',
       focus: 'keep',
       speaker: { role: 'agent', id: 'demo.release' },
     });
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[0]?.body).toMatchObject({ unassigned: true });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
+    expect(el('group-transcript').textContent).toContain('入口收下了这句话');
+    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 整理发布风险';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body).toMatchObject({
+      text: '来自群聊「发布协作」：@AEEIS 整理发布风险',
+      intent: 'discuss',
+      focus: 'keep',
+      speaker: { role: 'agent', id: 'demo.release' },
+    });
+    expect(messagePosts(h)[1]?.body).toMatchObject({ newTask: { title: '整理发布风险' } });
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('unassigned');
+    expect(messagePosts(h)[1]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     speaker.value = '';
     el<HTMLTextAreaElement>('group-text').value = '这句是我的';
@@ -2373,11 +2625,18 @@ describe('entry bots and group chats', () => {
       { id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } },
       { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: date, runId: 'run_pause', latestRunId: 'run_pause' },
     );
-    events.set('room_phase', ['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })));
+    release.tasks.push({ id: 'task_back', title: '退回的纪要', threadId: 'thread_back', status: 'discussion', createdAt: date });
+    events.set('room_phase', [
+      ...['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })),
+      { id: 'evt_back', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给纪要', evidenceRefs: ['conv_release', 'task_back', 'demo.release'], createdAt: date },
+      { id: 'evt_back_return', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '退回待领取：退回的纪要', evidenceRefs: ['conv_release', 'task_back'], createdAt: date },
+    ]);
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_ready'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
+    expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('退回的纪要');
+    expect(doc().querySelector('[data-column="capture"]')?.textContent).not.toContain('退回的纪要');
     const postsBefore = h.posts.length;
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
     clickText('领取', el('channel-task-body'));

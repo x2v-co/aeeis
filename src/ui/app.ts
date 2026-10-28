@@ -12,7 +12,7 @@ interface ThreadRun extends RunSummary { threadSequence: number; privacy?: strin
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
 interface RoomSummary { id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
-interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string }
+interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string; displayName?: string }
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
   sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system';
@@ -201,7 +201,15 @@ let reminderStatusFilter = '';
 let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
-interface RosterBot { id: string; name: string; note: string; demo: boolean }
+type BotMark = 'letter' | 'round' | 'square' | 'diamond' | 'drop';
+interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string }
+interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; held?: string }
+const CUSTOM_BOTS_KEY = 'aeeis.custom-bots';
+const LOCAL_BOT_ACCOUNT = 'aeeis.custom-bots-account';
+const CUSTOM_BOT_CAP = 30;
+const BOT_MARKS: BotMark[] = ['letter', 'round', 'square', 'diamond', 'drop'];
+const BOT_MARK_LABEL: Record<BotMark, string> = { letter: '名字', round: '圆', square: '方', diamond: '菱', drop: '角' };
+const BOT_COLORS = ['#171717', '#6b4a32', '#b42318', '#c2410c', '#a16207', '#176b45', '#0f766e', '#1d4e89', '#6d28d9', '#be185d', '#57534e'];
 const DEMO_BOTS: RosterBot[] = [
   { id: 'demo.release', name: '发布', note: '对照发布清单', demo: true },
   { id: 'demo.research', name: '研究', note: '整理公开资料', demo: true },
@@ -209,6 +217,10 @@ const DEMO_BOTS: RosterBot[] = [
 ];
 let agentSummaries: AgentSummary[] = [];
 let agentsLoaded = false;
+let ownedBotRecords: RosterBot[] = [];
+let localBotsAdopted = false;
+let localBotNote = '';
+interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; createdAt?: string; updatedAt?: string }
 let roomSummaries: RoomSummary[] = [];
 let botGroups: BotGroups | undefined;
 let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
@@ -488,7 +500,7 @@ function syncPresence(run?: RunView): void {
   if (conversationEnabled) { syncEntrySurface(); return; }
   if (!title || !presence) return;
   if (document.body.classList.contains('group-draft') || groupDraftOpen) {
-    mirrorShell('新建群聊', '2 到 6 人 · AEEIS 始终在场', 'idle');
+    mirrorShell('新建群聊', `2 到 ${groupCap()} 人 · AEEIS 始终在场`, 'idle');
     return;
   }
   if (openGroupId) {
@@ -1022,7 +1034,7 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
   const response = await fetch(`/api${path}`, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+    headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const raw = await response.text();
@@ -1351,13 +1363,146 @@ function pinLastDelivery(): void {
   updateConversationControls();
 }
 function usingDemoBots(): boolean {
-  return agentsLoaded && !agentSummaries.some(agent => agent.status === 'admitted');
+  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
+}
+function reservedBotName(name: string): boolean {
+  const normalized = name.normalize('NFKC').trim();
+  return ['所有人', '团队', 'AEEIS'].some(reserved => reserved.localeCompare(normalized, 'zh', { sensitivity: 'accent' }) === 0);
+}
+/** A saved Bot joins a room once this account has the profile. A copy still waiting in this browser stays off the roster until this person writes it onto the account. */
+function roomReadyBot(bot: RosterBot): boolean {
+  if (bot.id === 'aeeis' || reservedBotName(bot.name)) return false;
+  if (bot.id.startsWith('bot_')) return ownedBotRecords.some(item => item.id === bot.id);
+  return true;
+}
+function ownedRosterBot(bot: OwnedBotView): RosterBot {
+  return { id: bot.id, name: bot.name, note: '', demo: false, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}) };
+}
+function rememberOwnedBot(bot: OwnedBotView): void {
+  const next = ownedRosterBot(bot);
+  ownedBotRecords = [...ownedBotRecords.filter(item => item.id !== next.id), next];
+}
+function loadCustomBots(): RosterBot[] {
+  const raw = localStorage.getItem(CUSTOM_BOTS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const bots: RosterBot[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const bot = item as Partial<StoredBot>;
+      if (typeof bot.id !== 'string' || !/^bot_[a-z0-9-]{8,80}$/.test(bot.id)) continue;
+      if (typeof bot.name !== 'string' || !bot.name.trim() || bot.name.trim().length > 40 || reservedBotName(bot.name)) continue;
+      if (typeof bot.mark !== 'string' || !BOT_MARKS.includes(bot.mark as BotMark)) continue;
+      if (typeof bot.color !== 'string' || !BOT_COLORS.includes(bot.color)) continue;
+      if (typeof bot.background !== 'string' || !bot.background.trim() || bot.background.trim().length > 800) continue;
+      const mark = bot.mark as BotMark;
+      const role = typeof bot.role === 'string' ? bot.role.trim().slice(0, 120) : '';
+      const held = typeof bot.held === 'string' ? bot.held : '';
+      bots.push({
+        id: bot.id, name: bot.name.trim(), note: '', demo: false, mark, color: bot.color, background: bot.background.trim(), ...(role ? { role } : {}), ...(held ? { held } : {}),
+      });
+      if (bots.length >= CUSTOM_BOT_CAP) break;
+    }
+    return bots;
+  } catch {
+    return [];
+  }
+}
+function saveCustomBots(bots: RosterBot[]): void {
+  const stored: StoredBot[] = bots.slice(0, CUSTOM_BOT_CAP).map(bot => ({
+    id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}), ...(bot.held ? { held: bot.held } : {}),
+  }));
+  localStorage.setItem(CUSTOM_BOTS_KEY, JSON.stringify(stored));
+}
+function botDutyLine(bot: RosterBot | undefined): string {
+  if (bot?.background) return bot.role ? `角色：${bot.role}。背景：${bot.background}` : `背景：${bot.background}`;
+  if (bot?.note) return `职责：${bot.note}`;
+  return '职责还没有单独写下。';
 }
 function rosterBots(): RosterBot[] {
   const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
-  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+}
+function claimableLocalBots(): RosterBot[] {
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  if (account && sessionPrincipal && account !== sessionPrincipal) return [];
+  const serverIds = new Set(ownedBotRecords.map(bot => bot.id));
+  return loadCustomBots().filter(bot => !bot.held && !serverIds.has(bot.id));
+}
+function renderLocalBotNote(): void {
+  const note = $('bot-local-note');
+  const claim = $('bot-local-claim');
+  if (!note || !claim) return;
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  const stored = loadCustomBots();
+  const claimable = claimableLocalBots();
+  if (localBotNote) {
+    note.hidden = false;
+    note.textContent = localBotNote;
+    claim.hidden = claimable.length === 0;
+    return;
+  }
+  if (account && sessionPrincipal && account !== sessionPrincipal && stored.some(bot => !bot.held)) {
+    note.hidden = false;
+    note.textContent = '这台浏览器还有上一个账号留下的 Bot，没有写入当前账号。';
+    claim.hidden = true;
+    return;
+  }
+  if (claimable.length) {
+    note.hidden = false;
+    note.textContent = `这台浏览器还有${claimable.map(bot => bot.name).join('、')}，还没写入这个账号。`;
+    claim.hidden = false;
+    return;
+  }
+  note.hidden = true;
+  note.textContent = '';
+  claim.hidden = true;
+}
+async function writeLocalBots(): Promise<void> {
+  if (!sessionPrincipal) return;
+  localStorage.setItem(LOCAL_BOT_ACCOUNT, sessionPrincipal);
+  const local = loadCustomBots();
+  const kept: RosterBot[] = [];
+  const reasons: string[] = [];
+  for (const bot of local) {
+    if (bot.held) { kept.push(bot); continue; }
+    try {
+      const saved = await api<OwnedBotView>('/bots', {
+        id: bot.id, name: bot.name, mark: bot.mark ?? 'letter', color: bot.color ?? BOT_COLORS[0]!, background: bot.background ?? '', ...(bot.role ? { role: bot.role } : {}),
+      });
+      rememberOwnedBot(saved);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        const reason = errorMessage(error);
+        kept.push({ ...bot, held: reason });
+        reasons.push(`${bot.name}：${reason}`);
+      } else kept.push(bot);
+    }
+  }
+  if (kept.length) saveCustomBots(kept);
+  else localStorage.removeItem(CUSTOM_BOTS_KEY);
+  const held = kept.filter(bot => bot.held);
+  if (reasons.length) localBotNote = `没有写入这个账号。${reasons.join(' ')}`;
+  else if (held.length) localBotNote ||= `没有写入这个账号。${held.map(bot => `${bot.name}：${bot.held}`).join(' ')}`;
+  else localBotNote = '';
+}
+async function adoptLocalBots(): Promise<void> {
+  if (localBotsAdopted || !sessionPrincipal) return;
+  const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
+  if (account !== sessionPrincipal) return;
+  localBotsAdopted = true;
+  await writeLocalBots();
+}
+async function claimLocalBots(): Promise<void> {
+  if (!sessionPrincipal) return;
+  localBotsAdopted = true;
+  await writeLocalBots();
+  renderBotRoster();
+  renderGroups(roomSummaries);
 }
 function loadBotGroups(): BotGroups {
   const raw = localStorage.getItem('aeeis.bot-groups');
@@ -1493,7 +1638,7 @@ function aeeisThread(): { id: string; revision: number } | undefined {
   return conversation;
 }
 function participantLabel(principalId: string): string {
-  return botById(principalId)?.name ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
+  return botById(principalId)?.name ?? groupMembers.find(member => member.principalId === principalId)?.displayName ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
 }
 function eventWriter(event: SessionEventSummary): { id: string; type: 'principal' | 'agent' | 'system' } {
   return event.recordedBy ?? { id: event.actorId, type: event.actorType };
@@ -1646,7 +1791,7 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'review', title: '待验收' },
   { id: 'done', title: '完成' },
 ];
-interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; lines: string[] }
+interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; lines: string[] }
 function channelLog(): SessionEventSummary[] {
   if (!laterChannelEvents.length && !liveChannelEvents.length) return groupEvents;
   return [...groupEvents, ...laterChannelEvents, ...liveChannelEvents];
@@ -1728,7 +1873,7 @@ function appendUnseen(items: SessionEventSummary[] | undefined, into: SessionEve
   for (const item of items ?? []) if (!seen.has(item.id)) { into.push(item); seen.add(item.id); }
 }
 function boardDecision(conversationId: string, taskId: string): BoardDecision {
-  const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, lines: [] };
+  const decision: BoardDecision = { conflicts: [], accepted: false, cancelled: false, released: false, lines: [] };
   for (const event of channelLog()) {
     if (event.operation === 'retract' || event.type !== 'task_update' || !roomOwnerWrote(event)) continue;
     const refs = event.evidenceRefs ?? [];
@@ -1739,14 +1884,17 @@ function boardDecision(conversationId: string, taskId: string): BoardDecision {
       if (!agentId) continue;
       if (decision.assigneeId && decision.assigneeId !== agentId) decision.conflicts.push(agentId);
       else decision.assigneeId = agentId;
+      decision.released = false;
       decision.lines.push(content);
     } else if (content.startsWith('分派给 ') || content.startsWith('转交给 ')) {
       if (!agentId) continue;
       decision.assigneeId = agentId;
       decision.cancelled = false;
+      decision.released = false;
       decision.lines.push(content);
-    } else if (content.startsWith('拒绝领取：')) {
+    } else if (content.startsWith('拒绝领取：') || content.startsWith('退回待领取')) {
       delete decision.assigneeId;
+      if (content.startsWith('退回待领取')) decision.released = true;
       decision.lines.push(content);
     } else if (content === '验收通过') {
       decision.accepted = true;
@@ -1792,6 +1940,7 @@ function boardColumn(status: string, decision?: BoardDecision, runId?: string): 
   if (decision?.cancelled && !runId && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'failed';
   if (status === 'failed' || status === 'cancelled' || status === 'unreadable') return 'failed';
   if (decision && blockNoteCurrent(status, decision)) return 'blocked';
+  if (decision?.released && !decision.assigneeId && !runId && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'ready';
   if (status === 'discussion') return 'capture';
   if (status === 'preparing' || status === 'queued') return 'ready';
   if (status === 'planning' || status === 'running' || status === 'reviewing') return 'doing';
@@ -1887,9 +2036,10 @@ function renderChannelBoard(): void {
     const view = handoffViews.get(cite.conversationId);
     const task = view?.tasks.find(item => item.id === cite.taskId);
     if (!view || !task) return [];
-    const ownerId = cite.agentId ?? view.agentId ?? '';
-    const owner = botById(ownerId)?.name ?? (ownerId || '这个人');
-    return [{ view, task, owner, ownerId, decision: boardDecision(cite.conversationId, task.id) }];
+    const decision = boardDecision(cite.conversationId, task.id);
+    const ownerId = decision.released ? '' : (cite.agentId ?? view.agentId ?? '');
+    const owner = decision.released ? '待领取' : (botById(ownerId)?.name ?? (ownerId || '这个人'));
+    return [{ view, task, owner, ownerId, decision }];
   });
   const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status, card.decision, taskRunId(card.task)) }));
   const failed = placed.filter(card => card.column === 'failed');
@@ -2042,7 +2192,7 @@ async function handChannelTask(view: ConversationView, task: ConversationTaskVie
   const verb = kind === '分派' ? '分派' : '转交';
   const note = await recordRosterHandoff(bot, `${verb}「${task.title}」`, room, undefined, channelPostSession, title => kind === '分派'
     ? `已分派给${bot.name}，记成讨论「${title}」。未执行。`
-    : `已转交给${bot.name}，记成讨论「${title}」。原来的事还在，未执行。`);
+    : `已转交给${bot.name}，记成讨论「${title}」。原来的事还在，未执行。`, 'handoff');
   if (note) { message(note); return; }
   await postRoomUpdate(`${kind === '分派' ? '分派给' : '转交给'} ${bot.name}`, citeRefs(view, task, bot.id));
   message(kind === '分派' ? `已分派给${bot.name}。记成一条新的讨论，未执行。` : `已转交给${bot.name}。原来的事还在，未执行。`);
@@ -2118,7 +2268,7 @@ async function reviseChannelTask(view: ConversationView, task: ConversationTaskV
   const load = doingCount(bot.id);
   if (load >= 3) { message(`${bot.name}进行中已有 ${load} 件。先完成或转交。`); return; }
   const room = roomSummaries.find(item => item.id === openGroupId);
-  const note = await recordRosterHandoff(bot, `要求修改「${task.title}」：${text}`, room, undefined, channelPostSession, title => `已另开修改讨论「${title}」。原来的产物还在，未执行。`);
+  const note = await recordRosterHandoff(bot, `要求修改「${task.title}」：${text}`, room, undefined, channelPostSession, title => `已另开修改讨论「${title}」。原来的产物还在，未执行。`, 'handoff');
   if (note) { message(note); return; }
   await postRoomUpdate(`要求修改：${text}`, citeRefs(view, task, bot.id));
   message(`已为「${task.title}」另开一条修改讨论。原来的产物还在。`);
@@ -2422,8 +2572,31 @@ async function refreshHandoffViews(): Promise<void> {
   renderGroupTranscript();
   if (!$('channel-studio')?.hidden) renderStudio();
 }
+const GROUP_CAP_KEY = 'aeeis.group-cap';
+const GROUP_CAP_DEFAULT = 10;
+const GROUP_CAP_MIN = 2;
+const GROUP_CAP_MAX = 30;
+function groupCap(): number {
+  const raw = Number(localStorage.getItem(GROUP_CAP_KEY));
+  return Number.isInteger(raw) && raw >= GROUP_CAP_MIN && raw <= GROUP_CAP_MAX ? raw : GROUP_CAP_DEFAULT;
+}
 function groupOccupancy(): number {
   return 1 + draftAgents.size + draftPeople.length;
+}
+function commitGroupCap(commitInvalid: boolean): void {
+  const input = $<HTMLInputElement>('group-cap');
+  if (!input) return;
+  const value = Math.trunc(Number(input.value));
+  const valid = Number.isInteger(value) && value >= GROUP_CAP_MIN && value <= GROUP_CAP_MAX;
+  if (!valid) {
+    if (!commitInvalid) return;
+    input.value = String(groupCap());
+    message(`人数上限是 ${GROUP_CAP_MIN} 到 ${GROUP_CAP_MAX}。`);
+    return;
+  }
+  localStorage.setItem(GROUP_CAP_KEY, String(value));
+  if (commitInvalid) message('');
+  renderGroupCandidates();
 }
 
 function hideChannelSurfaces(): void {
@@ -2509,7 +2682,9 @@ function syncEntrySurface(): void {
     if (title) title.textContent = counterpart?.name ?? '成员';
     if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
     const role = $('bot-profile-role');
-    if (role) role.textContent = counterpart?.note ? `职责：${counterpart.note}` : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+    if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+    const actions = $('bot-profile-actions');
+    if (actions) actions.hidden = !counterpart || counterpart.id === 'aeeis' || !ownedBotRecords.some(bot => bot.id === counterpart.id);
   }
   const botStatus = $('bot-status');
   if (botStatus) {
@@ -2524,14 +2699,14 @@ function syncEntrySurface(): void {
   const groupText = $<HTMLTextAreaElement>('group-text');
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
-    : '这是群聊。没选说话人时，入口收下这句话，记成一条讨论。@一个人则交给那个人；@所有人或点到多个人时，仍只记成入口的一条讨论。选一位说话人，只是标明这句话是谁说的。都不会执行，也不会调用模型。选「交给」同样只记成讨论。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+    : '这是群聊。每句话都留在这间房里，入口收下这句话。@群里的一个人，是请那个人回应，这句话仍留在入口。@所有人或点到多个人时，入口只记一条，不拆开。选一位说话人，只是标明这句话是谁说的，入口同样收下。选「交给」会再请那个人回应，并记成一条讨论。都不会执行，也不会调用模型。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
-  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写给入口。@AEEIS 或没点名，都记成一条讨论。@一个人交给那个人。@所有人仍由入口记成一条。不执行，也不调用模型。';
+  if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。@AEEIS、没点名，入口都会收下。@群里的一个人是请他回应。@所有人仍记成一条。不执行，也不调用模型。';
   const sendNote = $('group-send-note');
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
-    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没选说话人时，入口或被点名的那一个人会记下一条讨论，不执行。选一位说话人，只是标明这句话是谁说的。';
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。入口收下这句话。@到群里的一个人时，再记一条请他回应的讨论，不执行。选一位说话人，只是标明这句话是谁说的。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -2563,8 +2738,11 @@ function renderBotRoster(): void {
     item.className = 'bot-row';
     item.dataset.botId = bot.id;
     if (bot.id === 'aeeis') item.id = 'gb-bot';
-    const avatar = element('span', bot.name.slice(0, 1) || 'B', 'roster-avatar');
+    const avatar = element('span', bot.mark && bot.mark !== 'letter' ? '' : (bot.name.slice(0, 1) || 'B'), 'roster-avatar');
     avatar.dataset.state = lifeAvatarState(bot.id);
+    if (bot.mark) avatar.dataset.mark = bot.mark;
+    if (bot.color) avatar.style.background = bot.color;
+    avatar.setAttribute('aria-hidden', 'true');
     const copy = element('span', '', 'roster-copy');
     const presence = element('small', lifePresenceLabel(bot.id));
     copy.append(element('strong', bot.name), presence);
@@ -2585,6 +2763,7 @@ function renderBotRoster(): void {
   const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
   if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
   for (const bot of loose) renderRow(bot);
+  renderLocalBotNote();
   for (const room of roomSummaries.filter(item => item.status === 'active' && item.description === '私聊')) {
     const principalId = directMembers.get(room.id);
     if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
@@ -2807,14 +2986,14 @@ function renderGroupCandidates(): void {
   const live = $('group-count-live');
   if (!host || !people || !live) return;
   host.replaceChildren();
-  for (const bot of rosterBots().filter(item => item.id !== 'aeeis')) {
+  for (const bot of rosterBots().filter(roomReadyBot)) {
     const row = element('label', '', 'group-candidate');
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.checked = draftAgents.has(bot.id);
     box.addEventListener('change', () => {
       if (box.checked) {
-        if (groupOccupancy() >= 6) { box.checked = false; message('一个群聊最多 6 人。'); return; }
+        if (groupOccupancy() >= groupCap()) { box.checked = false; message(`一个群聊最多 ${groupCap()} 人。`); return; }
         draftAgents.add(bot.id);
       } else draftAgents.delete(bot.id);
       renderGroupCandidates();
@@ -2834,7 +3013,7 @@ function renderGroupCandidates(): void {
     people.append(row);
   }
   const names = [...draftAgents].map(participantLabel).concat(draftPeople);
-  live.textContent = `${groupOccupancy()} / 6 · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
+  live.textContent = `${groupOccupancy()} / ${groupCap()} · AEEIS${names.length ? `、${names.join('、')}` : ''}`;
   const proposal = $('group-proposal');
   if (proposal) proposal.textContent = groupProposalText();
 }
@@ -2844,12 +3023,12 @@ function groupProposalText(): string {
   const extras = draftPeople.length ? `名单以外：${draftPeople.join('、')}。` : '';
   const reason = $<HTMLInputElement>('group-newcomer-reason')?.value.trim() ?? '';
   const why = reason ? '原因已写下。' : '';
-  return `提议：AEEIS 担任 PM。${roster}${extras}一共 ${groupOccupancy()} / 6。创建前确认这一组。${why}`;
+  return `提议：AEEIS 担任 PM。${roster}${extras}一共 ${groupOccupancy()} / ${groupCap()}。创建前确认这一组。${why}`;
 }
 function reuseRoster(): void {
-  for (const bot of rosterBots()) {
-    if (bot.id === 'aeeis' || draftAgents.has(bot.id)) continue;
-    if (groupOccupancy() >= 6) break;
+  for (const bot of rosterBots().filter(roomReadyBot)) {
+    if (draftAgents.has(bot.id)) continue;
+    if (groupOccupancy() >= groupCap()) break;
     draftAgents.add(bot.id);
   }
   renderGroupCandidates();
@@ -2869,6 +3048,8 @@ function showGroupDraft(): void {
   if (person) person.value = '';
   const reason = $<HTMLInputElement>('group-newcomer-reason');
   if (reason) reason.value = '';
+  const cap = $<HTMLInputElement>('group-cap');
+  if (cap) cap.value = String(groupCap());
   renderGroupCandidates();
 }
 function addDraftPerson(): void {
@@ -2876,7 +3057,7 @@ function addDraftPerson(): void {
   const person = input?.value.trim() ?? '';
   if (!person) { input?.focus(); return; }
   if (draftPeople.includes(person) || draftAgents.has(person) || person === 'aeeis') { message('这位已经在群里。'); return; }
-  if (groupOccupancy() >= 6) { message('一个群聊最多 6 人。'); return; }
+  if (groupOccupancy() >= groupCap()) { message(`一个群聊最多 ${groupCap()} 人。`); return; }
   draftPeople = [...draftPeople, person];
   if (input) input.value = '';
   renderGroupCandidates();
@@ -2885,8 +3066,9 @@ async function createGroup(event: Event): Promise<void> {
   event.preventDefault();
   const title = $<HTMLInputElement>('group-title')?.value.trim() ?? '';
   if (!title) return;
+  for (const id of [...draftAgents]) if (!roomReadyBot(botById(id) ?? { id, name: id, note: '', demo: false })) draftAgents.delete(id);
   if (groupOccupancy() < 2) { message('群聊至少要 AEEIS 和另外一位。'); return; }
-  if (groupOccupancy() > 6) { message('一个群聊最多 6 人。'); return; }
+  if (groupOccupancy() > groupCap()) { message(`一个群聊最多 ${groupCap()} 人。`); return; }
   const room = await api<RoomSummary>('/rooms', { title, description: '群聊' });
   try {
     for (const agentId of draftAgents) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: agentId, role: 'agent' });
@@ -3129,15 +3311,13 @@ function renderMentions(): void {
     box.append(choice);
   }
 }
-function hasMention(text: string): boolean {
-  return /(?:^|[^\p{L}\p{N}_])@/u.test(text.normalize('NFKC'));
-}
 function mentionOf(label: string, text: string): boolean {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?:^|[^\\p{L}\\p{N}_])@${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(text.normalize('NFKC'));
 }
-function mentionedRosterBots(text: string): RosterBot[] {
-  return rosterBots().filter(bot => bot.id !== 'aeeis' && mentionOf(bot.name, text));
+function mentionedGroupBots(text: string): RosterBot[] {
+  const members = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
+  return rosterBots().filter(bot => roomReadyBot(bot) && members.has(bot.id) && mentionOf(bot.name, text));
 }
 const AEEIS_MENTION = /(?:^|[^\p{L}\p{N}_])@aeeis(?=$|[^\p{L}\p{N}_])/giu;
 function mentionsAeeis(text: string): boolean {
@@ -3171,6 +3351,7 @@ async function recordRosterHandoff(
   spoken: { type: 'agent' | 'principal'; id: string } | undefined,
   postSession: (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => Promise<unknown>,
   receipt: (title: string) => string,
+  mode: 'intake' | 'entry' | 'handoff',
 ): Promise<string> {
   const kind = room?.description === '私聊' ? '私聊' : '群聊';
   const roomTitle = room?.title || kind;
@@ -3198,15 +3379,16 @@ async function recordRosterHandoff(
     }
     conversationId = target.id;
     const expectedRevision = conversation?.id === conversationId ? conversation.revision : target.revision;
+    const opensTask = mode !== 'intake';
     const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
       text: clipEntryText(`来自${kind}「${roomTitle}」：${text}`, 7000),
       expectedRevision,
-      newTask: { title },
+      ...(opensTask ? { newTask: { title } } : { unassigned: true as const }),
       focus: 'keep',
       intent: 'discuss',
       ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
     }, 'POST', groupIdempotencyKey());
-    taskId = result.message.route.taskIds.find(item => CITATION_ID.test(item)) ?? '';
+    taskId = opensTask ? (result.message.route.taskIds.find(item => CITATION_ID.test(item)) ?? '') : '';
     if (epoch === conversationEpoch && result.conversation?.id === conversationId) {
       handoffViews.set(conversationId, result.conversation);
       if (conversation?.id === conversationId) acceptConversation(result.conversation);
@@ -3221,9 +3403,10 @@ async function recordRosterHandoff(
     if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
   }
   if (handoffError || !recorded) return handoffError;
-  const cited = CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
+  const cited = mode === 'handoff' && CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
+  const refs = cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : (CITATION_ID.test(conversationId) ? [conversationId] : undefined);
   try {
-    await postSession('system', receipt(title), cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : undefined);
+    await postSession('system', receipt(title), refs);
   } catch (error) {
     return bot.id === 'aeeis'
       ? `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`
@@ -3254,35 +3437,35 @@ async function submitGroupMessage(event: Event): Promise<void> {
   if (input) input.value = '';
   let handoffError = '';
   const chosen = selectedHandoffBot();
-  const speakingAsBot = spoken?.type === 'agent';
   const inGroup = room?.description !== '私聊';
-  const handTo = (bot: RosterBot, receipt: (title: string) => string) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt);
-  if (chosen) {
-    handoffError = await handTo(chosen, title => `已交给${chosen.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
-    if (!handoffError) {
-      const select = $<HTMLSelectElement>('group-handoff');
-      if (select) select.value = '';
-    }
-  } else if (speakingAsBot || !inGroup) {
-    if (mentionsAeeis(text)) {
-      const home = botById('aeeis');
-      if (home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`);
-    }
-  } else {
-    const named = mentionedRosterBots(text);
+  const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff') => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode);
+  const home = botById('aeeis');
+  if (!inGroup) {
+    if (mentionsAeeis(text) && home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`, 'entry');
+  } else if (home) {
+    const named = mentionedGroupBots(text);
     const addressed = mentionsAeeis(text);
     const crowd = mentionOf('所有人', text) || mentionOf('团队', text) || named.length > 1 || (addressed && named.length > 0);
-    const home = botById('aeeis');
-    if (!crowd && named.length === 1 && !addressed) {
-      const bot = named[0]!;
-      handoffError = await handTo(bot, title => `已交给${bot.name}，记为讨论「${title}」。未执行，对方不会自己回复。`);
-    } else if (home && (crowd || addressed || !hasMention(text))) {
-      const receipt = crowd
-        ? (title: string) => `入口记下了这句话，记成讨论「${title}」。没有拆给多个人，也未执行。`
-        : mentionsAeeis(text)
-          ? (title: string) => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`
-          : (title: string) => `入口收下了这句话，记成讨论「${title}」。未执行，讨论焦点不变。`;
-      handoffError = await handTo(home, receipt);
+    const asked = chosen && chosen.id !== 'aeeis'
+      ? chosen
+      : (!chosen && !crowd && named.length === 1 && !addressed ? named[0] : undefined);
+    const entryMode = chosen?.id === 'aeeis' ? 'handoff' : (!chosen && !asked && !crowd && addressed ? 'entry' : 'intake');
+    const entryError = await handTo(home, title => {
+      if (chosen?.id === 'aeeis') return `已交给AEEIS，记为讨论「${title}」。未执行，对方不会自己回复。`;
+      if (asked) return `入口收下了这句话「${title}」。已请${asked.name}回应。未执行，讨论焦点不变。`;
+      if (crowd) return `入口记下了这句话「${title}」。没有拆给多个人，也未执行。`;
+      if (addressed) return `已记为入口讨论「${title}」。未执行，讨论焦点不变。`;
+      return `入口收下了这句话「${title}」。未执行，讨论焦点不变。`;
+    }, entryMode);
+    const askedError = asked
+      ? await handTo(asked, title => chosen
+        ? `已交给${asked.name}，记为讨论「${title}」。这句话也留在入口。未执行，对方不会自己回复。`
+        : `已请${asked.name}回应，记为讨论「${title}」。这句话也留在入口。未执行，对方不会自己回复。`, 'handoff')
+      : '';
+    handoffError = [entryError, askedError].filter(Boolean).join(' ');
+    if (chosen && !(chosen.id === 'aeeis' ? entryError : askedError)) {
+      const select = $<HTMLSelectElement>('group-handoff');
+      if (select) select.value = '';
     }
   }
   await loadGroup(roomId);
@@ -4265,9 +4448,189 @@ $('gb-new-bot-group')?.addEventListener('click', () => {
   draft.hidden = !draft.hidden;
   if (!draft.hidden) $<HTMLInputElement>('bot-group-name')?.focus();
 });
+let botCreateMark: BotMark = 'letter';
+let botCreateColor = BOT_COLORS[0]!;
+let botEditId = '';
+let botCreateTicket = 0;
+let botCreateBusy = false;
+function paintBotCreate(): void {
+  const preview = $('bot-create-preview');
+  const name = $<HTMLInputElement>('bot-create-name')?.value.trim() ?? '';
+  if (preview) {
+    preview.dataset.mark = botCreateMark;
+    preview.style.background = botCreateColor;
+    preview.textContent = botCreateMark === 'letter' ? (name.slice(0, 1) || 'B') : '';
+  }
+  document.querySelectorAll<HTMLButtonElement>('#bot-create-marks button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.mark === botCreateMark));
+  });
+  document.querySelectorAll<HTMLButtonElement>('#bot-create-colors button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.color === botCreateColor));
+  });
+}
+function renderBotCreateChoices(): void {
+  const marks = $('bot-create-marks');
+  const colors = $('bot-create-colors');
+  if (!marks || !colors || marks.childElementCount) return;
+  for (const mark of BOT_MARKS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.mark = mark;
+    button.className = 'roster-avatar';
+    button.style.background = BOT_COLORS[0]!;
+    button.textContent = mark === 'letter' ? '名' : '';
+    button.setAttribute('aria-label', BOT_MARK_LABEL[mark]);
+    button.addEventListener('click', () => { botCreateMark = mark; paintBotCreate(); });
+    marks.append(button);
+  }
+  for (const color of BOT_COLORS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.color = color;
+    button.style.background = color;
+    button.setAttribute('aria-label', color);
+    button.addEventListener('click', () => { botCreateColor = color; paintBotCreate(); });
+    colors.append(button);
+  }
+}
+function botCreateStatus(text: string): void {
+  const status = $('bot-create-status');
+  if (status) status.textContent = text;
+}
+function setBotCreatePending(pending: boolean): void {
+  botCreateBusy = pending;
+  const generate = $<HTMLButtonElement>('bot-create-generate');
+  const save = $<HTMLButtonElement>('bot-create-save');
+  if (generate) generate.disabled = pending;
+  if (save) save.disabled = pending;
+}
+function openBotCreate(): void {
+  const panel = $('bot-create');
+  if (!panel) return;
+  botEditId = '';
+  botCreateTicket += 1;
+  setBotCreatePending(false);
+  renderBotCreateChoices();
+  botCreateMark = 'letter';
+  botCreateColor = BOT_COLORS[0]!;
+  $<HTMLFormElement>('bot-create-form')?.reset();
+  botCreateStatus('');
+  panel.hidden = false;
+  paintBotCreate();
+  $<HTMLInputElement>('bot-create-name')?.focus();
+}
+function closeBotCreate(): void {
+  botEditId = '';
+  botCreateTicket += 1;
+  setBotCreatePending(false);
+  const panel = $('bot-create');
+  if (panel) panel.hidden = true;
+}
+function openBotEdit(bot: RosterBot): void {
+  const panel = $('bot-create');
+  if (!panel) return;
+  botEditId = bot.id;
+  botCreateTicket += 1;
+  setBotCreatePending(false);
+  renderBotCreateChoices();
+  botCreateMark = bot.mark ?? 'letter';
+  botCreateColor = bot.color ?? BOT_COLORS[0]!;
+  $<HTMLFormElement>('bot-create-form')?.reset();
+  const name = $<HTMLInputElement>('bot-create-name');
+  const role = $<HTMLInputElement>('bot-create-role');
+  const background = $<HTMLTextAreaElement>('bot-create-background');
+  if (name) name.value = bot.name;
+  if (role) role.value = bot.role ?? '';
+  if (background) background.value = bot.background ?? '';
+  botCreateStatus('');
+  panel.hidden = false;
+  paintBotCreate();
+  name?.focus();
+}
+async function removeOwnedBot(id: string): Promise<void> {
+  const bot = ownedBotRecords.find(item => item.id === id);
+  if (!bot) return;
+  if (!window.confirm(`移除${bot.name}。这位会从房间里撤下，名额空出来。这个编号留下。还没开始做的事会退回待领取。`)) return;
+  await api(`/bots/${encodeURIComponent(id)}`, undefined, 'DELETE');
+  ownedBotRecords = ownedBotRecords.filter(item => item.id !== id);
+  if (selectedBotId === id) { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
+  renderBotRoster();
+  selectBot('aeeis');
+}
+function sameBotName(left: string, right: string): boolean {
+  return left.localeCompare(right, 'zh', { sensitivity: 'accent' }) === 0;
+}
+function backgroundFailure(error: unknown): string {
+  const text = errorMessage(error);
+  return text === '模型尚未就绪' ? '模型尚未就绪。可以自己写背景。' : text;
+}
+async function generatedBackground(role: string): Promise<string> {
+  if (!modelConfigured) throw new Error('模型尚未就绪。可以自己写背景。');
+  const drafted = await api<{ background?: string }>('/bots/background', { role }, 'POST', `bot-background-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`);
+  const background = drafted.background?.trim().slice(0, 800) ?? '';
+  if (!background) throw new Error('背景没有生成');
+  return background;
+}
+async function saveCreatedBot(event: Event): Promise<void> {
+  event.preventDefault();
+  if (botCreateBusy) return;
+  const name = $<HTMLInputElement>('bot-create-name')?.value.trim().slice(0, 40) ?? '';
+  const role = $<HTMLInputElement>('bot-create-role')?.value.trim().slice(0, 120) ?? '';
+  const background = $<HTMLTextAreaElement>('bot-create-background')?.value.trim().slice(0, 800) ?? '';
+  if (!name) { botCreateStatus('先写下名字。'); $<HTMLInputElement>('bot-create-name')?.focus(); return; }
+  if (reservedBotName(name)) { botCreateStatus('请换一个名字。所有人、团队和 AEEIS 留给群里的点名。'); return; }
+  if (rosterBots().some(bot => bot.id !== botEditId && sameBotName(bot.name, name))) { botCreateStatus('这个名字已经在名单上。'); return; }
+  if (!botEditId && ownedBotRecords.length >= CUSTOM_BOT_CAP) { botCreateStatus(`这个账号最多留下 ${CUSTOM_BOT_CAP} 位。`); return; }
+  if (!background) { botCreateStatus('先写下背景，或给出角色定位再生成。'); $<HTMLTextAreaElement>('bot-create-background')?.focus(); return; }
+  setBotCreatePending(true);
+  botCreateStatus('正在保存。');
+  const editing = botEditId;
+  try {
+    const saved = editing
+      ? await api<OwnedBotView>(`/bots/${encodeURIComponent(editing)}`, { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) }, 'PATCH')
+      : await api<OwnedBotView>('/bots', { name, mark: botCreateMark, color: botCreateColor, background, ...(role ? { role } : {}) });
+    rememberOwnedBot(saved);
+    closeBotCreate();
+    renderBotRoster();
+    selectBot(saved.id);
+  } catch (error) {
+    setBotCreatePending(false);
+    botCreateStatus(errorMessage(error));
+  }
+}
+async function generateBotBackground(): Promise<void> {
+  if (botCreateBusy) return;
+  const role = $<HTMLInputElement>('bot-create-role')?.value.trim() ?? '';
+  if (!role) { botCreateStatus('先写下角色定位。'); $<HTMLInputElement>('bot-create-role')?.focus(); return; }
+  const ticket = ++botCreateTicket;
+  setBotCreatePending(true);
+  botCreateStatus('正在生成背景。');
+  try {
+    const background = await generatedBackground(role);
+    if (ticket !== botCreateTicket || $('bot-create')?.hidden) return;
+    const field = $<HTMLTextAreaElement>('bot-create-background');
+    if (field) field.value = background;
+    botCreateStatus('背景已生成。看过之后再保存。');
+  } catch (error) {
+    if (ticket !== botCreateTicket || $('bot-create')?.hidden) return;
+    botCreateStatus(backgroundFailure(error));
+  } finally {
+    if (ticket === botCreateTicket) setBotCreatePending(false);
+  }
+}
+$('gb-new-bot')?.addEventListener('click', () => openBotCreate());
+$('bot-local-claim')?.addEventListener('click', () => { void claimLocalBots().catch(error => { localBotNote = errorMessage(error); renderLocalBotNote(); }); });
+$('bot-profile-edit')?.addEventListener('click', () => { const bot = botById(activeBotId()); if (bot) openBotEdit(bot); });
+$('bot-profile-remove')?.addEventListener('click', () => { void removeOwnedBot(activeBotId()).catch(error => message(errorMessage(error))); });
+$('bot-create-cancel')?.addEventListener('click', () => closeBotCreate());
+$('bot-create-generate')?.addEventListener('click', () => { void generateBotBackground(); });
+$('bot-create-name')?.addEventListener('input', () => paintBotCreate());
+$('bot-create-form')?.addEventListener('submit', event => { void saveCreatedBot(event).catch(error => botCreateStatus(backgroundFailure(error))); });
 $('gb-new-group')?.addEventListener('click', () => showGroupDraft());
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-reuse')?.addEventListener('click', () => reuseRoster());
+$('group-cap')?.addEventListener('input', () => commitGroupCap(false));
+$('group-cap')?.addEventListener('change', () => commitGroupCap(true));
 $('group-newcomer-reason')?.addEventListener('input', () => {
   const proposal = $('group-proposal');
   if (proposal) proposal.textContent = groupProposalText();
@@ -4380,7 +4743,7 @@ async function openChannelBot(agentId: string): Promise<void> {
     catch { view = undefined; }
   }
   body.replaceChildren();
-  body.append(element('p', `${name} · ${bot?.note ? `职责：${bot.note}` : '职责还没有单独写下。'}`));
+  body.append(element('p', `${name} · ${botDutyLine(bot)}`));
   body.append(element('small', lifePresenceLabel(agentId)));
   body.append(element('small', '权限仍是现在这套：讨论不授权，执行要单独创建 Run。批准、登录和密钥留在和 AEEIS 的对话里。'));
   const remembered = view?.standingInstruction?.trim();
@@ -5254,16 +5617,19 @@ async function refresh(): Promise<void> {
   if (linkedThreadId) { await refreshThread(); return; }
   if (conversationEnabled) await refreshConversation().catch(error => { $('conversation-error').textContent = errorMessage(error); });
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
-  const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage] = await Promise.all([
+  const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage, owned] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
     api<{ items: CompetitionSummary[] }>('/collaborations/competitions/page?limit=12').then(page => page.items), api<{ items: DebateSummary[] }>('/collaborations/debates/page?limit=12').then(page => page.items), api<ProjectionSummary[]>('/collaborations/projections?limit=12'), api<AgentSummary[]>('/agents?limit=50').catch(() => []),
     api<TriggerPolicySummary[]>('/collaborations/triggers/policies?limit=12').catch(() => []), api<TriggerDecisionSummary[]>('/collaborations/triggers/decisions?limit=20').catch(() => []), api<ReminderPage>(`/reminders/page?limit=20${reminderQuery}`).catch(() => ({ items: [] } as ReminderPage)),
+    api<OwnedBotView[]>('/bots').catch(() => null),
   ]);
   const runs = runPage.items;
   runSummaries = runs;
   roomSummaries = rooms;
   agentSummaries = agents;
   agentsLoaded = true;
+  if (owned) ownedBotRecords = owned.map(ownedRosterBot);
+  await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   renderAttentionInbox(runs);
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
@@ -5975,21 +6341,23 @@ function restoreExecutionReview(): void {
   const saved = localStorage.getItem('aeeis.execution-review');
   const select = $<HTMLSelectElement>('execution-review');
   if (!select) return;
-  // Default is auto: the model decides whether a plan stops for approval, and per-action approval still stops writes.
+  // Default is auto: a small task runs, and a real plan waits. YOLO runs the plan too.
   select.value = saved === 'required' || saved === 'yolo' ? saved : 'auto';
 }
 function executionReviewNote(): string {
   const mode = executionReviewValue();
   const decision = currentPlanningDecision();
   const gate = mode === 'yolo'
-    ? '自动执行：计划生成后直接执行，不再停下来等批准。讨论焦点不会因此改变。'
+    ? 'YOLO：抽出计划也直接做，不再停下来等批准。'
     : mode === 'auto'
       ? (decision.shape === 'direct'
-        ? '自动：这次只有一个只读步骤，由边界放行，不调用规划模型。讨论焦点不会因此改变。'
-        : '自动：模型判断要不要请你批准。它不能扩大工具或权限。判断缺失时仍等待批准。')
-      : '需要审批：创建执行后请在任务行核对计划，再明确批准。';
+        ? '自动：这是一件小任务，直接做。'
+        : '自动：这次会抽出一份计划，计划出来后再请你批准。')
+      : (decision.shape === 'direct'
+        ? '需要审批：这是一件小任务，仍等你点头再做。'
+        : '需要审批：抽出计划后，等你批准再做。');
   const shape = decision.shape === 'direct'
-    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的审核档放行。'
+    ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的权限放行。'
     : `这次先出任务图：${planningRefusal(decision.reason)}。`;
   return `${gate}${shape}`;
 }

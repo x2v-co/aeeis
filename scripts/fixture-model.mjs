@@ -271,6 +271,18 @@ export function createFixtureModelServer() {
       const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
       const system = String(messages.find((item) => item?.role === 'system')?.content ?? '');
       const rawInput = messages.find((item) => item?.role === 'user')?.content ?? '{}';
+      if (system.includes('你在给一位新的 Bot 写背景')) {
+        const role = String(rawInput).trim().slice(0, 120);
+        const value = { background: role ? `负责${role}。自己不代替人做决定。` : '先写下角色定位。' };
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          id: `fixture-${Date.now()}`,
+          object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(value) }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }));
+        return;
+      }
       const input = JSON.parse(String(rawInput));
       const value = responseFor(system, input);
       const compactionDelay = Number(process.env.AEEIS_FIXTURE_COMPACTION_DELAY_MS ?? 0);

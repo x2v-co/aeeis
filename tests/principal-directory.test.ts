@@ -11,6 +11,7 @@ import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { buildApp } from '../src/runtime/http.js';
 import { InMemoryRoomMembershipRepository } from '../src/room-membership.js';
+import { InMemoryOwnedBotStore } from '../src/owned-bots.js';
 
 describe('principal directory invitation boundary', () => {
   it('coalesces concurrent lookups, caches negative results, and supports explicit invalidation', async () => {
@@ -102,6 +103,19 @@ describe('principal directory invitation boundary', () => {
     await expect(domain.addRoomMember(room.id, 'missing', 'viewer', 'alice', 'team-a')).rejects.toThrow('not in this tenant');
     await expect(domain.addRoomMember(room.id, 'suspended', 'viewer', 'alice', 'team-a')).rejects.toThrow('not active');
     await expect(domain.addRoomMember(room.id, 'other', 'viewer', 'alice', 'team-a')).rejects.toThrow('not in this tenant');
+  });
+
+  it('admits a Bot saved on this account when the directory does not list that id', async () => {
+    const directory = new InMemoryPrincipalDirectory([{ principalId: 'bob', tenantId: 'team-a', status: 'active' }]);
+    const bots = new InMemoryOwnedBotStore();
+    const saved = await bots.create({ name: '阿核', mark: 'letter', color: '#176b45', background: '核对清单。' }, { owner: 'alice', tenantId: 'team-a' }, '2026-10-27T00:00:00.000Z');
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships, directory, bots);
+    const room = await domain.createRoom({ title: 'Directory room' }, undefined, 'alice', 'team-a');
+    await expect(domain.addRoomMember(room.id, saved.id, 'agent', 'alice', 'team-a')).resolves.toMatchObject({ principalId: saved.id, role: 'agent', status: 'active' });
+    await expect(domain.addRoomMember(room.id, 'bob', 'editor', 'alice', 'team-a')).resolves.toMatchObject({ principalId: 'bob' });
+    await expect(domain.addRoomMember(room.id, saved.id, 'agent', 'bob', 'team-a')).rejects.toThrow('not in this tenant');
+    await expect(domain.addRoomMember(room.id, 'bot_missing01', 'agent', 'alice', 'team-a')).rejects.toThrow('not in this tenant');
   });
 
   it('fails closed when the configured directory is unavailable', async () => {

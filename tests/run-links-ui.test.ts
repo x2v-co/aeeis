@@ -32,6 +32,7 @@ function start(path: string, fetch: any) {
   dom = new JSDOM(html, { url: `http://localhost${path}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   dom.window.localStorage.setItem('aeeis.run', `run_${randomUUID()}`);
+  dom.window.localStorage.setItem('aeeis.demo-roster', '1');
   dom.window.sessionStorage.setItem('aeeis.token', 'saved-auth-secret');
   dom.window.fetch = fetch;
   dom.window.setInterval = (() => 1) as any;
@@ -59,7 +60,7 @@ describe('group chat', () => {
     const doc = dom.window.document;
     expect(doc.getElementById('group-draft')?.hidden).toBe(false);
     expect(doc.getElementById('detail')?.hidden).toBe(true);
-    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 6');
+    expect(doc.getElementById('group-count-live')?.textContent).toContain('1 / 10');
     (doc.getElementById('group-title') as HTMLInputElement).value = '发布协作';
     (doc.getElementById('group-create') as HTMLFormElement).requestSubmit();
     await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('至少'));

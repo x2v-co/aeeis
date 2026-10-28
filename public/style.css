@@ -1427,6 +1427,22 @@ body.conversation-mode #command-center .command-tools { width: 100%; max-width: 
 button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; }
 .bot-row[aria-pressed="true"], .group-row.selected, .bot-row:hover, .group-row:hover { background: var(--surface-soft); }
 .roster-avatar { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--surface-blue); color: var(--blue-deep); font-size: 12px; font-weight: 700; }
+.roster-avatar[data-mark="round"] { border-radius: 50%; }
+.roster-avatar[data-mark="square"] { border-radius: 4px; }
+.roster-avatar[data-mark="diamond"] { border-radius: 4px; transform: rotate(45deg); }
+.roster-avatar[data-mark="drop"] { border-radius: 50% 50% 50% 12%; }
+.bot-create[hidden] { display: none !important; }
+.bot-create { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: rgba(23, 23, 23, .32); }
+.bot-create form { width: min(100%, 440px); max-height: min(100%, 720px); overflow: auto; display: grid; gap: 10px; margin: 0; padding: 22px; border-radius: 16px; background: #fff; box-shadow: 0 16px 50px rgba(23, 23, 23, .16); }
+.bot-create h2 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
+.bot-create p { margin: 0; }
+.bot-create-preview { width: 72px; height: 72px; margin: 4px auto; color: #fff; font-size: 28px; }
+.bot-create-preview::after, .bot-create-choices .roster-avatar::after { display: none; }
+.bot-create-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.bot-create-choices button { width: 36px; height: 36px; padding: 0; border: 2px solid transparent; color: #fff; }
+.bot-create-choices button[aria-pressed="true"] { border-color: var(--ink); }
+.bot-create-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.bot-create-actions button { width: auto; min-width: 88px; }
 .roster-copy { display: grid; min-width: 0; }
 .roster-copy strong, .roster-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .roster-copy small { color: var(--muted); font-size: 11px; }

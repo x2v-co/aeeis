@@ -9,6 +9,7 @@ import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-materi
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
+import secureJsonParse from 'secure-json-parse';
 import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -59,10 +60,12 @@ import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
+import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
 declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -153,6 +156,14 @@ export function buildApp(options: Options) {
   const httpMetrics: HttpMetrics = { inFlight: 0, routes: new Map() };
   // One 256 KiB base64 PDF plus the existing text material allowance.
   const app = Fastify({ bodyLimit: 1_500_000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
+  // An empty DELETE still carries application/json from older clients. Fastify
+  // rejects that before the route runs. Keep the secure parser and accept no body.
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
+    if (body.length === 0) { done(null, undefined); return; }
+    try { done(null, secureJsonParse(body, { protoAction: 'error', constructorAction: 'error' })); }
+    catch { const error = new Error("Body is not valid JSON but content-type is set to 'application/json'") as Error & { statusCode: number }; error.statusCode = 400; done(error, undefined); }
+  });
   const maxSseConnections = options.maxSseConnections ?? 100;
   if (!Number.isSafeInteger(maxSseConnections) || maxSseConnections < 1) throw new Error('maxSseConnections must be a positive integer');
   let activeSseConnections = 0;
@@ -393,6 +404,7 @@ export function buildApp(options: Options) {
       // These services currently manage installation-wide configuration/state.
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
+      if ((route === '/api/bots' || route === '/api/bots/:id') && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
@@ -420,12 +432,12 @@ export function buildApp(options: Options) {
     if (error instanceof DeviceSessionNotFound) return reply.code(401).send({ error: 'Unknown device session' });
     if (error instanceof DeviceSessionConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof NotFound || error instanceof EvolutionNotFound) return reply.code(404).send({ error: error.message });
-    if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound || error instanceof OwnedBotNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof PrincipalDirectoryUnavailable) return reply.code(503).send({ error: 'Principal directory unavailable; invitation refused' });
     if (error instanceof ChannelIdentityUnavailable) return reply.code(503).send({ error: 'Channel identity resolver unavailable; event admission refused' });
     if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound || error instanceof CollaborationTriggerNotFound || error instanceof ProjectionNotFound || error instanceof ReminderNotFound) return reply.code(404).send({ error: error.message });
-    if (error instanceof ReminderConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof ReminderConflict || error instanceof OwnedBotConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof Conflict || error instanceof ThreadConflict) {
       const retrySameRequest = error instanceof ReplayablePreparationError;
       return reply.code(409).send({ error: error.message, ...(retrySameRequest ? { retrySameRequest: true } : {}) });
@@ -716,6 +728,67 @@ export function buildApp(options: Options) {
     try { return await options.agentDirectory.discover(card, new Date().toISOString(), principalOf(request).id); }
     catch (error) { throw new Conflict(error instanceof Error ? error.message : 'Agent discovery failed'); }
   });
+  const ownedBotBody = z.object({
+    id: z.string().regex(/^bot_[a-z0-9-]{8,80}$/).optional(),
+    name: z.string().trim().min(1).max(40),
+    mark: z.enum(OWNED_BOT_MARKS),
+    color: z.enum(OWNED_BOT_COLORS),
+    background: z.string().trim().min(1).max(800),
+    role: z.string().trim().min(1).max(120).optional(),
+  }).strict();
+  app.get('/api/bots', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const principal = principalOf(request);
+    return (await options.ownedBots.list({ owner: principal.id, tenantId: principal.tenantId })).map(visibleOwnedBot);
+  });
+  app.post('/api/bots', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const body = ownedBotBody.parse(request.body);
+    const principal = principalOf(request);
+    const saved = await options.ownedBots.create({
+      name: body.name, mark: body.mark, color: body.color, background: body.background,
+      ...(body.id ? { id: body.id } : {}), ...(body.role ? { role: body.role } : {}),
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
+  });
+  const ownedBotId = z.string().regex(/^bot_[a-z0-9-]{8,80}$/);
+  const ownedBotPatch = ownedBotBody.omit({ id: true });
+  app.patch<{ Params: { id: string } }>('/api/bots/:id', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const id = ownedBotId.parse(request.params.id);
+    const body = ownedBotPatch.parse(request.body);
+    const principal = principalOf(request);
+    const saved = await options.ownedBots.update(id, {
+      name: body.name, mark: body.mark, color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}),
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
+  });
+  app.delete<{ Params: { id: string } }>('/api/bots/:id', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const id = ownedBotId.parse(request.params.id);
+    const principal = principalOf(request);
+    const record = await options.ownedBots.recall(id);
+    if (!record || record.owner !== principal.id || record.tenantId !== principal.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const returned = record.retiredAt ? [] : await releaseHeldBotTasks({
+      botId: id, scope,
+      ...(options.conversationStore ? { conversations: options.conversationStore } : {}),
+      ...(options.domain ? { domain: options.domain } : {}),
+      ...(options.sessionEvents ? { sessionEvents: options.sessionEvents } : {}),
+      runs: options.repository,
+    });
+    if (!record.retiredAt && options.domain) await options.domain.releasePrincipalFromRooms(id, principal.id, principal.tenantId);
+    await options.ownedBots.remove(id, scope);
+    return { removed: true, id, ...(returned.length ? { returned } : {}) };
+  });
+  app.post('/api/bots/background', async request => {
+    if (!options.engine) throw new Conflict('模型尚未就绪');
+    const body = z.object({ role: z.string().trim().min(1).max(120) }).strict().parse(request.body);
+    const header = request.headers['idempotency-key'];
+    const key = typeof header === 'string' && /^[A-Za-z0-9._:-]{8,200}$/.test(header) ? header : `bot-background-${randomUUID()}`;
+    const principal = principalOf(request);
+    return options.engine.draftBotBackground(body.role, key, { owner: principal.id, tenantId: principal.tenantId });
+  });
   app.post('/api/agents/discover-url', async request => {
     if (!options.agentDirectory) throw new Conflict('Agent registry is not configured');
     const body = z.object({ url: z.string().url().max(2000) }).strict().parse(request.body);
@@ -782,7 +855,15 @@ export function buildApp(options: Options) {
   });
   app.get<{ Params: { id: string } }>('/api/rooms/:id/members', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    const principal = principalOf(request); return options.domain.listRoomMembers(request.params.id, principal.id, principal.tenantId);
+    const principal = principalOf(request);
+    const members = await options.domain.listRoomMembers(request.params.id, principal.id, principal.tenantId);
+    if (!options.ownedBots) return members;
+    return Promise.all(members.map(async member => {
+      if (!member.principalId.startsWith('bot_')) return member;
+      const bot = await options.ownedBots?.get(member.principalId);
+      if (!bot || bot.tenantId !== principal.tenantId) return member;
+      return { ...member, displayName: bot.name };
+    }));
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/members', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');

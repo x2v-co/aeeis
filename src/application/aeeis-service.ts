@@ -30,6 +30,7 @@ import { isAudienceAllowed, normalizeKnowledgeSearchResult, validateKnowledgeHit
 import { contextAudienceSnapshotSchema, createContextAudienceSnapshot, type ContextAudienceSnapshot } from '../context-audience.js';
 import { goalContextSourceHash } from '../context-manifest-binding.js';
 import { PrincipalDirectoryUnavailable, type PrincipalDirectory } from '../security/principal-directory.js';
+import type { OwnedBotStore } from '../owned-bots.js';
 
 export class AeeisNotFound extends Error {}
 export class AeeisConflict extends Error {}
@@ -49,7 +50,7 @@ export class AeeisService {
     if (!this.store.changeAudit) throw new Error('Memory change audit is not configured');
     return this.store.changeAudit;
   }
-  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory) {}
+  public constructor(private readonly store: AeeisStore, private readonly projectionTargets: ProjectionTarget[] = [], private readonly memberships?: RoomMembershipRepository, private readonly principalDirectory?: PrincipalDirectory, private readonly ownedBots?: Pick<OwnedBotStore, 'get' | 'recall'>) {}
 
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
@@ -168,6 +169,8 @@ export class AeeisService {
     if (inviterRole !== 'owner' && inviterRole !== 'editor') throw new RoomMembershipConflict('Room editor role required to manage members');
     if (principalId === (room.owner ?? 'owner')) throw new RoomMembershipConflict('Room owner is already a member');
     if (!['editor', 'viewer', 'agent'].includes(role)) throw new RoomMembershipConflict('Invalid room member role');
+    const remembered = await this.ownedBots?.recall(principalId);
+    if (remembered?.retiredAt) throw new RoomMembershipConflict('这个身份已经撤下。');
     if (this.principalDirectory) {
       let entry;
       try { entry = await this.principalDirectory.lookup(principalId, tenantId); }
@@ -175,8 +178,14 @@ export class AeeisService {
         if (error instanceof PrincipalDirectoryUnavailable) throw error;
         throw error;
       }
-      if (!entry || entry.principalId !== principalId || entry.tenantId !== tenantId) throw new RoomMembershipConflict('Target principal is not in this tenant');
-      if (entry.status !== 'active') throw new RoomMembershipConflict('Target principal is not active');
+      if (entry && entry.principalId === principalId && entry.tenantId === tenantId) {
+        if (entry.status !== 'active') throw new RoomMembershipConflict('Target principal is not active');
+      } else if (entry) {
+        throw new RoomMembershipConflict('Target principal is not in this tenant');
+      } else {
+        const bot = await this.ownedBots?.get(principalId);
+        if (!bot || bot.tenantId !== tenantId || bot.owner !== invitedBy) throw new RoomMembershipConflict('Target principal is not in this tenant');
+      }
     }
     return this.memberships.add(room.id, principalId, tenantId, role, invitedBy, now);
   }
@@ -194,6 +203,19 @@ export class AeeisService {
     const role = await this.roomRole(room, principalId, tenantId);
     if (!role || !['owner', 'editor', 'agent'].includes(role)) throw new RoomMembershipConflict('Room writer role required for Session events');
     return room;
+  }
+
+  async activeRoomIdsFor(principalId: string, tenantId: string): Promise<string[]> {
+    if (!this.memberships) return [];
+    return this.memberships.activeRoomIds(principalId, tenantId);
+  }
+
+  /** Drop this principal from every room in the tenant. Used when the owner
+   * retires a Bot, including rooms where that owner is no longer an editor. */
+  async releasePrincipalFromRooms(principalId: string, releasedBy: string, tenantId: string, now = new Date().toISOString()): Promise<void> {
+    if (!this.memberships) return;
+    const roomIds = await this.memberships.activeRoomIds(principalId, tenantId);
+    for (const roomId of roomIds) await this.memberships.revoke(roomId, principalId, tenantId, releasedBy, now);
   }
 
   async revokeRoomMember(roomId: Id, principalId: string, revokedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {

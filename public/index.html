@@ -110,8 +110,11 @@
 <small id="bot-count">
 </small>
 </div>
+<button id="gb-new-bot" type="button">新建</button>
 <button id="gb-new-bot-group" type="button">分组</button>
 </div>
+<p id="bot-local-note" class="muted" hidden></p>
+<button id="bot-local-claim" type="button" class="quiet-button" hidden>写入这个账号</button>
 <form id="bot-group-draft" hidden="">
 <input id="bot-group-name" maxlength="40" placeholder="分组名称">
 <button type="submit">创建</button>
@@ -218,6 +221,10 @@
 <section id="bot-note" hidden>
 <h3 id="bot-note-title">AEEIS</h3>
 <p id="bot-profile-role" class="muted"></p>
+<div id="bot-profile-actions" hidden>
+<button id="bot-profile-edit" type="button">修改</button>
+<button id="bot-profile-remove" type="button" class="quiet-button">移除</button>
+</div>
 <p id="bot-status" class="muted"></p>
 <p id="bot-profile-boundary" class="muted">边界：它不会自己回复，也不会执行。点名和交接只记成讨论。批准、登录和密钥留在和 AEEIS 的对话里。</p>
 <p id="bot-note-copy"></p>
@@ -298,7 +305,7 @@
 <option value="keep">保持焦点（临时提问 / 回复其他任务）</option>
 <option value="switch">切换到本条消息关联的任务</option>
 </select>
-<p id="conversation-send-note" class="muted">发送会交给 AEEIS 去做：先出计划，计划显示在对话里。“只记下来”只保存记录，不生成模型回答。选这个人，只是标明这句话是它说的；它不会自己回复，也不会启动执行。执行使用“更多设置”中的资料、工具和预算。Enter 发送，Shift+Enter 换行。</p>
+<p id="conversation-send-note" class="muted">发送先留在对话里。小任务直接做；抽出一份计划后再请你批准。选 YOLO 时，计划也直接做。“只记下来”只保存记录，不生成模型回答。选这个人，只是标明这句话是它说的；它不会自己回复，也不会启动执行。执行使用“更多设置”中的资料、工具和预算。Enter 发送，Shift+Enter 换行。</p>
 </details>
 <div class="quick-input-row">
 <label class="sr-only" for="life-speaker">说话人</label>
@@ -308,11 +315,11 @@
 <button id="conversation-send" type="submit">发送</button>
 </div>
 <div class="conversation-actions">
-<label class="sr-only" for="execution-review">执行审核</label>
+<label class="sr-only" for="execution-review">权限</label>
 <select id="execution-review" aria-describedby="conversation-execution-note">
 <option value="required">需要审批</option>
 <option value="auto" selected>自动</option>
-<option value="yolo">自动执行</option>
+<option value="yolo">YOLO</option>
 </select>
 <button id="conversation-note" type="button" class="quiet-button">只记下来</button>
 <p id="conversation-execution-note" class="muted"></p>
@@ -349,12 +356,14 @@
 </section>
 <section id="group-draft" hidden="">
 <h2>新建群聊</h2>
-<p>AEEIS 始终在场。再加入 1 到 5 位：已准入的外部 Agent，或一位成员。内部的规划、研究和复核不会变成单独的联系人。</p>
+<p>AEEIS 始终在场，并算在人数里。再加入其他人：已准入的外部 Agent，或一位成员。内部的规划、研究和复核不会变成单独的联系人。</p>
 <form id="group-create">
 <label for="group-title">名称</label>
 <input id="group-title" required="" maxlength="80" placeholder="例如：发布协作">
-<p id="group-count-live" class="muted">1 / 6 · AEEIS</p>
-<p id="group-proposal" class="muted">提议：AEEIS 担任 PM。优先复用名单里已有的人。一共 1 / 6。创建前确认这一组。</p>
+<label for="group-cap">最多人数</label>
+<input id="group-cap" type="number" min="2" max="30" step="1" value="10" inputmode="numeric" aria-describedby="group-count-live">
+<p id="group-count-live" class="muted">1 / 10 · AEEIS</p>
+<p id="group-proposal" class="muted">提议：AEEIS 担任 PM。优先复用名单里已有的人。一共 1 / 10。创建前确认这一组。</p>
 <button id="group-reuse" type="button">按名单复用</button>
 <label for="group-newcomer-reason">名单以外的人</label>
 <input id="group-newcomer-reason" maxlength="200" placeholder="为什么现有的人不够">
@@ -513,7 +522,7 @@
 <label class="sr-only" for="group-handoff">交给</label>
 <select id="group-handoff" aria-label="交给"><option value="">只留在会话里</option></select>
 <label class="sr-only" for="group-text">消息</label>
-<textarea id="group-text" rows="1" maxlength="7000" placeholder="用 @ 点名。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。"></textarea>
+<textarea id="group-text" rows="1" maxlength="7000" placeholder="写到这间群里。@AEEIS、没点名，入口都会收下。@群里的一个人是请他回应。@所有人仍记成一条。不执行，也不调用模型。"></textarea>
 <button type="submit">发到群里</button>
 </div>
 <div id="group-mentions" class="group-mentions" hidden></div>
@@ -1178,6 +1187,27 @@
 </div>
 </aside>
 </main>
+<div id="bot-create" class="bot-create" hidden>
+<form id="bot-create-form">
+<h2>新建 Bot</h2>
+<p>写下名字、样子和背景。也可以只给一个角色定位，生成背景后再保存。</p>
+<span id="bot-create-preview" class="roster-avatar bot-create-preview" data-mark="letter" aria-hidden="true">B</span>
+<label for="bot-create-name">名字</label>
+<input id="bot-create-name" maxlength="40" placeholder="给这位起个名字">
+<div id="bot-create-marks" class="bot-create-choices" role="radiogroup" aria-label="样子"></div>
+<div id="bot-create-colors" class="bot-create-choices" role="radiogroup" aria-label="颜色"></div>
+<label for="bot-create-background">背景</label>
+<textarea id="bot-create-background" maxlength="800" rows="4" placeholder="自己写：它是谁，负责什么"></textarea>
+<label for="bot-create-role">角色定位</label>
+<input id="bot-create-role" maxlength="120" placeholder="例如：把讨论收成可以核对的纪要">
+<p id="bot-create-status" role="status"></p>
+<div class="bot-create-actions">
+<button id="bot-create-generate" type="button">生成背景</button>
+<button id="bot-create-cancel" type="button">取消</button>
+<button id="bot-create-save" type="submit">保存</button>
+</div>
+</form>
+</div>
 <script type="module" src="/app.js">
 </script>
 </body>

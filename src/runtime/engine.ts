@@ -19,6 +19,7 @@ import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelP
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
 import { ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected } from './model.js';
+import { BotBackgroundError, composeBotBackground } from '../bot-background.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
@@ -902,6 +903,71 @@ export class AgentEngine {
     if (this.resolver?.health) return this.resolver.health();
     if (this.resolver) return { ready: true, detail: 'model catalog resolver configured; provider health probe not configured', checkedAt: now() };
     return { ready: false, detail: 'model configuration required', checkedAt: now() };
+  }
+  /** Draft a Bot background from a role. This call does not create a Run or save the Bot. A configured global budget reserves the call before the model runs and settles the reported usage afterward. */
+  async draftBotBackground(role: string, idempotencyKey: string, scope: Ownership = { owner: 'owner', tenantId: 'local' }): Promise<{ background: string }> {
+    const trimmed = role.trim();
+    if (!trimmed || trimmed.length > 120) throw new Conflict('先写下角色定位');
+    const resolution = this.defaultModel ? { adapter: this.defaultModel } : this.resolver ? await this.resolver.resolve({ capability: 'agent', privacy: 'internal' }) : undefined;
+    const adapter = resolution?.adapter;
+    if (!adapter) throw new Conflict('模型尚未就绪');
+    const selection = this.globalBudget?.select(scope, now());
+    const budgetKey = `aeeis:bot-background:${idempotencyKey}`;
+    if (selection && this.globalBudget) {
+      const priced = adapter.pin.usageAccounting === 'tokens-only' ? undefined : modelPrices(resolution && 'decision' in resolution ? resolution.decision : undefined);
+      if (selection.budget.moneyUsd !== undefined && priced === undefined) throw new Conflict('Selected model adapter cannot enforce global USD budgets');
+      let reservation: GlobalBudgetReservation;
+      try { reservation = await this.globalBudget.ledger.reserve(selection, budgetKey); }
+      catch (error) { throw new Conflict(error instanceof Error ? error.message : '全局预算没有留下这次生成'); }
+      if (!reservation.reserved && reservation.state !== 'reserved') {
+        const reason = reservation.state === 'unknown' ? '这次背景生成的花费还没核查'
+          : reservation.state === 'settled' ? '这次背景生成已经记过账'
+          : `Global model budget reservation was ${reservation.state}`;
+        throw new Conflict(reason);
+      }
+    }
+    const usageOf = (usage: ModelResponse['usage'] | undefined): GlobalBudgetUsage => {
+      if (!validModelUsage(usage)) return {};
+      const prices = adapter.pin.usageAccounting === 'tokens-only' || usage.details?.accounting === 'tokens-only' ? undefined : modelPrices(resolution && 'decision' in resolution ? resolution.decision : undefined);
+      const moneyUsd = prices ? (usage.inputTokens * prices.input + usage.outputTokens * prices.output) / 1_000_000 : undefined;
+      return { tokens: usage.inputTokens + usage.outputTokens, ...(moneyUsd === undefined ? {} : { moneyUsd }) };
+    };
+    const account = async (usage: ModelResponse['usage'] | undefined, outcome: 'settled' | 'unknown'): Promise<void> => {
+      if (!selection || !this.globalBudget) return;
+      if (outcome === 'unknown') { await this.globalBudget.ledger.markUnknown(selection.accountKey, budgetKey); return; }
+      const reported = usageOf(usage);
+      if (selection.budget.tokens !== undefined && reported.tokens === undefined) {
+        await this.globalBudget.ledger.markUnknown(selection.accountKey, budgetKey);
+        throw new Conflict('这次模型调用没有用量，背景没有留下');
+      }
+      if (selection.budget.moneyUsd !== undefined && reported.moneyUsd === undefined) {
+        await this.globalBudget.ledger.markUnknown(selection.accountKey, budgetKey);
+        throw new Conflict('这次模型调用没有美元用量，背景没有留下');
+      }
+      try { await this.globalBudget.ledger.settle(selection.accountKey, budgetKey, reported); }
+      catch (error) { throw new Conflict(error instanceof Error ? error.message : '全局预算没有记下这次生成'); }
+    };
+    try {
+      const drafted = await composeBotBackground(adapter, trimmed, idempotencyKey);
+      await account(drafted.usage, 'settled');
+      return { background: drafted.background };
+    } catch (error) {
+      if (error instanceof Conflict) throw error;
+      if (error instanceof ModelOutcomeUnknown) {
+        await account(undefined, 'unknown');
+        throw new Conflict('结果不明，背景没有留下');
+      }
+      if (error instanceof ModelResponseRejected) {
+        await account(error.usage, 'settled');
+        throw new Conflict('背景没有生成');
+      }
+      if (error instanceof BotBackgroundError) {
+        await account(error.usage, 'settled');
+        throw new Conflict(error.message);
+      }
+      await account(undefined, 'unknown');
+      throw error;
+    }
   }
   get agentGatewayConfigured(): boolean { return Boolean(this.agents); }
   /** A thread conveys no Goal or Room rights. Check the domain's live ACLs
