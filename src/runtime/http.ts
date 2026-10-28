@@ -771,8 +771,8 @@ export function buildApp(options: Options) {
     if (!record || record.owner !== principal.id || record.tenantId !== principal.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
     const scope = { owner: principal.id, tenantId: principal.tenantId };
     const returned = record.retiredAt ? [] : await releaseHeldBotTasks({
-      botId: id, scope,
-      ...(options.conversationStore ? { conversations: options.conversationStore } : {}),
+      botId: id, botName: record.name, scope,
+      ...(options.conversationStore && conversations ? { conversations: options.conversationStore, conversation: conversations } : {}),
       ...(options.domain ? { domain: options.domain } : {}),
       ...(options.sessionEvents ? { sessionEvents: options.sessionEvents } : {}),
       runs: options.repository,

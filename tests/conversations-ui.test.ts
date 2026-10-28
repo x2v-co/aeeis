@@ -2592,6 +2592,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/session-events')) return response({ items: events.get(roomId) ?? [] });
       if (url === '/api/conversations' && method === 'POST' && body?.agentId === 'demo.release') return response(release);
       if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
+      if (url === '/api/conversations/conv_aeeis' && method !== 'POST') return response({ id: 'conv_aeeis', title: 'AEEIS', revision: 1, agentId: 'aeeis', tasks: [{ id: 'task_entry', title: '交给入口的纪要', threadId: 'thread_entry', status: 'discussion', createdAt: date }], messages: [], hasEarlierMessages: false });
       if (url === '/api/conversations/conv_release/messages' && method === 'POST') {
         const created = body.newTask ? { id: `task_new_${release.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${release.tasks.length}`, status: 'discussion' } : undefined;
         if (created) release.tasks.push(created);
@@ -2626,10 +2627,13 @@ describe('entry bots and group chats', () => {
       { id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: date, runId: 'run_pause', latestRunId: 'run_pause' },
     );
     release.tasks.push({ id: 'task_back', title: '退回的纪要', threadId: 'thread_back', status: 'discussion', createdAt: date });
+    release.tasks.push({ id: 'task_up', title: '交给入口的纪要', threadId: 'thread_up', status: 'discussion', createdAt: date });
     events.set('room_phase', [
       ...['task_ready', 'task_done', 'task_run'].map(taskId => ({ id: `evt_${taskId}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `引用 ${taskId}`, evidenceRefs: ['conv_release', taskId, 'demo.release'], createdAt: date })),
       { id: 'evt_back', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给纪要', evidenceRefs: ['conv_release', 'task_back', 'demo.release'], createdAt: date },
       { id: 'evt_back_return', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '退回待领取：退回的纪要', evidenceRefs: ['conv_release', 'task_back'], createdAt: date },
+      { id: 'evt_up', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给入口', evidenceRefs: ['conv_release', 'task_up', 'demo.release'], createdAt: date },
+      { id: 'evt_up_hand', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '已交给AEEIS，记为讨论「交给入口的纪要」。原来的事还在。', evidenceRefs: ['conv_aeeis', 'task_entry', 'aeeis', 'conv_release', 'task_up'], createdAt: date },
     ]);
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_ready'));
@@ -2637,6 +2641,9 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
     expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('退回的纪要');
     expect(doc().querySelector('[data-column="capture"]')?.textContent).not.toContain('退回的纪要');
+    expect(doc().querySelector('[data-column="capture"] [data-board-task="task_entry"]')?.textContent).toContain('交给入口的纪要');
+    expect(doc().querySelector('[data-column="capture"] [data-board-task="task_entry"]')?.textContent).toContain('AEEIS');
+    expect(doc().querySelector('[data-board-task="task_up"]')).toBeNull();
     const postsBefore = h.posts.length;
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
     clickText('领取', el('channel-task-body'));

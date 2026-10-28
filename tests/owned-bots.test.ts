@@ -148,7 +148,7 @@ describe('owned bots', () => {
     } finally { await app.close(); await bots.close(); }
   });
 
-  it('returns an open task to the channel and keeps a running task in place', async () => {
+  it('writes open work onto AEEIS and keeps a running task in place', async () => {
     const bots = new InMemoryOwnedBotStore();
     const memberships = new InMemoryRoomMembershipRepository();
     const domain = new AeeisService(new InMemoryStore(), [], memberships, undefined, bots);
@@ -181,10 +181,22 @@ describe('owned bots', () => {
       expect(cited.statusCode).toBe(200);
       const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice', 'content-type': 'application/json' }, payload: '' });
       expect(removed.statusCode).toBe(200);
-      expect(removed.json().returned).toEqual([{ id: 'task_note', title: '整理纪要' }]);
+      const handed = removed.json().returned as Array<{ id: string; title: string; entryConversationId: string; entryTaskId: string }>;
+      expect(handed).toEqual([expect.objectContaining({ id: 'task_note', title: '整理纪要' })]);
+      expect(handed[0]?.entryConversationId).toMatch(/^conv_/);
+      expect(handed[0]?.entryTaskId).toMatch(/^task_/);
+      const entry = await conversations.get(handed[0]!.entryConversationId, scope);
+      expect(entry.agentId).toBe('aeeis');
+      expect(entry.tasks).toEqual([expect.objectContaining({ id: handed[0]!.entryTaskId, title: '整理纪要' })]);
       expect((await conversations.get(life.id, scope)).tasks).toEqual([expect.objectContaining({ id: 'task_note', title: '整理纪要' })]);
       const events = await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/session-events?limit=20`, headers: { authorization: 'Bearer alice' } });
-      expect(events.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'task_update', content: '退回待领取：整理纪要', evidenceRefs: [life.id, 'task_note'] })]));
+      const items = events.json().items as Array<{ type: string; content: string; evidenceRefs: string[] }>;
+      expect(items.some(item => item.content.startsWith('退回待领取'))).toBe(false);
+      expect(items).toEqual(expect.arrayContaining([expect.objectContaining({
+        type: 'system',
+        content: '已交给AEEIS，记为讨论「整理纪要」。原来的事还在。',
+        evidenceRefs: [handed[0]!.entryConversationId, handed[0]!.entryTaskId, 'aeeis', life.id, 'task_note'],
+      })]));
       const busy = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '阿忙' } });
       const busyId = busy.json().id as string;
       const running = runWithSignals();
@@ -207,7 +219,80 @@ describe('owned bots', () => {
       });
       const released = await app.inject({ method: 'DELETE', url: `/api/bots/${lostId}`, headers: { authorization: 'Bearer alice' } });
       expect(released.statusCode).toBe(200);
+      const lostHand = released.json().returned as Array<{ id: string; title: string; entryConversationId: string; entryTaskId: string }>;
+      expect(lostHand).toEqual([expect.objectContaining({ id: 'task_lost', title: '记录不在了', entryConversationId: handed[0]!.entryConversationId })]);
+      expect((await conversations.get(handed[0]!.entryConversationId, scope)).tasks.map(task => task.title)).toEqual(['整理纪要', '记录不在了']);
       expect(await bots.list(scope)).toEqual([expect.objectContaining({ id: busyId, name: '阿忙' })]);
+    } finally { await app.close(); await bots.close(); }
+  });
+
+  it('leaves a channel-cancelled task in place and still hands the others up', async () => {
+    const bots = new InMemoryOwnedBotStore();
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships, undefined, bots);
+    const conversations = new InMemoryConversationStore();
+    const sessionEvents = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const app = buildApp({
+      repository: new InMemoryRunRepository(), domain, ownedBots: bots, conversationStore: conversations, sessionEvents,
+      principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } },
+    });
+    const life = {
+      schemaVersion: 'conversation/1' as const,
+      id: 'conv_00000000-0000-4000-8000-0000000000dd',
+      owner: 'alice', tenantId: 'team-a', title: '阿停', revision: 1,
+      createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-28T00:00:00.000Z',
+      recentTaskIds: [] as string[], messages: [],
+      tasks: [
+        { id: 'task_open', threadId: 'thread_00000000-0000-4000-8000-0000000000d1', title: '还要做', createdAt: '2026-10-28T00:00:00.000Z' },
+        { id: 'task_stop', threadId: 'thread_00000000-0000-4000-8000-0000000000d2', title: '已经取消', createdAt: '2026-10-28T00:00:00.000Z' },
+        { id: 'task_back', threadId: 'thread_00000000-0000-4000-8000-0000000000d3', title: '撤回了取消', createdAt: '2026-10-28T00:00:00.000Z' },
+        { id: 'task_split', threadId: 'thread_00000000-0000-4000-8000-0000000000d4', title: '另一个房间还要', createdAt: '2026-10-28T00:00:00.000Z' },
+      ],
+    };
+    const headers = { authorization: 'Bearer alice' };
+    try {
+      const saved = (await app.inject({ method: 'POST', url: '/api/bots', headers, payload: { ...profile, name: '阿停' } })).json() as { id: string };
+      await conversations.create({ ...life, agentId: saved.id });
+      const roomFor = async (title: string) => {
+        const room = await app.inject({ method: 'POST', url: '/api/rooms', headers, payload: { title, description: '群聊' } });
+        const roomId = room.json().id as string;
+        expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers, payload: { principalId: saved.id, role: 'agent' } })).statusCode).toBe(200);
+        const goal = await app.inject({ method: 'POST', url: '/api/goals', headers, payload: { title, roomId } });
+        const manifest = await app.inject({ method: 'POST', url: `/api/goals/${goal.json().id}/context-manifests`, headers, payload: { purpose: '群聊消息', audienceMode: 'room' } });
+        return { roomId, goalId: goal.json().id as string, manifestId: manifest.json().id as string };
+      };
+      const first = await roomFor('一组');
+      const second = await roomFor('二组');
+      const cite = (room: { roomId: string; goalId: string; manifestId: string }, taskId: string, key: string) => app.inject({
+        method: 'POST', url: `/api/rooms/${room.roomId}/session-events`, headers,
+        payload: { goalId: room.goalId, type: 'system', content: '已交给阿停', contextManifestId: room.manifestId, evidenceRefs: [life.id, taskId, saved.id], idempotencyKey: key },
+      });
+      const update = (room: { roomId: string; goalId: string; manifestId: string }, taskId: string, content: string, key: string) => app.inject({
+        method: 'POST', url: `/api/rooms/${room.roomId}/session-events`, headers,
+        payload: { goalId: room.goalId, type: 'task_update', content, contextManifestId: room.manifestId, evidenceRefs: [life.id, taskId], idempotencyKey: key },
+      });
+      for (const taskId of ['task_open', 'task_stop', 'task_back', 'task_split']) expect((await cite(first, taskId, `cite-${taskId}`)).statusCode).toBe(200);
+      expect((await cite(second, 'task_split', 'cite-split-2')).statusCode).toBe(200);
+      expect((await update(first, 'task_stop', '取消：不做了', 'cancel-stop')).statusCode).toBe(200);
+      expect((await update(first, 'task_back', '取消：先停一下', 'cancel-back')).statusCode).toBe(200);
+      expect((await update(first, 'task_back', '撤回取消：还是要做', 'restore-back')).statusCode).toBe(200);
+      expect((await update(first, 'task_split', '取消：这一组不做', 'cancel-split')).statusCode).toBe(200);
+      const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { ...headers, 'content-type': 'application/json' }, payload: '' });
+      expect(removed.statusCode).toBe(200);
+      const returned = removed.json().returned as Array<{ id: string; title: string; entryConversationId: string }>;
+      expect(returned.map(item => item.title)).toEqual(['还要做', '撤回了取消', '另一个房间还要']);
+      const entryId = returned[0]!.entryConversationId;
+      expect((await conversations.get(entryId, scope)).tasks.map(task => task.title)).toEqual(['还要做', '撤回了取消', '另一个房间还要']);
+      expect((await conversations.get(life.id, scope)).tasks.map(task => task.id).sort()).toEqual(['task_back', 'task_open', 'task_split', 'task_stop']);
+      const roomItems = async (roomId: string) => (await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/session-events?limit=20`, headers })).json().items as Array<{ content: string }>;
+      const firstItems = await roomItems(first.roomId);
+      const secondItems = await roomItems(second.roomId);
+      expect(firstItems.map(item => item.content)).toEqual(expect.arrayContaining([
+        '已交给AEEIS，记为讨论「还要做」。原来的事还在。',
+        '已交给AEEIS，记为讨论「撤回了取消」。原来的事还在。',
+      ]));
+      expect(firstItems.some(item => item.content.includes('已经取消') || item.content.includes('另一个房间还要'))).toBe(false);
+      expect(secondItems.map(item => item.content)).toContain('已交给AEEIS，记为讨论「另一个房间还要」。原来的事还在。');
     } finally { await app.close(); await bots.close(); }
   });
 });
