@@ -133,7 +133,11 @@ describe('durable collaboration service', () => {
     const service = new CollaborationService(repository);
     const created = await service.createDebate({ taskId: 'task.rounds', contextVersion: 'ctx.rounds', participantAgentIds: ['agent.one'], maxRounds: 20, maxMessagesPerAgent: 1 });
     expect(created.room.maxRounds).toBe(20);
+    const full = await service.createDebate({ taskId: 'task.rounds.full', contextVersion: 'ctx.rounds.full', participantAgentIds: Array.from({ length: 12 }, (_, index) => `agent.r${index}`), maxRounds: 20, maxMessagesPerAgent: 20, maxTotalMessages: 240 });
+    expect(full.room.maxMessagesPerAgent).toBe(20);
+    expect(full.room.maxTotalMessages).toBe(240);
     await expect(service.createDebate({ taskId: 'task.rounds.over', contextVersion: 'ctx.rounds.over', participantAgentIds: ['agent.one'], maxRounds: 21, maxMessagesPerAgent: 1 })).rejects.toThrow();
+    await expect(service.createDebate({ taskId: 'task.rounds.messages', contextVersion: 'ctx.rounds.messages', participantAgentIds: ['agent.one'], maxRounds: 20, maxMessagesPerAgent: 20, maxTotalMessages: 1001 })).rejects.toThrow();
     await repository.close();
   });
 
