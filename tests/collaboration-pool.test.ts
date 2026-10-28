@@ -88,6 +88,23 @@ describe('internal competition model pool', () => {
     expect(finished.status).toBe('closed'); expect(finished.room.messages).toHaveLength(2); expect(finished.closeReason).toContain('decision');
   });
 
+  it('keeps an uncapped debate going until the message bound', async () => {
+    let record: any = { id: 'debate.open', status: 'active', room: { debateId: 'debate.open', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one'], maxTotalMessages: 3, messages: [] } };
+    let calls = 0;
+    const service = {
+      getDebate: async () => record,
+      appendMessage: async (_id: string, message: any) => { record = { ...record, room: { ...record.room, messages: [...record.room.messages, message] } }; return record; },
+      closeDebate: async (_id: string, reason: string) => { record = { ...record, status: 'closed', closeReason: reason }; return record; },
+    };
+    const runner = new ModelPoolDebateOrchestrator(service, new Map([
+      ['agent.one', { pin, complete: async () => { calls += 1; return { value: { type: 'position', content: 'Still talking', claimRefs: [] } }; } } as ModelAdapter],
+    ]));
+    const finished = await runner.run('debate.open');
+    expect(calls).toBe(3);
+    expect(finished.room.messages).toHaveLength(3);
+    expect(finished.closeReason).toContain('message bound');
+  });
+
   it('resumes a persisted debate round without duplicating messages after restart', async () => {
     let record: any = { id: 'debate.resume', status: 'active', room: { debateId: 'debate.resume', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 2, maxMessagesPerAgent: 2, messages: [{ schemaVersion: 'debate-message/1', messageId: 'message.existing', debateId: 'debate.resume', round: 1, speakerAgentId: 'agent.one', type: 'position', content: 'Already persisted', claimRefs: [], contextVersion: 'ctx.pool' }] } };
     const calls: string[] = [];

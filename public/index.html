@@ -1107,7 +1107,7 @@
 <h3>Debate</h3>
 <form id="new-debate">
 <label for="debate-brief">Debate Brief（JSON）</label>
-<textarea id="debate-brief" rows="8" placeholder="{&quot;taskId&quot;:&quot;task.release&quot;,&quot;contextVersion&quot;:&quot;ctx.1&quot;,&quot;goal&quot;:&quot;讨论发布方案&quot;,&quot;participantAgentIds&quot;:[&quot;agent.one&quot;,&quot;agent.two&quot;],&quot;maxRounds&quot;:2,&quot;maxMessagesPerAgent&quot;:2}">
+<textarea id="debate-brief" rows="8" placeholder="{&quot;taskId&quot;:&quot;task.release&quot;,&quot;contextVersion&quot;:&quot;ctx.1&quot;,&quot;goal&quot;:&quot;讨论发布方案&quot;,&quot;participantAgentIds&quot;:[&quot;agent.one&quot;,&quot;agent.two&quot;]}">
 </textarea>
 <button>创建 Debate</button>
 </form>
@@ -1121,7 +1121,7 @@
 <h3>Trigger Policy</h3>
 <form id="new-trigger-policy">
 <label for="trigger-policy">Trigger Policy（JSON）</label>
-<textarea id="trigger-policy" rows="8" placeholder="{&quot;id&quot;:&quot;policy.review&quot;,&quot;name&quot;:&quot;低置信度复核&quot;,&quot;eventTypes&quot;:[&quot;review.completed&quot;],&quot;action&quot;:{&quot;type&quot;:&quot;debate&quot;,&quot;participantAgentIds&quot;:[&quot;agent.one&quot;],&quot;maxRounds&quot;:2,&quot;maxMessagesPerAgent&quot;:2,&quot;dispatch&quot;:&quot;create&quot;}}">
+<textarea id="trigger-policy" rows="8" placeholder="{&quot;id&quot;:&quot;policy.review&quot;,&quot;name&quot;:&quot;低置信度复核&quot;,&quot;eventTypes&quot;:[&quot;review.completed&quot;],&quot;action&quot;:{&quot;type&quot;:&quot;debate&quot;,&quot;participantAgentIds&quot;:[&quot;agent.one&quot;],&quot;dispatch&quot;:&quot;create&quot;}}">
 </textarea>
 <button>保存 Trigger Policy</button>
 </form>

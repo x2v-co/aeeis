@@ -24,11 +24,14 @@ describe('durable collaboration triggers', () => {
       const collaboration = new CollaborationService(collaborationRepository);
       const triggers = new CollaborationTriggerService(triggerStore, collaboration);
       const policy = await triggers.createPolicy({ id: 'policy.default.rounds', name: 'Default rounds', enabled: true, eventTypes: ['review.completed'], action: { type: 'debate', participantAgentIds: ['agent.one', 'agent.two'] } }, scope);
-      expect(policy.action).toMatchObject({ maxRounds: 20, maxMessagesPerAgent: 20 });
+      expect(policy.action.type).toBe('debate');
+      if (policy.action.type !== 'debate') throw new Error('expected debate');
+      expect(policy.action.maxRounds).toBeUndefined();
+      expect(policy.action.maxMessagesPerAgent).toBeUndefined();
       await triggers.evaluate({ ...event, eventId: 'review:default:rounds' }, scope);
       const [debate] = await collaboration.listDebates(scope);
-      expect(debate!.room.maxRounds).toBe(20);
-      expect(debate!.room.maxMessagesPerAgent).toBe(20);
+      expect(debate!.room.maxRounds).toBeUndefined();
+      expect(debate!.room.maxMessagesPerAgent).toBeUndefined();
     } finally { await triggerStore.close(); await collaborationRepository.close(); }
   });
 
