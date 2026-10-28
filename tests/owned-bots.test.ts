@@ -17,8 +17,10 @@ describe('owned bots', () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-owned-bots-'));
     const first = new JsonOwnedBotStore(join(directory, 'owned-bots.json'));
     await first.init();
+    let savedId = '';
     try {
       const saved = await first.create(profile, scope, '2026-10-27T00:00:00.000Z');
+      savedId = saved.id;
       expect(saved.id).toMatch(/^bot_[a-z0-9-]{8,80}$/);
       const again = await first.create({ ...profile, id: saved.id, name: '改名' }, scope, '2026-10-27T00:00:01.000Z');
       expect(again).toMatchObject({ id: saved.id, name: '阿核' });
@@ -27,11 +29,17 @@ describe('owned bots', () => {
       await expect(first.create({ ...profile, id: saved.id }, { owner: 'bob', tenantId: 'team-a' })).rejects.toThrow('另一个账号');
       expect(await first.list({ owner: 'bob', tenantId: 'team-a' })).toEqual([]);
       expect(await first.list(scope)).toHaveLength(1);
+      await first.remove(saved.id, scope, '2026-10-28T00:00:00.000Z');
+      expect(await first.list(scope)).toEqual([]);
+      await expect(first.create({ ...profile, id: saved.id, name: '换了个人' }, scope)).rejects.toThrow('已经撤下');
     } finally { await first.close(); }
 
     const second = new JsonOwnedBotStore(join(directory, 'owned-bots.json'));
     await second.init();
-    try { expect(await second.list(scope)).toHaveLength(1); }
+    try {
+      expect(await second.list(scope)).toEqual([]);
+      await expect(second.create({ ...profile, id: savedId, name: '换了个人' }, { owner: 'bob', tenantId: 'team-a' })).rejects.toThrow('已经撤下');
+    }
     finally { await second.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -41,6 +49,11 @@ describe('owned bots', () => {
       await bots.create({ ...profile, name: `人${index}` }, scope, '2026-10-27T00:00:00.000Z');
     }
     await expect(bots.create({ ...profile, name: '再一位' }, scope)).rejects.toThrow('最多留下 30');
+    expect(await bots.list(scope)).toHaveLength(OWNED_BOT_CAP);
+    const [first] = await bots.list(scope);
+    await bots.remove(first!.id, scope, '2026-10-28T00:00:00.000Z');
+    await expect(bots.create({ ...profile, id: first!.id, name: '原号' }, scope)).rejects.toThrow('已经撤下');
+    await expect(bots.create({ ...profile, name: '再一位' }, scope)).resolves.toMatchObject({ name: '再一位' });
     expect(await bots.list(scope)).toHaveLength(OWNED_BOT_CAP);
   });
 
@@ -102,12 +115,28 @@ describe('owned bots', () => {
       const roomId = room.json().id as string;
       expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer alice' }, payload: { principalId: 'bob', role: 'editor' } })).statusCode).toBe(200);
       expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer alice' }, payload: { principalId: saved.id, role: 'agent' } })).statusCode).toBe(200);
+      const second = await app.inject({ method: 'POST', url: '/api/rooms', headers: { authorization: 'Bearer alice' }, payload: { title: '二组', description: '群聊' } });
+      expect(second.statusCode).toBe(200);
+      const roomId2 = second.json().id as string;
+      expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId2}/members`, headers: { authorization: 'Bearer alice' }, payload: { principalId: saved.id, role: 'agent' } })).statusCode).toBe(200);
       const members = await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/members`, headers: { authorization: 'Bearer bob' } });
       expect(members.statusCode).toBe(200);
       expect(members.json()).toEqual(expect.arrayContaining([expect.objectContaining({ principalId: saved.id, displayName: '阿核二' })]));
-      const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice' } });
+      const removed = await app.inject({ method: 'DELETE', url: `/api/bots/${saved.id}`, headers: { authorization: 'Bearer alice', 'content-type': 'application/json' }, payload: '' });
       expect(removed.statusCode).toBe(200);
+      for (const id of [roomId, roomId2]) {
+        const after = await app.inject({ method: 'GET', url: `/api/rooms/${id}/members`, headers: { authorization: 'Bearer alice' } });
+        const botMember = (after.json() as Array<{ principalId: string; status: string; displayName?: string }>).find(member => member.principalId === saved.id);
+        expect(botMember).toMatchObject({ status: 'revoked' });
+        expect(botMember?.displayName).toBeUndefined();
+      }
       expect(await bots.list(scope)).toEqual([]);
+      const reused = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, id: saved.id, name: '换了个人' } });
+      expect(reused.statusCode).toBe(409);
+      expect(reused.json().error).toContain('已经撤下');
+      const stolen = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer bob' }, payload: { ...profile, id: saved.id, name: '换了个人' } });
+      expect(stolen.statusCode).toBe(409);
+      expect(stolen.json().error).toContain('已经撤下');
       const again = await app.inject({ method: 'POST', url: '/api/bots', headers: { authorization: 'Bearer alice' }, payload: { ...profile, name: '新人' } });
       expect(again.statusCode).toBe(200);
     } finally { await app.close(); await bots.close(); }

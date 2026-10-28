@@ -203,6 +203,14 @@ export class AeeisService {
     return room;
   }
 
+  /** Drop this principal from every room in the tenant. Used when the owner
+   * retires a Bot, including rooms where that owner is no longer an editor. */
+  async releasePrincipalFromRooms(principalId: string, releasedBy: string, tenantId: string, now = new Date().toISOString()): Promise<void> {
+    if (!this.memberships) return;
+    const roomIds = await this.memberships.activeRoomIds(principalId, tenantId);
+    for (const roomId of roomIds) await this.memberships.revoke(roomId, principalId, tenantId, releasedBy, now);
+  }
+
   async revokeRoomMember(roomId: Id, principalId: string, revokedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
     if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
     const room = await this.getRoomForPrincipal(roomId, revokedBy, tenantId);

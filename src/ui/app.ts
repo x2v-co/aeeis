@@ -1027,7 +1027,7 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
   const response = await fetch(`/api${path}`, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+    headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const raw = await response.text();
@@ -4524,13 +4524,7 @@ function openBotEdit(bot: RosterBot): void {
 async function removeOwnedBot(id: string): Promise<void> {
   const bot = ownedBotRecords.find(item => item.id === id);
   if (!bot) return;
-  if (!window.confirm(`移除${bot.name}。这个账号的名额会空出来。`)) return;
-  for (const room of roomSummaries) {
-    try {
-      const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`);
-      if (members.some(member => member.principalId === id && member.status === 'active')) await api(`/rooms/${encodeURIComponent(room.id)}/members/${encodeURIComponent(id)}`, undefined, 'DELETE');
-    } catch { /* 这间房不由这个账号管理时，成员记录留在原处。 */ }
-  }
+  if (!window.confirm(`移除${bot.name}。这位会从房间里撤下，名额空出来。这个编号留下。`)) return;
   await api(`/bots/${encodeURIComponent(id)}`, undefined, 'DELETE');
   ownedBotRecords = ownedBotRecords.filter(item => item.id !== id);
   if (selectedBotId === id) { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }

@@ -198,6 +198,8 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url.startsWith('/api/bots/') && url !== '/api/bots/background') {
       const id = decodeURIComponent(url.slice('/api/bots/'.length));
       if (request?.method === 'DELETE') {
+        const type = request.headers?.['content-type'];
+        if (typeof type === 'string' && type.includes('application/json') && (request.body === undefined || request.body === '')) return response({ error: 'Invalid HTTP request' }, 400);
         const index = ownedBots.findIndex(bot => bot.id === id);
         if (index >= 0) ownedBots.splice(index, 1);
         return response({ removed: true, id });
@@ -1153,6 +1155,8 @@ describe('entry bots and group chats', () => {
     dom.window.confirm = () => true;
     el('bot-profile-remove').click();
     await vi.waitFor(() => expect(el('bots').textContent).not.toContain('阿核'));
+    const deletion = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/') && call[1]?.method === 'DELETE');
+    expect(deletion?.[1].headers['content-type']).toBeUndefined();
   });
 
   it('writes a browser Bot onto this account when asked, and stops after the server refuses', async () => {

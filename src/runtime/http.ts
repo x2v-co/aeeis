@@ -9,6 +9,7 @@ import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-materi
 import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
+import secureJsonParse from 'secure-json-parse';
 import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -154,6 +155,14 @@ export function buildApp(options: Options) {
   const httpMetrics: HttpMetrics = { inFlight: 0, routes: new Map() };
   // One 256 KiB base64 PDF plus the existing text material allowance.
   const app = Fastify({ bodyLimit: 1_500_000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
+  // An empty DELETE still carries application/json from older clients. Fastify
+  // rejects that before the route runs. Keep the secure parser and accept no body.
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
+    if (body.length === 0) { done(null, undefined); return; }
+    try { done(null, secureJsonParse(body, { protoAction: 'error', constructorAction: 'error' })); }
+    catch { const error = new Error("Body is not valid JSON but content-type is set to 'application/json'") as Error & { statusCode: number }; error.statusCode = 400; done(error, undefined); }
+  });
   const maxSseConnections = options.maxSseConnections ?? 100;
   if (!Number.isSafeInteger(maxSseConnections) || maxSseConnections < 1) throw new Error('maxSseConnections must be a positive integer');
   let activeSseConnections = 0;
@@ -757,6 +766,9 @@ export function buildApp(options: Options) {
     if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
     const id = ownedBotId.parse(request.params.id);
     const principal = principalOf(request);
+    const record = await options.ownedBots.recall(id);
+    if (!record || record.owner !== principal.id || record.tenantId !== principal.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+    if (!record.retiredAt && options.domain) await options.domain.releasePrincipalFromRooms(id, principal.id, principal.tenantId);
     await options.ownedBots.remove(id, { owner: principal.id, tenantId: principal.tenantId });
     return { removed: true, id };
   });
