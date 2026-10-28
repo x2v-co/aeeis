@@ -390,7 +390,7 @@ export class ConversationService {
   }
   async list(scope: Ownership) {
     const conversations = await this.store.list(scope);
-    return Promise.all(conversations.map(async ({ id, title, revision, updatedAt, focusTaskId, tasks, agentId }) => {
+    return Promise.all(conversations.map(async ({ id, title, revision, updatedAt, focusTaskId, tasks, agentId, standingInstruction }) => {
       const items = await Promise.all(tasks.map(async task => {
         if (!task.latestRunId) return { id: task.id, title: task.title, status: task.pendingMessageId ? 'preparing' : 'discussion' };
         try {
@@ -401,7 +401,7 @@ export class ConversationService {
           return { id: task.id, title: task.title, status: 'unreadable' };
         }
       }));
-      return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}) };
+      return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}), ...(standingInstruction ? { hasStandingInstruction: true } : {}) };
     }));
   }
   async get(id: string, scope: Ownership, actor?: Principal) { return this.view(await this.store.get(id, scope), scope, actor); }
