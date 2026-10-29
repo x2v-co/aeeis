@@ -98,6 +98,11 @@ for monitoring configuration checks, or `AEEIS_VERIFY_FULL_LOCAL=1` for the
 complete local protocol smoke. Pull requests and pushes to `main` run the
 default and PostgreSQL gates in GitHub Actions.
 
+On deploy hosts, run `npm run test:deploy` instead of `npx vitest run`; it runs the Temporal workflow file separately after the rest of the suite.
+`AEEIS_TEST_MAX_WORKERS` overrides the worker count (default: available CPUs minus one, minimum one).
+`AEEIS_TEST_TEMPORAL_SETUP_TIMEOUT_MS` sets the setup/teardown hook timeout (default: 300000ms).
+`AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR` selects a test-server cache directory; mount it persistently to reuse downloads across fresh containers.
+
 如果只想在本机快速查看完整的控制面，可以用一条命令启动 Fixture Model 和 AEEIS；它会把演示数据写入独立的 `data/demo-local`，不会覆盖默认的 `data/runs`：
 
 ```bash

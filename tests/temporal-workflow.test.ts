@@ -3,6 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker, bundleWorkflowCode } from '@temporalio/worker';
 import { notifyTemporalRunWorkflow } from '../src/runtime/dispatcher.js';
+import { parseTemporalSetupTimeoutMs } from './support/temporal-timeouts.js';
+
+const setupTimeoutMs = parseTemporalSetupTimeoutMs(process.env.AEEIS_TEST_TEMPORAL_SETUP_TIMEOUT_MS);
 
 const workflowBundle = await bundleWorkflowCode({
   workflowsPath: fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url)),
@@ -25,7 +28,12 @@ describe('AEEIS Temporal workflow', () => {
   const taskQueue = `aeeis-workflow-test-${process.pid}`;
 
   beforeAll(async () => {
-    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const downloadDir = process.env.AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR;
+    environment = downloadDir
+      ? await TestWorkflowEnvironment.createTimeSkipping({
+        server: { executable: { type: 'cached-download', downloadDir } },
+      })
+      : await TestWorkflowEnvironment.createTimeSkipping();
     worker = await Worker.create({
       connection: environment.nativeConnection,
       namespace: environment.namespace,
@@ -37,13 +45,13 @@ describe('AEEIS Temporal workflow', () => {
       },
     });
     workerRun = worker.run();
-  }, 120_000);
+  }, setupTimeoutMs);
 
   afterAll(async () => {
     await worker?.shutdown();
     await workerRun;
     await environment?.teardown();
-  }, 120_000);
+  }, setupTimeoutMs);
 
   it('finishes when the activity reports a terminal status', async () => {
     await expect(environment.client.workflow.execute('agentRunWorkflow', {
