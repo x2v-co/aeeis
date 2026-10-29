@@ -4,6 +4,9 @@ import { build } from 'esbuild';
 import { readFile } from 'node:fs/promises';
 import { projectChannelBoard, taskActionLine, type BoardConversationView } from '../src/channel-task-action.js';
 
+// slow on 2-core sg deploy host (5990ms observed at 0f59391).
+vi.setConfig({ testTimeout: 15000 });
+
 let source: string, html: string, css: string;
 let dom: JSDOM;
 beforeAll(async () => {
