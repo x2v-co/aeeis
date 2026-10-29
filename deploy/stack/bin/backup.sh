@@ -21,8 +21,10 @@ verify_images
 backup_dir="${AEEIS_BACKUP_DIR:-$STACK_DIR/backups}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$backup_dir"; chmod 700 "$backup_dir"
+run_args=(--rm --no-deps)
+if dc_run_supports_pull; then run_args+=(--pull never); fi
 # --no-deps prevents Compose from starting/recreating any running service.
-BACKUP_STAMP="$stamp" dc --profile ops run --rm --no-deps --pull never -T --user "$(id -u):$(id -g)" -e BACKUP_STAMP backup
+BACKUP_STAMP="$stamp" dc --profile ops run "${run_args[@]}" -T --user "$(id -u):$(id -g)" -e BACKUP_STAMP backup
 dest="$backup_dir/$stamp"
 for f in aeeis.dump temporal.dump temporal_visibility.dump SHA256SUMS; do test -s "$dest/$f"; done
 (cd "$dest" && sha256sum -c --quiet SHA256SUMS)

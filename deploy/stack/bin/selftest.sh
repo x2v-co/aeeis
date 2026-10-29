@@ -62,7 +62,12 @@ refs = [prefix + x for x in [os.getenv('AEEIS_IMAGE','aeeis:test'), 'alpine:3.20
 mode = os.getenv('FAKE_MODE', '')
 if args[0] == 'compose':
     assert '-p' in args and args[args.index('-p')+1] == os.getenv('AEEIS_STACK', 'aeeis-cn-prod'), args
-    if 'config' in args:
+    if 'run' in args and '--help' in args:
+        support = os.getenv('FAKE_COMPOSE_RUN_PULL', '1')
+        print('Usage: docker compose run [OPTIONS] SERVICE [COMMAND] [ARGS...]')
+        if support != '0': print('      --pull string    Pull image before running')
+        sys.exit(42 if support == 'help-fail' else 0)
+    elif 'config' in args:
         if '--images' in args:
             assert '--profile' in args and '*' in args, args
             print('\n'.join(refs + [refs[2]]))
@@ -88,7 +93,11 @@ if args[0] == 'compose':
     elif 'deployment' in args and 'describe' in args:
         print(json.dumps({'currentVersion': {'buildId': os.environ['AEEIS_BUILD_ID']}}))
     elif 'run' in args and args[-1] == 'backup':
-        assert '--no-deps' in args and '--pull' in args and 'never' in args, args
+        assert '--no-deps' in args, args
+        if os.getenv('FAKE_COMPOSE_RUN_PULL', '1') == '1':
+            assert '--pull' in args and args[args.index('--pull') + 1] == 'never', args
+        else:
+            assert '--pull' not in args, args
         if mode == 'backup-run-fail': sys.exit(42)
         env = dict(os.environ, AEEIS_BACKUP_ROOT=os.environ['AEEIS_BACKUP_DIR'],
                    AEEIS_POSTGRES_PASSWORD='test-aeeis', TEMPORAL_POSTGRES_PASSWORD='test-temporal',
@@ -148,7 +157,7 @@ export PATH="$test_dir/bin:$PATH"
 reset_fake() {
   : > "$FAKE_LOG"; : > "$FAKE_IMAGES"
   : > "$FAKE_RELEASE_LOG"
-  unset FAKE_MODE FAKE_VOLUME_OWNER FAKE_LEGACY FAKE_TARGET_CONTAINER FAKE_REVISION FAKE_IMAGE_ENV_COMMIT AEEIS_IMAGE_REGISTRY AEEIS_LEGACY_STACK
+  unset FAKE_MODE FAKE_VOLUME_OWNER FAKE_LEGACY FAKE_TARGET_CONTAINER FAKE_REVISION FAKE_IMAGE_ENV_COMMIT FAKE_COMPOSE_RUN_PULL AEEIS_IMAGE_REGISTRY AEEIS_LEGACY_STACK
 }
 expect_failure() {
   if "$@" > "$test_dir/output" 2>&1; then echo "unexpected success: $*" >&2; exit 1; fi
@@ -465,6 +474,7 @@ PY
 reset_backup
 # A legacy quiesce setting must not cause an outage.
 export AEEIS_BACKUP_QUIESCE=full AEEIS_BACKUP_KEEP_DAYS=14
+export FAKE_COMPOSE_RUN_PULL=1
 "$STACK_DIR/bin/backup.sh" > "$test_dir/output" 2>&1
 no_service_changes
 python3 - <<'PY'
@@ -478,7 +488,25 @@ assert {p.name for p in backups[0].iterdir()} == {'aeeis.dump','temporal.dump','
 calls = list(map(json.loads, open(os.environ['FAKE_PG_LOG'])))
 assert [a[a.index('-d')+1] for a in calls if a[0]=='pg_dump'] == ['aeeis','temporal','temporal_visibility'], calls
 assert sum(a[0]=='pg_restore' for a in calls) == 3, calls
+docker_calls = list(map(json.loads, open(os.environ['FAKE_LOG'])))
+assert any(a[0] == 'compose' and a[-2:] == ['run', '--help'] for a in docker_calls), docker_calls
+runs = [a for a in docker_calls if a[0] == 'compose' and 'run' in a and a[-1] == 'backup']
+assert len(runs) == 1 and runs[0][runs[0].index('--pull') + 1] == 'never', runs
 PY
+# Older Compose, or a failed help probe, must still complete the backup.
+for support in 0 help-fail; do
+  reset_backup
+  export FAKE_COMPOSE_RUN_PULL="$support"
+  "$STACK_DIR/bin/backup.sh" > "$test_dir/output" 2>&1
+  no_service_changes
+  python3 - <<'PY'
+import json,os
+calls = list(map(json.loads, open(os.environ['FAKE_LOG'])))
+assert any(a[0] == 'compose' and a[-2:] == ['run', '--help'] for a in calls), calls
+runs = [a for a in calls if a[0] == 'compose' and 'run' in a and a[-1] == 'backup']
+assert len(runs) == 1 and '--pull' not in runs[0], runs
+PY
+done
 # No partial final directory or temp files; failures must not prune old backups.
 for mode in backup-run-fail dump-fail restore-fail; do
   reset_backup

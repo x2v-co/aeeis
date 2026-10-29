@@ -376,6 +376,8 @@ AEEIS_ENV_FILE="$STACK_ENV" "$NEW_REPO/deploy/stack/bin/images.sh" verify
 new_dc stop temporal
 # Run the target image's schema tools BEFORE starting that server. The password
 # is read from the container environment, never interpolated into host argv.
+# Older Compose (e.g. 2.30.x) lacks run --pull; omit --pull never in that case.
+# Images have already been pre-pulled and verified above.
 new_dc run --rm -T --no-deps --pull never --entrypoint sh temporal -ec '
   export SQL_PASSWORD="$POSTGRES_PWD"
   temporal-sql-tool --plugin postgres12 --ep temporal-postgres -p 5432 \
@@ -460,8 +462,9 @@ volumes or migration failures without copying secrets into incident channels.
 
 Complete **one real run end to end** with a small approved, non-sensitive input:
 create via the existing workbench or authenticated `POST /api/runs` (body contains
-`goal` and `materials`), inspect its generated plan, approve its exact `approval.planHash`
-with `POST /api/runs/:id/approve`, then observe `GET /api/runs/:id` until
+`goal` and `materials`), inspect its latest generated plan, approve its exact
+`version` and `hash` as `{ planVersion, planHash }` with `POST /api/runs/:id/approve`,
+then observe `GET /api/runs/:id` until
 `status=succeeded`, review `verdict=accepted`, and inspect a real artifact.
 Each material must contain `title`, `content`, and `source`. For example:
 
@@ -476,16 +479,23 @@ Each material must contain `title`, `content`, and `source`. For example:
 }
 ```
 
-Read `approval.planHash` from `GET /api/runs/:id` once `status=needs_approval`
-and submit that exact value in the approval request (the request field is still
-`planHash`):
+Read the latest plan, `run.plans.at(-1)`, from `GET /api/runs/:id` once
+`status=needs_approval`. Submit its `version` as `planVersion` (a required positive
+integer, not a string) and its `hash` as `planHash` (a required non-empty string).
+The approval record's `planVersion` is optional, so use the latest plan for both
+values. A stale plan version returns HTTP `409`; fetch and inspect the latest
+plan before approving again.
 
 ```javascript
 const run = await (await fetch(`${base}/api/runs/${runId}`, { headers })).json();
-if (run.status !== 'needs_approval' || !run.approval?.planHash) throw new Error('Run is not ready for approval');
+const plan = run.plans?.at(-1);
+if (run.status !== 'needs_approval' || !Number.isInteger(plan?.version) || plan.version <= 0 ||
+    typeof plan.hash !== 'string' || !plan.hash || run.approval?.planHash !== plan.hash) {
+  throw new Error('Run is not ready for plan approval');
+}
 const response = await fetch(`${base}/api/runs/${runId}/approve`, {
   method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
-  body: JSON.stringify({ planHash: run.approval.planHash }),
+  body: JSON.stringify({ planVersion: plan.version, planHash: plan.hash }),
 });
 if (!response.ok) throw new Error(`Approval failed: HTTP ${response.status}`);
 ```
