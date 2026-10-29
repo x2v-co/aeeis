@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { digestProtocol } from '../src/protocol.js';
 import { createContextAudienceSnapshot } from '../src/context-audience.js';
 import { PostgresSessionEventRepository, type SessionEventDraft } from '../src/session-events.js';
+import { AeeisConflict } from '../src/application/aeeis-service.js';
 import { isolatedPostgres } from './support/postgres.js';
 
 const databaseUrl = process.env.AEEIS_TEST_DATABASE_URL;
@@ -43,5 +44,26 @@ describe('Postgres Shared Session event repository', () => {
     if (winner.status !== 'fulfilled') throw new Error('Expected a winning revision');
     await expect(first.appendLinear(makeRevision(winner.value.idempotencyKey, winner.value.content), original.id, 1)).resolves.toEqual(winner.value);
     await first.close(); await db.close();
+  });
+
+  it.skipIf(!databaseUrl)('lets only one of two concurrent claims through the task-action guard, and pages newest first', async () => {
+    const db = await isolatedPostgres(databaseUrl!);
+    const repository = new PostgresSessionEventRepository(db.url); await repository.init();
+    const audienceSnapshot = createContextAudienceSnapshot({ schemaVersion: 'context-audience/1', capturedAt: '2026-10-29T00:00:00.000Z', participants: [{ principalId: 'alice', tenantId: 'team-a', audience: JSON.stringify(['team-a', 'alice']), authority: 'goal-owner', role: 'owner' }] });
+    const base: SessionEventDraft = { roomId: 'room.board', goalId: 'goal.board', owner: 'alice', tenantId: 'team-a', type: 'task_update', actorId: 'alice', actorType: 'principal', recordedBy: { id: 'alice', type: 'principal' }, contextManifestId: 'ctx.board', contextManifestHash: 'c'.repeat(64), audienceSnapshot, content: '', contentHash: '', evidenceRefs: [], idempotencyKey: '', createdAt: '2026-10-29T00:00:01.000Z' };
+    const claim = (agentId: string): SessionEventDraft => ({ ...base, content: `领取：${agentId}`, contentHash: digestProtocol({ agentId }), evidenceRefs: ['conv_board', 'task_board', agentId], idempotencyKey: `claim-${agentId}`, taskAction: { schemaVersion: 'channel-task-action/1', kind: 'claim', conversationId: 'conv_board', taskId: 'task_board', agentId } });
+    const guard = (events: Array<{ taskAction?: { kind: string } }>) => { if (events.some(event => event.taskAction?.kind === 'claim')) throw new AeeisConflict('已领取'); };
+    try {
+      const results = await Promise.allSettled([repository.appendGuarded(claim('demo.one'), 'task_board', guard), repository.appendGuarded(claim('demo.two'), 'task_board', guard)]);
+      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+      expect((results.find(result => result.status === 'rejected') as PromiseRejectedResult).reason).toBeInstanceOf(AeeisConflict);
+      for (let index = 0; index < 5; index += 1) await repository.append({ ...base, type: 'message', content: `m${index}`, contentHash: digestProtocol({ index }), idempotencyKey: `m-${index}` });
+      const latest = await repository.pageBefore('room.board', { tenantId: 'team-a' }, 3);
+      expect(latest.items.map(item => item.sequence)).toEqual([4, 5, 6]);
+      expect(latest.previousCursor).toBe('4');
+      const older = await repository.pageBefore('room.board', { tenantId: 'team-a' }, 3, 4);
+      expect(older.items.map(item => item.sequence)).toEqual([1, 2, 3]);
+      expect(older.previousCursor).toBeUndefined();
+    } finally { await repository.close(); await db.close(); }
   });
 });

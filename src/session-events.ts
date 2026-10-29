@@ -9,6 +9,7 @@ import type { ContextManifest, Id } from './contracts.js';
 import type { AeeisService } from './application/aeeis-service.js';
 import { AeeisConflict, AeeisNotFound } from './application/aeeis-service.js';
 import { principalAudience } from './security/principal.js';
+import { channelTaskActionSchema, type ChannelTaskAction } from './channel-task-action.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const isoDate = z.string().datetime({ offset: true });
@@ -47,8 +48,12 @@ export const sessionEventSchema = z.object({
   evidenceRefs: z.array(id).max(200),
   idempotencyKey: z.string().trim().min(1).max(500),
   recordedBy: z.object({ id: z.string().min(1).max(200), type: sessionEventActorTypeSchema }).strict().optional(),
+  /** Structured channel task action. The board reads this, never `content`. */
+  taskAction: channelTaskActionSchema.optional(),
   createdAt: isoDate,
 }).strict().superRefine((event, ctx) => {
+  if (event.taskAction && event.operation !== 'publish') ctx.addIssue({ code: 'custom', message: 'A task action cannot be revised or retracted' });
+  if (event.taskAction && !(event.type === 'task_update' || (event.type === 'system' && event.taskAction.kind === 'hand_up'))) ctx.addIssue({ code: 'custom', message: 'A task action belongs on a task update' });
   if (event.operation === 'publish' && (event.targetEventId !== undefined || event.revision !== 1 || event.retractionReason !== undefined)) ctx.addIssue({ code: 'custom', message: 'Published event cannot carry revision metadata' });
   if (event.operation === 'revise' && (!event.targetEventId || event.revision < 2 || event.retractionReason !== undefined)) ctx.addIssue({ code: 'custom', message: 'Revision requires a target and revision number' });
   if (event.operation === 'retract' && (!event.targetEventId || !event.retractionReason)) ctx.addIssue({ code: 'custom', message: 'Retraction requires a target and reason' });
@@ -76,20 +81,33 @@ export interface SessionEventDraft {
   evidenceRefs: Id[];
   idempotencyKey: string;
   recordedBy?: { id: string; type: SessionEventActorType };
+  taskAction?: ChannelTaskAction;
   createdAt: string;
 }
 
-export interface SessionEventPage { items: SessionEvent[]; nextCursor?: string }
+export interface SessionEventPage { items: SessionEvent[]; nextCursor?: string; previousCursor?: string }
 export interface SessionEventScope { tenantId: string; owner?: string }
+/** Checks the events already written about one task before a new action is
+ * appended. It runs inside the same serialization boundary as sequence
+ * allocation, so two writers cannot both pass it. Throw to refuse. */
+export type TaskActionGuard = (events: SessionEvent[]) => void;
 export interface SessionEventRepository {
   init?(): Promise<void>;
   append(draft: SessionEventDraft): Promise<SessionEvent>;
+  /** Append a task action after `guard` accepts the events that already
+   * cite `taskId` in this room. A replayed idempotency key returns the
+   * original event without running the guard. */
+  appendGuarded(draft: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent>;
   /** Append a revision/retraction while atomically asserting that the target
    * still has no child event. Durable repositories must perform this check in
    * the same serialization boundary as sequence allocation. */
   appendLinear?(draft: SessionEventDraft, targetEventId: Id, expectedTargetRevision: number): Promise<SessionEvent>;
   get(id: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined>;
   page(roomId: Id, scope: SessionEventScope | undefined, limit: number, afterSequence?: number): Promise<SessionEventPage>;
+  /** The newest `limit` events before `beforeSequence` (or the newest of
+   * all), in ascending order. `previousCursor` is set when older events
+   * remain and is the sequence to pass as the next `beforeSequence`. */
+  pageBefore(roomId: Id, scope: SessionEventScope | undefined, limit: number, beforeSequence?: number): Promise<SessionEventPage>;
   findByTarget?(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]>;
   close(): Promise<void>;
 }
@@ -119,6 +137,12 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
     this.events.push(structuredClone(event));
     return structuredClone(event);
   }
+  async appendGuarded(input: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent> {
+    const existing = this.events.find(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && event.idempotencyKey === input.idempotencyKey);
+    if (existing) return sameDraft(existing, input);
+    guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && citesTask(event, taskId))));
+    return this.append(input);
+  }
   async get(eventId: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined> {
     const event = this.events.find(item => item.id === eventId && matchesScope(item, scope));
     return event ? structuredClone(event) : undefined;
@@ -128,6 +152,9 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
     const items = this.events.filter(event => event.roomId === roomId && matchesScope(event, scope) && event.sequence > afterSequence).sort((a, b) => a.sequence - b.sequence);
     const visible = items.slice(0, limit);
     return { items: structuredClone(visible), ...(items.length > limit && visible.length ? { nextCursor: String(visible.at(-1)!.sequence) } : {}) };
+  }
+  async pageBefore(roomId: Id, scope: SessionEventScope | undefined, limit: number, beforeSequence?: number): Promise<SessionEventPage> {
+    return newestPage(this.events.filter(event => event.roomId === roomId && matchesScope(event, scope)), limit, beforeSequence);
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> { return structuredClone(this.events.filter(event => event.roomId === roomId && event.targetEventId === targetEventId && matchesScope(event, scope))); }
   async close(): Promise<void> {}
@@ -188,7 +215,23 @@ export class JsonSessionEventRepository implements SessionEventRepository {
       return structuredClone(event);
     });
   }
+  async appendGuarded(input: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent> {
+    return this.serial(async () => {
+      this.assertOpen();
+      const existing = this.events.find(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && event.idempotencyKey === input.idempotencyKey);
+      if (existing) return sameDraft(existing, input);
+      guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && citesTask(event, taskId))));
+      const count = this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId).length;
+      const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: count + 1, ...input });
+      await this.persist([...this.events, event]);
+      return structuredClone(event);
+    });
+  }
   async get(eventId: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined> { this.assertOpen(); const event = this.events.find(item => item.id === eventId && matchesScope(item, scope)); return event ? structuredClone(event) : undefined; }
+  async pageBefore(roomId: Id, scope: SessionEventScope | undefined, limit: number, beforeSequence?: number): Promise<SessionEventPage> {
+    this.assertOpen();
+    return newestPage(this.events.filter(event => event.roomId === roomId && matchesScope(event, scope)), limit, beforeSequence);
+  }
   async page(roomId: Id, scope: SessionEventScope | undefined, limit: number, afterSequence = 0): Promise<SessionEventPage> {
     this.assertOpen();
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Session event page limit must be between 1 and 200');
@@ -251,6 +294,22 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
       return event;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
   }
+  async appendGuarded(input: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.tenantId}:${input.owner}:${input.roomId}`]);
+      const existing = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND idempotency_key=$4', [input.roomId, input.owner, input.tenantId, input.idempotencyKey]);
+      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(existing.rows[0].state, input); }
+      const cited = await client.query<{ state: SessionEvent }>(`SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND (state->'evidenceRefs' ? $4 OR state->'taskAction'->>'taskId'=$4) ORDER BY sequence ASC`, [input.roomId, input.owner, input.tenantId, taskId]);
+      guard(cited.rows.map(row => row.state));
+      const count = await client.query<{ max: number | null }>('SELECT max(sequence)::int AS max FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3', [input.roomId, input.owner, input.tenantId]);
+      const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: (count.rows[0]?.max ?? 0) + 1, ...input });
+      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, event, event.createdAt]);
+      await client.query('COMMIT');
+      return event;
+    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
+  }
   async get(eventId: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined> {
     const result = await this.pool.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE id=$1', [eventId]);
     const event = result.rows[0]?.state;
@@ -266,6 +325,17 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
     const rows = result.rows.map(row => row.state);
     const visible = rows.slice(0, limit);
     return { items: visible, ...(rows.length > limit && visible.length ? { nextCursor: String(visible.at(-1)!.sequence) } : {}) };
+  }
+  async pageBefore(roomId: Id, scope: SessionEventScope | undefined, limit: number, beforeSequence?: number): Promise<SessionEventPage> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Session event page limit must be between 1 and 200');
+    const params: unknown[] = [roomId, beforeSequence ?? 2_147_483_647, limit + 1];
+    let query = 'SELECT state FROM aeeis_session_events WHERE room_id=$1 AND sequence<$2';
+    if (scope) { params.push(scope.tenantId); query += ` AND tenant_id=$${params.length}`; if (scope.owner) { params.push(scope.owner); query += ` AND owner=$${params.length}`; } }
+    query += ' ORDER BY sequence DESC LIMIT $3';
+    const result = await this.pool.query<{ state: SessionEvent }>(query, params);
+    const rows = result.rows.map(row => row.state);
+    const visible = rows.slice(0, limit).reverse();
+    return { items: visible, ...(rows.length > limit && visible.length ? { previousCursor: String(visible[0]!.sequence) } : {}) };
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> {
     const params: unknown[] = [roomId, targetEventId]; let query = `SELECT state FROM aeeis_session_events WHERE room_id=$1 AND state->>'targetEventId'=$2`;
@@ -300,6 +370,19 @@ export class SessionEventService {
   constructor(private readonly repository: SessionEventRepository, private readonly domain: AeeisService) {}
 
   async create(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
+    return this.repository.append(await this.draft(roomId, input, actorId, tenantId, actorType));
+  }
+
+  /** Writes a channel task action. The repository runs `guard` on the events
+   * that already cite the task, inside the same lock as the append, so a
+   * rule such as "the first claim holds" cannot be raced past. */
+  async createTaskAction(roomId: Id, input: Omit<CreateSessionEventInput, 'type' | 'actor'> & { taskAction: ChannelTaskAction; type?: 'task_update' | 'system' }, actorId: string, tenantId: string, guard: TaskActionGuard): Promise<SessionEvent> {
+    const action = channelTaskActionSchema.parse(input.taskAction);
+    const draft = await this.draft(roomId, { ...input, type: input.type ?? 'task_update' }, actorId, tenantId, 'principal', action);
+    return this.repository.appendGuarded(draft, action.taskId, guard);
+  }
+
+  private async draft(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType, taskAction?: ChannelTaskAction): Promise<SessionEventDraft> {
     const room = await this.domain.assertRoomEventWriter(roomId, actorId, tenantId);
     const manifest = await this.resolveManifest(room.id, input.goalId, input.contextManifestId, actorId, tenantId);
     if (!manifest.audienceSnapshot || !manifest.audience.includes(audienceFor(actorId, tenantId))) throw new AeeisNotFound('Context manifest is not shared with this actor');
@@ -332,8 +415,8 @@ export class SessionEventService {
     }
     const evidenceRefs = [...new Set(input.evidenceRefs ?? [])];
     const contextManifestHash = contextManifestBindingHash(manifest);
-    const contentHash = digestProtocol({ type: input.type, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
-    return this.repository.append({ roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, recordedBy: { id: actorId, type: actorType }, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() });
+    const contentHash = digestProtocol({ type: input.type, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest, ...(taskAction ? { taskAction } : {}) });
+    return { roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, recordedBy: { id: actorId, type: actorType }, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, ...(taskAction ? { taskAction } : {}), createdAt: new Date().toISOString() };
   }
 
   async revise(roomId: Id, eventId: Id, input: ReviseSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
@@ -380,8 +463,33 @@ export class SessionEventService {
   async page(roomId: Id, actorId: string, tenantId: string, limit = 50, afterSequence = 0): Promise<SessionEventPage> {
     await this.domain.getRoomForPrincipal(roomId, actorId, tenantId);
     const page = await this.repository.page(roomId, { tenantId }, limit, afterSequence);
+    return { items: await this.visible(page.items, actorId, tenantId), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+  }
+
+  /** The newest page, or the page before `beforeSequence`. A channel opens on
+   * this so a long backlog never hides the latest messages. */
+  async pageBefore(roomId: Id, actorId: string, tenantId: string, limit = 50, beforeSequence?: number): Promise<SessionEventPage> {
+    await this.domain.getRoomForPrincipal(roomId, actorId, tenantId);
+    const page = await this.repository.pageBefore(roomId, { tenantId }, limit, beforeSequence);
+    return { items: await this.visible(page.items, actorId, tenantId), ...(page.previousCursor ? { previousCursor: page.previousCursor } : {}) };
+  }
+
+  /** Every event this reader may see, oldest first. */
+  async history(roomId: Id, actorId: string, tenantId: string): Promise<SessionEvent[]> {
+    const events: SessionEvent[] = [];
+    let after = 0;
+    for (;;) {
+      const page = await this.page(roomId, actorId, tenantId, 200, after);
+      events.push(...page.items);
+      const next = Number(page.nextCursor);
+      if (!page.nextCursor || !Number.isInteger(next) || next <= after) return events;
+      after = next;
+    }
+  }
+
+  private async visible(items: SessionEvent[], actorId: string, tenantId: string): Promise<SessionEvent[]> {
     const visible: SessionEvent[] = [];
-    for (const event of page.items) {
+    for (const event of items) {
       try {
         const manifest = await this.resolveManifest(event.roomId, event.goalId, event.contextManifestId, actorId, tenantId);
         if (contextManifestBindingHash(manifest) !== event.contextManifestHash || manifest.audienceSnapshot?.digest !== event.audienceSnapshot.digest) continue;
@@ -391,7 +499,7 @@ export class SessionEventService {
         if (!(error instanceof AeeisNotFound || error instanceof AeeisConflict)) throw error;
       }
     }
-    return { items: visible, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    return visible;
   }
 
   async get(eventId: Id, actorId: string, tenantId: string): Promise<SessionEvent> {
@@ -422,9 +530,16 @@ export class SessionEventService {
 
 }
 
+function citesTask(event: SessionEvent, taskId: Id): boolean { return event.evidenceRefs.includes(taskId) || event.taskAction?.taskId === taskId; }
+function newestPage(events: SessionEvent[], limit: number, beforeSequence?: number): SessionEventPage {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Session event page limit must be between 1 and 200');
+  const items = events.filter(event => beforeSequence === undefined || event.sequence < beforeSequence).sort((a, b) => a.sequence - b.sequence);
+  const visible = items.slice(-limit);
+  return { items: structuredClone(visible), ...(items.length > limit && visible.length ? { previousCursor: String(visible[0]!.sequence) } : {}) };
+}
 function matchesScope(event: { owner: string; tenantId: string }, scope?: SessionEventScope): boolean { return !scope || (event.tenantId === scope.tenantId && (scope.owner === undefined || event.owner === scope.owner)); }
 function sameDraft(existing: SessionEvent, input: SessionEventDraft): SessionEvent {
-  if (existing.roomId !== input.roomId || existing.goalId !== input.goalId || existing.owner !== input.owner || existing.tenantId !== input.tenantId || existing.type !== input.type || existing.actorId !== input.actorId || existing.actorType !== input.actorType || existing.operation !== (input.operation ?? 'publish') || existing.targetEventId !== input.targetEventId || existing.revision !== (input.revision ?? 1) || existing.retractionReason !== input.retractionReason || existing.contextManifestId !== input.contextManifestId || existing.contextManifestHash !== input.contextManifestHash || existing.contentHash !== input.contentHash || existing.idempotencyKey !== input.idempotencyKey) throw new SessionEventConflict('Session event idempotency key is bound to different content');
+  if (existing.roomId !== input.roomId || existing.goalId !== input.goalId || existing.owner !== input.owner || existing.tenantId !== input.tenantId || existing.type !== input.type || existing.actorId !== input.actorId || existing.actorType !== input.actorType || existing.operation !== (input.operation ?? 'publish') || existing.targetEventId !== input.targetEventId || existing.revision !== (input.revision ?? 1) || existing.retractionReason !== input.retractionReason || existing.contextManifestId !== input.contextManifestId || existing.contextManifestHash !== input.contextManifestHash || existing.contentHash !== input.contentHash || existing.idempotencyKey !== input.idempotencyKey || JSON.stringify(existing.taskAction ?? null) !== JSON.stringify(input.taskAction ?? null)) throw new SessionEventConflict('Session event idempotency key is bound to different content');
   return structuredClone(existing);
 }
 function audienceFor(principalId: string, tenantId: string): string { return principalAudience({ id: principalId, tenantId }); }

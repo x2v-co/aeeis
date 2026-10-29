@@ -6,7 +6,8 @@ import { RoomMembershipConflict } from './room-membership.js';
 import { isTerminalRun } from './runtime/run-reconcile.js';
 import { NotFound, type RunRepository } from './runtime/repository.js';
 import type { Ownership } from './security/principal.js';
-import type { SessionEvent, SessionEventService } from './session-events.js';
+import type { SessionEventService } from './session-events.js';
+import { eventTaskAction } from './channel-task-action.js';
 
 const citationId = /^[a-z][a-z0-9_.-]{1,127}$/;
 const ENTRY_AGENT = 'aeeis';
@@ -119,10 +120,10 @@ async function channelMark(roomId: string, lifeId: string, taskIds: ReadonlySet<
       const conversationId = event.evidenceRefs.find(id => id.startsWith('conv_') && citationId.test(id));
       if (!taskId || conversationId !== lifeId) continue;
       cited.add(taskId);
-      if (event.type !== 'task_update' || !roomOwnerWrote(event, scope.owner)) continue;
-      const content = event.content.trim();
-      if (content.startsWith('取消：')) cancelled.add(taskId);
-      else if (content.startsWith('撤回取消：') || content.startsWith('分派给 ') || content.startsWith('转交给 ')) cancelled.delete(taskId);
+      const action = eventTaskAction(event);
+      if (!action || action.taskId !== taskId || action.conversationId !== lifeId) continue;
+      if (action.kind === 'cancel') cancelled.add(taskId);
+      else if (action.kind === 'restore' || action.kind === 'assign' || action.kind === 'transfer') cancelled.delete(taskId);
     }
     if (!result.nextCursor) return { cited, cancelled };
     const next = Number(result.nextCursor);
@@ -130,12 +131,6 @@ async function channelMark(roomId: string, lifeId: string, taskIds: ReadonlySet<
     after = next;
   }
   return { cited, cancelled };
-}
-
-function roomOwnerWrote(event: SessionEvent, actorId: string): boolean {
-  const writer = event.recordedBy ?? { id: event.actorId, type: event.actorType };
-  if (writer.type !== 'principal') return false;
-  return event.owner ? writer.id === event.owner : writer.id === actorId;
 }
 
 async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, tasks: readonly ReleasedBotTask[], holdBack: ReadonlySet<string>, scope: Ownership, sessionEvents: SessionEventService): Promise<void> {
@@ -148,8 +143,9 @@ async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, 
       const refs = event.evidenceRefs;
       const taskId = refs.find(id => id.startsWith('task_') && citationId.test(id));
       if (!taskId || handed.has(taskId)) continue;
-      if (event.content.startsWith('已交给AEEIS') && tasks.some(task => refs.includes(task.id))) {
-        for (const task of tasks) if (refs.includes(task.id)) handed.add(task.id);
+      const action = eventTaskAction(event);
+      if (action?.kind === 'hand_up') {
+        if (tasks.some(task => task.id === action.taskId)) handed.add(action.taskId);
         continue;
       }
       if (!refs.includes(botId)) continue;
@@ -157,14 +153,15 @@ async function handTasksUpInRoom(roomId: string, botId: string, lifeId: string, 
       const task = tasks.find(item => item.id === taskId);
       if (!task || conversationId !== lifeId || holdBack.has(task.id)) continue;
       handed.add(task.id);
-      await sessionEvents.create(roomId, {
+      await sessionEvents.createTaskAction(roomId, {
         ...(event.goalId === undefined ? {} : { goalId: event.goalId }),
         type: 'system',
         content: `已交给AEEIS，记为讨论「${task.title}」。原来的事还在。`,
         contextManifestId: event.contextManifestId,
         evidenceRefs: [task.entryConversationId, task.entryTaskId, ENTRY_AGENT, lifeId, task.id],
         idempotencyKey: `bot-up.${botId}.${task.id}.${roomId}`.slice(0, 500),
-      }, scope.owner, scope.tenantId);
+        taskAction: { schemaVersion: 'channel-task-action/1', kind: 'hand_up', conversationId: lifeId, taskId: task.id, agentId: ENTRY_AGENT },
+      }, scope.owner, scope.tenantId, () => undefined);
     }
     if (!result.nextCursor) return;
     const next = Number(result.nextCursor);

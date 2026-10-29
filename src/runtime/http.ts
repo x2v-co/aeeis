@@ -58,6 +58,7 @@ import { PrincipalDirectoryUnavailable } from '../security/principal-directory.j
 import type { ChannelIdentityResolver } from '../security/channel-identity.js';
 import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
+import { ChannelBoardService } from '../channel-board.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
 import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
@@ -138,6 +139,25 @@ export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
   const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
+  const channelBoard = options.sessionEvents && options.domain
+    ? new ChannelBoardService(options.sessionEvents, options.domain, async (conversationId, actorId, tenantId) => {
+      if (!conversations) return undefined;
+      const view = await conversations.get(conversationId, { owner: actorId, tenantId });
+      return { id: view.id, ...(view.agentId ? { agentId: view.agentId } : {}), tasks: view.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...(task.runId ? { runId: task.runId } : {}), ...(task.latestRunId ? { latestRunId: task.latestRunId } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}) })) };
+    }, async (agentId, tenantId) => {
+      if (agentId === 'aeeis') return 'AEEIS';
+      if (agentId.startsWith('bot_') && options.ownedBots) {
+        const bot = await options.ownedBots.get(agentId).catch(() => undefined);
+        return bot && bot.tenantId === tenantId ? bot.name : undefined;
+      }
+      if (options.agentDirectory) {
+        const card = await Promise.resolve(options.agentDirectory.get(agentId)).catch(() => undefined);
+        return card?.name;
+      }
+      return undefined;
+    })
+    : undefined;
+  const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
@@ -889,11 +909,25 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     return options.domain.getSessionContextManifest(request.params.id, request.params.manifestId, principal.id, principal.tenantId);
   });
-  app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string } }>('/api/rooms/:id/session-events', async request => {
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string; before?: string; latest?: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
-    const principal = principalOf(request); const parsed = cursorCollectionLimit(request.query); const limit = parsed ?? 50;
+    const principal = principalOf(request);
+    const limit = z.object({ limit: z.coerce.number().int().min(1).max(200).optional(), cursor: z.string().min(1).max(1000).optional(), before: z.string().min(1).max(40).optional(), latest: z.enum(['1', 'true']).optional() }).strict().parse(request.query).limit ?? 50;
+    if (request.query.before !== undefined || request.query.latest !== undefined) {
+      if (request.query.cursor !== undefined) throw new RangeError('Use either cursor or before, not both');
+      const beforeSequence = request.query.before === undefined ? undefined : z.coerce.number().int().positive().parse(request.query.before);
+      return options.sessionEvents.pageBefore(request.params.id, principal.id, principal.tenantId, limit, beforeSequence);
+    }
     const afterSequence = request.query.cursor === undefined ? 0 : z.coerce.number().int().nonnegative().parse(request.query.cursor);
     return options.sessionEvents.page(request.params.id, principal.id, principal.tenantId, limit, afterSequence);
+  });
+  app.get<{ Params: { id: string } }>('/api/rooms/:id/board', async request => {
+    const principal = principalOf(request);
+    return boardService().board(request.params.id, principal.id, principal.tenantId);
+  });
+  app.post<{ Params: { id: string } }>('/api/rooms/:id/task-actions', async request => {
+    const principal = principalOf(request);
+    return boardService().act(request.params.id, request.body, principal.id, principal.tenantId);
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
