@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-md",
+  "title": "Project Pulse from Markdown notes",
+  "source": "docs/pulse-retest-set.md#3",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "materials": [
+      {
+        "title": "alpha.md",
+        "file": "tests/fixtures/r79/md.json",
+        "pointer": "/materials/0/content"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "no-evidence-placeholder",
+      "kind": "contentExcludes",
+      "any": [
+        "\\[证据\\]",
+        "\\[evidence\\]"
+      ]
+    },
+    {
+      "id": "blocker-found",
+      "kind": "contentIncludes",
+      "any": [
+        "Payment API key",
+        "payment API key",
+        "API key"
+      ]
+    }
+  ]
+}

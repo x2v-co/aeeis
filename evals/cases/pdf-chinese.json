@@ -1,0 +1,88 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pdf-chinese",
+  "title": "Fill a Chinese contact form with CJK glyphs",
+  "source": "docs/fillable-pdf-retest-set.md#6",
+  "tags": [
+    "pdf"
+  ],
+  "request": {
+    "goal": "用中文资料填写联系表（姓名、地址、城市、邮箱）",
+    "builtinSkill": "fillable-pdf/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "contact-zh.pdf",
+        "file": "fixtures/fillable-pdf/contact-zh.pdf",
+        "encoding": "pdf"
+      },
+      {
+        "title": "profile-zh.json",
+        "file": "fixtures/fillable-pdf/profile-zh.json"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "fillable-pdf/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "fillable-pdf/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-pdf-fill",
+      "kind": "toolUsed",
+      "tool": "pdf.fill"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "filled-fields",
+      "kind": "pdfFilled",
+      "fields": {
+        "fullName": "陈美雅",
+        "address": "北京市朝阳区建国路88号SOHO现代城3号楼1205室",
+        "city": "北京",
+        "email": "maya@example.test"
+      },
+      "exact": true
+    },
+    {
+      "id": "unknowns-reported",
+      "kind": "pdfUnknowns",
+      "fields": [
+        "note"
+      ]
+    }
+  ]
+}

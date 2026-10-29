@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-csv-overdue",
+  "title": "Overdue open tasks by the system clock",
+  "source": "docs/pulse-retest-set.md#6",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "列出 due 早于今天（以系统时钟 clock.currentDate 为准）且 status 不是 done/closed/完成 的未完成任务，按 due 升序，给出总数并逐条引用证据。",
+    "builtinSkill": "project-pulse/1",
+    "materials": [
+      {
+        "title": "due.csv",
+        "content": "id,title,status,due,createdAt\n1,Fix login,open,{{date:-10}},2026-01-05\n2,Write docs,done,{{date:-5}},2026-01-05\n3,Ship v2,in_progress,{{date:+7}},2026-01-05\n4,Audit logs,open,{{date:-1}},2026-01-05\n5,Plan Q4,open,tbd,2026-01-05"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-sources-csvquery",
+      "kind": "toolUsed",
+      "tool": "sources.csvQuery"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "date-filter-lt",
+      "kind": "logProtocol",
+      "protocol": "aeeis-csv-date-filter/1",
+      "where": {
+        "filters": {
+          "op": "lt",
+          "effective": true
+        }
+      }
+    },
+    {
+      "id": "lists-overdue",
+      "kind": "contentIncludes",
+      "all": [
+        "Fix login",
+        "Audit logs"
+      ]
+    },
+    {
+      "id": "omits-done-and-future",
+      "kind": "contentExcludes",
+      "any": [
+        "Write docs",
+        "Ship v2"
+      ]
+    }
+  ],
+  "judge": {
+    "rubric": "Exactly tasks 1 (Fix login) and 4 (Audit logs) are listed, in ascending due order, with a total of 2, each citing the CSV."
+  }
+}

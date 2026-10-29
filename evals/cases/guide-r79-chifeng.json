@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "guide-r79-chifeng",
+  "title": "Sourceless travel guide proceeds on labelled assumptions",
+  "source": "tests/fixtures/r79/chifeng.json",
+  "tags": [
+    "r79"
+  ],
+  "request": {
+    "goal": "给我一份8月去赤峰草原的3天两晚，自驾游的攻略。人员：一家人：老人1位，夫妻1对，3岁男孩",
+    "maxModelCalls": 20,
+    "materials": []
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "three-days",
+      "kind": "contentIncludes",
+      "any": [
+        "第三天",
+        "Day 3",
+        "第3天",
+        "D3"
+      ]
+    }
+  ],
+  "judge": {
+    "rubric": "A practical 3-day, 2-night self-drive plan for August in the Chifeng grasslands that accounts for an elderly traveller and a 3-year-old (drive lengths, rest, sun and cold). Assumptions are labelled; no invented bookings or prices presented as facts."
+  }
+}

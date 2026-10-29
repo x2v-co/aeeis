@@ -4,6 +4,8 @@ Manual retest cases run after each aeeis deploy. Select **PDF 表单**
 (`builtinSkill: "fillable-pdf/1"`), upload `fixtures/fillable-pdf/registration.pdf`
 (case 6: `contact-zh.pdf`) and the source below. Record Run ID, review verdict, output filename/hash/size,
 and any `tool.failed_recoverable` or `artifact.repair_requested` events.
+The six cases also run unattended with `npm run test:evals -- --live --case pdf` (see `evals/README.md`);
+opening the downloaded PDF in a viewer stays a manual step.
 
 | # | Input alongside the PDF | Goal | Expected filled fields | Expected unknowns / must observe |
 |---|---|---|---|---|

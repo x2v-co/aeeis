@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-csv-large",
+  "title": "Project Pulse over a large task export",
+  "source": "docs/pulse-retest-set.md#1",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "tasks.csv",
+        "file": "tests/fixtures/project-pulse-large.csv"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-sources-csvquery",
+      "kind": "toolUsed",
+      "tool": "sources.csvQuery"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    }
+  ],
+  "judge": {
+    "rubric": "Progress, blockers, risks and next actions are drawn from the CSV rows and cite them. Counts quoted in the text agree with the data. Nothing is invented."
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pdf-profile-csv",
+  "title": "Fill the form from one CSV row, including a false checkbox",
+  "source": "docs/fillable-pdf-retest-set.md#3",
+  "tags": [
+    "pdf"
+  ],
+  "request": {
+    "goal": "Fill the form from the single CSV row",
+    "builtinSkill": "fillable-pdf/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "registration.pdf",
+        "file": "fixtures/fillable-pdf/registration.pdf",
+        "encoding": "pdf"
+      },
+      {
+        "title": "profile.csv",
+        "file": "fixtures/fillable-pdf/profile.csv"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "fillable-pdf/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "fillable-pdf/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-pdf-fill",
+      "kind": "toolUsed",
+      "tool": "pdf.fill"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "filled-fields",
+      "kind": "pdfFilled",
+      "fields": {
+        "name": "Maya Chen",
+        "email": "maya@example.test",
+        "subscribe": false,
+        "contactMethod": "Email",
+        "country": "SG",
+        "interests": [
+          "Music"
+        ]
+      },
+      "exact": true
+    },
+    {
+      "id": "unknowns-reported",
+      "kind": "pdfUnknowns",
+      "fields": [
+        "phone",
+        "caseId"
+      ]
+    }
+  ]
+}

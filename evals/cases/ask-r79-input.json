@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "ask-r79-input",
+  "title": "Asks instead of inventing missing quote details",
+  "source": "tests/fixtures/r79/input.json",
+  "tags": [
+    "r79"
+  ],
+  "request": {
+    "goal": "根据资料给这位客户出一份最终报价单，必须写明确定的型号、数量和交付城市；缺什么就先问我。",
+    "maxModelCalls": 12,
+    "materials": [
+      {
+        "title": "quote-request.txt",
+        "file": "tests/fixtures/r79/input.json",
+        "pointer": "/materials/0/content"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "asks",
+      "kind": "runStatus",
+      "expect": [
+        "needs_input"
+      ]
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 300000
+    }
+  ]
+}

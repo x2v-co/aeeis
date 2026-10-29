@@ -2,6 +2,8 @@
 
 Manual retest cases run after each aeeis deploy. Record run id, verdict and the log counters below.
 
+The same six cases (plus r79 csv) run unattended against a real model with `npm run test:evals -- --live --case pulse`; see `evals/README.md`.
+
 | # | Input | Goal | Must observe |
 |---|---|---|---|
 | 1 | big CSV (tasks export) | Project Pulse over the export | csvQuery used; no timeout |

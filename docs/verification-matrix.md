@@ -19,6 +19,7 @@
 | RSI | `npm test`、Compose smoke | signal、candidate、replay/holdout/safety、shadow/canary、activation、rollback | 真实 evaluator、候选质量、生产流量指标 |
 | Feishu / Hermes 边界 | `npm test`、`npx vitest run tests/collaboration-projection.test.ts` | 原始体签名、群路由、sender mapping、幂等和 Trigger 边界；Projection 按 channel 路由 Feishu、Hermes CLI 和通用 fallback，并验证隐私、健康检查与 unknown/reconcile 边界 | Feishu 应用权限、Hermes 身份映射、CLI/平台凭证和送达 SLA |
 | 观测与恢复 | `npm run test:monitoring`、`npm run smoke:monitoring` | 指标、readiness、告警规则、备份校验和恢复脚本 | Docker、Alertmanager、长期指标、跨区域恢复 |
+| 真实模型任务质量 | `npm run test:evals -- --live`（手动，付费推理；不进 `npm test`、`verify` 或 CI） | `evals/cases/` 下 15 件用例，来自 Pulse、fillable-pdf 和 r79 复测集；确定性检查和可选的评审模型分开记录；报告写到 `test-report/evals/`，带模型 pin、token 和费用，可用 `--compare` 逐项对比。缺少凭证时报告 `not_run` 并以 2 退出。`--fixture` 和 `tests/evals-harness.test.ts` 只证明评测本身能跑 | 每次换模型或改提示后在目标模型上跑一遍并保留报告 |
 
 ## 当前发布判断
 
@@ -31,7 +32,7 @@
 不能宣称生产就绪，直到至少完成以下项目：
 
 1. 在目标 Docker/Temporal/PostgreSQL 基础设施上完成 Compose smoke、监控 smoke 和真实 history replay。
-2. 接入并验收真实模型、Planprice、OwnHow、toolkit_new、RSI evaluator 和外部 Agent。
+2. 接入并验收真实模型（至少一份 `npm run test:evals -- --live` 报告）、Planprice、OwnHow、toolkit_new、RSI evaluator 和外部 Agent。
 3. 完成 OIDC、多租户 ACL、Secret Manager、备份上传、容量压测、故障注入和跨区域恢复。
 4. 用真实 Feishu/Hermes 权限和通知 SLA 验证投影、入站 Debate 及 unknown/reconcile。
 # Resource governance

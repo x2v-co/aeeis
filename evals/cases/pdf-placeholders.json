@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pdf-placeholders",
+  "title": "Refuse placeholders, invented names and read-only writes",
+  "source": "docs/fillable-pdf-retest-set.md#5",
+  "tags": [
+    "pdf"
+  ],
+  "request": {
+    "goal": "Inspect fields and fill only valid supported values",
+    "builtinSkill": "fillable-pdf/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "registration.pdf",
+        "file": "fixtures/fillable-pdf/registration.pdf",
+        "encoding": "pdf"
+      },
+      {
+        "title": "invalid.json",
+        "content": "{\"name\":\"TBD\",\"country\":\"XX\",\"invented\":\"value\",\"caseId\":\"NEW\"}"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "fillable-pdf/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "fillable-pdf/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-pdf-fill",
+      "kind": "toolUsed",
+      "tool": "pdf.fill"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "filled-fields",
+      "kind": "pdfFilled",
+      "fields": {},
+      "exact": true
+    },
+    {
+      "id": "unknowns-reported",
+      "kind": "pdfUnknowns",
+      "fields": [
+        "name",
+        "email",
+        "phone",
+        "subscribe",
+        "contactMethod",
+        "country",
+        "interests",
+        "caseId"
+      ]
+    }
+  ]
+}

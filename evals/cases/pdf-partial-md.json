@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pdf-partial-md",
+  "title": "Fill only the supplied facts from Markdown",
+  "source": "docs/fillable-pdf-retest-set.md#2",
+  "tags": [
+    "pdf"
+  ],
+  "request": {
+    "goal": "Fill only the supplied facts; report missing information",
+    "builtinSkill": "fillable-pdf/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "registration.pdf",
+        "file": "fixtures/fillable-pdf/registration.pdf",
+        "encoding": "pdf"
+      },
+      {
+        "title": "partial.md",
+        "file": "fixtures/fillable-pdf/partial.md"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "fillable-pdf/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "fillable-pdf/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-pdf-fill",
+      "kind": "toolUsed",
+      "tool": "pdf.fill"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "filled-fields",
+      "kind": "pdfFilled",
+      "fields": {
+        "name": "Maya Chen",
+        "email": "maya@example.test",
+        "country": "SG"
+      },
+      "exact": true
+    },
+    {
+      "id": "unknowns-reported",
+      "kind": "pdfUnknowns",
+      "fields": [
+        "phone",
+        "subscribe",
+        "contactMethod",
+        "interests",
+        "caseId"
+      ]
+    }
+  ]
+}
