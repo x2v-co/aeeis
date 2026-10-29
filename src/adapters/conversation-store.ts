@@ -10,6 +10,8 @@ import { Conflict } from '../runtime/engine.js';
 import { NotFound } from '../runtime/repository.js';
 import type { Ownership } from '../security/principal.js';
 import { withPostgresMigrationLock } from './postgres-migration.js';
+import { createPostgresPool } from './postgres-pool.js';
+import { openAggregate, pick, sealAggregate } from '../content-encryption.js';
 
 const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const conversationId = new RegExp(`^conv_${uuid}$`);
@@ -388,10 +390,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS aeeis_conversations_agent_uidx ON aeeis_conver
 const pendingPredicate = `state @> '{"messages":[{"execution":{"state":"pending"}}]}'::jsonb`;
 const pageSize = 100;
 
+/** SQL reads the identity, the person and pending executions; the messages themselves are sealed. */
+function conversationPlain(value: Conversation): Record<string, unknown> {
+  return {
+    ...pick(value, ['schemaVersion', 'id', 'owner', 'tenantId', 'agentId', 'revision', 'updatedAt']),
+    messages: value.messages.filter(message => message.execution?.state === 'pending').map(() => ({ execution: { state: 'pending' } })),
+  };
+}
+export const sealConversation = (value: Conversation) => sealAggregate('conversation', value.tenantId, value.id, value, conversationPlain);
+const openConversation = async (stored: unknown) => structuredClone(await openAggregate<Conversation>('conversation', String((stored as { id?: unknown }).id), stored));
+
 export class PostgresConversationStore implements ConversationStore {
   private readonly pool: pg.Pool;
   private closed = false;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     try { await withPostgresMigrationLock(this.pool, 'conversations', async client => { await client.query(migration); }); }
     catch (error) { await this.close(); throw error; }
@@ -402,7 +414,7 @@ export class PostgresConversationStore implements ConversationStore {
     try {
       const result = await this.pool.query(
         'INSERT INTO aeeis_conversations(id,owner,tenant_id,revision,state,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING',
-        [copy.id, copy.owner, copy.tenantId, copy.revision, copy, copy.updatedAt],
+        [copy.id, copy.owner, copy.tenantId, copy.revision, await sealConversation(copy), copy.updatedAt],
       );
       assert(result.rowCount, 'Conversation already exists');
     } catch (error) {
@@ -414,7 +426,7 @@ export class PostgresConversationStore implements ConversationStore {
     validateId(id);
     const result = await this.pool.query<{ state: Conversation }>('SELECT state FROM aeeis_conversations WHERE id=$1 AND owner=$2 AND tenant_id=$3', [id, scope.owner, scope.tenantId]);
     if (!result.rows[0]) throw new NotFound('Unknown conversation');
-    return structuredClone(result.rows[0].state);
+    return openConversation(result.rows[0].state);
   }
   async list(scope: Ownership): Promise<Conversation[]> {
     const owner = { ...scope }, result: Conversation[] = [];
@@ -425,7 +437,7 @@ export class PostgresConversationStore implements ConversationStore {
     let after = '';
     while (true) {
       const page = await this.pool.query<{ state: Conversation }>('SELECT state FROM aeeis_conversations WHERE owner=$1 AND tenant_id=$2 AND id>$3 AND id<=$4 ORDER BY id LIMIT $5', [owner.owner, owner.tenantId, after, upper, pageSize]);
-      result.push(...page.rows.map(row => structuredClone(row.state)));
+      result.push(...await Promise.all(page.rows.map(row => openConversation(row.state))));
       if (page.rows.length < pageSize) return result.sort(recentFirst);
       after = page.rows.at(-1)!.state.id;
     }
@@ -437,8 +449,8 @@ export class PostgresConversationStore implements ConversationStore {
       await client.query('BEGIN');
       const result = await client.query<{ state: Conversation }>('SELECT state FROM aeeis_conversations WHERE id=$1 AND owner=$2 AND tenant_id=$3 FOR UPDATE', [id, owner.owner, owner.tenantId]);
       if (!result.rows[0]) throw new NotFound('Unknown conversation');
-      const before = result.rows[0].state, next = changed(before, change);
-      if (next.revision !== before.revision) await client.query('UPDATE aeeis_conversations SET revision=$4,state=$5,updated_at=$6 WHERE id=$1 AND owner=$2 AND tenant_id=$3', [id, owner.owner, owner.tenantId, next.revision, next, next.updatedAt]);
+      const before = await openConversation(result.rows[0].state), next = changed(before, change);
+      if (next.revision !== before.revision) await client.query('UPDATE aeeis_conversations SET revision=$4,state=$5,updated_at=$6 WHERE id=$1 AND owner=$2 AND tenant_id=$3', [id, owner.owner, owner.tenantId, next.revision, await sealConversation(next), next.updatedAt]);
       await client.query('COMMIT');
       return structuredClone(next);
     } catch (error) {
@@ -454,7 +466,7 @@ export class PostgresConversationStore implements ConversationStore {
     let after = '';
     while (true) {
       const page = await this.pool.query<{ state: Conversation }>(`SELECT state FROM aeeis_conversations WHERE ${pendingPredicate} AND id>$1 AND id<=$2 ORDER BY id LIMIT $3`, [after, upper, pageSize]);
-      for (const row of page.rows) yield structuredClone(row.state);
+      for (const row of page.rows) yield await openConversation(row.state);
       if (page.rows.length < pageSize) return;
       after = page.rows.at(-1)!.state.id;
     }

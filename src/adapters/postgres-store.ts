@@ -8,6 +8,8 @@ import type { ContextManifest, Goal, Id, MemoryEntry, Plan, ProjectionIntent, Ru
 import type { AeeisStore, RoomPage } from './in-memory-store.js';
 import { assertMemoryCommit, assertRoomCommit, assertTaskCommit } from './task-commit.js';
 import { withPostgresMigrationLock } from './postgres-migration.js';
+import { createPostgresPool } from './postgres-pool.js';
+import { openAggregate, pick, sealAggregate } from '../content-encryption.js';
 
 /** PostgreSQL domain store. Each aggregate is kept as validated JSONB while
  * indexed ownership columns support the bounded Goal/Plan/Memory queries. */
@@ -16,12 +18,12 @@ export class PostgresAeeisStore implements AeeisStore {
   private readonly auditStore: PostgresChangeAuditStore;
   readonly changeAudit: ChangeAuditService<pg.PoolClient>;
   constructor(connectionString: string) {
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = createPostgresPool(connectionString);
     this.auditStore = new PostgresChangeAuditStore(this.pool, 'domain-memory');
     this.changeAudit = new ChangeAuditService(this.auditStore, {
       read: async (entry, client) => {
         const records: MemoryChanges = {};
-        for (const id of memorySnapshotIds(entry)) records[id] = (await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [id])).rows[0]?.state ?? null;
+        for (const id of memorySnapshotIds(entry)) records[id] = await openMemory((await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [id])).rows[0]?.state) ?? null;
         return { records };
       },
       restore: async (entry, snapshot, client) => {
@@ -192,11 +194,11 @@ export class PostgresAeeisStore implements AeeisStore {
   async appendReceipt(receipt: RunReceipt): Promise<void> { await this.pool.query('INSERT INTO aeeis_receipts(id,plan_id,state,occurred_at) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [receipt.id, receipt.planId, receipt, receipt.occurredAt]); }
   async getReceipts(planId: Id): Promise<RunReceipt[]> { return many<RunReceipt>(this.pool, 'SELECT state FROM aeeis_receipts WHERE plan_id=$1 ORDER BY occurred_at,id', [planId]); }
   private async writeMemory(client: pg.PoolClient, memory: MemoryEntry): Promise<void> {
-    await client.query('INSERT INTO aeeis_memories(id,goal_id,owner,tenant_id,state,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET goal_id=EXCLUDED.goal_id,owner=EXCLUDED.owner,tenant_id=EXCLUDED.tenant_id,state=EXCLUDED.state,created_at=EXCLUDED.created_at', [memory.id, memory.goalId ?? null, memory.owner ?? 'owner', memory.tenantId ?? 'local', memory, memory.createdAt]);
+    await client.query('INSERT INTO aeeis_memories(id,goal_id,owner,tenant_id,state,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET goal_id=EXCLUDED.goal_id,owner=EXCLUDED.owner,tenant_id=EXCLUDED.tenant_id,state=EXCLUDED.state,created_at=EXCLUDED.created_at', [memory.id, memory.goalId ?? null, memory.owner ?? 'owner', memory.tenantId ?? 'local', await sealMemory(memory), memory.createdAt]);
   }
   async saveMemory(memory: MemoryEntry, context?: ChangeContext): Promise<void> {
     await this.auditStore.transaction(async (log, client) => {
-      const previous = (await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [memory.id])).rows[0]?.state;
+      const previous = await openMemory((await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [memory.id])).rows[0]?.state);
       log.append(memoryAuditInput(memory, previous ? { [memory.id]: previous } : null, { [memory.id]: memory }, 'memory.save', context));
       await this.writeMemory(client, memory);
     });
@@ -204,7 +206,7 @@ export class PostgresAeeisStore implements AeeisStore {
   async commitMemoryUpdate(expected: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
     await this.auditStore.transaction(async (log, client) => {
       const result = await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [expected.id]);
-      assertMemoryCommit(result.rows[0]?.state, expected, next);
+      assertMemoryCommit(await openMemory(result.rows[0]?.state), expected, next);
       log.append(memoryAuditInput(next, { [expected.id]: expected }, { [next.id]: next }, 'memory.update', context));
       await this.writeMemory(client, next);
     });
@@ -212,7 +214,7 @@ export class PostgresAeeisStore implements AeeisStore {
   async commitMemoryRevision(previous: MemoryEntry, next: MemoryEntry, context?: ChangeContext): Promise<void> {
     await this.auditStore.transaction(async (log, client) => {
       const result = await client.query<{ state: MemoryEntry }>('SELECT state FROM aeeis_memories WHERE id=$1 FOR UPDATE', [previous.id]);
-      assertMemoryCommit(result.rows[0]?.state, previous, previous);
+      assertMemoryCommit(await openMemory(result.rows[0]?.state), previous, previous);
       if ((await client.query('SELECT id FROM aeeis_memories WHERE id=$1', [next.id])).rows.length) throw new Error('Memory revision already exists');
       const superseded = { ...previous, state: 'superseded' as const, updatedAt: next.updatedAt };
       log.append(memoryAuditInput(previous, { [previous.id]: previous, [next.id]: null }, { [previous.id]: superseded, [next.id]: next }, 'memory.correct', context));
@@ -226,7 +228,8 @@ export class PostgresAeeisStore implements AeeisStore {
     if (limit !== undefined) values.push(limit);
     const where = goalId === undefined ? '' : ' WHERE goal_id=$1';
     const order = limit === undefined ? ' ORDER BY created_at, id' : ' ORDER BY (state->>\'updatedAt\')::timestamptz DESC NULLS LAST, id';
-    return many<MemoryEntry>(this.pool, `SELECT state FROM aeeis_memories${where}${order}${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
+    const rows = await many<MemoryEntry>(this.pool, `SELECT state FROM aeeis_memories${where}${order}${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
+    return Promise.all(rows.map(row => openMemory(row) as Promise<MemoryEntry>));
   }
   async saveContextManifest(manifest: ContextManifest): Promise<void> { await this.pool.query('INSERT INTO aeeis_context_manifests(id,goal_id,owner,tenant_id,state,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET goal_id=EXCLUDED.goal_id,owner=EXCLUDED.owner,tenant_id=EXCLUDED.tenant_id,state=EXCLUDED.state,created_at=EXCLUDED.created_at', [manifest.id, manifest.goalId ?? null, manifest.owner ?? 'owner', manifest.tenantId ?? 'local', manifest, manifest.createdAt]); }
   async getContextManifest(id: Id): Promise<ContextManifest | undefined> { return one<ContextManifest>(this.pool, 'SELECT state FROM aeeis_context_manifests WHERE id=$1', [id]); }
@@ -234,6 +237,11 @@ export class PostgresAeeisStore implements AeeisStore {
   async markProjectionIntentDispatched(id: Id, dispatchedAt = new Date().toISOString()): Promise<void> { await this.pool.query("UPDATE aeeis_projection_intents SET status='dispatched', state=state || jsonb_build_object('status','dispatched','dispatchedAt',$2::text) WHERE id=$1", [id, dispatchedAt]); }
   async close(): Promise<void> { await this.pool.end(); }
 }
+
+/** SQL orders memories by update time; the remembered text is sealed. */
+const memoryPlain = (memory: MemoryEntry) => pick(memory, ['id', 'goalId', 'owner', 'createdAt', 'updatedAt', 'state']);
+export const sealMemory = (memory: MemoryEntry) => sealAggregate('memory', memory.tenantId, memory.id, memory, memoryPlain);
+const openMemory = async (stored: unknown): Promise<MemoryEntry | undefined> => stored === undefined || stored === null ? undefined : openAggregate<MemoryEntry>('memory', String((stored as { id?: unknown }).id), stored);
 
 async function one<T>(pool: pg.Pool, query: string, values: unknown[] = []): Promise<T | undefined> {
   const result = await pool.query<{ state: T }>(query, values);

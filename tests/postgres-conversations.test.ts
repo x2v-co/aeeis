@@ -7,6 +7,7 @@ import { requestSchema } from '../src/runtime/contracts.js';
 import { Conflict } from '../src/runtime/engine.js';
 import { NotFound } from '../src/runtime/repository.js';
 import { isolatedPostgres } from './support/postgres.js';
+import { openAggregate } from '../src/content-encryption.js';
 
 const databaseUrl = process.env.AEEIS_TEST_DATABASE_URL;
 const scope = { owner: 'alice', tenantId: 'tenant-a' };
@@ -45,7 +46,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL conversation store', () => {
     expect(saved.title).toBe('40'); expect(saved.revision).toBe(40); expect(saved.tasks[0]!.createdAt).toBe(at);
     await expect(first.mutate(value.id, scope, () => {})).resolves.toEqual(saved);
     const row = (await pool.query('SELECT revision,state,owner,tenant_id FROM aeeis_conversations WHERE id=$1', [value.id])).rows[0];
-    expect(Number(row.revision)).toBe(40); expect(row.state).toEqual(saved); expect(row.owner).toBe(scope.owner); expect(row.tenant_id).toBe(scope.tenantId);
+    expect(Number(row.revision)).toBe(40); expect(await openAggregate('conversation', saved.id, row.state)).toEqual(saved); expect(row.owner).toBe(scope.owner); expect(row.tenant_id).toBe(scope.tenantId);
   }));
   it('rejects racing duplicate creates, same-key appends and duplicate message IDs', () => using(async (first, second) => {
     const value = conversation();

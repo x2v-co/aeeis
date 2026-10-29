@@ -6,6 +6,7 @@ import pg from 'pg';
 import type { Ownership } from './security/principal.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 /** A budget shared by every billable surface owned by one tenant. */
 export const globalBudgetSchema = z.object({
@@ -282,7 +283,7 @@ export class InMemoryGlobalBudgetLedger extends FileGlobalBudgetLedger {
  * key while bootstrapping it), so concurrent reservations cannot oversell. */
 export class PostgresGlobalBudgetLedger implements GlobalBudgetLedger {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> { await withPostgresMigrationLock(this.pool, 'global-budget', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_global_budget_accounts (account_key text PRIMARY KEY, owner text NOT NULL, tenant_id text NOT NULL, window_key text NOT NULL, budget jsonb NOT NULL, used_calls integer NOT NULL, used_tokens bigint NOT NULL, used_money_usd numeric NOT NULL, unreported_token_calls integer NOT NULL, unreported_money_calls integer NOT NULL, entries jsonb NOT NULL, updated_at timestamptz NOT NULL)`); }); }
   async reserve(input: Pick<GlobalBudgetAccount, 'accountKey' | 'owner' | 'tenantId' | 'windowKey' | 'budget'>, key: string): Promise<GlobalBudgetReservation> { return this.withAccount(input, account => { const result = reserveInAccount(account, key); return { account, result }; }); }
   async ensureUnknown(input: Pick<GlobalBudgetAccount, 'accountKey' | 'owner' | 'tenantId' | 'windowKey' | 'budget'>, key: string): Promise<void> { await this.withAccount(input, account => { if (!account.entries[key]) { reserveInAccount(account, key); markUnknownInAccount(account, key); } return { account }; }); }

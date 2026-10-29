@@ -2,6 +2,7 @@ import { Client, Connection, isGrpcDeadlineError, WorkflowExecutionAlreadyStarte
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { AgentEngine } from './engine.js';
 import { validateInternalEndpoint } from '../internal-endpoint.js';
+import { withSystemScope } from '../adapters/postgres-pool.js';
 
 export interface TemporalRunWorkflowClient {
   workflow: {
@@ -98,10 +99,11 @@ export class LocalDispatcher implements Dispatcher {
   private schedulePump(): void {
     if (this.pumpScheduled || this.closing) return;
     this.pumpScheduled = true;
-    queueMicrotask(() => {
+    // The pump outlives the request that scheduled it and runs every tenant's queued Runs: it reads as the system.
+    queueMicrotask(() => withSystemScope(() => {
       this.pumpScheduled = false;
       this.pump();
-    });
+    }));
   }
   private pump(): void {
     if (this.closing) return;

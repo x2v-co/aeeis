@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { encodeRunEventCursor, type RunRepository, type RunEventScanRecord } from './runtime/repository.js';
 import type { AgentRun, Event } from './runtime/contracts.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const runId = z.string().regex(/^run_[a-f0-9-]{36}$/);
 const nameSchema = z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/);
@@ -74,7 +75,7 @@ export class FileRunScanCursorStore implements RunScanCursorStore {
 
 export class PostgresRunScanCursorStore implements RunScanCursorStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'run-scan-cursors', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_run_scan_cursors (

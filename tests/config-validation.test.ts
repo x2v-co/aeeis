@@ -10,9 +10,22 @@ const production = {
   AEEIS_ACCESS_TOKEN: 'operator-token',
   AEEIS_RUNNER: 'local',
   AEEIS_HOST: '127.0.0.1',
+  AEEIS_CONTENT_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
+  AEEIS_DATABASE_MIGRATION_URL: 'postgresql://aeeis_owner@db/aeeis',
 };
 
 describe('runtime configuration validation', () => {
+  it('requires content encryption and a separate migration role in production unless one owner opts out', () => {
+    const { AEEIS_CONTENT_ENCRYPTION_KEY: _key, AEEIS_DATABASE_MIGRATION_URL: _owner, ...bare } = production;
+    expect(() => validateRuntimeConfig(production)).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...production, AEEIS_CONTENT_ENCRYPTION_KEY: undefined })).toThrow('AEEIS_CONTENT_ENCRYPTION_KEY_FILE');
+    expect(() => validateRuntimeConfig({ ...production, AEEIS_DATABASE_MIGRATION_URL: undefined })).toThrow('AEEIS_DATABASE_MIGRATION_URL');
+    expect(() => validateRuntimeConfig({ ...production, AEEIS_DATABASE_MIGRATION_URL: production.DATABASE_URL })).toThrow('different roles');
+    expect(() => validateRuntimeConfig({ ...bare, AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE: '1' })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...bare, AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE: '1', AEEIS_OIDC_ISSUER: 'https://issuer.example' })).toThrow();
+    expect(() => validateRuntimeConfig({ ...development })).not.toThrow();
+  });
+
   it('validates opt-in thinking/effort and the initial token ceiling', () => {
     for (const value of ['enabled', 'disabled', 'auto', 'provider-default']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_THINKING: value })).not.toThrow();
     for (const value of ['minimal', 'low', 'medium', 'high']) expect(() => validateRuntimeConfig({ ...development, AEEIS_MODEL_REASONING_EFFORT: value })).not.toThrow();

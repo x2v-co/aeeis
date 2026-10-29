@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { ChangeAuditConflict, ChangeAuditLog, canonicalJson, type ChangeAuditEntry, type ChangeAuditStore, type MaybePromise } from '../change-audit.js';
 import { postgresAdvisoryXactLock } from './postgres-lock.js';
 import { withPostgresMigrationLock } from './postgres-migration.js';
+import { openAggregate, pick, sealAggregate } from '../content-encryption.js';
 
 // Keep in sync with migrations/005-change-audit.sql, like the other adapter migrations.
 export const changeAuditMigration = `
@@ -33,14 +34,14 @@ export class PostgresChangeAuditStore implements ChangeAuditStore<pg.PoolClient>
     await withPostgresMigrationLock(this.pool, 'change-audit', async client => { await client.query(changeAuditMigration); });
   }
   async list(): Promise<ChangeAuditEntry[]> {
-    return (await this.pool.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [this.stream])).rows.map(row => row.entry);
+    return await Promise.all((await this.pool.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [this.stream])).rows.map(row => openEntry(row.entry)));
   }
   async transaction<T>(work: (log: ChangeAuditLog, tx: pg.PoolClient) => MaybePromise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       await postgresAdvisoryXactLock(client, 'aeeis:change-audit', this.stream);
-      const entries = (await client.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [this.stream])).rows.map(row => row.entry);
+      const entries = await Promise.all((await client.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [this.stream])).rows.map(row => openEntry(row.entry)));
       const log = new ChangeAuditLog(entries);
       const result = await work(log, client);
       for (const entry of log.list().slice(entries.length)) await insertEntry(client, this.stream, entry);
@@ -55,10 +56,18 @@ export class PostgresChangeAuditStore implements ChangeAuditStore<pg.PoolClient>
 export async function persistChangeAuditChain(client: pg.PoolClient, stream: string, entries: ChangeAuditEntry[]): Promise<void> {
   await postgresAdvisoryXactLock(client, 'aeeis:change-audit', stream);
   new ChangeAuditLog(entries);
-  const existing = (await client.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [stream])).rows.map(row => row.entry);
+  const existing = await Promise.all((await client.query<{ entry: ChangeAuditEntry }>('SELECT entry FROM aeeis_change_audit WHERE stream=$1 ORDER BY sequence', [stream])).rows.map(row => openEntry(row.entry)));
   if (existing.length > entries.length || existing.some((entry, index) => canonicalJson(entry) !== canonicalJson(entries[index]))) throw new ChangeAuditConflict('Cannot replace change audit history');
   for (const entry of entries.slice(existing.length)) await insertEntry(client, stream, entry);
 }
 async function insertEntry(client: pg.PoolClient, stream: string, entry: ChangeAuditEntry): Promise<void> {
-  await client.query('INSERT INTO aeeis_change_audit(stream,id,entry) VALUES($1,$2,$3)', [stream, entry.id, entry]);
+  await client.query('INSERT INTO aeeis_change_audit(stream,id,entry) VALUES($1,$2,$3)', [stream, entry.id, await sealEntry(entry)]);
 }
+
+/** Memory and skill snapshots are sealed under the subject's tenant; the CHECKed fields stay plain. */
+function entryTenant(entry: ChangeAuditEntry): string {
+  const subject = (entry.after ?? entry.before) as { tenantId?: unknown } | null;
+  return subject && typeof subject === 'object' && typeof subject.tenantId === 'string' ? subject.tenantId : 'local';
+}
+export const sealEntry = (entry: ChangeAuditEntry) => sealAggregate('change-audit', entryTenant(entry), entry.id, entry, value => pick(value, ['id', 'subjectKind', 'subjectId', 'op', 'at']));
+export const openEntry = (stored: unknown) => openAggregate<ChangeAuditEntry>('change-audit', String((stored as { id?: unknown }).id), stored);

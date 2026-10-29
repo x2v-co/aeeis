@@ -119,6 +119,30 @@ services:
       retries: 30
     logging: *small-logs
 
+  # One-shot: the login the API uses. It owns no table, so row-level security
+  # applies to it; the aeeis owner only runs migrations. Idempotent on old volumes.
+  postgres-roles:
+    image: ${AEEIS_IMAGE_REGISTRY:+${AEEIS_IMAGE_REGISTRY:-}/}${AEEIS_POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: aeeis
+      PGDATABASE: aeeis
+      PGPASSWORD: ${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}
+      AEEIS_APP_DB_PASSWORD: ${AEEIS_APP_DB_PASSWORD:?Set AEEIS_APP_DB_PASSWORD for the aeeis_app database login}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql -v ON_ERROR_STOP=1 -v app_password="$$AEEIS_APP_DB_PASSWORD" <<'SQL'
+        SELECT 'CREATE ROLE aeeis_app LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'aeeis_app')\gexec
+        ALTER ROLE aeeis_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'app_password';
+        SQL
+    networks: [aeeis]
+    logging: *small-logs
+
   api:
     <<: *aeeis-image
     network_mode: service:netns
@@ -127,6 +151,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      postgres-roles:
+        condition: service_completed_successfully
       temporal:
         condition: service_healthy
     env_file:
@@ -137,7 +163,8 @@ services:
         AEEIS_HOST: 0.0.0.0
         PORT: 4323
         AEEIS_DATA_DIR: /app/data/runs
-        DATABASE_URL: postgresql://aeeis:${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}@postgres:5432/aeeis
+        DATABASE_URL: postgresql://aeeis_app:${AEEIS_APP_DB_PASSWORD:?Set AEEIS_APP_DB_PASSWORD}@postgres:5432/aeeis
+        AEEIS_DATABASE_MIGRATION_URL: postgresql://aeeis:${AEEIS_POSTGRES_PASSWORD:?Set AEEIS_POSTGRES_PASSWORD}@postgres:5432/aeeis
         AEEIS_RUNNER: temporal
         TEMPORAL_ADDRESS: temporal:7233
         TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-aeeis}

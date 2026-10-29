@@ -7,6 +7,7 @@ import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { calendarScheduleSchema, nextCalendarOccurrence } from './reminder-schedule.js';
 import { requestSchema } from './runtime/contracts.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 /**
  * A routine is work the owner wrote down once: a prompt for one person,
@@ -225,7 +226,7 @@ export class JsonRoutineStore extends InMemoryRoutineStore {
 
 export class PostgresRoutineStore implements RoutineStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'routines', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_routines (id text PRIMARY KEY, owner text NOT NULL, tenant_id text NOT NULL, state jsonb NOT NULL, due_at timestamptz, created_at timestamptz NOT NULL);

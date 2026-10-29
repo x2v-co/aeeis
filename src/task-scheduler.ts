@@ -11,6 +11,7 @@ import { NotFound } from './runtime/repository.js';
 import type { AeeisService } from './application/aeeis-service.js';
 import type { Plan, PlanNode, Id } from './contracts.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export type TaskDispatchState = 'queued' | 'dispatched' | 'waiting' | 'succeeded' | 'failed' | 'unknown' | 'cancelled';
 
@@ -268,7 +269,7 @@ export class FileTaskDispatchRepository implements TaskDispatchRepository {
 
 export class PostgresTaskDispatchRepository implements TaskDispatchRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'task-dispatches', async client => {
       await client.query(`

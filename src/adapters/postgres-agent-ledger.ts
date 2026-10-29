@@ -16,6 +16,7 @@ import {
   type GrantLifecycleStatus,
 } from '../agent-ledger.js';
 import { delegationGrantSchema, digestProtocol } from '../protocol.js';
+import { createPostgresPool } from './postgres-pool.js';
 
 /** PostgreSQL-backed Grant budget ledger.
  * Every reserve/settle operation locks exactly one grant row, so concurrent
@@ -26,7 +27,7 @@ export class PostgresGrantLedger implements GrantLedger {
   private readonly pool: pg.Pool;
 
   constructor(connectionString: string) {
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = createPostgresPool(connectionString);
   }
 
   async init(): Promise<void> {

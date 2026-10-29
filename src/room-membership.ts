@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import pg from 'pg';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { z } from 'zod';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export const roomMemberRoleSchema = z.enum(['owner', 'editor', 'viewer', 'agent']);
 export type RoomMemberRole = z.infer<typeof roomMemberRoleSchema>;
@@ -132,7 +133,7 @@ export class JsonRoomMembershipRepository implements RoomMembershipRepository {
 
 export class PostgresRoomMembershipRepository implements RoomMembershipRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'room-memberships', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_room_memberships (room_id text NOT NULL, principal_id text NOT NULL, tenant_id text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, PRIMARY KEY(room_id, principal_id, tenant_id)); CREATE INDEX IF NOT EXISTS aeeis_room_memberships_room_idx ON aeeis_room_memberships(room_id, tenant_id); CREATE INDEX IF NOT EXISTS aeeis_room_memberships_principal_idx ON aeeis_room_memberships(principal_id, tenant_id, room_id) WHERE state->>'status'='active';`);

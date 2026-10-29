@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export const OWNED_BOT_CAP = 30;
 export const OWNED_BOT_MARKS = ['letter', 'round', 'square', 'diamond', 'drop'] as const;
@@ -261,7 +262,7 @@ function readBot(value: unknown): OwnedBot {
 
 export class PostgresOwnedBotStore implements OwnedBotStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'owned-bots', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_owned_bots (id text PRIMARY KEY, owner text NOT NULL, tenant_id text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL); CREATE INDEX IF NOT EXISTS aeeis_owned_bots_owner_idx ON aeeis_owned_bots(owner, tenant_id, created_at);`);

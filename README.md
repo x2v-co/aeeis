@@ -34,6 +34,8 @@ API 重启后，Reminder Timer 只按活动状态分页重连 `scheduled`、`fir
 
 部署到 Docker/Kubernetes 时，敏感配置可以使用文件形式注入，例如 `AEEIS_ACCESS_TOKEN_FILE=/run/secrets/aeeis-token`、`AEEIS_MODEL_API_KEY_FILE=/run/secrets/model-key` 或 `DATABASE_URL_FILE=/run/secrets/database-url`。AEEIS 会在打开存储和校验配置前读取这些文件；同一个变量同时提供直接值和 `_FILE` 值会拒绝启动，避免轮换时出现歧义。该约定只对 `AEEIS_*`、`TEMPORAL_*` 和 `DATABASE_URL` 生效。
 
+多用户的 PostgreSQL 部署用两个数据库身份：`AEEIS_DATABASE_MIGRATION_URL` 是拥有表的 owner，只做迁移；`DATABASE_URL` 是不拥有表的应用登录，行级安全对它生效，带身份的请求只能读写自己租户的行。`AEEIS_CONTENT_ENCRYPTION_KEY_FILE` 指向 32 字节主密钥，对话、Run 的资料和产物、会话事件、Goal 记忆和 Brain 主张以按租户的数据密钥加密后写入，hash 仍对明文计算。生产模式缺少其中任何一项会拒绝启动，只有一位主人的节点可以用 `AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1` 带警告启动。密钥管理、轮换、存量加密和升级步骤见[运维手册](docs/operations/runbook.md)第 12 节。
+
 也可以用 Docker Compose 启动一套包含 PostgreSQL、Fixture Model、Fixture RSI Evaluator、Fixture 外部 Agent 和 AEEIS 的开发环境：
 
 ```bash

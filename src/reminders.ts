@@ -8,6 +8,7 @@ import type { ProjectionAggregateType } from './contracts.js';
 import type { Ownership } from './security/principal.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, recentFirst, validateCollectionLimit } from './adapters/collection-query.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const identity = z.string().trim().min(1).max(200);
 const reminderId = z.string().regex(/^reminder_[a-f0-9-]{36}$/);
@@ -237,7 +238,7 @@ function sqlState(reminder: Reminder): [string, string, string, string, string, 
 /** PostgreSQL store uses row locks and SKIP LOCKED for cross-process claims. */
 export class PostgresReminderStore implements ReminderStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> { await withPostgresMigrationLock(this.pool, 'reminders', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_reminders (id text PRIMARY KEY, owner text NOT NULL, tenant_id text NOT NULL, status text NOT NULL, due_at timestamptz NOT NULL, next_attempt_at timestamptz NOT NULL, lease_until timestamptz, attempts integer NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, idempotency_key text NOT NULL, state jsonb NOT NULL, UNIQUE(owner, tenant_id, idempotency_key)); CREATE INDEX IF NOT EXISTS aeeis_reminders_due_idx ON aeeis_reminders(owner, tenant_id, status, due_at, next_attempt_at, id); CREATE INDEX IF NOT EXISTS aeeis_reminders_scope_updated_idx ON aeeis_reminders(owner, tenant_id, updated_at DESC, id); CREATE INDEX IF NOT EXISTS aeeis_reminders_active_recent_idx ON aeeis_reminders(updated_at DESC, id) WHERE status IN ('scheduled','firing','failed');`); }); }
   async create(input: CreateReminderInput, scope: Ownership): Promise<Reminder> { const reminder = makeReminder(input, scope); const result = await this.pool.query<{ state: unknown }>('INSERT INTO aeeis_reminders(id,owner,tenant_id,status,due_at,next_attempt_at,lease_until,attempts,created_at,updated_at,idempotency_key,state) VALUES($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,$10,$11) ON CONFLICT(owner,tenant_id,idempotency_key) DO NOTHING RETURNING state', [reminder.id, reminder.owner, reminder.tenantId, reminder.status, reminder.dueAt, reminder.nextAttemptAt, reminder.attempts, reminder.createdAt, reminder.updatedAt, reminder.idempotencyKey, reminder]); if (result.rows[0]) return rowToReminder(result.rows[0]); const existing = await this.getByKey(reminder.idempotencyKey, scope); if (existing.requestHash !== reminder.requestHash) throw new ReminderConflict('Reminder idempotency key is already bound to a different request'); return existing; }
   private async getByKey(key: string, scope: Ownership): Promise<Reminder> { const result = await this.pool.query<{ state: unknown }>('SELECT state FROM aeeis_reminders WHERE owner=$1 AND tenant_id=$2 AND idempotency_key=$3', [scope.owner, scope.tenantId, key]); if (!result.rows[0]) throw new ReminderNotFound('Unknown reminder'); return rowToReminder(result.rows[0]); }
