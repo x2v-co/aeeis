@@ -984,6 +984,46 @@ export class ConversationService implements LifeThreadInbox {
   }
 
   /**
+   * A Bot's own proposal: a discussion task on the life thread of the Bot who
+   * would do it, spoken by the Bot that proposed it. It never starts work; the
+   * same key returns the first proposal.
+   */
+  async proposeTask(input: { agentId: string; proposerId: string; title: string; reason?: string; key: string }, scope: Ownership): Promise<{ conversationId: string; taskId: string }> {
+    const thread = await this.lifeThread(input.agentId, input.agentId === 'aeeis' ? 'AEEIS' : input.agentId, scope);
+    const key = idempotencyKeySchema.parse(input.key);
+    const previous = thread.messages.find(message => message.keyHash === followupHash(key));
+    const result = previous
+      ? await this.finish(thread.id, previous.id, scope)
+      : await this.post(thread.id, { text: input.reason ? `${input.title}：${input.reason}` : input.title, expectedRevision: thread.revision, newTask: { title: input.title }, intent: 'discuss', focus: 'keep', speaker: { role: 'agent', id: input.proposerId } }, scope, key, false);
+    const taskId = result.message.route.taskIds[0];
+    if (!taskId) throw new Conflict('提议没有落成任务');
+    return { conversationId: thread.id, taskId };
+  }
+
+  /**
+   * A Bot starts an existing task itself. The Run's origin is `agent`, so the
+   * action rules ask before writes (or refuse them under yolo). Same key, same Run.
+   */
+  async startTaskAsBot(input: { conversationId: string; taskId: string; agentId: string; review: 'required' | 'auto' | 'yolo'; key: string; note?: string }, scope: Ownership, canExecute: boolean): Promise<{ runId: string }> {
+    const conversation = await this.store.get(input.conversationId, scope);
+    const key = idempotencyKeySchema.parse(input.key);
+    const previous = conversation.messages.find(message => message.keyHash === followupHash(key));
+    const result = previous
+      ? await this.finish(conversation.id, previous.id, scope)
+      : await this.post(conversation.id, { text: input.note ?? '我来做这件事。', expectedRevision: conversation.revision, taskIds: [input.taskId], intent: 'execute', focus: 'keep', speaker: { role: 'agent', id: input.agentId }, runOptions: { executionReview: input.review, origin: 'agent' } }, scope, key, canExecute);
+    if (!result.runId) throw new Conflict('这次没有开出执行');
+    return { runId: result.runId };
+  }
+
+  /** The Runs of one task, oldest first. */
+  async taskRuns(conversationId: string, taskId: string, scope: Ownership): Promise<AgentRun[]> {
+    const conversation = await this.store.get(conversationId, scope);
+    const task = conversation.tasks.find(item => item.id === taskId);
+    if (!task) throw new NotFound('Unknown task');
+    return this.runs.listRunsByThread(task.threadId, scope);
+  }
+
+  /**
    * A routine's start: a new task on the person's life thread with an explicit
    * Run. The same key returns the first start, even when the text differs
    * because the retry happened later.

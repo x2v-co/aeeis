@@ -6,7 +6,7 @@ const citationId = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
  * the fact; the board is only a projection of these actions. Older events
  * wrote the same meaning as a text prefix; `legacyTaskAction` reads those so
  * existing channels keep their state, but new writes always carry this. */
-export const channelTaskActionKindSchema = z.enum(['claim', 'assign', 'transfer', 'refuse', 'release', 'accept', 'request_changes', 'block', 'unblock', 'cancel', 'restore', 'hand_up']);
+export const channelTaskActionKindSchema = z.enum(['claim', 'assign', 'transfer', 'refuse', 'release', 'accept', 'request_changes', 'block', 'unblock', 'cancel', 'restore', 'hand_up', 'propose', 'adopt', 'offer', 'decline']);
 export type ChannelTaskActionKind = z.infer<typeof channelTaskActionKindSchema>;
 export const channelTaskActionSchema = z.object({
   schemaVersion: z.literal('channel-task-action/1'),
@@ -18,11 +18,12 @@ export const channelTaskActionSchema = z.object({
 }).strict();
 export type ChannelTaskAction = z.infer<typeof channelTaskActionSchema>;
 
-/** Kinds a person can write through the task-actions endpoint. `hand_up` is
- * written only by the server when a Bot is removed. */
-export const writableTaskActionKinds = ['claim', 'assign', 'transfer', 'refuse', 'release', 'accept', 'request_changes', 'block', 'unblock', 'cancel', 'restore'] as const satisfies readonly ChannelTaskActionKind[];
-export const actionNeedsAgent: ReadonlySet<ChannelTaskActionKind> = new Set(['claim', 'assign', 'transfer']);
-export const actionNeedsReason: ReadonlySet<ChannelTaskActionKind> = new Set(['refuse', 'release', 'request_changes', 'block', 'unblock', 'cancel', 'restore']);
+/** Kinds a person can write through the task-actions endpoint. `hand_up`,
+ * `propose` and `decline` are written only by the server: Bot removal, a Bot's
+ * own proposal, and the end of a handoff that was not taken. */
+export const writableTaskActionKinds = ['claim', 'assign', 'transfer', 'refuse', 'release', 'accept', 'request_changes', 'block', 'unblock', 'cancel', 'restore', 'adopt', 'offer'] as const satisfies readonly ChannelTaskActionKind[];
+export const actionNeedsAgent: ReadonlySet<ChannelTaskActionKind> = new Set(['claim', 'assign', 'transfer', 'offer', 'propose']);
+export const actionNeedsReason: ReadonlySet<ChannelTaskActionKind> = new Set(['refuse', 'release', 'request_changes', 'block', 'unblock', 'cancel', 'restore', 'decline']);
 
 /** The line people read in the channel. It keeps the wording the channel has
  * always shown; nothing reads meaning back out of it. */
@@ -42,6 +43,10 @@ export function taskActionLine(action: ChannelTaskAction, agentName?: string): s
     case 'cancel': return `取消：${reason}`;
     case 'restore': return `撤回取消：${reason}`;
     case 'hand_up': return `已交给AEEIS${reason ? `，记为讨论「${reason}」` : ''}。原来的事还在。`;
+    case 'propose': return `${name}提议这件事${reason ? `：${reason}` : ''}`;
+    case 'adopt': return '采纳提议';
+    case 'offer': return `交接中：交给 ${name}${reason ? `。${reason}` : ''}`;
+    case 'decline': return `没有交接：${reason}`;
   }
 }
 
@@ -66,7 +71,13 @@ export interface BoardTaskView { id: string; title: string; status: string; runI
 export interface BoardConversationView { id: string; agentId?: string; tasks: BoardTaskView[] }
 
 export type BoardColumn = 'capture' | 'ready' | 'doing' | 'blocked' | 'review' | 'done' | 'failed';
-export interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[] }
+export interface BoardDecision {
+  assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[];
+  /** A Bot proposed this task; it waits for a person until adopted or cancelled. */
+  proposedBy?: string; proposalReason?: string; adopted?: boolean;
+  /** Handed to someone who has not taken it yet. The task stays with its holder. */
+  offer?: { to: string; note?: string };
+}
 export interface BoardCitation { eventId: string; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string }
 export interface BoardActionMark { eventId: string; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string }
 export interface BoardCard {
@@ -177,6 +188,23 @@ export function applyTaskAction(decision: BoardDecision, action: ChannelTaskActi
       decision.assigneeId = action.agentId;
       decision.cancelled = false;
       decision.released = false;
+      delete decision.offer;
+      break;
+    case 'propose':
+      if (!action.agentId) return;
+      decision.proposedBy = action.agentId;
+      if (action.reason) decision.proposalReason = action.reason;
+      decision.adopted = false;
+      break;
+    case 'adopt':
+      decision.adopted = true;
+      break;
+    case 'offer':
+      if (!action.agentId) return;
+      decision.offer = { to: action.agentId, ...(action.reason ? { note: action.reason } : {}) };
+      break;
+    case 'decline':
+      delete decision.offer;
       break;
     case 'refuse':
       delete decision.assigneeId;
@@ -201,6 +229,7 @@ export function applyTaskAction(decision: BoardDecision, action: ChannelTaskActi
     case 'cancel':
       decision.cancelled = true;
       if (action.reason) decision.cancelReason = action.reason;
+      delete decision.offer;
       break;
     case 'restore':
       decision.cancelled = false;

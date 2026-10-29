@@ -50,6 +50,7 @@ import type { ProjectSourceProvider } from '../project-sources.js';
 import { withTenantScope } from '../adapters/postgres-pool.js';
 import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
 import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.js';
+import { BotTeam } from '../bot-team.js';
 import { RoutineConflict, RoutineNotFound, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
 import type { HermesDebateIngress } from '../hermes-debate-ingress.js';
 import { collaborationTriggerEventSchema, collaborationTriggerReconcileSchema, CollaborationTriggerNotFound, type CollaborationTriggerService } from '../collaboration-triggers.js';
@@ -65,10 +66,10 @@ import { ChannelBoardService } from '../channel-board.js';
 import { ActionPolicyConflict, ownerActionPolicyChangeSchema, type ActionPolicyStore } from '../action-policy-store.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
-import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
-declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService; aeeisBots?: BotTeam } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
 interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
@@ -186,6 +187,17 @@ export function buildApp(options: Options) {
     })
     : undefined;
   const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  // Bots that reply, propose and hand off on their own. Needs a model; AEEIS_BOT_REPLIES=0 keeps them quiet.
+  const botTeam = channelBoard && conversations && options.sessionEvents && options.domain && options.ownedBots && options.engine?.modelConfigured && process.env.AEEIS_BOT_REPLIES !== '0'
+    ? new BotTeam({
+      events: options.sessionEvents, domain: options.domain, board: channelBoard, bots: options.ownedBots, conversations,
+      complete: (request, scope) => options.engine!.completeForBot(request, scope),
+      canExecute: Boolean(options.engine && options.dispatcher),
+      notifyRun: async (runId, scope) => { const run = await options.repository.get(runId, scope); if (isBootRecoverableRun(run.status)) await notify(run.id); },
+      ...(process.env.AEEIS_BOT_HANDOFF_MAX_TURNS ? { handoffMaxTurns: Number(process.env.AEEIS_BOT_HANDOFF_MAX_TURNS) } : {}),
+      log: (message, detail) => console.error(message, detail ?? ''),
+    })
+    : undefined;
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
   const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
@@ -683,7 +695,7 @@ export function buildApp(options: Options) {
     return {
       executionProfile: options.demoMode ? 'fixture' : 'unverified',
       conversationRouting: Boolean(conversations),
-      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), routinesConfigured: Boolean(routines), feishuLifeConfigured: Boolean(feishuLife), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
+      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), routinesConfigured: Boolean(routines), feishuLifeConfigured: Boolean(feishuLife), botTeamConfigured: Boolean(botTeam), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
     };
   });
   app.get('/api/devices', async request => {
@@ -809,6 +821,7 @@ export function buildApp(options: Options) {
     color: z.enum(OWNED_BOT_COLORS),
     background: z.string().trim().min(1).max(800),
     role: z.string().trim().min(1).max(120).optional(),
+    autonomy: botAutonomySchema.optional(),
   }).strict();
   app.get('/api/bots', async request => {
     if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
@@ -821,7 +834,7 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     const saved = await options.ownedBots.create({
       name: body.name, mark: body.mark, color: body.color, background: body.background,
-      ...(body.id ? { id: body.id } : {}), ...(body.role ? { role: body.role } : {}),
+      ...(body.id ? { id: body.id } : {}), ...(body.role ? { role: body.role } : {}), ...(body.autonomy ? { autonomy: body.autonomy } : {}),
     }, { owner: principal.id, tenantId: principal.tenantId });
     return visibleOwnedBot(saved);
   });
@@ -833,7 +846,7 @@ export function buildApp(options: Options) {
     const body = ownedBotPatch.parse(request.body);
     const principal = principalOf(request);
     const saved = await options.ownedBots.update(id, {
-      name: body.name, mark: body.mark, color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}),
+      name: body.name, mark: body.mark, color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}), ...(body.autonomy ? { autonomy: body.autonomy } : {}),
     }, { owner: principal.id, tenantId: principal.tenantId });
     return visibleOwnedBot(saved);
   });
@@ -981,7 +994,10 @@ export function buildApp(options: Options) {
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/task-actions', async request => {
     const principal = principalOf(request);
-    return boardService().act(request.params.id, request.body, principal.id, principal.tenantId);
+    const result = await boardService().act(request.params.id, request.body, principal.id, principal.tenantId);
+    const action = result.event.taskAction;
+    if (botTeam && action?.kind === 'offer') botTeam.enqueue(() => botTeam.negotiate(request.params.id, { owner: principal.id, tenantId: principal.tenantId }, action.conversationId, action.taskId));
+    return result;
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
@@ -998,7 +1014,10 @@ export function buildApp(options: Options) {
       }).strict().optional(),
     }).strict().parse(request.body);
     const principal = principalOf(request);
-    return options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey, ...(body.actor === undefined ? {} : { actor: body.actor }) }, principal.id, principal.tenantId);
+    const event = await options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey, ...(body.actor === undefined ? {} : { actor: body.actor }) }, principal.id, principal.tenantId);
+    // A person's message gets its reply after this request returns.
+    if (botTeam && event.type === 'message' && event.actorType === 'principal') botTeam.enqueue(() => botTeam.respond(event));
+    return event;
   });
   app.post<{ Params: { id: string; eventId: string } }>('/api/rooms/:id/session-events/:eventId/revise', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
@@ -2137,6 +2156,7 @@ export function buildApp(options: Options) {
     return updated;
   });
   if (routines) app.decorate('aeeisRoutines', routines);
+  if (botTeam) app.decorate('aeeisBots', botTeam);
   return app;
 }
 

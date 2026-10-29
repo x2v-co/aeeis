@@ -129,6 +129,7 @@ interface RuntimeStatus {
   collaborationConfigured: boolean; projectionConfigured: boolean; projectionSinkConfigured: boolean; domainConfigured: boolean;
   projectionSinkHealth?: { ready: boolean; detail?: string } | null;
   routinesConfigured?: boolean; feishuLifeConfigured?: boolean;
+  botTeamConfigured?: boolean;
   taskSchedulerConfigured: boolean; agentGatewayConfigured: boolean; agentRegistryConfigured: boolean; mode: string; principal?: string; tenantId?: string; roles?: string[];
 }
 interface RunPage { items: RunSummary[]; nextCursor?: string }
@@ -216,7 +217,7 @@ let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
 type BotMark = 'letter' | 'round' | 'square' | 'diamond' | 'drop';
-interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string }
+interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string; autonomy?: BotAutonomy }
 interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; held?: string }
 const CUSTOM_BOTS_KEY = 'aeeis.custom-bots';
 const LOCAL_BOT_ACCOUNT = 'aeeis.custom-bots-account';
@@ -232,9 +233,15 @@ const DEMO_BOTS: RosterBot[] = [
 let agentSummaries: AgentSummary[] = [];
 let agentsLoaded = false;
 let ownedBotRecords: RosterBot[] = [];
+/** The server lets Bots reply, propose and hand off on their own. */
+let botsActive = false;
+let sideThreadRooms: RoomSummary[] = [];
+const SIDE_THREAD = '侧线程';
+const BOT_AUTONOMY_LABEL: Record<BotAutonomy, string> = { quiet: '只记录，不回复', reply: '回复，提议等我', auto: '自动开工（auto 审批）', yolo: '放手（yolo 审批）' };
+type BotAutonomy = 'quiet' | 'reply' | 'auto' | 'yolo';
 let localBotsAdopted = false;
 let localBotNote = '';
-interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; createdAt?: string; updatedAt?: string }
+interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; autonomy?: BotAutonomy; createdAt?: string; updatedAt?: string }
 let roomSummaries: RoomSummary[] = [];
 let botGroups: BotGroups | undefined;
 let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
@@ -1553,7 +1560,7 @@ function roomReadyBot(bot: RosterBot): boolean {
   return true;
 }
 function ownedRosterBot(bot: OwnedBotView): RosterBot {
-  return { id: bot.id, name: bot.name, note: '', demo: false, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}) };
+  return { id: bot.id, name: bot.name, note: '', demo: false, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}), ...(bot.autonomy ? { autonomy: bot.autonomy } : {}) };
 }
 function rememberOwnedBot(bot: OwnedBotView): void {
   const next = ownedRosterBot(bot);
@@ -1826,7 +1833,12 @@ function roomOwnerWrote(event: SessionEventSummary): boolean {
   if (event.owner) return writer.id === event.owner;
   return Boolean(sessionPrincipal) && writer.id === sessionPrincipal;
 }
+/** Board marks and receipts the server wrote for the Bots (proposals, handoffs, reassignment). */
+function automaticRecord(event: SessionEventSummary): boolean {
+  return event.actorType === 'principal' && /^(bot-|handoff-)/.test(event.idempotencyKey ?? '');
+}
 function eventAuthor(event: SessionEventSummary): string {
+  if (automaticRecord(event)) return '自动记录';
   if (event.type === 'system') {
     const writer = eventWriter(event);
     if (writer.type === 'system' || roomOwnerWrote(event)) return '记录';
@@ -1973,7 +1985,7 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'review', title: '待验收' },
   { id: 'done', title: '完成' },
 ];
-interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[] }
+interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[]; proposedBy?: string; proposalReason?: string; adopted?: boolean; offer?: { to: string; note?: string } }
 interface ChannelBoardCardView { conversationId: string; taskId: string; agentId?: string; ownerId: string; title?: string; status: string; runId?: string; column: string; decision: BoardDecision; chain: string[] }
 interface ChannelBoardView {
   cursor: number;
@@ -2274,6 +2286,8 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   if (blocked) button.append(element('small', blocked));
   const blockNote = blockNoteCurrent(task.status, decision);
   if (blockNote) button.append(element('small', `阻塞：${blockNote}`));
+  if (decision.proposedBy && !decision.adopted && !decision.cancelled && task.status === 'discussion') button.append(element('small', `提议 · ${participantLabel(decision.proposedBy)}${decision.proposalReason ? `：${decision.proposalReason}` : ''}`));
+  if (decision.offer) button.append(element('small', `交接中 → ${participantLabel(decision.offer.to)}`));
   if (decision.assigneeId) button.append(element('small', `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取`));
   if (decision.conflicts.length) button.append(element('small', '已被领取'));
   if (decision.accepted) button.append(element('small', '已验收'));
@@ -2328,7 +2342,7 @@ async function roomWriteContext(roomId: string): Promise<{ goalId: string; manif
   const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
   return { goalId: goal.id, manifestId: manifest.id };
 }
-type TaskActionKind = 'claim' | 'assign' | 'transfer' | 'refuse' | 'release' | 'accept' | 'request_changes' | 'block' | 'unblock' | 'cancel' | 'restore';
+type TaskActionKind = 'claim' | 'assign' | 'transfer' | 'refuse' | 'release' | 'accept' | 'request_changes' | 'block' | 'unblock' | 'cancel' | 'restore' | 'adopt' | 'offer';
 /** Sends what the person did. The server checks the rules (first claim
  * holds, work-in-progress limit, only a success can be accepted) and answers
  * with the new board, or 409 with the reason. */
@@ -2394,6 +2408,63 @@ async function handChannelTask(view: ConversationView, task: ConversationTaskVie
   if (note) { message(note); return; }
   if (!await postTaskAction(kind === '分派' ? 'assign' : 'transfer', view, task, { agentId: bot.id })) return;
   message(kind === '分派' ? `已分派给${bot.name}。记成一条新的讨论，未执行。` : `已转交给${bot.name}。原来的事还在，未执行。`);
+  await afterChannelWrite(view, task.id);
+}
+/** How much this Bot does on its own. Only Bots saved on this account carry the setting. */
+function renderBotAutonomy(bot: RosterBot | undefined): void {
+  const row = $('bot-autonomy-row');
+  const select = $<HTMLSelectElement>('bot-autonomy');
+  const owned = bot && ownedBotRecords.find(item => item.id === bot.id);
+  if (!row || !select) return;
+  row.hidden = !botsActive || !owned;
+  if (row.hidden || !owned) return;
+  if (!select.options.length) for (const [value, label] of Object.entries(BOT_AUTONOMY_LABEL)) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); }
+  select.value = owned.autonomy ?? 'reply';
+  select.dataset.botId = owned.id;
+}
+async function saveBotAutonomy(): Promise<void> {
+  const select = $<HTMLSelectElement>('bot-autonomy');
+  const bot = ownedBotRecords.find(item => item.id === select?.dataset.botId);
+  if (!select || !bot || !bot.mark || !bot.color || !bot.background) return;
+  const autonomy = select.value as BotAutonomy;
+  const saved = await api<OwnedBotView>(`/bots/${encodeURIComponent(bot.id)}`, { name: bot.name, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}), autonomy }, 'PATCH');
+  rememberOwnedBot(saved);
+  message(`${bot.name}：${BOT_AUTONOMY_LABEL[autonomy]}。`);
+}
+/** The Bot's side threads, read on demand. They never show in the chat lists. */
+function renderBotSideThreads(bot: RosterBot | undefined): void {
+  const details = $<HTMLDetailsElement>('bot-side-threads');
+  if (!details) return;
+  details.hidden = !botsActive || !bot || !sideThreadRooms.length;
+  details.dataset.botId = bot?.id ?? '';
+  if (details.open) void loadBotSideThreads();
+}
+async function loadBotSideThreads(): Promise<void> {
+  const details = $<HTMLDetailsElement>('bot-side-threads');
+  const list = $('bot-side-thread-list');
+  const botId = details?.dataset.botId ?? '';
+  if (!list || !botId) return;
+  list.replaceChildren(element('li', '正在读取…'));
+  const rows: HTMLElement[] = [];
+  for (const room of sideThreadRooms) {
+    const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`).catch(() => [] as RoomMemberSummary[]);
+    if (!members.some(member => member.principalId === botId && member.status === 'active')) continue;
+    const page = await api<SessionEventPage>(`/rooms/${encodeURIComponent(room.id)}/session-events?latest=1&limit=20`).catch(() => ({ items: [] as SessionEventSummary[] }));
+    const row = element('li', '', 'side-thread');
+    row.append(element('strong', room.title));
+    const lines = element('ol');
+    for (const event of page.items.filter(item => item.type === 'message')) lines.append(element('li', `${participantLabel(event.actorId)}：${event.content}`));
+    row.append(lines);
+    rows.push(row);
+  }
+  list.replaceChildren(...(rows.length ? rows : [element('li', '这位还没有和其他 Bot 谈过交接。')]));
+}
+/** The other Bot must accept before the card moves; the two talk it over in their side thread. */
+async function offerChannelTask(view: ConversationView, task: ConversationTaskView, agentId: string): Promise<void> {
+  const bot = botById(agentId);
+  if (!bot) { message('先从名单里选一位。'); return; }
+  if (!await postTaskAction('offer', view, task, { agentId: bot.id })) return;
+  message(`已交给${bot.name}，等对方接受。卡片先留在原处。`);
   await afterChannelWrite(view, task.id);
 }
 async function refuseChannelTask(view: ConversationView, task: ConversationTaskView, reason: string): Promise<void> {
@@ -2530,6 +2601,17 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
     transfer.dataset.transferTask = task.id;
     if (column !== 'ready') body.append(picker);
     body.append(assign, transfer);
+    if (botsActive && !decision.offer) {
+      const offer = dashboardButton('交给，等对方接受', () => offerChannelTask(view, task, picker.value));
+      offer.dataset.offerTask = task.id;
+      body.append(offer);
+    }
+  }
+  if (decision.offer) body.append(element('p', `交接中：${participantLabel(decision.offer.to)}还没接。两位在侧线程里谈，谈不拢会来问你。`));
+  if (decision.proposedBy && !decision.adopted && !decision.cancelled && task.status === 'discussion') {
+    const adopt = dashboardButton('采纳提议', async () => { if (await postTaskAction('adopt', view, task)) { message(`已采纳「${task.title}」。还没有执行。`); await afterChannelWrite(view, task.id); } });
+    adopt.dataset.adoptTask = task.id;
+    body.append(element('p', `${participantLabel(decision.proposedBy)}提议${decision.proposalReason ? `：${decision.proposalReason}` : ''}`), adopt);
   }
   if (decision.assigneeId) {
     const reason = document.createElement('textarea');
@@ -2883,6 +2965,13 @@ function syncEntrySurface(): void {
     if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
     const actions = $('bot-profile-actions');
     if (actions) actions.hidden = !counterpart || counterpart.id === 'aeeis' || !ownedBotRecords.some(bot => bot.id === counterpart.id);
+    if (botsActive) {
+      if (copy) copy.textContent = '这是这个人。在群里被点名、或在私聊里，它会自己回复；按下面的设置提议任务、开工。执行仍遵守审批，写操作先问你。';
+      const boundary = $('bot-profile-boundary');
+      if (boundary) boundary.textContent = '边界：它说的话只是讨论。它开的 Run 来源是 agent，写操作要你批准，放手档下直接拒绝。批准、登录和密钥留在和 AEEIS 的对话里。';
+    }
+    renderBotAutonomy(counterpart);
+    renderBotSideThreads(counterpart);
   }
   const botStatus = $('bot-status');
   if (botStatus) {
@@ -2898,9 +2987,12 @@ function syncEntrySurface(): void {
   if (chatNote) chatNote.textContent = view === 'direct'
     ? '这间私聊只保留会话记录。选说话人只是标明这句话是谁说的，对方不会自己回复，也不会执行。@AEEIS 会记到 AEEIS 的对话里，不执行。归档后从成员列表里撤下，不会改讨论焦点，也不会停下任务。'
     : '这是群聊。每句话都留在这间房里。没有点名时，这句话送到其他成员的对话。写了常驻要求的成员会被提醒看一下，其余成员留一个 👍 表示收到。回执合成一条，只写这次送到的人。@某一位时，这一位和 AEEIS 同时接收；写了常驻要求的其他成员会再被提醒。没有收到这句话的成员不留表情。说话人不会再收到自己的这句话。@所有人同样按没点名送达。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
+  if (botsActive && view !== 'direct' && chatNote) chatNote.textContent = '这是群聊。没有点名时 AEEIS 回复；@某一位时这一位自己回复。回复只是讨论，要做的事会作为提议出现在任务板上，交接在两位 Bot 的侧线程里谈，对方接受才转过去。';
+  if (botsActive && view === 'direct' && chatNote) chatNote.textContent = '这间私聊里，对方会自己回复。回复只是讨论；要做的事会作为提议出现在任务板上。';
   if (rename) rename.hidden = view === 'direct';
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，成员用 👍 表示收到；写了常驻要求的成员会被提醒。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收。';
+  if (groupText && botsActive) groupText.placeholder = view === 'direct' ? '写给这一位，它会自己回复。' : '写到这间群里。没有点名时 AEEIS 回复；@某一位时这一位回复。';
   const sendNote = $('group-send-note');
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
@@ -3288,7 +3380,9 @@ async function createGroup(event: Event): Promise<void> {
   }
   await refresh();
 }
-function renderGroups(rooms: RoomSummary[]): void {
+function renderGroups(all: RoomSummary[]): void {
+  // Side threads are Bot-to-Bot rooms: they show in a Bot's profile, not in the chat lists.
+  const rooms = all.filter(room => room.description !== SIDE_THREAD);
   roomSummaries = rooms;
   indexDirectRooms(rooms);
   if (!openGroupId && !groupDraftOpen) {
@@ -3359,7 +3453,7 @@ async function refreshLoadedChannel(id: string): Promise<void> {
   if (!channelEventsCaughtUp && groupEventCursor) {
     const members = await membersPromise;
     if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
-    groupMembers = members.filter(member => member.status === 'active');
+    groupMembers = members.filter(member => member.status === 'active' && member.principalId !== 'aeeis');
     finishChannelRead(id, epoch);
     await absorbLaterEvents(id, epoch);
     finishChannelRead(id, epoch);
@@ -3372,7 +3466,7 @@ async function refreshLoadedChannel(id: string): Promise<void> {
       api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50&cursor=${encodeURIComponent(cursor)}`).catch((): SessionEventPage => ({ items: [] })),
     ]);
     if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
-    groupMembers = members.filter(member => member.status === 'active');
+    groupMembers = members.filter(member => member.status === 'active' && member.principalId !== 'aeeis');
     appendUnseen(page.items, liveChannelEvents);
     noteEventPage(page, cursor);
     finishChannelRead(id, epoch);
@@ -3387,7 +3481,7 @@ async function refreshLoadedChannel(id: string): Promise<void> {
     api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50&latest=1`).catch((): SessionEventPage => ({ items: [] })),
   ]);
   if (openGroupId !== id || channelLoadedRoomId !== id || epoch !== channelReadEpoch) return;
-  groupMembers = members.filter(member => member.status === 'active');
+  groupMembers = members.filter(member => member.status === 'active' && member.principalId !== 'aeeis');
   const held = new Set([...laterChannelEvents, ...liveChannelEvents].map(event => event.id));
   groupEvents = (events.items ?? []).filter(event => !held.has(event.id));
   channelOlderCursor = events.previousCursor;
@@ -3405,7 +3499,7 @@ async function loadGroupFromStart(id: string): Promise<void> {
     api<SessionEventPage>(`/rooms/${encodeURIComponent(id)}/session-events?limit=50&latest=1`).catch((): SessionEventPage => ({ items: [] })),
   ]);
   if (openGroupId !== id || epoch !== channelReadEpoch) return;
-  groupMembers = members.filter(member => member.status === 'active');
+  groupMembers = members.filter(member => member.status === 'active' && member.principalId !== 'aeeis');
   groupEvents = events.items ?? [];
   channelOlderCursor = events.previousCursor;
   laterChannelEvents = [];
@@ -3495,6 +3589,7 @@ function renderGroupTranscript(): void {
     item.dataset.kind = event.type === 'system' ? 'system' : event.actorType === 'agent' ? 'bot' : event.type === 'message' ? 'human' : event.type;
     const heading = element('header');
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
+    if (event.actorType === 'agent' && event.idempotencyKey?.startsWith('bot-reply:')) { heading.append(element('small', '自动回复', 'bot-auto')); item.dataset.auto = 'true'; }
     item.append(heading, element('p', event.content));
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
     list.append(item);
@@ -4916,6 +5011,8 @@ async function generateBotBackground(): Promise<void> {
 $('gb-new-bot')?.addEventListener('click', () => openBotCreate());
 $('bot-local-claim')?.addEventListener('click', () => { void claimLocalBots().catch(error => { localBotNote = errorMessage(error); renderLocalBotNote(); }); });
 $('bot-profile-edit')?.addEventListener('click', () => { const bot = botById(activeBotId()); if (bot) openBotEdit(bot); });
+$('bot-autonomy')?.addEventListener('change', () => { void saveBotAutonomy().catch(error => message(errorMessage(error))); });
+$('bot-side-threads')?.addEventListener('toggle', () => { if ($<HTMLDetailsElement>('bot-side-threads')?.open) void loadBotSideThreads().catch(error => message(errorMessage(error))); });
 $('bot-profile-remove')?.addEventListener('click', () => { void removeOwnedBot(activeBotId()).catch(error => message(errorMessage(error))); });
 $('bot-create-cancel')?.addEventListener('click', () => closeBotCreate());
 $('bot-create-generate')?.addEventListener('click', () => { void generateBotBackground(); });
@@ -5906,7 +6003,7 @@ async function refresh(): Promise<void> {
   if (linkedThreadId) { await refreshThread(); return; }
   if (conversationEnabled) await refreshConversation().catch(error => { $('conversation-error').textContent = errorMessage(error); });
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
-  const [runPage, goals, rooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage, owned] = await Promise.all([
+  const [runPage, goals, allRooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage, owned] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
     api<{ items: CompetitionSummary[] }>('/collaborations/competitions/page?limit=12').then(page => page.items), api<{ items: DebateSummary[] }>('/collaborations/debates/page?limit=12').then(page => page.items), api<ProjectionSummary[]>('/collaborations/projections?limit=12'), api<AgentSummary[]>('/agents?limit=50').catch(() => []),
     api<TriggerPolicySummary[]>('/collaborations/triggers/policies?limit=12').catch(() => []), api<TriggerDecisionSummary[]>('/collaborations/triggers/decisions?limit=20').catch(() => []), api<ReminderPage>(`/reminders/page?limit=20${reminderQuery}`).catch(() => ({ items: [] } as ReminderPage)),
@@ -5914,6 +6011,8 @@ async function refresh(): Promise<void> {
   ]);
   const runs = runPage.items;
   runSummaries = runs;
+  sideThreadRooms = allRooms.filter(room => room.description === SIDE_THREAD);
+  const rooms = allRooms.filter(room => room.description !== SIDE_THREAD);
   roomSummaries = rooms;
   agentSummaries = agents;
   agentsLoaded = true;
@@ -7845,6 +7944,7 @@ async function initialize(): Promise<void> {
     routinesConfigured = Boolean(status.routinesConfigured);
     runtimeModel = status.model?.model ?? '';
     taskSchedulerConfigured = status.taskSchedulerConfigured;
+    botsActive = Boolean(status.botTeamConfigured);
     authRequired = false;
     quickRunReady = status.modelConfigured && status.modelHealth?.ready !== false;
     syncConfigurationNotice();

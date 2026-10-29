@@ -16,6 +16,11 @@ const ownedBotMark = z.enum(OWNED_BOT_MARKS);
 const ownedBotColor = z.enum(OWNED_BOT_COLORS);
 const isoDate = z.string().datetime({ offset: true });
 
+/** How far a Bot acts without being asked. Missing means `reply`. */
+export const botAutonomySchema = z.enum(['quiet', 'reply', 'auto', 'yolo']);
+export type BotAutonomy = z.infer<typeof botAutonomySchema>;
+export function botAutonomy(bot: Pick<OwnedBot, 'autonomy'> | undefined): BotAutonomy { return bot?.autonomy ?? 'reply'; }
+
 export const ownedBotSchema = z.object({
   id: ownedBotId,
   owner: z.string().trim().min(1).max(200),
@@ -25,6 +30,7 @@ export const ownedBotSchema = z.object({
   color: ownedBotColor,
   background: z.string().trim().min(1).max(800),
   role: z.string().trim().min(1).max(120).optional(),
+  autonomy: botAutonomySchema.optional(),
   createdAt: isoDate,
   updatedAt: isoDate,
   retiredAt: isoDate.optional(),
@@ -39,6 +45,7 @@ export interface CreateOwnedBotInput {
   color: string;
   background: string;
   role?: string;
+  autonomy?: BotAutonomy;
 }
 
 export interface OwnedBotStore {
@@ -67,7 +74,7 @@ export function sameBotName(left: string, right: string): boolean {
 export function visibleOwnedBot(bot: OwnedBot): Omit<OwnedBot, 'owner' | 'tenantId'> {
   return {
     id: bot.id, name: bot.name, mark: bot.mark, color: bot.color, background: bot.background,
-    ...(bot.role ? { role: bot.role } : {}), createdAt: bot.createdAt, updatedAt: bot.updatedAt,
+    ...(bot.role ? { role: bot.role } : {}), autonomy: botAutonomy(bot), createdAt: bot.createdAt, updatedAt: bot.updatedAt,
   };
 }
 
@@ -96,7 +103,7 @@ export function decideOwnedBotCreate(existing: readonly OwnedBot[], input: Creat
   const id = input.id ?? `bot_${randomUUID()}`;
   const bot = ownedBotSchema.parse({
     id, owner: scope.owner, tenantId: scope.tenantId, name, mark: input.mark, color: input.color, background,
-    ...(role ? { role } : {}), createdAt: now, updatedAt: now,
+    ...(role ? { role } : {}), ...(input.autonomy ? { autonomy: input.autonomy } : {}), createdAt: now, updatedAt: now,
   });
   return { bot, inserted: true };
 }
@@ -116,7 +123,7 @@ export function decideOwnedBotUpdate(existing: readonly OwnedBot[], id: string, 
   if (mine.some(bot => sameBotName(bot.name, name))) throw new OwnedBotConflict('这个名字已经在名单上。');
   return ownedBotSchema.parse({
     id: found.id, owner: found.owner, tenantId: found.tenantId, name, mark: input.mark, color: input.color, background,
-    ...(role ? { role } : {}), createdAt: found.createdAt, updatedAt: now,
+    ...(role ? { role } : {}), ...((input.autonomy ?? found.autonomy) ? { autonomy: input.autonomy ?? found.autonomy } : {}), createdAt: found.createdAt, updatedAt: now,
   });
 }
 

@@ -2741,6 +2741,61 @@ describe('entry bots and group chats', () => {
     expect(doc().querySelectorAll('.group-run-card')).toHaveLength(2);
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/messages$/.test(post.url))).toBe(false);
   });
+  it('shows Bots that act on their own: automatic replies, proposals, side threads and the autonomy setting', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const side = { id: 'room_side', title: '阿研 ↔ AEEIS', description: '侧线程', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'reply' };
+    const base = { operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date };
+    const events = [
+      { ...base, id: 'evt_ask', sequence: 1, type: 'message', actorType: 'principal', actorId: 'owner', content: '下周发布，要一份风险摘要', evidenceRefs: [], idempotencyKey: 'say-1' },
+      { ...base, id: 'evt_reply', sequence: 2, type: 'message', actorType: 'agent', actorId: 'aeeis', recordedBy: { id: 'owner', type: 'principal' }, content: '我请阿研整理风险。', evidenceRefs: ['evt_ask'], idempotencyKey: 'bot-reply:evt_ask:aeeis' },
+      { ...base, id: 'evt_receipt', sequence: 3, type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：风险摘要', evidenceRefs: ['conv_research', 'task_risk', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' },
+      { ...base, id: 'evt_propose', sequence: 4, type: 'task_update', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议这件事：发布前要', evidenceRefs: ['conv_research', 'task_risk', 'aeeis'], idempotencyKey: 'bot-propose-mark:evt_ask:aeeis',
+        taskAction: { schemaVersion: 'channel-task-action/1', kind: 'propose', conversationId: 'conv_research', taskId: 'task_risk', agentId: 'aeeis', reason: '发布前要' } },
+    ];
+    const research = { id: 'conv_research', title: '阿研', revision: 0, agentId: bot.id, tasks: [{ id: 'task_risk', title: '风险摘要', threadId: 'thread_risk', status: 'discussion' }], messages: [] as any[], hasEarlierMessages: false };
+    const patches: any[] = [];
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room, side]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (url === `/api/bots/${bot.id}` && method === 'PATCH') { const body = JSON.parse(request.body); patches.push(body); Object.assign(bot, body); return response(bot); }
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_side/members')) return response([bot.id, 'aeeis'].map((principalId, index) => ({ id: `s${index}`, roomId: 'room_side', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date })));
+      if (String(url).includes('/rooms/room_side/session-events')) return response({ items: [{ ...base, id: 'evt_side', sequence: 1, type: 'message', actorType: 'agent', actorId: bot.id, content: '我先看数据再接。', evidenceRefs: [], idempotencyKey: 'handoff:evt_offer:0' }] });
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: events });
+      if (url === '/api/conversations/conv_research') return response(research);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const groups = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].map(button => button.textContent ?? '');
+    expect(groups.some(text => text.includes('发布协作'))).toBe(true);
+    expect(groups.some(text => text.includes('阿研 ↔ AEEIS'))).toBe(false);
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('我请阿研整理风险。'));
+    const reply = [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')].find(item => item.textContent?.includes('我请阿研整理风险。'))!;
+    expect(reply.dataset.auto).toBe('true');
+    expect(reply.querySelector('.bot-auto')?.textContent).toBe('自动回复');
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(el('channel-board').textContent).toContain('提议 · AEEIS：发布前要'));
+    doc().querySelector<HTMLButtonElement>(`[data-bot-id="${bot.id}"]`)!.click();
+    await vi.waitFor(() => expect(el('bot-autonomy-row').hidden).toBe(false));
+    expect(el('bot-note-copy').textContent).toContain('它会自己回复');
+    const select = el<HTMLSelectElement>('bot-autonomy');
+    expect(select.value).toBe('reply');
+    select.value = 'auto';
+    select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toMatchObject({ name: '阿研', autonomy: 'auto' });
+    const threads = el<HTMLDetailsElement>('bot-side-threads');
+    expect(threads.hidden).toBe(false);
+    threads.open = true;
+    threads.dispatchEvent(new dom.window.Event('toggle'));
+    await vi.waitFor(() => expect(el('bot-side-thread-list').textContent).toContain('阿研：我先看数据再接。'));
+    expect(h.posts.some(post => /\/messages$|\/runs(?:\/|$)/.test(post.url))).toBe(false);
+  });
   it('claims, accepts, and remembers inside the channel without starting a run', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const events = new Map<string, Array<{ id: string; operation: string; actorType: string; actorId: string; type: string; content: string; evidenceRefs?: string[]; createdAt: string }>>();
