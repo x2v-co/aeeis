@@ -826,6 +826,61 @@ document.querySelectorAll<HTMLAnchorElement>('nav.workbench-nav a').forEach(link
     window.requestAnimationFrame(() => document.querySelector<HTMLElement>(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   });
 });
+interface OwnerActionPolicyView { allow: string[]; block: string[]; revision: number }
+let ownerActionPolicy: OwnerActionPolicyView | undefined;
+function actionPolicyView(value: unknown): OwnerActionPolicyView {
+  const raw = (value && typeof value === 'object' ? value : {}) as Partial<OwnerActionPolicyView>;
+  return { allow: Array.isArray(raw.allow) ? raw.allow : [], block: Array.isArray(raw.block) ? raw.block : [], revision: typeof raw.revision === 'number' ? raw.revision : 0 };
+}
+/** The owner's standing action lists on the Settings page. A new Run copies them when it is created. */
+async function loadActionPolicy(): Promise<void> {
+  const list = $('action-policy-lists');
+  if (!list) return;
+  try { ownerActionPolicy = actionPolicyView(await api<unknown>('/action-policy')); }
+  catch (error) { list.replaceChildren(element('p', `读不到动作清单：${errorMessage(error)}`, 'muted')); return; }
+  renderActionPolicy();
+}
+function renderActionPolicy(): void {
+  const list = $('action-policy-lists');
+  if (!list || !ownerActionPolicy) return;
+  list.replaceChildren();
+  for (const [key, title, empty] of [['allow', '允许', '还没有。批准卡片上点「以后都允许」会加到这里。'], ['block', '阻止', '还没有。']] as const) {
+    const section = element('div', '', 'action-policy-list');
+    section.dataset.actionPolicyList = key;
+    section.append(element('h3', `${title} ${ownerActionPolicy[key].length}`));
+    if (!ownerActionPolicy[key].length) section.append(element('small', empty));
+    for (const ref of ownerActionPolicy[key]) {
+      const row = element('div', '', 'action-policy-item');
+      row.append(element('code', ref));
+      const remove = dashboardButton('移除', () => changeActionPolicy({ remove: { list: key, ref } }, `已从「${title}」移除 ${ref}。已经开始的 Run 不受影响。`));
+      remove.dataset.actionPolicyRemove = ref;
+      row.append(remove);
+      section.append(row);
+    }
+    list.append(section);
+  }
+}
+async function changeActionPolicy(change: Record<string, unknown>, done: string): Promise<void> {
+  const note = $('action-policy-note');
+  try {
+    ownerActionPolicy = actionPolicyView(await api<unknown>('/action-policy', { ...change, ...(ownerActionPolicy ? { expectedRevision: ownerActionPolicy.revision } : {}) }, 'PATCH'));
+    renderActionPolicy();
+    if (note) note.textContent = done;
+  } catch (error) {
+    if (note) note.textContent = errorMessage(error);
+    await loadActionPolicy();
+  }
+}
+$('action-policy-add')?.addEventListener('submit', event => {
+  event.preventDefault();
+  const input = $<HTMLInputElement>('action-policy-ref');
+  const ref = input?.value.trim() ?? '';
+  const list = ($<HTMLSelectElement>('action-policy-list')?.value === 'block' ? 'block' : 'allow');
+  if (!ref) { input?.focus(); return; }
+  void changeActionPolicy({ add: { list, ref } }, `已把 ${ref} 加到「${list === 'allow' ? '允许' : '阻止'}」。下一件 Run 开始生效。`).then(() => { if (input) input.value = ''; });
+});
+document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-actions"]')?.addEventListener('click', () => { void loadActionPolicy(); });
+void loadActionPolicy();
 // The Settings page's own index: jump within the open pane without changing the URL.
 document.querySelectorAll<HTMLAnchorElement>('nav.settings-index a').forEach(link => {
   link.addEventListener('click', event => {
@@ -3726,9 +3781,9 @@ function conversationDecisionCard(task: ConversationTaskView, answerDraft = ''):
     const more = element('div', '', 'decision-card-more'); more.hidden = true; more.id = `decision-more-${task.id}`;
     const moreButton = dashboardButton('更多', async () => { more.hidden = !more.hidden; moreButton.setAttribute('aria-expanded', String(!more.hidden)); });
     moreButton.dataset.cardMore = task.id; moreButton.setAttribute('aria-expanded', 'false'); moreButton.setAttribute('aria-controls', more.id);
-    const always = dashboardButton('这件任务里以后都允许', () => decideConversationAction(task, 'always'));
+    const always = dashboardButton('以后都允许', () => decideConversationAction(task, 'always'));
     always.dataset.cardDecision = 'always';
-    const block = dashboardButton('这件任务里一直阻止', () => decideConversationAction(task, 'block'));
+    const block = dashboardButton('以后都阻止', () => decideConversationAction(task, 'block'));
     block.dataset.cardDecision = 'block';
     more.append(always, block);
     actions.append(approve, deny, whyButton, moreButton);
@@ -3762,9 +3817,9 @@ async function decideConversationAction(task: ConversationTaskView, decision: 'o
     if (epoch !== conversationEpoch) return;
     const done: Record<typeof decision, string> = {
       once: `已批准 ${action.ref} 这一次，「${task.title}」接着做。`,
-      always: `已允许 ${action.ref}，这件任务里以后不再问。`,
+      always: `已允许 ${action.ref}，「${task.title}」接着做。它已加到设置里的动作清单，以后的 Run 不再问。`,
       deny: `没有执行 ${action.ref}，「${task.title}」会接着做，并知道你没同意。`,
-      block: `已阻止 ${action.ref}，这件任务里不会再执行它。`,
+      block: `已阻止 ${action.ref}，这件任务和以后的 Run 都不会执行它。可以在设置里的动作清单移除。`,
     };
     $('conversation-status').textContent = done[decision];
     $('conversation-error').textContent = '';
@@ -6456,14 +6511,14 @@ function executionReviewNote(): string {
   const mode = executionReviewValue();
   const decision = currentPlanningDecision();
   const gate = mode === 'yolo'
-    ? 'YOLO：抽出计划也直接做，不再停下来等批准。'
+    ? 'YOLO：抽出计划也直接做，不再停下来等批准。外部工具或代理的内容进来之后，写入和发送不会自动执行。'
     : mode === 'auto'
       ? (decision.shape === 'direct'
-        ? '自动：这是一件小任务，直接做。'
-        : '自动：这次会抽出一份计划，计划出来后再请你批准。')
+        ? '自动：这是一件小任务，直接做。写入、发送等动作由审批模型判断，拿不准就问你。'
+        : '自动：这次会抽出一份计划，计划出来后再请你批准。写入、发送等动作由审批模型判断，拿不准就问你。')
       : (decision.shape === 'direct'
-        ? '需要审批：这是一件小任务，仍等你点头再做。'
-        : '需要审批：抽出计划后，等你批准再做。');
+        ? '需要审批：这是一件小任务，仍等你点头再做。写入、发送等动作不在允许清单里时会先问你。'
+        : '需要审批：抽出计划后，等你批准再做。写入、发送等动作不在允许清单里时会先问你。');
   const shape = decision.shape === 'direct'
     ? '这次直接执行：跳过规划模型，写入一个步骤，仍按上面的权限放行。'
     : `这次先出任务图：${planningRefusal(decision.reason)}。`;
@@ -6804,11 +6859,11 @@ function renderRunDecision(run: RunView): void {
         const once = button('仅这一次', decide('once'));
         once.className = 'decision-primary';
         once.dataset.actionDecision = 'once';
-        const always = button('这件 Run 里以后都允许', decide('always'));
+        const always = button('以后都允许', decide('always'));
         always.dataset.actionDecision = 'always';
         const deny = button('拒绝这一次', decide('deny'));
         deny.dataset.actionDecision = 'deny';
-        const block = button('在这件 Run 里阻止', decide('block'));
+        const block = button('以后都阻止', decide('block'));
         block.dataset.actionDecision = 'block';
         reviewActions.append(once, always, deny, block);
       }

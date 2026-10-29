@@ -693,7 +693,7 @@ describe('AEEIS runtime', () => {
   it('completes a website-builder/1 Run with a structured evidence-linked artifact', async () => {
     const repo = await repository();
     const engine = new AgentEngine(repo, { model: new WebsiteBuilderFixture(), tools: new WebsiteCapabilityGateway() });
-    const run = await engine.create({ goal: 'Update the website landing page', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'] });
+    const run = await engine.create({ goal: 'Update the website landing page', builtinSkill: 'website-builder/1', allowedTools: ['fixture.lookup@1'], actionPolicy: { allow: ['fixture.lookup@1'] } });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id);
     await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
@@ -1101,7 +1101,7 @@ describe('AEEIS runtime', () => {
     let receivedGrant = '';
     const agents = new AgentGateway(directory, { submit: async (_card, request) => { receivedGrant = request.grant.grantId; return { status: 'completed', receiptRef: 'receipt.partner', acknowledgement: { schemaVersion: 'context-ack/1', taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { schemaVersion: 'result-envelope/1', taskId: request.taskBrief.taskId, agentId: request.agentId, status: 'completed', resultType: 'research/1', summary: 'candidate', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.partner' } }; } });
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
-    const run = await engine.create({ goal: 'Use a partner Agent', allowedAgents: ['agent.partner'] });
+    const run = await engine.create({ goal: 'Use a partner Agent', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     expect(await engine.advance(run.id)).toBe('running');
@@ -1126,7 +1126,7 @@ describe('AEEIS runtime', () => {
       return { status: 'completed', receiptRef: 'receipt.stream-runtime', acknowledgement: { schemaVersion: 'context-ack/1', taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { schemaVersion: 'result-envelope/1', taskId: request.taskBrief.taskId, agentId: request.agentId, status: 'completed', resultType: 'research/1', summary: 'streamed candidate', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.stream-runtime' } };
     } });
     const engine = new AgentEngine(repo, { model: new StreamingDelegationFixture(), agents });
-    const run = await engine.create({ goal: 'Stream a partner Agent update', allowedAgents: ['agent.partner'] });
+    const run = await engine.create({ goal: 'Stream a partner Agent update', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await engine.advance(run.id);
     expect(await engine.advance(run.id)).toBe('running');
@@ -1143,7 +1143,7 @@ describe('AEEIS runtime', () => {
     const directory = new AgentDirectory(); directory.register(card);
     const agents = new AgentGateway(directory, { submit: async () => { throw new Error('must not invoke changed card'); } });
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
-    const run = await engine.create({ goal: 'Use a pinned partner', allowedAgents: ['agent.partner'] });
+    const run = await engine.create({ goal: 'Use a pinned partner', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     directory.register({ ...card, cardVersion: '2', name: 'Changed partner' });
     expect(await engine.advance(run.id)).toBe('needs_approval');
     const proposed = await repo.get(run.id);
@@ -1164,7 +1164,7 @@ describe('AEEIS runtime', () => {
       return { status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: { schemaVersion: 'context-ack/1', taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true } };
     } });
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
-    const run = await engine.create({ goal: 'Late Agent acceptance', allowedAgents: ['agent.partner'] });
+    const run = await engine.create({ goal: 'Late Agent acceptance', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     await engine.advance(run.id);
     await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
@@ -1188,7 +1188,7 @@ describe('AEEIS runtime', () => {
       submit: async (_card, request) => ({ status: 'accepted', receiptRef: 'receipt.accepted', acknowledgement: { schemaVersion: 'context-ack/1' as const, taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true } }),
       reconcile: async (_card, request) => ({ status: 'completed' as const, receiptRef: 'receipt.async-complete', acknowledgement: { schemaVersion: 'context-ack/1' as const, taskId: request.taskBrief.taskId, contextVersion: request.contextPack.id, understoodGoal: true, missingInformation: [], assumptions: [], conflicts: [], ready: true }, result: { schemaVersion: 'result-envelope/1' as const, taskId: request.taskBrief.taskId, agentId: request.agentId, status: 'completed' as const, resultType: 'research/1', summary: 'async complete', claims: [], artifacts: [], unresolved: [], requestedFollowups: [], cost: {}, capabilitiesUsed: [], contextVersion: request.contextPack.id, receiptRef: 'receipt.async-complete' } }),
     });
-    const run = await new AgentEngine(repo, { model: new DelegationFixture(), agents }).create({ goal: 'Use an asynchronous partner Agent', allowedAgents: ['agent.partner'] });
+    const run = await new AgentEngine(repo, { model: new DelegationFixture(), agents }).create({ goal: 'Use an asynchronous partner Agent', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     const engine = new AgentEngine(repo, { model: new DelegationFixture(), agents });
     await engine.advance(run.id); let current = await repo.get(run.id); await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await engine.advance(run.id);
@@ -1209,7 +1209,7 @@ describe('AEEIS runtime', () => {
     const unknownTransport = { submit: async () => ({ status: 'unknown' as const, receiptRef: 'receipt.pending' }) };
     const firstGateway = new AgentGateway(directory, unknownTransport);
     const first = new AgentEngine(repo, { model: new DelegationFixture(), agents: firstGateway });
-    const run = await first.create({ goal: 'Recover delegated work', allowedAgents: ['agent.partner'] });
+    const run = await first.create({ goal: 'Recover delegated work', allowedAgents: ['agent.partner'], actionPolicy: { allow: ['agent:agent.partner'] } });
     await first.advance(run.id); let current = await repo.get(run.id); await first.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
     await first.advance(run.id); expect(await first.advance(run.id)).toBe('unknown');
     const unknownCurrent = await repo.get(run.id);

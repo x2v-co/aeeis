@@ -684,12 +684,42 @@ describe('single-entry conversation workbench', () => {
       return [...setup.querySelectorAll('[id]')].indexOf(found);
     });
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect([...setup.querySelectorAll('nav.settings-index a')].map(link => link.textContent)).toEqual(['默认与边界', '访问', '目标、Room 与提醒', '自我改进', '协作']);
+    expect([...setup.querySelectorAll('nav.settings-index a')].map(link => link.textContent)).toEqual(['默认与边界', '动作清单', '访问', '目标、Room 与提醒', '自我改进', '协作']);
     doc().querySelector<HTMLAnchorElement>('nav.workbench-nav a[href="#rsi-panel"]')!.click();
     expect(doc().body.classList.contains('computer-open')).toBe(true);
     expect(el('gb-computer').dataset.tab).toBe('setup');
     expect(el('gb-computer-title').textContent).toBe('设置');
     expect(h.posts).toHaveLength(0);
+  });
+
+  it('keeps the owner action lists on the Settings page and changes them by revision', async () => {
+    let policy = { allow: ['web-fetch'], block: [] as string[], revision: 1 };
+    const patches: any[] = [];
+    const h = harness(undefined, { handler: (url, request) => {
+      if (url !== '/api/action-policy') return undefined;
+      if (request?.method === 'PATCH') {
+        const body = JSON.parse(request.body);
+        patches.push(body);
+        if (body.expectedRevision !== policy.revision) return response({ error: '动作清单已经变化，请刷新后再改' }, 409);
+        if (body.add) policy = { ...policy, [body.add.list]: [...policy[body.add.list as 'allow' | 'block'], body.add.ref].sort(), revision: policy.revision + 1 };
+        if (body.remove) policy = { ...policy, [body.remove.list]: policy[body.remove.list as 'allow' | 'block'].filter((ref: string) => ref !== body.remove.ref), revision: policy.revision + 1 };
+        return response(policy);
+      }
+      return response(policy);
+    } });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('[data-action-policy-list="allow"]')?.textContent).toContain('web-fetch'));
+    expect(doc().querySelector('[data-action-policy-list="block"]')?.textContent).toContain('阻止 0');
+    fill('action-policy-ref', 'publish@1');
+    fill('action-policy-list', 'block');
+    el<HTMLFormElement>('action-policy-add').requestSubmit();
+    await vi.waitFor(() => expect(doc().querySelector('[data-action-policy-list="block"]')?.textContent).toContain('publish@1'));
+    expect(patches[0]).toEqual({ add: { list: 'block', ref: 'publish@1' }, expectedRevision: 1 });
+    expect(el('action-policy-note').textContent).toContain('下一件 Run 开始生效');
+    doc().querySelector<HTMLButtonElement>('[data-action-policy-remove="web-fetch"]')!.click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-action-policy-list="allow"]')?.textContent).toContain('允许 0'));
+    expect(patches[1]).toEqual({ remove: { list: 'allow', ref: 'web-fetch' }, expectedRevision: 2 });
+    expect(el('action-policy-note').textContent).toContain('已经开始的 Run 不受影响');
   });
 
   it('shows the defaults the next run will use under the entry composer, and opens Settings to change them', async () => {

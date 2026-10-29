@@ -35,7 +35,7 @@ describe('executor capability reuse', () => {
     const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
     const restart = () => new AgentEngine(repository, { model, tools, executionLimits: { maxNodeIterations: 4 } });
     let engine = restart();
-    const run = await engine.create({ goal: 'Research family routes', allowedTools: ['web-fetch'] });
+    const run = await engine.create({ goal: 'Research family routes', allowedTools: ['web-fetch'], actionPolicy: { allow: ['web-fetch'] } });
     await engine.advance(run.id);
     const plan = (await repository.get(run.id)).plans[0]!;
     await engine.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version });

@@ -54,6 +54,7 @@ import { FileTaskDispatchRepository, PostgresTaskDispatchRepository, TaskSchedul
 import { createGlobalBudgetSelector, FileGlobalBudgetLedger, globalBudgetRuleSchema, PostgresGlobalBudgetLedger, type GlobalBudgetLedger } from './global-budget.js';
 import { JsonRoomMembershipRepository, PostgresRoomMembershipRepository, type RoomMembershipRepository } from './room-membership.js';
 import { JsonOwnedBotStore, PostgresOwnedBotStore, type OwnedBotStore } from './owned-bots.js';
+import { JsonActionPolicyStore, PostgresActionPolicyStore, type ActionPolicyStore } from './action-policy-store.js';
 import { validateRuntimeConfig } from './config-validation.js';
 import { FeishuDebateIngress, feishuDebateRouteSchema } from './feishu-debate-ingress.js';
 import { HermesDebateIngress, hermesDebateRouteSchema } from './hermes-debate-ingress.js';
@@ -216,6 +217,10 @@ const ownedBots: OwnedBotStore = process.env.DATABASE_URL
   ? new PostgresOwnedBotStore(process.env.DATABASE_URL)
   : new JsonOwnedBotStore(process.env.AEEIS_OWNED_BOTS_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/owned-bots.json`);
 await ownedBots.init();
+const actionPolicies: ActionPolicyStore = process.env.DATABASE_URL
+  ? new PostgresActionPolicyStore(process.env.DATABASE_URL)
+  : new JsonActionPolicyStore(process.env.AEEIS_ACTION_POLICIES_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/action-policies.json`);
+await actionPolicies.init?.();
 const principalDirectoryBackend: PrincipalDirectory | undefined = process.env.AEEIS_PRINCIPAL_DIRECTORY_URL
   ? new HttpPrincipalDirectory(process.env.AEEIS_PRINCIPAL_DIRECTORY_URL, process.env.AEEIS_PRINCIPAL_DIRECTORY_TOKEN, Number(process.env.AEEIS_PRINCIPAL_DIRECTORY_TIMEOUT_MS ?? 5000), process.env.AEEIS_PRINCIPAL_DIRECTORY_ALLOW_INSECURE_HTTP === '1')
   : process.env.AEEIS_PRINCIPAL_DIRECTORY_PATH
@@ -480,7 +485,7 @@ try {
     rsiProposalPump.setSynthesis(synthesis);
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, executionLimits: executionLimitsConfig(process.env), domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, executionLimits: executionLimitsConfig(process.env), actionPolicies, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
     const threadService = new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? DEFAULT_THREAD_HISTORY_BYTES));
     await new ConversationService(conversationStore, repository, threadService).recover();
     await threadService.recover();
@@ -555,6 +560,7 @@ try {
     sessionEvents,
     deviceSessions,
     ownedBots,
+    actionPolicies,
     ...(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES !== undefined ? { threadContextBudgetBytes: Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES) } : {}),
     ...(process.env.AEEIS_MAX_SSE_CONNECTIONS ? { maxSseConnections: Number(process.env.AEEIS_MAX_SSE_CONNECTIONS) } : {}),
   });
@@ -846,7 +852,7 @@ try {
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); throw error; }
+} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); throw error; }

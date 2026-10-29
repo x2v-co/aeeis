@@ -70,7 +70,7 @@ async function setup(options: { cost?: Receipt['cost']; sequence?: Array<'tool' 
   };
   const engine = new AgentEngine(repo, { model, tools, agents });
   const prepare = async (externalBudget?: ExternalBudget, extra: Record<string, unknown> = {}) => {
-    const run = await engine.create({ goal: 'Deliver', allowedTools: ['lookup'], allowedAgents: ['agent.partner'], ...(externalBudget ? { externalBudget } : {}), ...extra });
+    const run = await engine.create({ goal: 'Deliver', allowedTools: ['lookup'], allowedAgents: ['agent.partner'], actionPolicy: { allow: ['lookup', 'agent:agent.partner'] }, ...(externalBudget ? { externalBudget } : {}), ...extra });
     await engine.advance(run.id);
     await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
     await engine.advance(run.id);
@@ -114,6 +114,11 @@ describe('Run external capability budgets', () => {
     await engine.advance(id);
     await repo.close(); await repo.init();
     const resumed = restart(); await resumed.recover();
+    for (let i = 0; i < 6; i++) await resumed.advance(id);
+    // The tool's output is external text, so the delegation after it waits for the owner even though it is allow-listed.
+    const waiting = await repo.get(id);
+    expect(waiting.actionApproval).toMatchObject({ status: 'pending', ref: 'agent:agent.partner' });
+    await resumed.command(id, 'approve-action', { idempotencyKey: waiting.actionApproval!.idempotencyKey, decision: 'once' });
     for (let i = 0; i < 6; i++) await resumed.advance(id);
     const run = await repo.get(id);
     expect(run.status).toBe('succeeded');
