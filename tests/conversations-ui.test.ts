@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { build } from 'esbuild';
 import { readFile } from 'node:fs/promises';
+import { projectChannelBoard, taskActionLine, type BoardConversationView } from '../src/channel-task-action.js';
 
 let source: string, html: string, css: string;
 let dom: JSDOM;
@@ -36,8 +37,51 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
   };
   let principal = 'owner';
   const ownedBots: Array<Record<string, unknown>> = [];
+  const demoNames: Record<string, string> = { aeeis: 'AEEIS', 'demo.release': '发布', 'demo.research': '研究', 'demo.brief': '纪要' };
+  const nameOf = (id: string) => demoNames[id] ?? String(ownedBots.find(bot => bot.id === id)?.name ?? id);
+  const readHandler = async (path: string, init: Record<string, unknown>) => {
+    const result = await options.handler?.(path, { headers: {}, ...init });
+    return result === undefined ? undefined : JSON.parse(await result.text());
+  };
+  /** Stands in for the server's /board: the real projection over the events
+   * and conversations this test's handler serves. */
+  const mockBoard = async (roomId: string) => {
+    const raw: Array<Record<string, any>> = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 50; page += 1) {
+      const listed = await readHandler(`/api/rooms/${encodeURIComponent(roomId)}/session-events?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { method: 'GET' });
+      const items = Array.isArray(listed) ? listed : listed?.items ?? [];
+      for (const item of items) if (!raw.some(seen => seen.id === item.id)) raw.push(item);
+      const next = Array.isArray(listed) ? undefined : listed?.nextCursor;
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
+    const items = raw.map((event, index) => ({ sequence: index + 1, owner: principal, ...event }));
+    const ids = new Set<string>();
+    for (const event of items) for (const ref of event.evidenceRefs ?? []) if (String(ref).startsWith('conv_')) ids.add(String(ref));
+    const conversations = new Map<string, BoardConversationView | undefined>();
+    for (const id of ids) {
+      const served = await readHandler(`/api/conversations/${id}`, { method: 'GET' }).catch(() => undefined);
+      conversations.set(id, served && !served.error ? served : conversationFor(`/api/conversations/${id}`));
+    }
+    return projectChannelBoard(roomId, items, conversations, nameOf);
+  };
   const fetch = vi.fn(async (url: string, request: any) => {
     if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
+    const boardRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/board$/)?.[1];
+    if (boardRoom) return response(await mockBoard(decodeURIComponent(boardRoom)));
+    const actionRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/task-actions$/)?.[1];
+    if (actionRoom && request.method === 'POST') {
+      const roomId = decodeURIComponent(actionRoom);
+      const body = JSON.parse(request.body);
+      const card = (await mockBoard(roomId)).cards.find(item => item.conversationId === body.conversationId && item.taskId === body.taskId);
+      if (!card) return response({ error: '这件事不在这个频道的任务板上' }, 404);
+      if (body.kind === 'claim' && card.decision.assigneeId) return response({ error: card.decision.assigneeId === body.agentId ? '已经领取这件事' : `${nameOf(card.decision.assigneeId)}已领取` }, 409);
+      if (body.kind === 'accept' && card.status !== 'succeeded') return response({ error: '只有已成功的事可以验收' }, 409);
+      const action = { schemaVersion: 'channel-task-action/1' as const, kind: body.kind, conversationId: body.conversationId, taskId: body.taskId, ...(body.agentId ? { agentId: body.agentId } : {}), ...(body.reason ? { reason: body.reason } : {}) };
+      const event = await readHandler(`/api/rooms/${encodeURIComponent(roomId)}/session-events`, { method: 'POST', body: JSON.stringify({ goalId: body.goalId, type: 'task_update', content: taskActionLine(action, body.agentId ? nameOf(body.agentId) : undefined), contextManifestId: body.contextManifestId, idempotencyKey: body.idempotencyKey, evidenceRefs: [body.conversationId, body.taskId, ...(body.agentId ? [body.agentId] : [])], taskAction: action }) });
+      return response({ event, board: await mockBoard(roomId) });
+    }
     const custom = options.handler?.(url, request);
     if (custom !== undefined) return custom;
     if (url === '/api/status') return response({ modelConfigured: options.model ?? true, runner: 'fixture', mode: 'single-owner-local', principal, tenantId: 'local', conversationRouting: options.enabled ?? true });
@@ -2724,13 +2768,14 @@ describe('entry bots and group chats', () => {
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
     clickText('领取', el('channel-task-body'));
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('发布已领取'));
-    expect(h.posts.filter(post => post.body?.type === 'task_update').map(post => post.body.content)).toEqual(['领取：发布']);
+    expect(h.posts.filter(post => post.url.endsWith('/task-actions')).map(post => post.body)).toEqual([expect.objectContaining({ kind: 'claim', conversationId: 'conv_release', taskId: 'task_ready', agentId: 'demo.release' })]);
+    expect(h.posts.filter(post => post.url.endsWith('/session-events') && post.body?.type === 'task_update')).toEqual([]);
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
     const picker = el('channel-task-body').querySelector<HTMLSelectElement>('select')!;
     picker.value = 'demo.research';
     clickText('领取', el('channel-task-body'));
     expect(el('error').textContent).toContain('发布已领取');
-    expect(h.posts.filter(post => post.body?.content === '领取：发布')).toHaveLength(1);
+    expect(h.posts.filter(post => post.url.endsWith('/task-actions') && post.body?.kind === 'claim')).toHaveLength(1);
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_done"]')!.click();
     await vi.waitFor(() => expect(el('channel-task-body').textContent).toContain('花费：7 已报告 tokens'));
     expect(el('channel-task-body').textContent).toContain('交接：交给发布');
@@ -2744,7 +2789,7 @@ describe('entry bots and group chats', () => {
     clickText('验收', el('channel-task-body'));
     await vi.waitFor(() => expect(doc().querySelector('[data-column="done"]')?.textContent).toContain('待验收的清单'));
     expect(doc().querySelector('[data-column="review"]')?.textContent).toContain('待验收 0');
-    expect(h.posts.some(post => post.body?.content === '验收通过')).toBe(true);
+    expect(h.posts.some(post => post.url.endsWith('/task-actions') && post.body?.kind === 'accept')).toBe(true);
     doc().querySelector<HTMLButtonElement>('[data-board-task="task_run"]')!.click();
     const blockField = el('channel-task-body').querySelector<HTMLTextAreaElement>('textarea[data-block-task]')!;
     expect(blockField.placeholder).toContain('这会暂停这件 Run');
@@ -2940,7 +2985,83 @@ describe('entry bots and group chats', () => {
     expect(doc().querySelector('[data-accept-task]')).toBe(accept);
     accept.click();
     await vi.waitFor(() => expect(el('error').textContent).toContain('已验收「待验收的清单」'));
-    expect(h.posts.some(post => post.body?.content === '验收通过')).toBe(true);
+    expect(h.posts.some(post => post.url.endsWith('/task-actions') && post.body?.kind === 'accept')).toBe(true);
+  });
+  it('shows the server refusal when another client claimed first', async () => {
+    const handoff = { id: 'evt_handoff', operation: 'publish', sequence: 1, actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_ready', 'demo.release'], createdAt: date };
+    const room = { id: 'room_race', title: '抢先领取', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_ready', title: '待领取的对照', threadId: 'thread_ready', status: 'queued', createdAt: date }], messages: [], hasEarlierMessages: false };
+    const events: Array<Record<string, unknown>> = [handoff];
+    const members = ['demo.release', 'demo.research'].map(principalId => ({ id: `member_${principalId}`, roomId: 'room_race', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }));
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_race/members')) return response(members);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([{ id: 'goal_race', title: '抢先领取', status: 'active', createdAt: date, roomId: 'room_race' }]);
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_race' });
+      if (String(url).includes('/rooms/room_race/session-events') && method === 'POST') {
+        const body = JSON.parse(request.body);
+        const event = { id: `evt_${events.length}`, operation: 'publish', sequence: events.length + 1, actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, evidenceRefs: body.evidenceRefs ?? [], createdAt: date };
+        events.push(event);
+        return response(event);
+      }
+      if (String(url).includes('/rooms/room_race/session-events')) return response({ items: String(url).includes('cursor=') || String(url).includes('limit=20') ? [] : events });
+      if (url === '/api/conversations/conv_release') return response(release);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('抢先领取'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('抢先领取'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
+    el('channel-board-open').click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
+    doc().querySelector<HTMLButtonElement>('[data-board-task="task_ready"]')!.click();
+    events.push({ id: 'evt_other_client', operation: 'publish', sequence: 2, actorType: 'principal', actorId: 'owner', type: 'task_update', content: '领取：发布', evidenceRefs: ['conv_release', 'task_ready', 'demo.release'], createdAt: date });
+    const picker = el('channel-task-body').querySelector<HTMLSelectElement>('select')!;
+    picker.value = 'demo.research';
+    clickText('领取', el('channel-task-body'));
+    await vi.waitFor(() => expect(el('error').textContent).toContain('发布已领取'));
+    expect(h.posts.filter(post => post.url.endsWith('/task-actions'))).toHaveLength(1);
+    await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('发布已领取'));
+    expect(events.filter(event => event.type === 'task_update')).toHaveLength(1);
+  });
+  it('opens a long channel on its newest page and reads older messages only when asked', async () => {
+    const room = { id: 'room_long', title: '很长的频道', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const message = (sequence: number) => ({ id: `evt_${sequence}`, operation: 'publish', sequence, actorType: 'principal', actorId: 'owner', type: 'message', content: `消息 ${sequence}`, evidenceRefs: [], createdAt: date });
+    const all = Array.from({ length: 1_200 }, (_, index) => message(index + 1));
+    const h = harness(undefined, { handler: url => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_long/members')) return response([]);
+      if (String(url).includes('/rooms/room_long/session-events')) {
+        const query = new URL(String(url), 'http://localhost').searchParams;
+        if (query.get('limit') === '20') return response({ items: [] });
+        if (query.has('cursor')) return response({ items: all.filter(event => event.sequence > Number(query.get('cursor'))).slice(0, 50) });
+        const before = query.has('before') ? Number(query.get('before')) : Infinity;
+        if (query.has('before') || query.has('latest')) {
+          const older = all.filter(event => event.sequence < before);
+          const page = older.slice(-50);
+          return response({ items: page, ...(older.length > 50 ? { previousCursor: String(page[0]!.sequence) } : {}) });
+        }
+        return response({ items: all.slice(0, 50), nextCursor: '50' });
+      }
+      return undefined;
+    } });
+    const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_long/session-events') && !url.includes('limit=20'));
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('很长的频道'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('很长的频道'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('消息 1200'));
+    expect(el('group-transcript').textContent).toContain('消息 1151');
+    expect(el('group-transcript').textContent).not.toContain('消息 1150');
+    expect(reads().filter(url => !url.includes('latest=1') && !url.includes('board'))).toEqual([]);
+    expect(doc().querySelector('[data-earlier-messages]')?.textContent).toBe('查看更早的消息');
+    doc().querySelector<HTMLButtonElement>('[data-earlier-messages]')!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('消息 1101'));
+    expect(reads().filter(url => url.includes('before=1151'))).toHaveLength(1);
+    expect(el('group-transcript').textContent).toContain('消息 1200');
+    expect(h.posts).toHaveLength(0);
   });
   it('says when a block pauses the run and lets channel marks be cleared', async () => {
     const room = { id: 'room_marks', title: '标注', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
