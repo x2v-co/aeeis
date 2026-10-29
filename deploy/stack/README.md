@@ -6,6 +6,16 @@ before starting this stack.** It covers draining workflows, preserving tokens,
 backing up both Postgres clusters and application data, restoring into fresh volumes,
 verification with a real model and schema-aware rollback.
 
+## Pre-deploy test gate
+
+From the repository root with dependencies installed, run `npm run test:deploy`
+instead of `npx vitest run`. It runs the full suite in two phases, with the
+Temporal workflow file alone after the other tests, and reports both results.
+Set `AEEIS_TEST_MAX_WORKERS` to override the default available CPUs minus one
+(minimum one), and `AEEIS_TEST_TEMPORAL_SETUP_TIMEOUT_MS` to override the
+300000ms setup/teardown timeout. Set `AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR` to a
+persistent cache directory mounted into fresh test containers to reuse the test-server binary.
+
 ## Production configuration
 
 `compose.yml` fixes `AEEIS_ENV=production`, `AEEIS_TEMPORAL_USE_VERSIONING=1`,
