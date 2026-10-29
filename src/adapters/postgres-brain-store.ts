@@ -1,8 +1,10 @@
-import { PostgresChangeAuditStore, persistChangeAuditChain } from './postgres-change-audit.js';
+import { PostgresChangeAuditStore, openEntry, persistChangeAuditChain, sealEntry } from './postgres-change-audit.js';
+import { openField, sealField } from '../content-encryption.js';
 import pg from 'pg';
 import { postgresAdvisoryXactLock } from './postgres-lock.js';
 import { BrainConflict, GovernedBrain, brainStateSchema, type BrainPersistence, type BrainSemanticIndexMaintenance, type BrainClaim } from '../brain.js';
 import { withPostgresMigrationLock } from './postgres-migration.js';
+import { createPostgresPool } from './postgres-pool.js';
 
 export interface PostgresBrainStoreOptions {
   semanticIndex?: BrainSemanticIndexMaintenance & { init(): Promise<void> };
@@ -20,7 +22,7 @@ export class PostgresBrainStore implements BrainPersistence {
   private readonly revisions = new WeakMap<GovernedBrain, number>();
 
   constructor(connectionString: string, private readonly options: PostgresBrainStoreOptions = {}) {
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = createPostgresPool(connectionString);
   }
 
   async init(): Promise<void> {
@@ -50,7 +52,7 @@ export class PostgresBrainStore implements BrainPersistence {
       try { await this.options.semanticIndex?.reconcile(brain.state().claims); } catch { /* lexical fallback */ }
       return brain;
     }
-    const brain = GovernedBrain.fromState(brainStateSchema.parse(result.rows[0].state));
+    const brain = GovernedBrain.fromState(brainStateSchema.parse(await openBrainState(result.rows[0].state)));
     this.revisions.set(brain, parseRevision(result.rows[0].revision));
     try { await this.options.semanticIndex?.reconcile(brain.state().claims); } catch { /* lexical fallback */ }
     return brain;
@@ -78,7 +80,7 @@ export class PostgresBrainStore implements BrainPersistence {
         `INSERT INTO aeeis_brain_state(id,revision,state,updated_at)
          VALUES(1,$1,$2,$3)
          ON CONFLICT(id) DO UPDATE SET revision=EXCLUDED.revision,state=EXCLUDED.state,updated_at=EXCLUDED.updated_at`,
-        [next, state, new Date().toISOString()],
+        [next, await sealBrainState(state), new Date().toISOString()],
       );
       await persistChangeAuditChain(client, 'brain', state.changes ?? []);
       await client.query('COMMIT');
@@ -104,4 +106,22 @@ function parseRevision(value: string): number {
   const revision = Number(value);
   if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid Brain persistence revision');
   return revision;
+}
+
+/** The row holds every tenant's claims, so each claim's text is sealed under its own tenant's key. */
+type StoredBrainState = { claims?: Array<Record<string, unknown>>; changes?: unknown[] } & Record<string, unknown>;
+export async function sealBrainState(state: ReturnType<typeof brainStateSchema.parse>): Promise<unknown> {
+  return {
+    ...state,
+    claims: await Promise.all(state.claims.map(async claim => ({ ...claim, content: await sealField('brain-claim', claim.tenantId, `${claim.id}@${claim.version}`, claim.content) }))),
+    ...(state.changes ? { changes: await Promise.all(state.changes.map(entry => sealEntry(entry))) } : {}),
+  };
+}
+export async function openBrainState(stored: unknown): Promise<unknown> {
+  const state = stored as StoredBrainState;
+  return {
+    ...state,
+    ...(state.claims ? { claims: await Promise.all(state.claims.map(async claim => ({ ...claim, content: await openField('brain-claim', claim.tenantId as string | undefined, `${String(claim.id)}@${String(claim.version)}`, String(claim.content)) }))) } : {}),
+    ...(state.changes ? { changes: await Promise.all(state.changes.map(entry => openEntry(entry))) } : {}),
+  };
 }

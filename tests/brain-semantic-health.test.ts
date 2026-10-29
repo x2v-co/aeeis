@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import pg from 'pg';
 import { PostgresBrainSemanticIndex } from '../src/adapters/postgres-brain-semantic-index.js';
+import { ScopedPool } from '../src/adapters/postgres-pool.js';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('Brain semantic dependency health', () => {
   it('uses only a bounded table read and a provider probe, including outage and recovery', async () => {
-    const query = vi.spyOn(pg.Pool.prototype, 'query').mockResolvedValue({ rows: [] } as never);
+    const query = vi.spyOn(ScopedPool.prototype, 'query').mockResolvedValue({ rows: [] } as never);
     let ready = false;
     const embed = vi.fn(async () => [1, 0, 0]);
     const health = vi.fn(async () => ({ ready, detail: ready ? 'provider available' : 'provider unavailable' }));
@@ -22,7 +22,7 @@ describe('Brain semantic dependency health', () => {
   });
 
   it('reports unavailable for an absent provider probe or a failed table read without leaking errors', async () => {
-    const query = vi.spyOn(pg.Pool.prototype, 'query').mockResolvedValue({ rows: [] } as never);
+    const query = vi.spyOn(ScopedPool.prototype, 'query').mockResolvedValue({ rows: [] } as never);
     const embed = vi.fn(async () => [1, 0, 0]);
     const index = new PostgresBrainSemanticIndex('postgresql://unused.invalid/test', { model: 'embed/1', dimensions: 3, embed });
     try {

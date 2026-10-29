@@ -158,3 +158,26 @@ PostgreSQL 的 `PostgresRunRepository.init` 在现有 `runs` migration advisory 
 文件模式的 metadata、Run、reservation journal 和 `.thread-shares.json` 与 Run 仓库一起备份，保持 single-writer lock；可重建的索引不能替代 canonical 文件。重启时先恢复 pending follow-up reservations，再执行 boot/reconcile dispatch；已完成的 history、connector 和 Brain checkpoints 会复用，commit 前的失败不会把部分链接的 Run 交给 dispatcher。进程在 provider result 与 checkpoint publication 之间中断产生的 `started` 歧义不能自动重发，需要核查供应商证据。恢复完成后用原 `Idempotency-Key` 重试并确认 Run ID、sequence 和 history hash 相同；同 key 改请求应返回 409。
 
 Local 与 Temporal 都在原子提交 membership 后通知 dispatcher；每个 Run 对应自己的 workflow ID，parent 已完成后保持完成。若 commit 后 notify 失败，检查 `dispatch.failed`，恢复执行服务并使用该 Run 的 resume dispatch（`POST /api/runs/:id/dispatch`）或既有 boot/reconcile 恢复，不要另建 follow-up。审批与回答唤醒 child 的 workflow。用 owner 读取 timeline/export、用 share token 检查 cutoff 和 redaction，再验证撤销后的页面、API 与 export 均为 404。使用步骤见 [README Try threads](../../README.md#try-threads)。
+
+## 12. 静态加密和行级安全
+
+**两个数据库身份。** `AEEIS_DATABASE_MIGRATION_URL` 是拥有表的 owner，只用于建表和迁移；`DATABASE_URL` 是应用登录（例如 `aeeis_app`），不拥有任何表、不是超级用户、没有 `BYPASSRLS`。每次迁移后 owner 给应用登录授予普通的增删改查，启动最后对所有租户表启用行级安全（`aeeis_tenant` 策略）。部署栈的 `postgres-roles` 一次性服务会创建或更新 `aeeis_app`，密码来自 `AEEIS_APP_DB_PASSWORD`。
+
+**租户范围。** 带身份的 API 请求以它的租户读写；运维接口、签名 Webhook、分享链接、启动和后台任务以系统身份读写。数据库会话里两个都没设置时，租户表返回空。Brain、代理注册表、RSI、扫描游标等是整套安装共用的数据，不在行级安全之内（见 `src/adapters/postgres-pool.ts` 的 `INSTALLATION_TABLES`），仍由应用代码检查。
+
+**内容加密。** 主密钥是 32 个随机字节：
+
+```bash
+openssl rand -base64 32 > secrets/content-key && chmod 400 secrets/content-key
+```
+
+配置 `AEEIS_CONTENT_ENCRYPTION_KEY_FILE` 后，Run（资料、产物、模型调用和事件数据）、Thread 追问请求和上下文快照、对话、会话事件、Goal 记忆、Brain 主张正文和记忆/Brain 的变更历史都以 AES-256-GCM 写入，每个租户一把数据密钥，数据密钥由主密钥包裹后存在 `aeeis_content_keys`。SQL 需要过滤的字段（状态、owner、tenant、时间、待处理标记）保持明文。所有 hash 都在加密前对明文计算，审批、证据和幂等不受影响。
+
+- **备份。** 数据库备份里是密文。主密钥要单独备份、单独授权；**没有主密钥，备份无法读取。** 恢复演练要带上同一把密钥（`AEEIS_CONTENT_ENCRYPTION_KEY_FILE`）。
+- **存量数据。** 读取同时接受明文和密文。配置密钥后，API 在后台分批加密旧行；`npm run content:keys -- status` 查看还剩多少明文，`npm run content:keys -- backfill` 立即加密全部。记忆和技能的变更历史是只追加的，已有条目保持原样，新条目加密。
+- **轮换主密钥。** 新密钥放进 `AEEIS_CONTENT_ENCRYPTION_KEY_FILE`，旧密钥放进 `AEEIS_CONTENT_ENCRYPTION_PREVIOUS_KEYS_FILE`（可多行），重启后运行 `npm run content:keys -- rewrap`，确认输出全部改用新密钥后再移除旧密钥。轮换只重新包裹数据密钥，不重写数据。
+- **File 存储。** 不加密；单机使用磁盘加密保护 `AEEIS_DATA_DIR`。
+
+**生产启动检查。** 生产模式缺少主密钥、缺少 `AEEIS_DATABASE_MIGRATION_URL`、两个连接串相同，或应用登录仍是表 owner／超级用户／可绕过行级安全时，拒绝启动。只有一位主人的节点可以设置 `AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1`，不加密、不分角色启动，每次启动都会警告；它不能和多用户登录（OIDC、主体目录）同时使用。
+
+**已有部署升级。** 在 `stack.env` 里加 `AEEIS_APP_DB_PASSWORD` 和 `AEEIS_CONTENT_ENCRYPTION_KEY_FILE`，把密钥文件放到 `secrets/`，再部署。`postgres-roles` 先创建 `aeeis_app`，API 以 owner 迁移、授权、启用行级安全后，改用 `aeeis_app` 服务，并在后台加密旧数据。**回滚：** 旧版本读不了加密后的行，所以配置密钥之后不能回滚到本版本之前（没有解密导出的命令）。只想退回角色拆分时，把 `DATABASE_URL` 改回 owner 即可，行级安全对 owner 不生效。

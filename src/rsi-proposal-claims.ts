@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import pg from 'pg';
 import { z } from 'zod';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export interface RsiProposalClaimScope {
   owner: string;
@@ -119,7 +120,7 @@ export class FileRsiProposalClaimStore implements RsiProposalClaimStore {
 
 export class PostgresRsiProposalClaimStore implements RsiProposalClaimStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'rsi-proposal-claims', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_rsi_proposal_claims (

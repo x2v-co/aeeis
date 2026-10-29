@@ -47,6 +47,7 @@ import { globalBudgetBillingImportSchema, globalBudgetReconcileSchema, type Glob
 import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membership.js';
 import type { KnowledgeEmbeddingMaintenance, KnowledgeEmbeddingReindexStatus, KnowledgeProvider } from '../knowledge.js';
 import type { ProjectSourceProvider } from '../project-sources.js';
+import { withTenantScope } from '../adapters/postgres-pool.js';
 import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
 import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.js';
 import { RoutineConflict, RoutineNotFound, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
@@ -67,7 +68,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
-declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
 interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
@@ -453,6 +454,8 @@ export function buildApp(options: Options) {
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
       if ((route === '/api/bots' || route === '/api/bots/:id') && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
+      // Installation-wide operator views read as the system; every other principal reads as its tenant.
+      if (!operatorRoute) request.aeeisDbTenant = principal.tenantId;
       const ownedResourceRoute = /^\/api\/(evolution|collaborations|reminders)(?:\/|$)/.test(route) || route.endsWith('/corrections');
       if (ownedResourceRoute && !principal.roles.some(role => role === 'owner' || role === 'operator')) return reply.code(403).send({ error: 'Resource owner role required' });
       const roomRoute = /^\/api\/rooms(?:\/|$)/.test(route);
@@ -465,6 +468,12 @@ export function buildApp(options: Options) {
         && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
       if (/^\/api\/(rooms|goals|plans|runs|threads|conversations|reminders|routines)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
+  });
+  // Row-level security scope for the handler and everything it awaits. Set after the body is parsed so the
+  // scope is active when the handler runs. Requests without a principal (webhooks, share links) run as the system.
+  app.addHook('preHandler', (request, _reply, done) => {
+    if (request.aeeisDbTenant === undefined) { done(); return; }
+    withTenantScope(request.aeeisDbTenant, done);
   });
   app.addHook('onResponse', async (request, reply) => {
     finishHttpRequest(request, String(reply.statusCode));

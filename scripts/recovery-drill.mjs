@@ -52,6 +52,8 @@ try {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => ![
         'AEEIS_ACCESS_TOKEN', 'AEEIS_PRINCIPAL_TOKENS', 'AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL',
         'AEEIS_ACCESS_TOKEN_FILE', 'AEEIS_PRINCIPAL_TOKENS_FILE', 'AEEIS_OIDC_ISSUER_FILE', 'AEEIS_OIDC_AUDIENCE_FILE', 'AEEIS_OIDC_JWKS_URL_FILE',
+        // The restored copy is migrated by its own admin login, never by the source database's owner.
+        'AEEIS_DATABASE_MIGRATION_URL', 'AEEIS_DATABASE_MIGRATION_URL_FILE', 'DATABASE_URL_FILE',
       ].includes(key))),
       PORT: String(apiPort), AEEIS_HOST: '127.0.0.1', AEEIS_DATA_DIR: dataDirectory,
       DATABASE_URL: restoredUrl.toString(), AEEIS_RUNNER: 'local',

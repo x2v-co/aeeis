@@ -19,7 +19,9 @@ function fixture() {
     return { rows: [], rowCount: 1 };
   });
   const release = vi.fn();
-  const client = { query, release };
+  // The pool stamps the row-level-security scope on each checkout; these tests are about the statements after it.
+  const scoped = async (sql: string, values?: unknown[]) => sql.startsWith('SELECT set_config(') ? { rows: [], rowCount: 1 } : query(sql, values);
+  const client = { query: scoped, release };
   const pool = { query, connect: vi.fn(async () => client), end: vi.fn(async () => undefined) };
   vi.spyOn(pg, 'Pool').mockImplementation(() => pool as unknown as pg.Pool);
   const repository = new PostgresRunRepository('postgres://unused');

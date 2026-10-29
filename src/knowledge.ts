@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { globalBudgetUsageSchema, type GlobalBudgetUsage } from './global-budget.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export const knowledgeRecordSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/),
@@ -247,7 +248,7 @@ export class PostgresKnowledgeProvider implements KnowledgeProvider, KnowledgeEm
   readonly changeAudit: ChangeAuditService<pg.PoolClient>;
 
   constructor(connectionString: string, options: PostgresKnowledgeProviderOptions = {}) {
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = createPostgresPool(connectionString);
     this.embedding = options.embedding;
     this.auditStore = new PostgresChangeAuditStore(this.pool, 'knowledge');
     this.changeAudit = new ChangeAuditService(this.auditStore, {

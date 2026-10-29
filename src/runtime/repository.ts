@@ -12,6 +12,8 @@ import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prep
 import { assertWorkingMemoryUnchanged } from './working-memory.js';
 import { assertThreadHistoryUnchanged } from './thread-history.js';
 import { assertFollowupCheckpoint, assertFollowupCommit, assertSameFollowup, FollowupLocks, threadFollowupsMigration, type ThreadFollowup } from './thread-followups.js';
+import { createPostgresPool } from '../adapters/postgres-pool.js';
+import { openAggregate, pick, sealAggregate } from '../content-encryption.js';
 
 export interface RunRepository extends ThreadRepository {
   readonly shares?: RunShareStore;
@@ -613,11 +615,11 @@ export class PostgresRunRepository implements RunRepository {
   private changeChannel = 'aeeis_run_changes';
   private closed = false;
   constructor(connectionString: string) {
-    this.pool = new pg.Pool({ connectionString }); this.shares = new PostgresRunShareStore(this.pool);
+    this.pool = createPostgresPool(connectionString); this.shares = new PostgresRunShareStore(this.pool);
     this.threadShares = new PostgresThreadShareStore(this.pool);
     // Session locks use a separate bounded pool. Waiting same-key callers must
     // not exhaust the pool used by the lock holder's checkpoint/read queries.
-    this.followupLockPool = new pg.Pool({ connectionString, max: 4 });
+    this.followupLockPool = createPostgresPool(connectionString, { max: 4 });
   }
   async init(): Promise<void> {
     const schema = await this.pool.query<{ schema: string }>('SELECT current_schema() AS schema');
@@ -661,7 +663,7 @@ export class PostgresRunRepository implements RunRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('INSERT INTO aeeis_runs(id, revision, state, updated_at) VALUES($1, $2, $3, $4)', [run.id, run.revision, run, run.updatedAt]);
+      await client.query('INSERT INTO aeeis_runs(id, revision, state, updated_at) VALUES($1, $2, $3, $4)', [run.id, run.revision, await sealRun(run), run.updatedAt]);
       await this.insertEvents(client, run, 0);
       await client.query('COMMIT');
       await this.notifyChange(client, run);
@@ -669,7 +671,7 @@ export class PostgresRunRepository implements RunRepository {
   }
   private async insertEvents(client: pg.PoolClient, run: AgentRun, from: number): Promise<void> {
     for (const item of run.events.slice(from)) {
-      await client.query('INSERT INTO aeeis_run_events(run_id,seq,event_id,type,at,data,owner,tenant_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING', [run.id, item.seq, item.id, item.type, item.at, item.data, run.owner ?? 'owner', run.tenantId ?? 'local']);
+      await client.query('INSERT INTO aeeis_run_events(run_id,seq,event_id,type,at,data,owner,tenant_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING', [run.id, item.seq, item.id, item.type, item.at, await sealAggregate('run-event', run.tenantId, item.id, item.data), run.owner ?? 'owner', run.tenantId ?? 'local']);
     }
   }
   private async notifyChange(client: pg.PoolClient, run: AgentRun): Promise<void> {
@@ -750,7 +752,7 @@ export class PostgresRunRepository implements RunRepository {
     validateId(id);
     const result = await this.pool.query(`SELECT state FROM aeeis_runs WHERE id=$1${scope ? " AND COALESCE(state->>'owner', 'owner')=$2 AND COALESCE(state->>'tenantId', 'local')=$3" : ''}`, scope ? [id, scope.owner, scope.tenantId] : [id]);
     if (!result.rows[0]) throw new NotFound('Unknown run');
-    return result.rows[0].state as AgentRun;
+    return openRun(result.rows[0].state);
   }
   async createThread(thread: Thread, initialRunId?: string): Promise<void> {
     const record = threadSchema.parse(thread);
@@ -764,12 +766,12 @@ export class PostgresRunRepository implements RunRepository {
       let root: AgentRun | undefined;
       if (initialRunId !== undefined) {
         const result = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1 FOR UPDATE', [initialRunId]);
-        root = result.rows[0]?.state;
+        root = await openMaybe(result.rows[0]?.state);
         if (!root || !isOwnedBy(root, record)) throw new NotFound('Unknown run');
         assertUnthreaded(root);
         prepareAttachment(root, record, undefined, 0);
       }
-      if (root) await client.query('UPDATE aeeis_runs SET thread_id=$2,parent_run_id=$3,thread_sequence=$4,revision=$5,state=$6,updated_at=$7 WHERE id=$1', [root.id, record.id, null, 1, root.revision, root, root.updatedAt]);
+      if (root) await client.query('UPDATE aeeis_runs SET thread_id=$2,parent_run_id=$3,thread_sequence=$4,revision=$5,state=$6,updated_at=$7 WHERE id=$1', [root.id, record.id, null, 1, root.revision, await sealRun(root), root.updatedAt]);
       await client.query('COMMIT');
       if (root) await this.notifyChange(client, root);
     } catch (error) { await client.query('ROLLBACK'); throw error; }
@@ -791,12 +793,12 @@ export class PostgresRunRepository implements RunRepository {
     const cursorClause = afterSequence > 0 ? ' AND thread_sequence > $4' : '';
     if (limit !== undefined) values.push(limit);
     const result = await this.pool.query<{ state: AgentRun }>(`SELECT state FROM aeeis_runs WHERE thread_id=$1 AND COALESCE(state->>'owner','owner')=$2 AND COALESCE(state->>'tenantId','local')=$3${cursorClause} ORDER BY thread_sequence ASC${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
-    return result.rows.map(row => row.state);
+    return openRuns(result.rows);
   }
   async latestRunByThread(id: string, scope?: Ownership): Promise<AgentRun | undefined> {
     const thread = await this.getThread(id, scope);
     const result = await this.pool.query<{ state: AgentRun }>("SELECT state FROM aeeis_runs WHERE thread_id=$1 AND COALESCE(state->>'owner','owner')=$2 AND COALESCE(state->>'tenantId','local')=$3 ORDER BY thread_sequence DESC LIMIT 1", [id, thread.owner, thread.tenantId]);
-    return result.rows[0]?.state;
+    return openMaybe(result.rows[0]?.state);
   }
   async createRunInThread(input: AgentRun, threadId: string, parentRunId?: string, scope?: Ownership, parentSnapshot?: string | number, followup?: ThreadFollowup): Promise<AgentRun> {
     validateId(input.id); validateThreadId(threadId);
@@ -813,7 +815,7 @@ export class PostgresRunRepository implements RunRepository {
       if (followup) {
         const result = await client.query('SELECT * FROM aeeis_thread_followups WHERE thread_id=$1 AND key_hash=$2 FOR UPDATE', [threadId, followup.keyHash]);
         if (!result.rows[0]) throw new ThreadConflict('Missing follow-up reservation');
-        const reservation = followupFromRow(result.rows[0]);
+        const reservation = await followupFromRow(result.rows[0]);
         assertSameFollowup(reservation, followup.requestHash);
         assertFollowupCommit(reservation, run, threadId, parentRunId);
         parentSnapshot = reservation.contextSnapshot.parentHistoryHash ?? reservation.parentRevision;
@@ -821,13 +823,13 @@ export class PostgresRunRepository implements RunRepository {
       let parent: AgentRun | undefined;
       if (parentRunId !== undefined) {
         const parents = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1 FOR SHARE', [parentRunId]);
-        parent = parents.rows[0]?.state;
+        parent = await openMaybe(parents.rows[0]?.state);
         if (!parent || !isOwnedBy(parent, thread)) throw new NotFound('Unknown run');
       }
       assertFollowupParent(parent, parentSnapshot);
       const last = await client.query<{ seq: number }>('SELECT COALESCE(MAX(thread_sequence),0) AS seq FROM aeeis_runs WHERE thread_id=$1', [threadId]);
       prepareAttachment(run, thread, parent, last.rows[0]!.seq);
-      const inserted = await client.query('INSERT INTO aeeis_runs(id,revision,state,updated_at,thread_id,parent_run_id,thread_sequence) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING', [run.id, run.revision, run, run.updatedAt, threadId, parentRunId ?? null, run.threadSequence]);
+      const inserted = await client.query('INSERT INTO aeeis_runs(id,revision,state,updated_at,thread_id,parent_run_id,thread_sequence) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING', [run.id, run.revision, await sealRun(run), run.updatedAt, threadId, parentRunId ?? null, run.threadSequence]);
       if (!inserted.rowCount) throw new ThreadConflict('Run already exists');
       await this.insertEvents(client, run, 0);
       if (followup) await client.query("UPDATE aeeis_thread_followups SET state='completed' WHERE thread_id=$1 AND key_hash=$2", [threadId, followup.keyHash]);
@@ -855,7 +857,7 @@ export class PostgresRunRepository implements RunRepository {
   async getThreadFollowup(threadId: string, keyHash: string, scope: Ownership): Promise<ThreadFollowup | undefined> {
     await this.getThread(threadId, scope);
     const result = await this.pool.query('SELECT * FROM aeeis_thread_followups WHERE thread_id=$1 AND key_hash=$2', [threadId, keyHash]);
-    return result.rows[0] && followupFromRow(result.rows[0]);
+    return result.rows[0] && await followupFromRow(result.rows[0]);
   }
   async saveThreadFollowup(record: ThreadFollowup, scope: Ownership): Promise<void> {
     assertFollowupCheckpoint(await this.getThreadFollowup(record.threadId, record.keyHash, scope), record);
@@ -863,14 +865,14 @@ export class PostgresRunRepository implements RunRepository {
       VALUES($1,$2,$3,$4,'reserved',$5,$6,$7,$8,$9)
       ON CONFLICT(thread_id,key_hash) DO UPDATE SET context_snapshot=EXCLUDED.context_snapshot
       WHERE aeeis_thread_followups.request_hash=EXCLUDED.request_hash AND aeeis_thread_followups.state='reserved'`,
-    [record.threadId, record.keyHash, record.requestHash, record.runId, record.request, record.parentRunId ?? null, record.parentRevision ?? null, record.contextSnapshot, record.createdAt]);
+    [record.threadId, record.keyHash, record.requestHash, record.runId, await sealAggregate('followup-request', scope.tenantId, `${record.threadId}:${record.keyHash}`, record.request), record.parentRunId ?? null, record.parentRevision ?? null, await sealAggregate('followup-context', scope.tenantId, `${record.threadId}:${record.keyHash}`, record.contextSnapshot), record.createdAt]);
     if (!result.rowCount) throw new ThreadConflict('Idempotency-Key was already used with different input or completed');
   }
   async *pendingThreadFollowups(): AsyncIterable<ThreadFollowup> {
     let after: [string, string] | undefined;
     while (true) {
       const result = await this.pool.query(`SELECT * FROM aeeis_thread_followups WHERE state='reserved'${after ? ' AND (thread_id,key_hash)>($1,$2)' : ''} ORDER BY thread_id,key_hash LIMIT 100`, after);
-      for (const row of result.rows) yield followupFromRow(row);
+      for (const row of result.rows) yield await followupFromRow(row);
       if (result.rows.length < 100) return;
       const last = result.rows.at(-1)!;
       after = [last.thread_id, last.key_hash];
@@ -889,17 +891,17 @@ export class PostgresRunRepository implements RunRepository {
       if (!row || (scope && !isOwnedBy({ owner: row.owner, tenantId: row.tenant_id }, scope))) throw new NotFound('Unknown thread');
       const thread = threadFromRow(row);
       const runs = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1 FOR UPDATE', [runId]);
-      const run = runs.rows[0]?.state;
+      const run = await openMaybe(runs.rows[0]?.state);
       if (!run || !isOwnedBy(run, thread)) throw new NotFound('Unknown run');
       let parent: AgentRun | undefined;
       if (parentRunId !== undefined) {
         const parents = await client.query<{ state: AgentRun }>('SELECT state FROM aeeis_runs WHERE id=$1', [parentRunId]);
-        parent = parents.rows[0]?.state;
+        parent = await openMaybe(parents.rows[0]?.state);
         if (!parent || !isOwnedBy(parent, thread)) throw new NotFound('Unknown run');
       }
       const last = await client.query<{ seq: number }>('SELECT COALESCE(MAX(thread_sequence),0) AS seq FROM aeeis_runs WHERE thread_id=$1', [threadId]);
       const changed = prepareAttachment(run, thread, parent, last.rows[0]!.seq);
-      if (changed) await client.query('UPDATE aeeis_runs SET thread_id=$2,parent_run_id=$3,thread_sequence=$4,revision=$5,state=$6,updated_at=$7 WHERE id=$1', [runId, threadId, parentRunId ?? null, run.threadSequence, run.revision, run, run.updatedAt]);
+      if (changed) await client.query('UPDATE aeeis_runs SET thread_id=$2,parent_run_id=$3,thread_sequence=$4,revision=$5,state=$6,updated_at=$7 WHERE id=$1', [runId, threadId, parentRunId ?? null, run.threadSequence, run.revision, await sealRun(run), run.updatedAt]);
       await client.query('COMMIT');
       if (changed) await this.notifyChange(client, run);
       return run;
@@ -911,14 +913,14 @@ export class PostgresRunRepository implements RunRepository {
     const values: unknown[] = scope ? [scope.owner, scope.tenantId] : [];
     if (limit !== undefined) values.push(limit);
     const result = await this.pool.query(`SELECT state FROM aeeis_runs${scope ? " WHERE COALESCE(state->>'owner', 'owner')=$1 AND COALESCE(state->>'tenantId', 'local')=$2" : ''} ORDER BY updated_at DESC, id${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
-    return result.rows.map(r => r.state as AgentRun);
+    return openRuns(result.rows);
   }
   async listByTenant(tenantId: string, limit?: number): Promise<AgentRun[]> {
     validateCollectionLimit(limit);
     const values: unknown[] = [tenantId];
     if (limit !== undefined) values.push(limit);
     const result = await this.pool.query<{ state: AgentRun }>(`SELECT state FROM aeeis_runs WHERE COALESCE(state->>'tenantId', 'local')=$1 ORDER BY updated_at DESC, id${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
-    return result.rows.map(row => row.state);
+    return openRuns(result.rows);
   }
   async page(scope: Ownership, limit: number, cursor?: string): Promise<RunPage> {
     validateCollectionLimit(limit);
@@ -933,7 +935,7 @@ export class PostgresRunRepository implements RunRepository {
     );
     const hasMore = result.rows.length > limit;
     const visible = hasMore ? result.rows.slice(0, limit) : result.rows;
-    return { runs: visible.map(row => row.state), ...(hasMore && visible.length ? { nextCursor: encodePageKey({ id: visible.at(-1)!.state.id, updatedAt: visible.at(-1)!.state.updatedAt }) } : {}) };
+    return { runs: await openRuns(visible), ...(hasMore && visible.length ? { nextCursor: encodePageKey({ id: visible.at(-1)!.state.id, updatedAt: visible.at(-1)!.state.updatedAt }) } : {}) };
   }
   async pageVisible(scope: Ownership, readableGoalIds: readonly string[], limit: number, cursor?: string): Promise<RunPage> {
     validateCollectionLimit(limit);
@@ -957,7 +959,7 @@ export class PostgresRunRepository implements RunRepository {
     );
     const hasMore = result.rows.length > limit;
     const visible = hasMore ? result.rows.slice(0, limit) : result.rows;
-    return { runs: visible.map(row => row.state), ...(hasMore && visible.length ? { nextCursor: encodePageKey({ id: visible.at(-1)!.state.id, updatedAt: visible.at(-1)!.state.updatedAt }) } : {}) };
+    return { runs: await openRuns(visible), ...(hasMore && visible.length ? { nextCursor: encodePageKey({ id: visible.at(-1)!.state.id, updatedAt: visible.at(-1)!.state.updatedAt }) } : {}) };
   }
   async eventsPage(id: string, scope: Ownership, limit: number, cursor?: string): Promise<RunEventsPage> {
     validateId(id); validateCollectionLimit(limit);
@@ -968,7 +970,7 @@ export class PostgresRunRepository implements RunRepository {
     const result = await this.pool.query<{ seq: number; event_id: string; type: string; at: string; data: Record<string, unknown> }>(
       'SELECT seq,event_id,type,at,data FROM aeeis_run_events WHERE run_id=$1 AND owner=$2 AND tenant_id=$3 AND seq>$4 ORDER BY seq ASC LIMIT $5', values);
     const hasMore = result.rows.length > limit; const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const events = rows.map(row => ({ id: row.event_id, seq: row.seq, type: row.type, at: new Date(row.at).toISOString(), data: row.data }));
+    const events = await Promise.all(rows.map(async row => ({ id: row.event_id, seq: row.seq, type: row.type, at: new Date(row.at).toISOString(), data: await openAggregate<Record<string, unknown>>('run-event', row.event_id, row.data) })));
     return { events, ...(hasMore && events.length ? { nextCursor: encodeRunEventCursor(events.at(-1)!.seq) } : {}) };
   }
   async scanPage(query: RunScanQuery): Promise<RunScanPage> {
@@ -978,7 +980,7 @@ export class PostgresRunRepository implements RunRepository {
     const result = await this.pool.query<{ state: AgentRun }>(
       'SELECT state FROM aeeis_runs WHERE id > $1 AND id <= $2 ORDER BY id ASC LIMIT $3',
       [query.afterId ?? '', throughId, query.limit]);
-    return { runs: result.rows.map(row => row.state), throughId, done: result.rows.length < query.limit };
+    return { runs: await openRuns(result.rows), throughId, done: result.rows.length < query.limit };
   }
   async scanEventsPage(query: RunScanQuery): Promise<RunEventScanPage> {
     validateScan(query);
@@ -1036,7 +1038,7 @@ export class PostgresRunRepository implements RunRepository {
       await client.query('BEGIN');
       const result = await client.query('SELECT state FROM aeeis_runs WHERE id=$1 FOR UPDATE', [id]);
       if (!result.rows[0]) throw new NotFound('Unknown run');
-      const run = result.rows[0].state as AgentRun;
+      const run = await openRun(result.rows[0].state);
       if (scope && !isOwnedBy(run, scope)) throw new NotFound('Unknown run');
       const ownership = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
       const eventCount = run.events.length;
@@ -1051,7 +1053,7 @@ export class PostgresRunRepository implements RunRepository {
       if (!isOwnedBy(run, ownership)) throw new Error('Run ownership is immutable');
       if (run.events.length < eventCount || eventIds.some((id, index) => run.events[index]?.id !== id)) throw new Error('Run events are append-only');
       run.revision++; run.updatedAt = new Date().toISOString();
-      await client.query('UPDATE aeeis_runs SET revision=$2, state=$3, updated_at=$4 WHERE id=$1', [id, run.revision, run, run.updatedAt]);
+      await client.query('UPDATE aeeis_runs SET revision=$2, state=$3, updated_at=$4 WHERE id=$1', [id, run.revision, await sealRun(run), run.updatedAt]);
       await this.insertEvents(client, run, eventCount);
       await client.query('COMMIT');
       await this.notifyChange(client, run); return run;
@@ -1061,10 +1063,29 @@ export class PostgresRunRepository implements RunRepository {
   async close(): Promise<void> { if (this.closed) return; this.closed = true; const entries = [...this.changeSubscribers.entries()]; await Promise.all(entries.map(([handler, subscription]) => this.stopChangeSubscription(handler, subscription))); await Promise.all([this.pool.end(), this.followupLockPool.end()]); }
 }
 
-function followupFromRow(row: Record<string, any>): ThreadFollowup {
+
+/** Columns the Run SQL filters on stay plain; everything else is sealed (see content-encryption.ts). */
+function runPlain(run: AgentRun): Record<string, unknown> {
+  return {
+    ...pick(run, ['schemaVersion', 'id', 'revision', 'owner', 'status', 'createdAt', 'updatedAt', 'goalId', 'domainPlanId', 'privacy', 'builtinSkill', 'threadId', 'parentRunId', 'threadSequence']),
+    ...((run as { projectSourceQuery?: unknown }).projectSourceQuery !== undefined ? { projectSourceQuery: '[sealed]' } : {}),
+    ...(run.taskExecution ? { taskExecution: pick(run.taskExecution, ['domainPlanId', 'taskId']) } : {}),
+    ...(run.pendingTool ? { pendingTool: pick(run.pendingTool, ['receiptId', 'executionToken', 'reconcileInFlight']) } : {}),
+    ...(run.pendingDelegation ? { pendingDelegation: pick(run.pendingDelegation, ['receiptRef', 'executionToken', 'reconcileInFlight']) } : {}),
+    calls: (run.calls ?? []).map(call => pick(call, ['id', 'phase', 'state'])),
+    events: (run.events ?? []).map(event => pick(event, ['id', 'seq', 'type', 'at'])),
+  };
+}
+export const sealRun = (run: AgentRun) => sealAggregate('run', run.tenantId, run.id, run, runPlain);
+const openRun = (stored: unknown) => openAggregate<AgentRun>('run', String((stored as { id?: unknown })?.id), stored);
+const openMaybe = async (stored: unknown): Promise<AgentRun | undefined> => stored === undefined ? undefined : openRun(stored);
+const openRuns = (rows: ReadonlyArray<{ state: unknown }>) => Promise.all(rows.map(row => openRun(row.state)));
+
+async function followupFromRow(row: Record<string, any>): Promise<ThreadFollowup> {
+  const id = `${row.thread_id}:${row.key_hash}`;
   return {
     threadId: row.thread_id, keyHash: row.key_hash, requestHash: row.request_hash, runId: row.run_id,
-    state: row.state, request: row.request, contextSnapshot: row.context_snapshot,
+    state: row.state, request: await openAggregate('followup-request', id, row.request), contextSnapshot: await openAggregate('followup-context', id, row.context_snapshot),
     ...(row.parent_run_id === null ? {} : { parentRunId: row.parent_run_id }),
     ...(row.parent_revision === null ? {} : { parentRevision: row.parent_revision }),
     createdAt: new Date(row.created_at).toISOString(),

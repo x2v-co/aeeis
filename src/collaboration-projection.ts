@@ -10,6 +10,7 @@ import pg from 'pg';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryLockKeys } from './adapters/postgres-lock.js';
 import { HttpDependencyProbe, type DependencyHealth } from './dependency-health.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const executeFile = promisify(execFileCallback);
 
@@ -154,7 +155,7 @@ export class FileProjectionOutbox implements ProjectionOutbox {
 export class PostgresProjectionOutbox implements ProjectionOutbox {
   private readonly pool: pg.Pool;
   private readonly deliveries = new Map<string, Promise<ProjectionEvent>>();
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
 
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'projection-events', async client => {

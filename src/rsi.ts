@@ -10,6 +10,7 @@ import type { Ownership } from './security/principal.js';
 import type { GlobalBudgetLedger, GlobalBudgetSelector } from './global-budget.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, recentFirst, scopedRecent, validateCollectionLimit } from './adapters/collection-query.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export type EvolutionScope = Ownership;
 export interface EvolutionPage { items: EvolutionCandidate[]; nextCursor?: string }
@@ -118,7 +119,7 @@ export class FileEvolutionRepository implements EvolutionRepository {
  * validated JSONB, while row locks serialize each lifecycle transition. */
 export class PostgresEvolutionRepository implements EvolutionRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'evolution-candidates', async client => {
       await client.query(`CREATE TABLE IF NOT EXISTS aeeis_evolution_candidates (id text PRIMARY KEY, state jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()); CREATE INDEX IF NOT EXISTS aeeis_evolution_status_idx ON aeeis_evolution_candidates ((state->>'status'));`);

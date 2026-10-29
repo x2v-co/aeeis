@@ -9,6 +9,7 @@ import { CollaborationService } from './collaboration-service.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import { digestProtocol } from './protocol.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const scopedIdentity = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/);
@@ -190,7 +191,7 @@ export class FileCollaborationTriggerStore implements CollaborationTriggerStore 
  * auditable like the other AEEIS aggregates. */
 export class PostgresCollaborationTriggerStore implements CollaborationTriggerStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'collaboration-triggers', async client => {
       await client.query(`

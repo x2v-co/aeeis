@@ -15,6 +15,28 @@ services:
       timeout: 5s
       retries: 20
 
+  # One-shot: the login the API uses (aeeis_app). It owns no table, so
+  # row-level security applies to it; POSTGRES_USER only runs migrations.
+  postgres-roles:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      AEEIS_APP_DB_PASSWORD: ${AEEIS_APP_DB_PASSWORD:?Set AEEIS_APP_DB_PASSWORD}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql -v ON_ERROR_STOP=1 -v app_password="$$AEEIS_APP_DB_PASSWORD" <<'SQL'
+        SELECT 'CREATE ROLE aeeis_app LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'aeeis_app')\gexec
+        ALTER ROLE aeeis_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD :'app_password';
+        SQL
+
   api:
     build:
       context: ../..
@@ -26,8 +48,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-roles:
+        condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
+      DATABASE_URL: postgresql://aeeis_app:${AEEIS_APP_DB_PASSWORD:?Set AEEIS_APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
+      AEEIS_DATABASE_MIGRATION_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
       AEEIS_HOST: 0.0.0.0
       AEEIS_DATA_DIR: /app/data/runs
     volumes:

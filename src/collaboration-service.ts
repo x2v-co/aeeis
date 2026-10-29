@@ -27,6 +27,7 @@ import { assertCollaborationBudget, collaborationBudgetSchema, collaborationCall
 import type { GlobalBudgetLedger, GlobalBudgetReservation, GlobalBudgetSelector, GlobalBudgetSelection } from './global-budget.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, scopedRecent, validateCollectionLimit, type CollectionCursor } from './adapters/collection-query.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 function matchesScope(value: { owner?: string; tenantId?: string }, scope?: Ownership): boolean {
   return scope === undefined || (value.owner ?? 'owner') === scope.owner && (value.tenantId ?? 'local') === scope.tenantId;
@@ -411,7 +412,7 @@ export class FileCollaborationRepository implements CollaborationRepository {
  * overwrite attempts or debate messages. */
 export class PostgresCollaborationRepository implements CollaborationRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
 
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'collaboration', async client => {

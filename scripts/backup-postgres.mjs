@@ -4,9 +4,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 
-const databaseUrl = process.env.DATABASE_URL;
+// The owner role sees every row; the app login is bound by row-level security.
+const databaseUrl = process.env.AEEIS_DATABASE_MIGRATION_URL || process.env.DATABASE_URL;
 if (!databaseUrl) {
-  console.error('Set DATABASE_URL before creating a PostgreSQL backup.');
+  console.error('Set AEEIS_DATABASE_MIGRATION_URL (or DATABASE_URL) before creating a PostgreSQL backup.');
   process.exit(1);
 }
 

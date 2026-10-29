@@ -8,6 +8,7 @@ import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import { actionRefSchema, normalizeActionPolicy, type ActionPolicy } from './runtime/action-policy.js';
 import { digestProtocol } from './protocol.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 /**
  * The owner's standing allow and block lists. A Run copies them when it is
@@ -157,7 +158,7 @@ export class JsonActionPolicyStore implements ActionPolicyStore {
 
 export class PostgresActionPolicyStore implements ActionPolicyStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'action-policies', async client => {
       await client.query('CREATE TABLE IF NOT EXISTS aeeis_action_policies (owner text NOT NULL, tenant_id text NOT NULL, state jsonb NOT NULL, revision integer NOT NULL, PRIMARY KEY (tenant_id, owner))');

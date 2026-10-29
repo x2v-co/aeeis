@@ -18,6 +18,7 @@
 | Competition / Debate | `npm test`、Compose smoke | 独立 participant/evaluator、盲评、Moderator、Adjudicator、轮次和 durable attempt | 真实模型池、外部群权限和生产投影 |
 | RSI | `npm test`、Compose smoke | signal、candidate、replay/holdout/safety、shadow/canary、activation、rollback | 真实 evaluator、候选质量、生产流量指标 |
 | Feishu / Hermes 边界 | `npm test`、`npx vitest run tests/collaboration-projection.test.ts` | 原始体签名、群路由、sender mapping、幂等和 Trigger 边界；Projection 按 channel 路由 Feishu、Hermes CLI 和通用 fallback，并验证隐私、健康检查与 unknown/reconcile 边界 | Feishu 应用权限、Hermes 身份映射、CLI/平台凭证和送达 SLA |
+| 静态加密和行级安全 | `npm run test:postgres`（含 `AEEIS_TEST_CONTENT_ENCRYPTION=1` 再跑一遍）、`npx vitest run tests/content-encryption.test.ts` | 应用登录不设租户时租户表为空；漏写租户过滤的查询和 HTTP 处理只看到请求者租户；跨租户写入被拒绝；转储里没有对话、资料和记忆明文；加密前后 hash 一致、计划审批照常；旧明文行在后台加密；生产模式下 owner 登录拒绝启动 | 目标环境的角色、密钥保管、轮换演练和带密钥的恢复演练 |
 | 观测与恢复 | `npm run test:monitoring`、`npm run smoke:monitoring` | 指标、readiness、告警规则、备份校验和恢复脚本 | Docker、Alertmanager、长期指标、跨区域恢复 |
 | 真实模型任务质量 | `npm run test:evals -- --live`（手动，付费推理；不进 `npm test`、`verify` 或 CI） | `evals/cases/` 下 15 件用例，来自 Pulse、fillable-pdf 和 r79 复测集；确定性检查和可选的评审模型分开记录；报告写到 `test-report/evals/`，带模型 pin、token 和费用，可用 `--compare` 逐项对比。缺少凭证时报告 `not_run` 并以 2 退出。`--fixture` 和 `tests/evals-harness.test.ts` 只证明评测本身能跑 | 每次换模型或改提示后在目标模型上跑一遍并保留报告 |
 

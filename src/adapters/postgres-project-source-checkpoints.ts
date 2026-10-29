@@ -12,12 +12,13 @@ import {
   type ProjectSourceSyncResult,
 } from '../project-sources.js';
 import { ProjectSourceCheckpointConflict } from '../project-sources.js';
+import { createPostgresPool } from './postgres-pool.js';
 
 /** PostgreSQL durable cursor store. A row lock plus compare-and-set keeps two
  * long-running sync jobs from silently advancing the same source cursor. */
 export class PostgresProjectSourceCheckpointStore implements ProjectSourceCheckpointStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
 
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'project-source-checkpoints', async client => {

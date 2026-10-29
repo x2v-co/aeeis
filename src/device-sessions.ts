@@ -5,6 +5,7 @@ import pg from 'pg';
 import { z } from 'zod';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 export const deviceIdSchema = z.string().regex(/^device_[0-9a-f-]{36}$/);
 export const deviceCapabilitySchema = z.enum(['read', 'approve', 'execute', 'local_access']);
@@ -87,7 +88,7 @@ export class JsonDeviceSessionRepository implements DeviceSessionRepository {
 
 export class PostgresDeviceSessionRepository implements DeviceSessionRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> { await withPostgresMigrationLock(this.pool, 'device-sessions', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_device_sessions (id text PRIMARY KEY, owner text NOT NULL, tenant_id text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, revoked_at timestamptz NULL); CREATE INDEX IF NOT EXISTS aeeis_device_sessions_scope_idx ON aeeis_device_sessions(owner, tenant_id, created_at);`); }); }
   async register(input: { owner: string; tenantId: string; label: string; capabilities: DeviceCapability[]; now?: string }): Promise<DeviceSession> { const session = makeSession(input); await this.pool.query('INSERT INTO aeeis_device_sessions(id,owner,tenant_id,state,created_at,revoked_at) VALUES($1,$2,$3,$4,$5,$6)', [session.id, session.owner, session.tenantId, session, session.createdAt, null]); return clone(session); }
   async get(id: string, scope?: Ownership): Promise<DeviceSession | undefined> { const result = await this.pool.query<{ state: DeviceSession }>('SELECT state FROM aeeis_device_sessions WHERE id=$1', [id]); const session = result.rows[0]?.state; return session && (!scope || owned(session, scope)) ? deviceSessionSchema.parse(session) : undefined; }

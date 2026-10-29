@@ -12,6 +12,7 @@ import {
   type AgentReputation,
 } from '../agent-gateway.js';
 import { agentCardSchema, type AgentCard } from '../protocol.js';
+import { createPostgresPool } from './postgres-pool.js';
 
 const statusSchema = z.enum(['discovered', 'admitted', 'revoked']);
 const storedEntrySchema = z.object({
@@ -49,7 +50,7 @@ type ObservationRow = { id: string; agent_id: string; observation: unknown; acto
  */
 export class PostgresAgentDirectory implements AgentDirectoryPort {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
 
   async health(): Promise<{ ready: boolean; detail: string; checkedAt: string }> {
     const checkedAt = new Date().toISOString();

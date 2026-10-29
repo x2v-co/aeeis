@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import pg from 'pg';
 import type { BrainClaim, BrainEmbeddingProvider, BrainSemanticHit, BrainSemanticIndexMaintenance, BrainSemanticSearchRequest } from '../brain.js';
 import { withPostgresMigrationLock } from './postgres-migration.js';
+import { createPostgresPool } from './postgres-pool.js';
 
 /**
  * PostgreSQL/pgvector side index for Brain claims. The JSON Brain state stays
@@ -13,7 +14,7 @@ export class PostgresBrainSemanticIndex implements BrainSemanticIndexMaintenance
   private readonly pool: pg.Pool;
 
   constructor(connectionString: string, private readonly embedding: BrainEmbeddingProvider) {
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = createPostgresPool(connectionString);
     if (!Number.isInteger(embedding.dimensions) || embedding.dimensions < 1 || embedding.dimensions > 16_384) throw new Error('Brain embedding dimensions must be an integer between 1 and 16384');
   }
 

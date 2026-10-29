@@ -490,6 +490,12 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   if (!production) return;
 
   if (!env.DATABASE_URL) throw new Error('Production configuration requires DATABASE_URL');
+  // A one-owner node may run without content encryption and without a separate app role; it is warned on every start.
+  const singleNode = env.AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE === '1';
+  if (singleNode && (env.AEEIS_OIDC_ISSUER || env.AEEIS_PRINCIPAL_DIRECTORY_URL)) throw new Error('AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE cannot be combined with multi-user sign-in');
+  if (!singleNode && !env.AEEIS_CONTENT_ENCRYPTION_KEY?.trim()) throw new Error('Production configuration requires AEEIS_CONTENT_ENCRYPTION_KEY_FILE (or AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1 for a one-owner node)');
+  if (!singleNode && !env.AEEIS_DATABASE_MIGRATION_URL?.trim()) throw new Error('Production configuration requires AEEIS_DATABASE_MIGRATION_URL: the owner role runs migrations and DATABASE_URL logs in as a role row-level security applies to');
+  if (!singleNode && env.AEEIS_DATABASE_MIGRATION_URL?.trim() === env.DATABASE_URL.trim()) throw new Error('AEEIS_DATABASE_MIGRATION_URL and DATABASE_URL must use different roles');
 
   const runner = env.AEEIS_RUNNER ?? 'local';
   if (!['local', 'temporal'].includes(runner)) throw new Error(`Unsupported AEEIS_RUNNER: ${runner}`);

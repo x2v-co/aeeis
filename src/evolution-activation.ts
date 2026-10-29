@@ -5,6 +5,7 @@ import { z } from 'zod';
 import pg from 'pg';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import type { Ownership } from './security/principal.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
 
 function matchesScope(value: { owner?: string; tenantId?: string }, scope?: Ownership): boolean {
   return scope === undefined || (value.owner ?? 'owner') === scope.owner && (value.tenantId ?? 'local') === scope.tenantId;
@@ -337,7 +338,7 @@ export class FileEvolutionActivationStore implements EvolutionActivationStore {
  * locked row makes activation pointer changes atomic across API instances. */
 export class PostgresEvolutionActivationStore implements EvolutionActivationStore {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'evolution-activation', async client => {
       await client.query('CREATE TABLE IF NOT EXISTS aeeis_evolution_activation (id text PRIMARY KEY, state jsonb NOT NULL)');

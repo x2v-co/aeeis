@@ -10,6 +10,9 @@ import type { AeeisService } from './application/aeeis-service.js';
 import { AeeisConflict, AeeisNotFound } from './application/aeeis-service.js';
 import { principalAudience } from './security/principal.js';
 import { channelTaskActionSchema, type ChannelTaskAction } from './channel-task-action.js';
+import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
+import { createPostgresPool } from './adapters/postgres-pool.js';
+import { openAggregate, pick, sealAggregate } from './content-encryption.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const isoDate = z.string().datetime({ offset: true });
@@ -253,13 +256,23 @@ export class JsonSessionEventRepository implements SessionEventRepository {
   }
 }
 
+/** SQL reads the room, sequence, citations and the cited task; content and reasons are sealed. */
+function eventPlain(event: SessionEvent): Record<string, unknown> {
+  return {
+    ...pick(event, ['schemaVersion', 'id', 'roomId', 'goalId', 'owner', 'sequence', 'type', 'operation', 'targetEventId', 'revision', 'evidenceRefs', 'createdAt']),
+    ...(event.taskAction ? { taskAction: pick(event.taskAction, ['kind', 'taskId']) } : {}),
+  };
+}
+export const sealEvent = (event: SessionEvent) => sealAggregate('session-event', event.tenantId, event.id, event, eventPlain);
+const openEvent = (stored: unknown) => openAggregate<SessionEvent>('session-event', String((stored as { id?: unknown }).id), stored);
+
 /** PostgreSQL repository. A transaction-local advisory lock serializes the
  * sequence allocation for one room/owner/tenant without a hot global lock. */
 export class PostgresSessionEventRepository implements SessionEventRepository {
   private readonly pool: pg.Pool;
-  constructor(connectionString: string) { this.pool = new pg.Pool({ connectionString }); }
+  constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS aeeis_session_events (id text PRIMARY KEY, room_id text NOT NULL, goal_id text, owner text NOT NULL, tenant_id text NOT NULL, sequence integer NOT NULL, idempotency_key text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, UNIQUE(room_id, owner, tenant_id, idempotency_key), UNIQUE(room_id, owner, tenant_id, sequence)); ALTER TABLE aeeis_session_events ALTER COLUMN goal_id DROP NOT NULL; CREATE INDEX IF NOT EXISTS aeeis_session_events_room_idx ON aeeis_session_events(room_id, owner, tenant_id, sequence)`);
+    await withPostgresMigrationLock(this.pool, 'session-events', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_session_events (id text PRIMARY KEY, room_id text NOT NULL, goal_id text, owner text NOT NULL, tenant_id text NOT NULL, sequence integer NOT NULL, idempotency_key text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, UNIQUE(room_id, owner, tenant_id, idempotency_key), UNIQUE(room_id, owner, tenant_id, sequence)); ALTER TABLE aeeis_session_events ALTER COLUMN goal_id DROP NOT NULL; CREATE INDEX IF NOT EXISTS aeeis_session_events_room_idx ON aeeis_session_events(room_id, owner, tenant_id, sequence)`); });
   }
   async append(input: SessionEventDraft): Promise<SessionEvent> {
     const client = await this.pool.connect();
@@ -267,10 +280,10 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.tenantId}:${input.owner}:${input.roomId}`]);
       const existing = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND idempotency_key=$4', [input.roomId, input.owner, input.tenantId, input.idempotencyKey]);
-      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(existing.rows[0].state, input); }
+      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(await openEvent(existing.rows[0].state), input); }
       const count = await client.query<{ max: number | null }>('SELECT max(sequence)::int AS max FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3', [input.roomId, input.owner, input.tenantId]);
       const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: (count.rows[0]?.max ?? 0) + 1, ...input });
-      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, event, event.createdAt]);
+      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, await sealEvent(event), event.createdAt]);
       await client.query('COMMIT');
       return event;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
@@ -281,15 +294,15 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.tenantId}:${input.owner}:${input.roomId}`]);
       const existing = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND idempotency_key=$4', [input.roomId, input.owner, input.tenantId, input.idempotencyKey]);
-      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(existing.rows[0].state, input); }
+      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(await openEvent(existing.rows[0].state), input); }
       const target = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE id=$1 AND room_id=$2 AND owner=$3 AND tenant_id=$4 FOR UPDATE', [targetEventId, input.roomId, input.owner, input.tenantId]);
       if (!target.rows[0]) throw new SessionEventConflict('Unknown session event revision target');
-      if (target.rows[0].state.revision !== expectedTargetRevision) throw new SessionEventConflict('Session event target revision is stale');
+      if ((await openEvent(target.rows[0].state)).revision !== expectedTargetRevision) throw new SessionEventConflict('Session event target revision is stale');
       const child = await client.query('SELECT 1 FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND state->>\'targetEventId\'=$4 LIMIT 1', [input.roomId, input.owner, input.tenantId, targetEventId]);
       if (child.rows[0]) throw new SessionEventConflict('Only the latest canonical response revision can be changed');
       const count = await client.query<{ max: number | null }>('SELECT max(sequence)::int AS max FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3', [input.roomId, input.owner, input.tenantId]);
       const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: (count.rows[0]?.max ?? 0) + 1, ...input });
-      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, event, event.createdAt]);
+      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, await sealEvent(event), event.createdAt]);
       await client.query('COMMIT');
       return event;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
@@ -300,19 +313,19 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.tenantId}:${input.owner}:${input.roomId}`]);
       const existing = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND idempotency_key=$4', [input.roomId, input.owner, input.tenantId, input.idempotencyKey]);
-      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(existing.rows[0].state, input); }
+      if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(await openEvent(existing.rows[0].state), input); }
       const cited = await client.query<{ state: SessionEvent }>(`SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND (state->'evidenceRefs' ? $4 OR state->'taskAction'->>'taskId'=$4) ORDER BY sequence ASC`, [input.roomId, input.owner, input.tenantId, taskId]);
-      guard(cited.rows.map(row => row.state));
+      guard(await Promise.all(cited.rows.map(row => openEvent(row.state))));
       const count = await client.query<{ max: number | null }>('SELECT max(sequence)::int AS max FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3', [input.roomId, input.owner, input.tenantId]);
       const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: (count.rows[0]?.max ?? 0) + 1, ...input });
-      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, event, event.createdAt]);
+      await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, await sealEvent(event), event.createdAt]);
       await client.query('COMMIT');
       return event;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
   }
   async get(eventId: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined> {
     const result = await this.pool.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE id=$1', [eventId]);
-    const event = result.rows[0]?.state;
+    const event = result.rows[0] ? await openEvent(result.rows[0].state) : undefined;
     return event && matchesScope(event, scope) ? event : undefined;
   }
   async page(roomId: Id, scope: SessionEventScope | undefined, limit: number, afterSequence = 0): Promise<SessionEventPage> {
@@ -322,7 +335,7 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
     if (scope) { params.push(scope.tenantId); query += ` AND tenant_id=$${params.length}`; if (scope.owner) { params.push(scope.owner); query += ` AND owner=$${params.length}`; } }
     query += ` ORDER BY sequence ASC LIMIT $3`;
     const result = await this.pool.query<{ state: SessionEvent }>(query, params);
-    const rows = result.rows.map(row => row.state);
+    const rows = await Promise.all(result.rows.map(row => openEvent(row.state)));
     const visible = rows.slice(0, limit);
     return { items: visible, ...(rows.length > limit && visible.length ? { nextCursor: String(visible.at(-1)!.sequence) } : {}) };
   }
@@ -333,14 +346,14 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
     if (scope) { params.push(scope.tenantId); query += ` AND tenant_id=$${params.length}`; if (scope.owner) { params.push(scope.owner); query += ` AND owner=$${params.length}`; } }
     query += ' ORDER BY sequence DESC LIMIT $3';
     const result = await this.pool.query<{ state: SessionEvent }>(query, params);
-    const rows = result.rows.map(row => row.state);
+    const rows = await Promise.all(result.rows.map(row => openEvent(row.state)));
     const visible = rows.slice(0, limit).reverse();
     return { items: visible, ...(rows.length > limit && visible.length ? { previousCursor: String(visible[0]!.sequence) } : {}) };
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> {
     const params: unknown[] = [roomId, targetEventId]; let query = `SELECT state FROM aeeis_session_events WHERE room_id=$1 AND state->>'targetEventId'=$2`;
     if (scope) { params.push(scope.tenantId); query += ` AND tenant_id=$${params.length}`; if (scope.owner) { params.push(scope.owner); query += ` AND owner=$${params.length}`; } }
-    query += ' ORDER BY sequence ASC'; const result = await this.pool.query<{ state: SessionEvent }>(query, params); return result.rows.map(row => row.state);
+    query += ' ORDER BY sequence ASC'; const result = await this.pool.query<{ state: SessionEvent }>(query, params); return Promise.all(result.rows.map(row => openEvent(row.state)));
   }
   async close(): Promise<void> { await this.pool.end(); }
 }
