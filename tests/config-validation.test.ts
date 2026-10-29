@@ -15,6 +15,11 @@ const production = {
 };
 
 describe('runtime configuration validation', () => {
+  it.each(['AEEIS_READY_TOOLS_TIMEOUT_MS', 'AEEIS_READY_TOOLS_REFRESH_MS', 'AEEIS_READY_TOOLS_LAST_GOOD_MS'] as const)('validates positive finite %s', name => {
+    for (const value of ['0', '-1', 'NaN', 'Infinity', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+    for (const value of ['0.5', '3000', '60000', '900000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
+  });
+
   it('requires content encryption and a separate migration role in production unless one owner opts out', () => {
     const { AEEIS_CONTENT_ENCRYPTION_KEY: _key, AEEIS_DATABASE_MIGRATION_URL: _owner, ...bare } = production;
     expect(() => validateRuntimeConfig(production)).not.toThrow();

@@ -216,6 +216,10 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   validateFractionConfig(env, 'AEEIS_RSI_LOW_CONFIDENCE_THRESHOLD', 0.5);
   const hasFixedModelBase = Boolean(env.AEEIS_MODEL_BASE_URL?.trim());
   validateIntegerConfig(env, 'AEEIS_MODEL_TIMEOUT_MS', { defaultValue: 180_000, min: 1_000, max: 600_000 });
+  for (const [name, defaultValue] of Object.entries({ AEEIS_READY_TOOLS_TIMEOUT_MS: 3_000, AEEIS_READY_TOOLS_REFRESH_MS: 60_000, AEEIS_READY_TOOLS_LAST_GOOD_MS: 900_000 })) {
+    const value = Number(env[name] ?? defaultValue);
+    if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive finite number`);
+  }
   executionLimitsConfig(env);
   validateIntegerConfig(env, 'AEEIS_THREAD_CONTEXT_BUDGET_BYTES', { defaultValue: DEFAULT_THREAD_HISTORY_BYTES, min: 1, max: MAX_THREAD_HISTORY_BYTES });
   if (env.AEEIS_MODEL_RETRY_EMPTY_IDLE !== undefined && !['0', '1'].includes(env.AEEIS_MODEL_RETRY_EMPTY_IDLE)) throw new Error('AEEIS_MODEL_RETRY_EMPTY_IDLE must be 0 or 1');

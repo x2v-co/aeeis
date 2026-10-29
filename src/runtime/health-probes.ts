@@ -1,6 +1,93 @@
 export interface ProbeHealth { ready: boolean; detail: string; stale?: boolean; lastGoodAt?: string }
 export class HealthProbeTimeout extends Error {}
 export interface HealthProbeOptions { timeoutMs?: number; cacheTtlMs?: number; lastGoodGraceMs?: number }
+export interface BackgroundHealthMonitorOptions { timeoutMs?: number; refreshIntervalMs?: number; lastGoodRetentionMs?: number }
+export type BackgroundHealthSnapshot = ProbeHealth & { lastCheckedAt: string };
+
+/** Background-only tools diagnostics. Reading a snapshot never starts I/O.
+ * A deadline ends the cycle, but retains the underlying operation's slot until
+ * it settles, so even a hung provider cannot cause overlapping refreshes. */
+export class BackgroundHealthMonitor {
+  private readonly timeoutMs: number;
+  private readonly refreshIntervalMs: number;
+  private readonly lastGoodRetentionMs: number;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private inFlight: Promise<void> | undefined;
+  private cycle: Promise<void> | undefined;
+  private finishCycle: (() => void) | undefined;
+  private value: ProbeHealth = { ready: false, detail: 'Tool gateway health probe unavailable' };
+  private checkedAt = Date.now();
+  private lastGood: { value: ProbeHealth; at: number } | undefined;
+
+  constructor(private readonly operation: () => ProbeHealth | Promise<ProbeHealth>, options: BackgroundHealthMonitorOptions = {}) {
+    this.timeoutMs = options.timeoutMs ?? 3_000;
+    this.refreshIntervalMs = options.refreshIntervalMs ?? 60_000;
+    this.lastGoodRetentionMs = options.lastGoodRetentionMs ?? 900_000;
+    for (const [name, value] of Object.entries({ timeoutMs: this.timeoutMs, refreshIntervalMs: this.refreshIntervalMs, lastGoodRetentionMs: this.lastGoodRetentionMs })) {
+      if (!Number.isFinite(value) || value <= 0) throw new Error(`Background health monitor ${name} must be a positive finite number`);
+    }
+  }
+
+  start(): void {
+    if (this.timer !== undefined) return;
+    void this.refreshNow();
+    this.timer = setInterval(() => { void this.refreshNow(); }, this.refreshIntervalMs);
+    this.timer.unref();
+  }
+
+  stop(): void {
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+    this.finishCycle?.();
+  }
+
+  refreshNow(): Promise<void> {
+    if (this.inFlight) return this.cycle!;
+    let timedOut = false;
+    let resolveCycle!: () => void;
+    this.cycle = new Promise<void>(resolve => { resolveCycle = resolve; });
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      this.value = { ready: false, detail: 'Tool gateway health probe timed out' };
+      this.checkedAt = Date.now();
+      finish();
+    }, this.timeoutMs);
+    deadline.unref();
+    const finish = () => {
+      clearTimeout(deadline);
+      this.finishCycle = undefined;
+      resolveCycle();
+    };
+    this.finishCycle = finish;
+    this.inFlight = Promise.resolve().then(this.operation).then(value => {
+      // A late success can recover readiness via last-good retention, but
+      // the timeout remains the result of this cycle.
+      if (!timedOut) {
+        this.value = value;
+        this.checkedAt = Date.now();
+      }
+      if (value.ready) this.lastGood = { value, at: Date.now() };
+    }, () => {
+      if (!timedOut) {
+        this.value = { ready: false, detail: 'Tool gateway health probe failed' };
+        this.checkedAt = Date.now();
+      }
+    }).then(() => {
+      this.inFlight = undefined;
+      finish();
+    });
+    return this.cycle;
+  }
+
+  snapshot(): BackgroundHealthSnapshot {
+    const timestamps = { lastCheckedAt: new Date(this.checkedAt).toISOString(), ...(this.lastGood ? { lastGoodAt: new Date(this.lastGood.at).toISOString() } : {}) };
+    if (!this.value.ready && this.lastGood && Date.now() - this.lastGood.at < this.lastGoodRetentionMs) {
+      return { ...this.lastGood.value, ...timestamps, stale: true, detail: `${this.lastGood.value.detail}; using last successful probe (${this.value.detail})` };
+    }
+    return { ...this.value, ...timestamps };
+  }
+}
+
 type Entry = { pending?: Promise<ProbeHealth>; value?: ProbeHealth; error?: unknown; checkedAt?: number; lastGood?: { value: ProbeHealth; at: number } };
 
 /** Read-only diagnostics only. Execution, manifests and permission lookups

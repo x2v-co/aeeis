@@ -6,7 +6,7 @@ import { debugBundle, redactRunData, redactRunEvents, sharedRunView, withoutWork
 import { runInputRequest } from './input-requests.js';
 import { artifactFilename } from './artifact-download.js';
 import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-material.js';
-import { HealthProbes, HealthProbeTimeout } from './health-probes.js';
+import { BackgroundHealthMonitor, HealthProbes, HealthProbeTimeout } from './health-probes.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import secureJsonParse from 'secure-json-parse';
@@ -71,7 +71,7 @@ import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService; aeeisBots?: BotTeam } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -307,23 +307,26 @@ export function buildApp(options: Options) {
   const toolsBootAt = Date.now();
   const toolsGraceMs = options.readinessToolsGraceMs ?? Number(process.env.AEEIS_READY_TOOLS_GRACE_MS ?? 60_000);
   if (!Number.isFinite(toolsGraceMs) || toolsGraceMs < 0) throw new Error('AEEIS_READY_TOOLS_GRACE_MS must be a nonnegative finite number');
-  let toolsWarmed = false;
+  const toolsTimeoutMs = options.readinessToolsTimeoutMs ?? Number(process.env.AEEIS_READY_TOOLS_TIMEOUT_MS ?? 3_000);
+  const toolsRefreshMs = options.readinessToolsRefreshMs ?? Number(process.env.AEEIS_READY_TOOLS_REFRESH_MS ?? 60_000);
+  const toolsLastGoodMs = options.readinessToolsLastGoodMs ?? Number(process.env.AEEIS_READY_TOOLS_LAST_GOOD_MS ?? 900_000);
+  for (const [name, value] of Object.entries({ AEEIS_READY_TOOLS_TIMEOUT_MS: toolsTimeoutMs, AEEIS_READY_TOOLS_REFRESH_MS: toolsRefreshMs, AEEIS_READY_TOOLS_LAST_GOOD_MS: toolsLastGoodMs })) {
+    if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive finite number`);
+  }
+  const toolsMonitor = new BackgroundHealthMonitor(
+    () => options.tools?.health?.() ?? { ready: false, detail: 'Tool gateway health probe unavailable' },
+    { timeoutMs: toolsTimeoutMs, refreshIntervalMs: toolsRefreshMs, lastGoodRetentionMs: toolsLastGoodMs },
+  );
   const toolsReadiness = async () => {
     if (!options.tools) return { ready: true, detail: 'tool gateway not configured' };
-    let result: { ready: boolean; detail: string };
-    try {
-      result = options.tools.health
-        ? await healthProbe('tools', () => options.tools!.health!())
-        : { ready: false, detail: 'Tool gateway health probe unavailable' };
-    } catch (error) {
-      result = { ready: false, detail: error instanceof HealthProbeTimeout ? 'Tool gateway health probe timed out' : 'Tool gateway health probe failed' };
-    }
-    if (result.ready) { toolsWarmed = true; return result; }
-    if (!toolsWarmed && Date.now() - toolsBootAt < toolsGraceMs) return { ready: false, detail: 'warming', state: 'warming' as const };
+    const result = toolsMonitor.snapshot();
+    if (result.ready) return result;
+    if (!result.lastGoodAt && Date.now() - toolsBootAt < toolsGraceMs) return { ...result, detail: 'warming', state: 'warming' as const };
     return { ...result, state: 'failed' as const };
   };
-  // Start the first cached probe at boot without delaying the server's startup.
-  app.addHook('onReady', () => { if (options.tools) void toolsReadiness(); });
+  // Populate tools diagnostics at boot and on a timer, never from an HTTP read.
+  app.addHook('onReady', async () => { if (options.tools) toolsMonitor.start(); });
+  app.addHook('onClose', async () => { toolsMonitor.stop(); });
   const agentRegistryReadiness = async () => {
     if (!options.agentDirectory) return { ready: true, detail: 'agent registry not configured' };
     if (!options.agentDirectory.health) return { ready: false, detail: 'Agent Registry health probe unavailable' };
