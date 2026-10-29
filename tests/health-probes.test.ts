@@ -267,9 +267,21 @@ describe('HTTP readiness health caching', () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-ready-tools-env-'));
     const repository = new FileRunRepository(directory); await repository.init();
     try {
-      for (const value of ['0', '-1', 'NaN', 'Infinity', '']) {
+      for (const value of ['0', '-1', 'NaN', 'Infinity', 'abc']) {
         vi.stubEnv(name, value);
         expect(() => buildApp({ repository })).toThrow(name);
+      }
+    } finally { vi.unstubAllEnvs(); await repository.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(['AEEIS_READY_TOOLS_TIMEOUT_MS', 'AEEIS_READY_TOOLS_REFRESH_MS', 'AEEIS_READY_TOOLS_LAST_GOOD_MS'] as const)('accepts blank %s at the HTTP boundary', async name => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-ready-tools-blank-env-'));
+    const repository = new FileRunRepository(directory); await repository.init();
+    try {
+      for (const value of ['', '   ']) {
+        vi.stubEnv(name, value);
+        const app = buildApp({ repository });
+        try { await app.ready(); } finally { await app.close(); }
       }
     } finally { vi.unstubAllEnvs(); await repository.close(); await rm(directory, { recursive: true, force: true }); }
   });

@@ -11,6 +11,7 @@ import { LocalDispatcher, TemporalDispatcher, notifyRecoverableRuns } from './ru
 import type { Dispatcher } from './runtime/dispatcher.js';
 import type { ModelCatalog } from './integrations.js';
 import { buildApp } from './runtime/http.js';
+import { readinessToolsEnvMs } from './runtime/readiness-tools-config.js';
 import { FileBrainStore } from './brain.js';
 import { PostgresBrainStore } from './adapters/postgres-brain-store.js';
 import { PostgresBrainSemanticIndex } from './adapters/postgres-brain-semantic-index.js';
@@ -567,9 +568,9 @@ try {
   const { secured } = await databaseSecurity.finalize();
   if (secured.length) console.log(JSON.stringify({ protocol: 'aeeis-row-level-security/1', tables: secured.length }));
   const app = buildApp({
-    readinessToolsTimeoutMs: Number(process.env.AEEIS_READY_TOOLS_TIMEOUT_MS ?? 3_000),
-    readinessToolsRefreshMs: Number(process.env.AEEIS_READY_TOOLS_REFRESH_MS ?? 60_000),
-    readinessToolsLastGoodMs: Number(process.env.AEEIS_READY_TOOLS_LAST_GOOD_MS ?? 900_000),
+    readinessToolsTimeoutMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000),
+    readinessToolsRefreshMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_REFRESH_MS', 60_000),
+    readinessToolsLastGoodMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_LAST_GOOD_MS', 900_000),
     conversationStore, localToolDefaults: defaultAllowedTools, demoMode: process.env.AEEIS_DEMO_MODE === '1', repository, domain, brain, brainStore, ...(brainSemanticIndex ? { brainSemanticIndex } : {}), rsi, ...(rsiProposalSynthesis ? { rsiProposalSynthesis } : {}), ...(rsiAutomation ? { rsiAutomation } : {}), ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(knowledgeMaintenance ? { knowledge: knowledgeMaintenance } : {}), ...(knowledge ? { knowledgeProvider: knowledge } : {}), ...(projectSources ? { projectSourcesProvider: projectSources } : {}), ...(trustedHosts.length ? { trustedHosts } : {}), ...(publicHosts.length ? { publicHosts } : {}), ...(trustedOrigins.length ? { trustedOrigins } : {}), ...(agentEndpointHosts.length ? { agentEndpointHosts } : {}), ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(sandboxGateway ? { runMachines: (runId: string) => sandboxGateway.describe(runId) } : {}), collaboration, collaborationTriggers, projection, reminders: reminderStore, reminderPump, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(feishuDebateIngress ? { feishuDebateIngress } : {}), ...(hermesDebateIngress ? { hermesDebateIngress } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}), ...(taskScheduler ? { taskScheduler } : {}),
     ...(accessToken ? { token: accessToken } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),

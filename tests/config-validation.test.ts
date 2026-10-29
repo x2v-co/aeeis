@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import { validateRuntimeConfig } from '../src/config-validation.js';
+import { readinessToolsEnvMs } from '../src/runtime/readiness-tools-config.js';
 
 const development = { AEEIS_ACCESS_TOKEN: 'development-token' };
 
@@ -14,10 +15,24 @@ const production = {
   AEEIS_DATABASE_MIGRATION_URL: 'postgresql://aeeis_owner@db/aeeis',
 };
 
+describe('readinessToolsEnvMs', () => {
+  it.each([undefined, '', ' ', '\t \n'])('uses the default for %j', value => {
+    expect(readinessToolsEnvMs({ AEEIS_READY_TOOLS_TIMEOUT_MS: value }, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000)).toBe(3_000);
+  });
+
+  it('trims numeric values', () => {
+    expect(readinessToolsEnvMs({ AEEIS_READY_TOOLS_TIMEOUT_MS: ' 5000 ' }, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000)).toBe(5_000);
+  });
+
+  it.each(['0', '-1', 'NaN', 'Infinity', 'abc'])('rejects %s', value => {
+    expect(() => readinessToolsEnvMs({ AEEIS_READY_TOOLS_TIMEOUT_MS: value }, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000)).toThrow('AEEIS_READY_TOOLS_TIMEOUT_MS must be a positive finite number');
+  });
+});
+
 describe('runtime configuration validation', () => {
   it.each(['AEEIS_READY_TOOLS_TIMEOUT_MS', 'AEEIS_READY_TOOLS_REFRESH_MS', 'AEEIS_READY_TOOLS_LAST_GOOD_MS'] as const)('validates positive finite %s', name => {
-    for (const value of ['0', '-1', 'NaN', 'Infinity', '']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
-    for (const value of ['0.5', '3000', '60000', '900000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
+    for (const value of ['0', '-1', 'NaN', 'Infinity', 'abc']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).toThrow(name);
+    for (const value of ['', ' ', '\t \n', '0.5', '3000', '60000', '900000']) expect(() => validateRuntimeConfig({ ...development, [name]: value })).not.toThrow();
   });
 
   it('requires content encryption and a separate migration role in production unless one owner opts out', () => {

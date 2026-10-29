@@ -7,6 +7,7 @@ import { runInputRequest } from './input-requests.js';
 import { artifactFilename } from './artifact-download.js';
 import { decodePdfMaterial, MAX_PDF_OUTPUT_BYTES, pdfSha256 } from './pdf-material.js';
 import { BackgroundHealthMonitor, HealthProbes, HealthProbeTimeout } from './health-probes.js';
+import { readinessToolsEnvMs } from './readiness-tools-config.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import secureJsonParse from 'secure-json-parse';
@@ -307,9 +308,9 @@ export function buildApp(options: Options) {
   const toolsBootAt = Date.now();
   const toolsGraceMs = options.readinessToolsGraceMs ?? Number(process.env.AEEIS_READY_TOOLS_GRACE_MS ?? 60_000);
   if (!Number.isFinite(toolsGraceMs) || toolsGraceMs < 0) throw new Error('AEEIS_READY_TOOLS_GRACE_MS must be a nonnegative finite number');
-  const toolsTimeoutMs = options.readinessToolsTimeoutMs ?? Number(process.env.AEEIS_READY_TOOLS_TIMEOUT_MS ?? 3_000);
-  const toolsRefreshMs = options.readinessToolsRefreshMs ?? Number(process.env.AEEIS_READY_TOOLS_REFRESH_MS ?? 60_000);
-  const toolsLastGoodMs = options.readinessToolsLastGoodMs ?? Number(process.env.AEEIS_READY_TOOLS_LAST_GOOD_MS ?? 900_000);
+  const toolsTimeoutMs = options.readinessToolsTimeoutMs ?? readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000);
+  const toolsRefreshMs = options.readinessToolsRefreshMs ?? readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_REFRESH_MS', 60_000);
+  const toolsLastGoodMs = options.readinessToolsLastGoodMs ?? readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_LAST_GOOD_MS', 900_000);
   for (const [name, value] of Object.entries({ AEEIS_READY_TOOLS_TIMEOUT_MS: toolsTimeoutMs, AEEIS_READY_TOOLS_REFRESH_MS: toolsRefreshMs, AEEIS_READY_TOOLS_LAST_GOOD_MS: toolsLastGoodMs })) {
     if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive finite number`);
   }
