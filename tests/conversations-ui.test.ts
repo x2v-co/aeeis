@@ -2281,6 +2281,58 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/focus$|\/cancel$/.test(post.url))).toBe(false);
   });
+  it('labels a Feishu message and keeps routines on this person, showing a webhook secret once', async () => {
+    const view = fixture();
+    view.messages.push({ id: 'message_feishu', role: 'user', speaker: { role: 'user', id: 'owner' }, text: '明天的稿子先列提纲', createdAt: date, route: { status: 'general', reason: 'unassigned', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' }, source: { kind: 'channel', channel: 'feishu', externalEventId: 'evt_1', receivedAt: date } });
+    const routines: any[] = [];
+    const calls: Array<{ url: string; method: string; body?: any }> = [];
+    const h = harness(view, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (!url.startsWith('/api/routines')) return undefined;
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      calls.push({ url, method, body });
+      if (url.startsWith('/api/routines?') && method === 'GET') return response({ routines: routines.filter(item => url.includes(`agentId=${encodeURIComponent(item.agentId)}`)) });
+      if (url === '/api/routines' && method === 'POST') {
+        const routine = { id: `routine_${routines.length + 1}`, ...body, status: 'active', revision: 0, ...(body.trigger.kind === 'schedule' ? { nextDueAt: '2026-10-30T01:00:00.000Z' } : { webhookConfigured: true }) };
+        routines.push(routine);
+        return response({ routine, ...(body.trigger.kind === 'webhook' ? { webhookSecret: 'secret-shown-once-0123456789abcdef0123' } : {}) }, 201);
+      }
+      const id = url.split('/api/routines/')[1]?.split('/')[0];
+      const routine = routines.find(item => item.id === id);
+      if (method === 'PATCH') { Object.assign(routine, { status: body.status, revision: routine.revision + 1 }); return response({ routine }); }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('你 · 对AEEIS · 来自飞书'));
+    expect(el('routines').hidden).toBe(false);
+    await vi.waitFor(() => expect(calls.some(call => call.url === '/api/routines?agentId=aeeis')).toBe(true));
+    fill('routine-name', '早报');
+    fill('routine-prompt', '整理今天的待办');
+    fill('routine-time', '08:30');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('早报'));
+    const created = calls.find(call => call.url === '/api/routines' && call.method === 'POST')!.body;
+    expect(created).toMatchObject({ agentId: 'aeeis', name: '早报', prompt: '整理今天的待办', executionReview: 'required', trigger: { kind: 'schedule', calendar: { frequency: 'daily', time: '08:30' } } });
+    expect(created.trigger.calendar.timeZone).toBeTruthy();
+    expect(el('routine-list').textContent).toContain('每天 08:30');
+    expect(el('routine-secret').hidden).toBe(true);
+    clickText('暂停', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('已暂停'));
+    expect(calls.find(call => call.method === 'PATCH')?.body).toEqual({ expectedRevision: 0, status: 'paused' });
+
+    fill('routine-name', '新工单');
+    fill('routine-prompt', '读新工单写摘要');
+    fill('routine-kind', 'webhook');
+    expect(el('routine-time').hidden).toBe(true);
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(el('routine-secret').hidden).toBe(false));
+    expect(el('routine-secret').textContent).toContain('secret-shown-once-0123456789abcdef0123');
+    expect(el('routine-list').textContent).toContain('/webhooks/routines/routine_2');
+    expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
+  });
+
   it('pins, clears, and keeps a standing sentence on this person without sending it as execution authority', async () => {
     const h = harness();
     start(h.fetch);

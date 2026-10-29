@@ -47,7 +47,9 @@ import { globalBudgetBillingImportSchema, globalBudgetReconcileSchema, type Glob
 import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membership.js';
 import type { KnowledgeEmbeddingMaintenance, KnowledgeEmbeddingReindexStatus, KnowledgeProvider } from '../knowledge.js';
 import type { ProjectSourceProvider } from '../project-sources.js';
-import type { FeishuDebateIngress } from '../feishu-debate-ingress.js';
+import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
+import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.js';
+import { RoutineConflict, RoutineNotFound, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
 import type { HermesDebateIngress } from '../hermes-debate-ingress.js';
 import { collaborationTriggerEventSchema, collaborationTriggerReconcileSchema, CollaborationTriggerNotFound, type CollaborationTriggerService } from '../collaboration-triggers.js';
 import { improvementSignalsForRun } from '../rsi-proposal-pump.js';
@@ -65,9 +67,9 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 import { OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
-declare module 'fastify' { interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -140,6 +142,30 @@ export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
   const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
+  const feishuLife = options.feishuLife && conversations
+    ? new FeishuChannelIngress({ ...options.feishuLife, inbox: conversations, ...(options.channelIdentityResolver ? { channelIdentityResolver: options.channelIdentityResolver } : {}) })
+    : undefined;
+  // Routine Runs start on the person's life thread. Origin, goal and materials are set here, never by the routine's options.
+  const routines = options.routines && conversations
+    ? new RoutineService(options.routines, async start => {
+      const scope = { owner: start.routine.owner, tenantId: start.routine.tenantId };
+      const started = await conversations.startRoutine({
+        agentId: start.routine.agentId, text: start.text, taskTitle: start.taskTitle, key: start.idempotencyKey,
+        runOptions: { ...(start.routine.runOptions ?? {}), executionReview: start.routine.executionReview, materials: start.materials, origin: start.origin },
+        source: { kind: 'routine', routineId: start.routine.id, deliveryId: start.delivery.deliveryId, trigger: start.delivery.kind },
+      }, scope, Boolean(options.engine && options.dispatcher));
+      // Same hand-off as a Run created from the conversation composer.
+      const run = await options.repository.get(started.runId, scope);
+      if (isBootRecoverableRun(run.status)) await notify(run.id);
+      return started;
+    }, {
+      runActive: async (runId, scope) => {
+        try { return !['succeeded', 'failed', 'cancelled'].includes((await options.repository.get(runId, scope)).status); }
+        catch (error) { if (error instanceof NotFound) return false; throw error; }
+      },
+    })
+    : undefined;
+  const routineService = () => { if (!routines) throw new Conflict('Routine store is not configured'); return routines; };
   const channelBoard = options.sessionEvents && options.domain
     ? new ChannelBoardService(options.sessionEvents, options.domain, async (conversationId, actorId, tenantId) => {
       if (!conversations) return undefined;
@@ -364,7 +390,7 @@ export function buildApp(options: Options) {
   app.decorateRequest('aeeisRequestId', '');
   app.decorateRequest('aeeisStartedAt', undefined);
   app.addHook('preParsing', async (request, _reply, payload) => {
-    if (!request.url.startsWith('/webhooks/feishu/events') && !request.url.startsWith('/webhooks/hermes/events') && !request.url.startsWith('/webhooks/agents/')) return payload;
+    if (!request.url.startsWith('/webhooks/feishu/events') && !request.url.startsWith('/webhooks/hermes/events') && !request.url.startsWith('/webhooks/agents/') && !request.url.startsWith('/webhooks/routines/')) return payload;
     const chunks: Buffer[] = [];
     for await (const chunk of payload) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     const raw = Buffer.concat(chunks);
@@ -437,7 +463,7 @@ export function buildApp(options: Options) {
       const sharedRunRead = request.method === 'GET' && /^\/api\/runs(?:\/|$)/.test(route) && !route.includes('/working-memory');
       const operatorRunAdmin = request.method === 'POST' && principal.roles.includes('operator')
         && (route === '/api/runs/:id/cancel' || (route === '/api/runs/:id/:action' && (request.params as { action: string }).action === 'reconcile'));
-      if (/^\/api\/(rooms|goals|plans|runs|threads|conversations|reminders)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
+      if (/^\/api\/(rooms|goals|plans|runs|threads|conversations|reminders|routines)(?:\/|$)/.test(route) && !principal.roles.includes('owner') && !(roomRoute && !roomCreation) && !(route === '/api/goals' && request.method === 'POST') && !sharedGraphRead && !sharedEditorWrite && !sharedTaskTransition && !sharedRunRead && !operatorRunAdmin) return reply.code(403).send({ error: 'Resource owner role required' });
     }
   });
   app.addHook('onResponse', async (request, reply) => {
@@ -448,6 +474,9 @@ export function buildApp(options: Options) {
     if (error instanceof ChangeAuditConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof BrainAccessDenied) return reply.code(403).send({ error: 'Brain access denied' });
     if (error instanceof AgentCallbackAuthenticationError) return reply.code(401).send({ error: 'Agent callback authentication failed' });
+    if (error instanceof FeishuSignatureError || error instanceof RoutineSignatureError) return reply.code(401).send({ error: error.message });
+    if (error instanceof RoutineNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof RoutineConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof AgentResponseRejected) return reply.code(400).send({ error: 'Agent response rejected', kind: error.kind, detail: error.message });
     if (error instanceof BrainConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof DeviceSessionNotFound) return reply.code(401).send({ error: 'Unknown device session' });
@@ -469,11 +498,26 @@ export function buildApp(options: Options) {
     console.error('Request failed', request.aeeisRequestId, error instanceof Error ? error.name : 'Error');
     return reply.code(500).send({ error: 'Internal operation failed; inspect the server log' });
   });
-  if (options.feishuDebateIngress) {
+  if (options.feishuDebateIngress || feishuLife) {
+    // One Feishu app, one event URL. A chat routed to a person's life thread goes there; any other chat goes to Debate.
     app.post('/webhooks/feishu/events', async request => {
       const rawBody = request.aeeisRawBody ?? JSON.stringify(request.body ?? {});
       const headers: Record<string, string | string[] | undefined> = request.headers;
+      const chatId = (() => { try { return parseEnvelope(rawBody).event?.message.chat_id; } catch { return undefined; } })();
+      if (feishuLife && (!options.feishuDebateIngress || (chatId !== undefined && feishuLife.routes(chatId)))) return feishuLife.handle(rawBody, headers);
       return options.feishuDebateIngress!.handle(rawBody, headers);
+    });
+  }
+  if (routines) {
+    // Unauthenticated by design: the per-routine HMAC is the credential. Any body type is accepted and kept as text.
+    app.register(async scoped => {
+      scoped.removeAllContentTypeParsers();
+      scoped.addContentTypeParser('*', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+      scoped.post<{ Params: { id: string } }>('/webhooks/routines/:id', async (request, reply) => {
+        const rawBody = request.aeeisRawBody ?? '';
+        const result = await routines.receiveWebhook(request.params.id, rawBody, request.headers);
+        return reply.code(result.status === 'started' || result.status === 'duplicate' ? 200 : 202).send(result);
+      });
     });
   }
   if (options.hermesDebateIngress) {
@@ -630,7 +674,7 @@ export function buildApp(options: Options) {
     return {
       executionProfile: options.demoMode ? 'fixture' : 'unverified',
       conversationRouting: Boolean(conversations),
-      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
+      modelConfigured: options.engine?.modelConfigured ?? false, model: options.engine?.modelPin ?? null, modelHealth: modelHealth, modelRouting: options.engine?.modelPin ? 'pinned' : options.engine ? 'catalog' : 'unconfigured', agentGatewayConfigured: options.engine?.agentGatewayConfigured ?? false, agentRegistryConfigured: Boolean(options.agentDirectory), agentRegistryCounts: options.agentDirectory ? countObject((await options.agentDirectory.entriesSnapshot()).map(agent => agent.status)) : {}, agentRegistryHealth, principalDirectoryConfigured: Boolean(options.principalDirectory), principalDirectoryHealth, channelIdentityConfigured: Boolean(options.channelIdentityResolver), channelIdentityHealth, runner: options.dispatcher?.constructor.name ?? 'unconfigured', dispatcherHealth: dispatcherHealth, toolsConfigured: Boolean(options.tools), toolsHealth, knowledgeConfigured: options.engine?.knowledgeConfigured ?? false, knowledgeProviderHealth, brainSemanticSearchConfigured: options.engine?.brainSemanticSearchConfigured ?? false, brainSemanticIndexHealth, projectSourcesConfigured: options.engine?.projectSourcesConfigured ?? false, projectSourcesHealth, projectSourceCheckpointsConfigured: Boolean(options.engine?.projectSourceCheckpointsConfigured), evolutionConfigured: Boolean(options.rsi), rsiEvaluatorConfigured: Boolean(options.rsiHarness), rsiEvaluatorHealth, rsiProposalSynthesisConfigured: Boolean(options.rsiProposalSynthesis), rsiAutomation: options.rsiAutomation?.status() ?? { enabled: false }, skillGovernanceConfigured: Boolean(options.skills), skillGovernanceHealth: skillsHealth, collaborationConfigured: Boolean(options.collaboration), remindersConfigured: Boolean(options.reminders), routinesConfigured: Boolean(routines), feishuLifeConfigured: Boolean(feishuLife), projectionConfigured: Boolean(options.projection), projectionSinkConfigured: Boolean(options.projectionSink), projectionSinkHealth, domainConfigured: Boolean(options.domain), taskSchedulerConfigured: Boolean(options.taskScheduler), deviceSessionsConfigured: Boolean(options.deviceSessions), mode: options.authMode ?? (options.principalTokens ? 'principal-scoped' : 'single-owner-local'), principal: principal.id, tenantId: principal.tenantId, roles: principal.roles
     };
   });
   app.get('/api/devices', async request => {
@@ -958,6 +1002,32 @@ export function buildApp(options: Options) {
     const body = z.object({ reason: z.string().trim().min(1).max(4000), idempotencyKey: z.string().trim().min(1).max(500) }).strict().parse(request.body);
     const principal = principalOf(request);
     return options.sessionEvents.retract(request.params.id, request.params.eventId, body.reason, body.idempotencyKey, principal.id, principal.tenantId);
+  });
+  // Routines: owner-written prompts for one person, started on a schedule or by a signed webhook.
+  app.get<{ Querystring: { agentId?: string } }>('/api/routines', async request => {
+    const principal = principalOf(request);
+    return { routines: await routineService().list({ owner: principal.id, tenantId: principal.tenantId }, request.query.agentId) };
+  });
+  app.post('/api/routines', async (request, reply) => {
+    const principal = principalOf(request);
+    return reply.code(201).send(await routineService().create(request.body, { owner: principal.id, tenantId: principal.tenantId }));
+  });
+  app.get<{ Params: { id: string } }>('/api/routines/:id', async request => {
+    const principal = principalOf(request);
+    return routineService().get(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.patch<{ Params: { id: string } }>('/api/routines/:id', async request => {
+    const principal = principalOf(request);
+    return { routine: await routineService().update(request.params.id, request.body, { owner: principal.id, tenantId: principal.tenantId }) };
+  });
+  app.delete<{ Params: { id: string } }>('/api/routines/:id', async (request, reply) => {
+    const principal = principalOf(request);
+    await routineService().remove(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
+    return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string } }>('/api/routines/:id/rotate-secret', async request => {
+    const principal = principalOf(request);
+    return routineService().rotateSecret(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
   });
   // The owner's standing action lists. A new Run copies them; a Run that has started keeps its copy.
   app.get('/api/action-policy', async request => {
@@ -2057,6 +2127,7 @@ export function buildApp(options: Options) {
     }
     return updated;
   });
+  if (routines) app.decorate('aeeisRoutines', routines);
   return app;
 }
 

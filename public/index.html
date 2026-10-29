@@ -240,6 +240,34 @@
 </div>
 </form>
 </section>
+<details id="routines" hidden>
+<summary>例程 <span id="routine-count"></span></summary>
+<p id="routine-note">例程按时间表，或在收到 Webhook 时，用你写好的这句话在这个人这里开一件新任务并创建 Run，仍要按审批档位走。Webhook 内容只放进资料，标明不可信，改不了这句话。例程和 Webhook 开始的 Run 遇到写操作：required 和 auto 先问你，yolo 直接拒绝。服务停了几次，回来只补一次，并告诉模型迟到了多久。</p>
+<ul id="routine-list"></ul>
+<p id="routine-secret" class="routine-secret" hidden></p>
+<form id="routine-form">
+<input id="routine-name" maxlength="80" placeholder="例程名字，例如早报" aria-label="例程名字" required>
+<textarea id="routine-prompt" maxlength="4000" placeholder="每次要做的事，只有你能改" aria-label="例程要做的事" required></textarea>
+<div class="standing-actions">
+<select id="routine-kind" aria-label="什么时候开始">
+<option value="daily">每天</option>
+<option value="weekly">每周</option>
+<option value="webhook">收到 Webhook</option>
+</select>
+<select id="routine-weekday" aria-label="星期几" hidden>
+<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
+</select>
+<input id="routine-time" type="time" value="09:00" aria-label="几点">
+<select id="routine-review" aria-label="审批档位">
+<option value="required">每一步都问我</option>
+<option value="auto">自动判断</option>
+<option value="yolo">放手</option>
+</select>
+<button id="routine-add" type="submit">添加例程</button>
+</div>
+<p id="routine-error" class="muted" role="alert"></p>
+</form>
+</details>
 <section id="last-delivery" hidden>
 <h3>上次做成</h3>
 <p id="last-delivery-note">这是这个人上一件做成的事。下一件工作不会自动带上它。要让下次执行看见，可以放进上面的嘱咐再记住，也可以在下面收下你写的一句，并引用这次做成的证据。</p>

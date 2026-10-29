@@ -93,6 +93,12 @@ interface ConversationMessageView {
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
+  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' };
+}
+interface RoutineView {
+  id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
+  trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' };
+  nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
 interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; hasStandingInstruction?: boolean; presence?: LifePresence }
@@ -122,6 +128,7 @@ interface RuntimeStatus {
   rsiAutomation?: { enabled: boolean; autoApproveLowRisk?: boolean; autoRollout?: boolean; autoActivate?: boolean; suiteVersion?: string; inFlight?: boolean; lastRunAt?: string; lastResult?: { inspected: number; evaluated: number; approved: number; shadowed: number; canaried: number; promoted: number; activated: number; skipped: number; failed: number } };
   collaborationConfigured: boolean; projectionConfigured: boolean; projectionSinkConfigured: boolean; domainConfigured: boolean;
   projectionSinkHealth?: { ready: boolean; detail?: string } | null;
+  routinesConfigured?: boolean; feishuLifeConfigured?: boolean;
   taskSchedulerConfigured: boolean; agentGatewayConfigured: boolean; agentRegistryConfigured: boolean; mode: string; principal?: string; tenantId?: string; roles?: string[];
 }
 interface RunPage { items: RunSummary[]; nextCursor?: string }
@@ -187,6 +194,12 @@ let currentRunOpen = !minimalMode || Boolean(currentId);
 let polling = false;
 let goalViewSignature = '';
 let modelConfigured = false;
+let routinesConfigured = false;
+/** The routines of the person whose life thread is open. Loaded when that person changes. */
+let routineState: { agentId: string; items: RoutineView[] } | undefined;
+let routineLoading = '';
+/** A webhook secret is shown once, right after it is made. */
+let routineSecret: { routineId: string; secret: string } | undefined;
 let runtimeModel = '';
 let taskModelBound = '';
 let evolutionConfigured = false;
@@ -1276,6 +1289,106 @@ function syncStandingInstruction(): void {
   $<HTMLButtonElement>('standing-save').disabled = locked;
   $<HTMLButtonElement>('standing-clear').disabled = locked || !conversation?.standingInstruction;
   syncLastDelivery();
+  syncRoutines(life ? routinePerson() : '');
+}
+/** The person whose life thread is open; the entry is AEEIS. */
+function routinePerson(): string { return lifeAgent(conversation) || (rosterView() === 'entry' ? 'aeeis' : ''); }
+const ROUTINE_WEEKDAYS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+const ROUTINE_REVIEW: Record<RoutineView['executionReview'], string> = { required: '每一步都问我', auto: '自动判断', yolo: '放手' };
+function routineWhen(routine: RoutineView): string {
+  if (routine.trigger.kind === 'webhook') return '收到 Webhook 时';
+  const calendar = routine.trigger.calendar;
+  const days = calendar.frequency === 'weekly' ? (calendar.daysOfWeek ?? []).map(day => ROUTINE_WEEKDAYS[day]).join('、') : calendar.frequency === 'monthly' ? `每月 ${calendar.dayOfMonth} 日` : '每天';
+  return `${days} ${calendar.time}（${calendar.timeZone}）`;
+}
+function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
+function syncRoutines(agentId: string): void {
+  const section = $<HTMLDetailsElement>('routines');
+  if (!section) return;
+  section.hidden = !agentId || !routinesConfigured;
+  if (section.hidden) return;
+  if (routineState?.agentId !== agentId && routineLoading !== agentId) void loadRoutines(agentId);
+  renderRoutines();
+}
+async function loadRoutines(agentId: string): Promise<void> {
+  routineLoading = agentId;
+  try {
+    const { routines } = await api<{ routines: RoutineView[] }>(`/routines?agentId=${encodeURIComponent(agentId)}`);
+    if (routineLoading !== agentId) return;
+    routineState = { agentId, items: routines };
+  } catch (error) {
+    $('routine-error').textContent = errorMessage(error);
+  } finally {
+    if (routineLoading === agentId) routineLoading = '';
+  }
+  renderRoutines();
+}
+function renderRoutines(): void {
+  const list = $('routine-list');
+  if (!list) return;
+  const agentId = routinePerson();
+  const items = routineState?.agentId === agentId ? routineState.items : [];
+  $('routine-count').textContent = items.length ? `· ${items.length}` : '';
+  list.replaceChildren(...items.map(routine => {
+    const row = element('li'); row.dataset.status = routine.status; row.dataset.routineId = routine.id;
+    const timing = routine.status === 'paused' ? '已暂停'
+      : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
+      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : '等 Webhook';
+    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
+    if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
+    const actions = element('div', '', 'standing-actions');
+    const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
+    actions.append(toggle);
+    if (routine.trigger.kind === 'webhook') {
+      const rotate = button('换密钥', async () => {
+        const result = await api<{ routine: RoutineView; webhookSecret: string }>(`/routines/${encodeURIComponent(routine.id)}/rotate-secret`, {});
+        routineSecret = { routineId: routine.id, secret: result.webhookSecret };
+        replaceRoutine(result.routine);
+      }); rotate.type = 'button'; rotate.className = 'quiet-button';
+      actions.append(rotate);
+    }
+    const remove = button('删除', async () => {
+      if (!confirm(`删除例程「${routine.name}」？已经开始的工作不受影响。`)) return;
+      await api<unknown>(`/routines/${encodeURIComponent(routine.id)}`, undefined, 'DELETE');
+      if (routineState) routineState = { ...routineState, items: routineState.items.filter(item => item.id !== routine.id) };
+      if (routineSecret?.routineId === routine.id) routineSecret = undefined;
+      renderRoutines();
+    }); remove.type = 'button'; remove.className = 'quiet-button';
+    actions.append(remove);
+    row.append(actions);
+    return row;
+  }));
+  const secret = $('routine-secret');
+  const shown = routineSecret && items.find(item => item.id === routineSecret!.routineId);
+  secret.hidden = !shown;
+  secret.textContent = shown ? `「${shown.name}」的密钥只显示这一次：${routineSecret!.secret}\n用它对「时间戳.投递 id.请求体」做 HMAC-SHA256，放在 x-aeeis-signature: sha256=…，同时带上 x-aeeis-timestamp（秒）和 x-aeeis-delivery。同一投递 id 只开始一次。` : '';
+  const kind = $<HTMLSelectElement>('routine-kind').value;
+  $('routine-weekday').hidden = kind !== 'weekly';
+  $('routine-time').hidden = kind === 'webhook';
+}
+function replaceRoutine(next: RoutineView): void {
+  if (routineState?.agentId === next.agentId) routineState = { ...routineState, items: routineState.items.some(item => item.id === next.id) ? routineState.items.map(item => item.id === next.id ? next : item) : [...routineState.items, next] };
+  renderRoutines();
+}
+async function changeRoutine(routine: RoutineView, change: Record<string, unknown>): Promise<void> {
+  const result = await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(routine.id)}`, { expectedRevision: routine.revision, ...change }, 'PATCH');
+  replaceRoutine(result.routine);
+}
+async function addRoutine(): Promise<void> {
+  const agentId = routinePerson();
+  if (!agentId) throw new Error('先打开这个人');
+  const kind = $<HTMLSelectElement>('routine-kind').value;
+  const time = $<HTMLInputElement>('routine-time').value || '09:00';
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const trigger = kind === 'webhook' ? { kind: 'webhook' }
+    : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek: [Number($<HTMLSelectElement>('routine-weekday').value)] } : {}) } };
+  const result = await api<{ routine: RoutineView; webhookSecret?: string }>('/routines', {
+    agentId, name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value,
+    trigger, executionReview: $<HTMLSelectElement>('routine-review').value,
+  });
+  if (result.webhookSecret) routineSecret = { routineId: result.routine.id, secret: result.webhookSecret };
+  $<HTMLFormElement>('routine-form').reset();
+  replaceRoutine(result.routine);
 }
 function deliveryDraft(delivery: LastDelivery): string {
   const parts = [delivery.taskTitle.trim()];
@@ -1727,6 +1840,11 @@ function lifePersonId(): string {
   const view = rosterView();
   if (view === 'entry') return lifeAgent(conversation) || 'aeeis';
   if (view === 'bot') return lifeAgent(conversation) || activeBotId();
+  return '';
+}
+function messageSource(item: ConversationMessageView): string {
+  if (item.source?.kind === 'channel') return item.source.channel === 'feishu' ? ' · 来自飞书' : ` · 来自 ${item.source.channel}`;
+  if (item.source?.kind === 'routine') return item.source.trigger === 'webhook' ? ' · 例程（Webhook）' : ' · 例程（定时）';
   return '';
 }
 function messageAuthor(item: ConversationMessageView): string {
@@ -3991,7 +4109,7 @@ function renderConversation(): void {
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
-      row.append(element('small', `${messageAuthor(item)} · ${formatTime(item.createdAt)}`), element('p', item.text));
+      row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`), element('p', item.text));
       if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`));
       const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
       if (corrected) row.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
@@ -4530,6 +4648,14 @@ $('entry-defaults-edit')?.addEventListener('click', () => {
   window.requestAnimationFrame(() => $('run-options')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 });
 $('conversation-note').addEventListener('click', () => { void sendConversation('discuss').catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('routine-form')?.addEventListener('submit', event => {
+  event.preventDefault();
+  $('routine-error').textContent = '';
+  const add = $<HTMLButtonElement>('routine-add');
+  add.disabled = true;
+  void addRoutine().catch(error => { $('routine-error').textContent = errorMessage(error); }).finally(() => { add.disabled = false; });
+});
+$('routine-kind')?.addEventListener('change', () => renderRoutines());
 $('standing-form')?.addEventListener('submit', event => {
   event.preventDefault();
   void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
@@ -7716,6 +7842,7 @@ async function initialize(): Promise<void> {
     evolutionConfigured = status.evolutionConfigured;
     sessionPrincipal = status.principal ?? '';
     modelConfigured = status.modelConfigured;
+    routinesConfigured = Boolean(status.routinesConfigured);
     runtimeModel = status.model?.model ?? '';
     taskSchedulerConfigured = status.taskSchedulerConfigured;
     authRequired = false;

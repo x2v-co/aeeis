@@ -52,16 +52,7 @@ export class FeishuDebateIngress {
   }
 
   verify(rawBody: string, headers: Record<string, string | string[] | undefined>): void {
-    const timestamp = header(headers, 'x-lark-request-timestamp') ?? header(headers, 'x-feishu-request-timestamp');
-    const nonce = header(headers, 'x-lark-request-nonce') ?? header(headers, 'x-feishu-request-nonce');
-    const signature = header(headers, 'x-lark-signature') ?? header(headers, 'x-feishu-signature');
-    if (!timestamp || !nonce || !signature) throw new Error('Feishu event signature headers are required');
-    const seconds = Number(timestamp);
-    if (!Number.isInteger(seconds) || Math.abs(this.now() - seconds) > this.maxAgeSeconds) throw new Error('Feishu event timestamp is outside the allowed window');
-    const expected = createHash('sha256').update(`${timestamp}\n${nonce}\n${this.options.encryptKey}\n${rawBody}`).digest('hex');
-    const left = Buffer.from(expected, 'utf8');
-    const right = Buffer.from(signature, 'utf8');
-    if (left.length !== right.length || !timingSafeEqual(left, right)) throw new Error('Feishu event signature is invalid');
+    verifyFeishuSignature(rawBody, headers, this.options.encryptKey, this.now(), this.maxAgeSeconds);
   }
 
   async handle(rawBody: string, headers: Record<string, string | string[] | undefined>): Promise<FeishuIngressResult> {
@@ -143,6 +134,22 @@ export class FeishuDebateIngress {
   }
 }
 
+/** Thrown for missing, stale or wrong Feishu signatures. HTTP answers 401. */
+export class FeishuSignatureError extends Error {}
+
+export function verifyFeishuSignature(rawBody: string, headers: Record<string, string | string[] | undefined>, encryptKey: string, nowSeconds: number, maxAgeSeconds: number): void {
+  const timestamp = header(headers, 'x-lark-request-timestamp') ?? header(headers, 'x-feishu-request-timestamp');
+  const nonce = header(headers, 'x-lark-request-nonce') ?? header(headers, 'x-feishu-request-nonce');
+  const signature = header(headers, 'x-lark-signature') ?? header(headers, 'x-feishu-signature');
+  if (!timestamp || !nonce || !signature) throw new FeishuSignatureError('Feishu event signature headers are required');
+  const seconds = Number(timestamp);
+  if (!Number.isInteger(seconds) || Math.abs(nowSeconds - seconds) > maxAgeSeconds) throw new FeishuSignatureError('Feishu event timestamp is outside the allowed window');
+  const expected = createHash('sha256').update(`${timestamp}\n${nonce}\n${encryptKey}\n${rawBody}`).digest('hex');
+  const left = Buffer.from(expected, 'utf8');
+  const right = Buffer.from(signature, 'utf8');
+  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new FeishuSignatureError('Feishu event signature is invalid');
+}
+
 function ownership(route: FeishuDebateRoute): Ownership { return { owner: route.owner, tenantId: route.tenantId }; }
 
 function header(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
@@ -150,17 +157,17 @@ function header(headers: Record<string, string | string[] | undefined>, name: st
   return Array.isArray(value) ? value[0] : value;
 }
 
-function hasSignatureHeaders(headers: Record<string, string | string[] | undefined>): boolean {
+export function hasSignatureHeaders(headers: Record<string, string | string[] | undefined>): boolean {
   return Boolean((header(headers, 'x-lark-request-timestamp') ?? header(headers, 'x-feishu-request-timestamp')) && (header(headers, 'x-lark-request-nonce') ?? header(headers, 'x-feishu-request-nonce')) && (header(headers, 'x-lark-signature') ?? header(headers, 'x-feishu-signature')));
 }
 
-type Envelope = {
+export type FeishuEnvelope = {
   type?: string; challenge?: string; token?: string;
   header?: { event_type?: string; event_id?: string };
   event?: { message: { chat_id: string; message_id: string; content: string }; sender?: { sender_id?: { open_id?: string; user_id?: string; union_id?: string } } };
 };
 
-function parseEnvelope(rawBody: string): Envelope {
+export function parseEnvelope(rawBody: string): FeishuEnvelope {
   const value: unknown = JSON.parse(rawBody);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Feishu event body must be an object');
   const record = value as Record<string, unknown>;
@@ -180,7 +187,7 @@ function parseEnvelope(rawBody: string): Envelope {
   };
 }
 
-function parseFeishuContent(content: string): string {
+export function parseFeishuContent(content: string): string {
   try {
     const value: unknown = JSON.parse(content);
     if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { text?: unknown }).text === 'string') return (value as { text: string }).text.trim().slice(0, 8000);
