@@ -44,6 +44,10 @@ const schema = z.object({
       state: z.enum(['pending', 'completed', 'cancelled']),
     }).strict().optional(),
     notificationRunId: runId.optional(),
+    source: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('channel'), channel: z.string().regex(/^[a-z][a-z0-9_.-]{1,63}$/), externalEventId: z.string().min(1).max(500), receivedAt: timestamp }).strict(),
+      z.object({ kind: z.literal('routine'), routineId: z.string().regex(/^routine_[a-f0-9-]{36}$/), deliveryId: z.string().min(1).max(200), trigger: z.enum(['schedule', 'webhook']) }).strict(),
+    ]).optional(),
   }).strict()).max(1000),
 }).strict();
 
@@ -124,7 +128,7 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
   assert(draft.messages.length >= before.messages.length, 'Conversation messages are append-only');
   before.messages.forEach((message, index) => {
     const next = draft.messages[index]!;
-    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId'] as const) {
+    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId', 'source'] as const) {
       assert(isDeepStrictEqual(message[field], next[field]), `Conversation message ${field} is immutable`);
     }
     if (message.execution) {

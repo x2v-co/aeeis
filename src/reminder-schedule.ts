@@ -33,6 +33,8 @@ export const reminderRecurrenceSchema = z.union([
 ]);
 export type ReminderRecurrence = z.infer<typeof reminderRecurrenceSchema>;
 export type CalendarSchedule = z.infer<typeof calendar>;
+/** The calendar rule alone, for work that repeats without a reminder. */
+export const calendarScheduleSchema = calendar;
 
 export function nextCalendarOccurrence(schedule: CalendarSchedule, after: string, inclusive = false): string {
   const threshold = Temporal.Instant.from(after);

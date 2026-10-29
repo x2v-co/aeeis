@@ -52,7 +52,12 @@ export interface ConversationMessage {
     state: 'pending' | 'completed' | 'cancelled';
   };
   notificationRunId?: string;
+  /** Where the message came from when it was not typed in the workbench. Written by the server only. */
+  source?: ConversationMessageSource;
 }
+export type ConversationMessageSource =
+  | { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string }
+  | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' };
 export interface Conversation extends Ownership {
   schemaVersion: 'conversation/1';
   id: string;

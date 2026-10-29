@@ -1276,6 +1276,19 @@ body.conversation-mode #standing-form { display: grid; gap: 6px; }
 body.conversation-mode #standing-text { width: 100%; min-height: 44px; resize: vertical; }
 body.conversation-mode .standing-actions { display: flex; gap: 8px; }
 body.conversation-mode .standing-actions button { min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #routines { flex: none; padding: 8px 16px 0; font-size: 12px; }
+body.conversation-mode #routines summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+body.conversation-mode #routines p { margin: 6px 0; color: var(--muted); line-height: 1.5; }
+body.conversation-mode #routine-list { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 6px; }
+body.conversation-mode #routine-list li { display: grid; gap: 4px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+body.conversation-mode #routine-list li[data-status="paused"] { opacity: .7; }
+body.conversation-mode #routine-list .standing-actions button { min-height: 24px; padding: 2px 8px; }
+body.conversation-mode .routine-secret { padding: 6px 8px; border-radius: 6px; background: var(--surface); word-break: break-all; white-space: pre-wrap; color: inherit !important; }
+body.conversation-mode #routine-form { display: grid; gap: 6px; }
+body.conversation-mode #routine-form input, body.conversation-mode #routine-form textarea { width: 100%; }
+body.conversation-mode #routine-form textarea { min-height: 44px; resize: vertical; }
+body.conversation-mode #routine-form .standing-actions { flex-wrap: wrap; }
+body.conversation-mode #routine-form .standing-actions select, body.conversation-mode #routine-form .standing-actions input { width: auto; min-height: 28px; padding: 4px 8px; }
 body.conversation-mode #last-delivery { flex: none; padding: 8px 16px 0; }
 body.conversation-mode #last-delivery h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #last-delivery p { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }

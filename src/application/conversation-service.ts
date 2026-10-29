@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
+import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
 import { BrainAccessDenied, brainClaimInputSchema, type BrainClaim, type GovernedBrain } from '../brain.js';
 import type { Ownership, Principal } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
@@ -10,6 +10,7 @@ import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
 import { baselineVersions } from '../evolution-activation.js';
 import type { RsiService } from '../rsi.js';
+import type { ChannelInboundMessage, LifeThreadInbox } from '../channel-ingress.js';
 
 /** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
 export class ReplayablePreparationError extends Conflict {
@@ -352,7 +353,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
   return lines.join('\n');
 }
 
-export class ConversationService {
+export class ConversationService implements LifeThreadInbox {
   constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
@@ -876,7 +877,7 @@ export class ConversationService {
     conversation.recentTaskIds = [taskId, ...conversation.recentTaskIds.filter(id => id !== taskId)].slice(0, 10);
   }
 
-  async post(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean, actor?: Principal) {
+  async post(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean, actor?: Principal, source?: ConversationMessageSource) {
     const body = messageSchema.parse(input), key = idempotencyKeySchema.parse(keyInput);
     if (body.intent !== 'execute' && body.runOptions) throw new Conflict('Run options require an explicit execution request');
     const keyHash = followupHash(key), requestHash = followupHash(body);
@@ -910,7 +911,7 @@ export class ConversationService {
       if (newTask) { current.tasks.push(newTask); route.taskIds = [newTask.id]; }
       const task = current.tasks.find(task => task.id === route.taskIds[0]);
       const speaker = resolveSpeaker(body.speaker, scope);
-      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', speaker, text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route };
+      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', speaker, text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route, ...(source ? { source } : {}) };
       if (body.intent === 'execute' && route.status === 'routed' && task) {
         if (task.pendingMessageId) throw new Conflict('Task execution is already being prepared');
         if (!newTask && (task.id !== selected?.id || task.latestRunId !== parent?.id)) throw new Conflict('Task changed while routing; refresh before execution');
@@ -947,6 +948,56 @@ export class ConversationService {
       if (route.status === 'routed' && route.focusEffect === 'switch' && route.taskIds.length === 1) this.setFocus(current, route.taskIds[0]!);
     });
     return this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope, actor);
+  }
+
+  /** The person's life thread, created on first use by a channel or a routine. */
+  private async lifeThread(agentId: string, title: string, scope: Ownership): Promise<Conversation> {
+    const all = await this.store.list(scope);
+    const existing = all.find(item => item.agentId === agentId);
+    if (existing) return existing;
+    // AEEIS's entry may predate life threads and carry no person; the workbench claims that one too.
+    const entry = agentId === 'aeeis' ? all.filter(item => !item.agentId).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0] : undefined;
+    const created = await this.create({ title, agentId, ...(entry ? { claimId: entry.id } : {}) }, scope);
+    return this.store.get(created.id, scope);
+  }
+
+  /** A message app message from the owner. It is discussion with no task; it never starts work. */
+  async receive(input: ChannelInboundMessage): Promise<{ status: 'accepted' | 'duplicate'; conversationId: string; messageId: string }> {
+    const scope = { owner: input.owner, tenantId: input.tenantId };
+    const thread = await this.lifeThread(input.agentId, input.title ?? (input.agentId === 'aeeis' ? 'AEEIS' : input.agentId), scope);
+    const keyHash = followupHash(`channel:${input.channel}:${input.chatId}:${input.externalEventId}`);
+    const requestHash = followupHash({ channel: input.channel, text: input.text });
+    let status: 'accepted' | 'duplicate' = 'duplicate';
+    let messageId = '';
+    await this.store.mutate(thread.id, scope, current => {
+      const duplicate = current.messages.find(message => message.keyHash === keyHash);
+      if (duplicate) { messageId = duplicate.id; return; }
+      const body = messageSchema.parse({ text: input.text, expectedRevision: current.revision, unassigned: true });
+      messageId = `message_${randomUUID()}`;
+      current.messages.push({
+        id: messageId, keyHash, requestHash, role: 'user', speaker: { role: 'user', id: scope.owner }, text: body.text, createdAt: input.receivedAt,
+        route: routeConversationMessage(current, body), source: { kind: 'channel', channel: input.channel, externalEventId: input.externalEventId, receivedAt: input.receivedAt },
+      });
+      status = 'accepted';
+    });
+    return { status, conversationId: thread.id, messageId };
+  }
+
+  /**
+   * A routine's start: a new task on the person's life thread with an explicit
+   * Run. The same key returns the first start, even when the text differs
+   * because the retry happened later.
+   */
+  async startRoutine(input: { agentId: string; text: string; taskTitle: string; runOptions: Record<string, unknown>; key: string; source: Extract<ConversationMessageSource, { kind: 'routine' }> }, scope: Ownership, canExecute: boolean): Promise<{ conversationId: string; taskId: string; runId: string }> {
+    const thread = await this.lifeThread(input.agentId, input.agentId === 'aeeis' ? 'AEEIS' : input.agentId, scope);
+    const key = idempotencyKeySchema.parse(input.key);
+    const previous = thread.messages.find(message => message.keyHash === followupHash(key));
+    const result = previous
+      ? await this.finish(thread.id, previous.id, scope)
+      : await this.post(thread.id, { text: input.text, expectedRevision: thread.revision, newTask: { title: input.taskTitle }, intent: 'execute', runOptions: input.runOptions }, scope, key, canExecute, undefined, input.source);
+    const execution = result.message.execution;
+    if (!execution || execution.state !== 'completed' || !result.runId) throw new Conflict('例程的执行没有创建');
+    return { conversationId: thread.id, taskId: execution.taskId, runId: result.runId };
   }
 
   private async runExists(runId: string, scope: Ownership): Promise<boolean> {
