@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pdf-conflicting-txt",
+  "title": "Leave conflicting values empty",
+  "source": "docs/fillable-pdf-retest-set.md#4",
+  "tags": [
+    "pdf"
+  ],
+  "request": {
+    "goal": "Fill uncontested facts and leave conflicting values empty",
+    "builtinSkill": "fillable-pdf/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "registration.pdf",
+        "file": "fixtures/fillable-pdf/registration.pdf",
+        "encoding": "pdf"
+      },
+      {
+        "title": "conflicting.txt",
+        "file": "fixtures/fillable-pdf/conflicting.txt"
+      }
+    ]
+  },
+  "budget": {
+    "timeoutMs": 600000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "fillable-pdf/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "fillable-pdf/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "uses-pdf-fill",
+      "kind": "toolUsed",
+      "tool": "pdf.fill"
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "filled-fields",
+      "kind": "pdfFilled",
+      "fields": {
+        "name": "Maya Chen"
+      },
+      "exact": true
+    },
+    {
+      "id": "unknowns-reported",
+      "kind": "pdfUnknowns",
+      "fields": [
+        "email",
+        "country",
+        "phone",
+        "subscribe",
+        "contactMethod",
+        "interests",
+        "caseId"
+      ]
+    }
+  ]
+}

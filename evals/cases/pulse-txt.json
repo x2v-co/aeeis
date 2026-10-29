@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-txt",
+  "title": "Project Pulse from plain-text notes",
+  "source": "docs/pulse-retest-set.md#4",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "materials": [
+      {
+        "title": "notes.txt",
+        "content": "周会记录\n- 登录页 10-10 已上线\n- 支付接口的密钥还在等供应商，阻塞联调\n- 下周要做压测，10-20 发布\n- 测试环境的数据库容量没人确认"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "blocker-found",
+      "kind": "contentIncludes",
+      "any": [
+        "密钥",
+        "支付"
+      ]
+    }
+  ]
+}

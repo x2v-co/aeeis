@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-json",
+  "title": "Project Pulse from a JSON export",
+  "source": "docs/pulse-retest-set.md#5",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "materials": [
+      {
+        "title": "status.json",
+        "content": "{\"project\": \"Alpha\", \"done\": [\"login page shipped 10-10\"], \"blocked\": [{\"item\": \"payments\", \"reason\": \"vendor API key pending\"}], \"next\": [\"integrate payments\", \"load test before 10-20 launch\"]}"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    }
+  ]
+}

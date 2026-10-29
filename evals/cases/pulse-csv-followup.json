@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-csv-followup",
+  "title": "Follow-up question on the same export",
+  "source": "docs/pulse-retest-set.md#2",
+  "tags": [
+    "pulse"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "maxModelCalls": 30,
+    "materials": [
+      {
+        "title": "tasks.csv",
+        "file": "tests/fixtures/project-pulse-large.csv"
+      }
+    ]
+  },
+  "followUp": {
+    "goal": "哪些阻塞最该先处理？给出理由和证据，没有证据支持的建议放在「推断」下。",
+    "builtinSkill": "project-pulse/1"
+  },
+  "budget": {
+    "timeoutMs": 900000
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    },
+    {
+      "id": "inference-labelled",
+      "kind": "contentIncludes",
+      "any": [
+        "推断",
+        "Inference"
+      ],
+      "required": false
+    }
+  ],
+  "judge": {
+    "rubric": "The answer prioritises blockers from the earlier Pulse and the CSV, cites evidence for each recommendation, and puts unsupported suggestions under an inference label."
+  }
+}

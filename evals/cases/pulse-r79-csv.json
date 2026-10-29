@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "pulse-r79-csv",
+  "title": "r79 tracker CSV that once exhausted its final call",
+  "source": "tests/fixtures/r79/csv.json",
+  "tags": [
+    "pulse",
+    "r79"
+  ],
+  "request": {
+    "goal": "根据资料生成项目进展、阻塞、风险和下一步。",
+    "builtinSkill": "project-pulse/1",
+    "maxModelCalls": 20,
+    "materials": [
+      {
+        "title": "alpha-tracker.csv",
+        "file": "tests/fixtures/r79/csv.json",
+        "pointer": "/materials/0/content"
+      }
+    ]
+  },
+  "checks": [
+    {
+      "id": "succeeded",
+      "kind": "runStatus",
+      "expect": [
+        "succeeded"
+      ]
+    },
+    {
+      "id": "artifact-type",
+      "kind": "artifactType",
+      "expect": "project-pulse/1"
+    },
+    {
+      "id": "artifact-schema",
+      "kind": "artifactSchema",
+      "schema": "project-pulse/1"
+    },
+    {
+      "id": "evidence-resolves",
+      "kind": "evidenceResolvable"
+    },
+    {
+      "id": "no-placeholders",
+      "kind": "noPlaceholderRefs"
+    },
+    {
+      "id": "within-budget",
+      "kind": "withinBudget",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "no-repair",
+      "kind": "noRepair",
+      "required": false
+    }
+  ]
+}
