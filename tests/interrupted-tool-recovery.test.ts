@@ -47,7 +47,7 @@ async function approvedRunWithPendingTool(toolId: string, capabilities?: string[
   const repo = await repository();
   const tools = new Gateway(toolId, capabilities);
   const first = new AgentEngine(repo, { model: new FetchModel(toolId), tools });
-  const run = await first.create({ goal: '赤峰 3 天 2 晚自驾攻略', allowedTools: [`${toolId}@1`] });
+  const run = await first.create({ goal: '赤峰 3 天 2 晚自驾攻略', allowedTools: [`${toolId}@1`], actionPolicy: { allow: [toolId] } });
   expect(await first.advance(run.id)).toBe('needs_approval');
   const plan = (await repo.get(run.id)).plans[0]!;
   await first.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version });

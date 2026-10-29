@@ -49,7 +49,7 @@ async function setup(options: { output?: unknown; errorCode?: string; failuresPe
   };
   const restart = () => new AgentEngine(repo, { model, tools, executionLimits: { maxNodeIterations: 20 } });
   const engine = restart();
-  const run = await engine.create({ goal: 'Research and report available evidence', allowedTools: ['web-fetch'], maxModelCalls: 40, ...(options.budget ? { externalBudget: options.budget } : {}) });
+  const run = await engine.create({ goal: 'Research and report available evidence', allowedTools: ['web-fetch'], actionPolicy: { allow: ['web-fetch'] }, maxModelCalls: 40, ...(options.budget ? { externalBudget: options.budget } : {}) });
   await engine.advance(run.id);
   await engine.command(run.id, 'approve', { planHash: (await repo.get(run.id)).plans[0]!.hash, planVersion: (await repo.get(run.id)).plans[0]!.version });
   await engine.advance(run.id); // Queue the first capability call.

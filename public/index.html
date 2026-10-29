@@ -838,6 +838,7 @@
 <div class="gb-pane" data-pane="setup">
 <nav class="settings-index" aria-label="设置分区">
 <a href="#new-run-panel">默认与边界</a>
+<a href="#settings-actions">动作清单</a>
 <a href="#settings-access">访问</a>
 <a href="#settings-goals">目标、Room 与提醒</a>
 <a href="#rsi-panel">自我改进</a>
@@ -923,6 +924,19 @@
 <label for="brain-query">只检索相关记忆</label>
 <input id="brain-query" maxlength="2000" placeholder="例如：发布回滚策略">
 <p class="muted">填写检索词后只注入匹配 claims，减少长期运行的上下文膨胀；必须同时填写 Brain scope。</p>
+</section>
+<section id="settings-actions" class="settings-section" aria-labelledby="settings-actions-title">
+<h2 id="settings-actions-title">动作清单</h2>
+<p class="muted">计划批准决定做哪些步骤；这里决定其中有副作用的动作要不要先问你。在「允许」里的动作直接执行，在「阻止」里的动作在任何档位都不执行。新的 Run 在创建时复制这两张清单，之后再改不影响已经开始的 Run。批准卡片上的「以后都允许」和「以后都阻止」也会加到这里。</p>
+<div id="action-policy-lists" class="action-policy-lists"></div>
+<form id="action-policy-add" class="action-policy-add">
+<label for="action-policy-ref">工具或代理</label>
+<input id="action-policy-ref" maxlength="200" placeholder="例如 web-fetch、publish@1 或 agent:partner.agent" autocomplete="off">
+<label for="action-policy-list">加到</label>
+<select id="action-policy-list"><option value="allow">允许</option><option value="block">阻止</option></select>
+<button type="submit">加入</button>
+</form>
+<p id="action-policy-note" class="muted" role="status"></p>
 </section>
 <section id="settings-access" class="settings-section" aria-labelledby="settings-access-title">
 <h2 id="settings-access-title">访问</h2>

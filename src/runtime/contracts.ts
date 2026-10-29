@@ -282,7 +282,7 @@ export interface ModelCall {
   modelRequest?: { system: string; input: unknown; maxTokens?: number; maxResponseBytes?: number; timeoutMs?: number; disableRetries?: boolean; thinking?: 'enabled' | 'disabled' | 'auto' | null; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | null };
   rawOutput?: string;
   validationErrors?: Array<{ path: string; code: string; message: string }>;
-  id: string; phase: 'planner' | 'executor' | 'reviewer' | 'compaction'; taskId?: string;
+  id: string; phase: 'planner' | 'executor' | 'reviewer' | 'compaction' | 'action_review'; taskId?: string;
   /** Compaction attempt fence; a reconciled retry must reject an older in-flight response. */
   executionToken?: string;
   /** Provider idempotency key. Unknown calls reuse this key after reconcile. */
@@ -394,13 +394,16 @@ export interface AgentRun {
   /** Frozen at creation. Missing means the planner proposes the task graph. */
   planning?: 'direct' | 'dag';
   approval?: { planHash: string; planVersion?: number; approved: boolean; actor?: string; at?: string; mode?: 'required' | 'auto' | 'yolo'; reason?: string; grant?: 'once' };
-  /** Frozen at creation and widened only by this Run's own action decisions. */
+  /** Frozen at creation from the owner's lists and the request, and widened only by this Run's own action decisions. */
   actionPolicy?: ActionPolicy;
+  /** Digest of the policy as frozen at creation, so later edits to the owner's lists are visibly not this Run's. */
+  actionPolicyDigest?: string;
   /** Frozen at creation. Missing means the owner started the Run. */
   origin?: ActionOrigin;
   /** One external side effect waiting for, or settled by, an owner decision. It is separate from plan approval. */
   actionApproval?: {
-    status: 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string;
+    /** `judging`: the approval model is deciding under auto review; doubt or error turns it into `pending`. */
+    status: 'judging' | 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string;
     idempotencyKey: string; inputHash: string; reason: string; requestedAt: string;
     decision?: ActionDecision; actor?: string; decidedAt?: string;
   };
