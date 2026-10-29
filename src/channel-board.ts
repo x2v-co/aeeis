@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AeeisConflict, AeeisNotFound, type AeeisService } from './application/aeeis-service.js';
 import type { SessionEvent, SessionEventService } from './session-events.js';
 import {
-  WIP_LIMIT, actionNeedsAgent, actionNeedsReason, emptyDecision, applyTaskAction, eventTaskAction, projectChannelBoard, taskActionLine, writableTaskActionKinds,
+  WIP_LIMIT, actionNeedsAgent, channelTaskActionKindSchema, actionNeedsReason, emptyDecision, applyTaskAction, eventTaskAction, projectChannelBoard, taskActionLine, writableTaskActionKinds,
   type BoardConversationView, type BoardDecision, type ChannelBoard, type ChannelTaskAction,
 } from './channel-task-action.js';
 
@@ -18,6 +18,8 @@ export const channelTaskActionInputSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(500),
 }).strict();
 export type ChannelTaskActionInput = z.infer<typeof channelTaskActionInputSchema>;
+const serverTaskActionInputSchema = channelTaskActionInputSchema.extend({ kind: channelTaskActionKindSchema.exclude(['hand_up']) });
+type ServerTaskActionInput = z.infer<typeof serverTaskActionInputSchema>;
 
 /** Reads one conversation as the given principal. Returns undefined when the
  * reader cannot open it; the board then shows its tasks as unreadable. */
@@ -42,7 +44,13 @@ export class ChannelBoardService {
   }
 
   async act(roomId: string, raw: unknown, actorId: string, tenantId: string): Promise<{ event: SessionEvent; board: ChannelBoard }> {
-    const input = channelTaskActionInputSchema.parse(raw);
+    return this.write(roomId, channelTaskActionInputSchema.parse(raw), actorId, tenantId);
+  }
+  /** The server's own writes on the room owner's behalf: a Bot's proposal, and handoff offers and outcomes. Same rules, same lock. */
+  async record(roomId: string, raw: unknown, ownerId: string, tenantId: string): Promise<{ event: SessionEvent; board: ChannelBoard }> {
+    return this.write(roomId, serverTaskActionInputSchema.parse(raw), ownerId, tenantId);
+  }
+  private async write(roomId: string, input: ServerTaskActionInput, actorId: string, tenantId: string): Promise<{ event: SessionEvent; board: ChannelBoard }> {
     if (actionNeedsAgent.has(input.kind) && !input.agentId) throw new AeeisConflict('先选一位');
     if (actionNeedsReason.has(input.kind) && !input.reason) throw new AeeisConflict('请先写下原因');
     const room = await this.domain.getRoomForPrincipal(roomId, actorId, tenantId);
@@ -136,6 +144,25 @@ function checkAction(action: ChannelTaskAction, decision: BoardDecision, holderN
       return;
     case 'cancel':
       if (decision.cancelled) throw new AeeisConflict('这件已经在频道里取消');
+      return;
+    case 'propose':
+      if (decision.proposedBy) throw new AeeisConflict('这件已经是提议');
+      return;
+    case 'adopt':
+      if (!decision.proposedBy) throw new AeeisConflict('这件不是提议');
+      if (decision.adopted) throw new AeeisConflict('这件已经采纳');
+      if (decision.cancelled) throw new AeeisConflict('这件提议已经不要了');
+      return;
+    case 'offer':
+      if (decision.cancelled) throw new AeeisConflict('这件已经在频道里取消');
+      if (decision.offer) throw new AeeisConflict(`正在交给${holderName(decision.offer.to)}，先等结果`);
+      if (decision.assigneeId && decision.assigneeId === action.agentId) throw new AeeisConflict(`已经在${holderName(action.agentId)}手上`);
+      return;
+    case 'decline':
+      if (!decision.offer) throw new AeeisConflict('这件没有在交接');
+      return;
+    case 'transfer':
+      if (decision.offer && decision.offer.to !== action.agentId) throw new AeeisConflict(`正在交给${holderName(decision.offer.to)}，先等结果`);
       return;
     default:
       return;

@@ -45,6 +45,26 @@ function responseFor(system, input) {
       })),
     };
   }
+  // Bots that act on their own: a short reply, one proposal when asked to get something done, and a handoff
+  // when another member is named after "交给". Handoff turns ask one question, then accept.
+  if (system.includes('在团队群聊（或私聊）里回复一条消息')) {
+    const text = String(input?.message?.text ?? '');
+    const name = String(input?.you?.name ?? 'Bot');
+    const roster = Array.isArray(input?.roster) ? input.roster.map(item => String(item.name)) : [];
+    const target = roster.find(member => member !== name && member !== 'AEEIS' && text.includes(`交给${member}`));
+    const wants = /写|整理|做|查|出一份|准备/.test(text);
+    const title = text.replace(/@\S+\s*/g, '').replace(/交给\S+/g, '').replace(/[，。,.!！?？]+$/u, '').trim().slice(0, 40) || '跟进这件事';
+    return {
+      reply: wants ? `${name}：收到，我先记成一件事。` : `${name}：收到。`,
+      ...(wants ? { proposeTask: { title, reason: '群里刚提到' } } : {}),
+      ...(wants && target ? { handoff: { to: target, note: `${target}更合适` } } : {}),
+    };
+  }
+  if (system.includes('在你们的侧线程里谈一件任务的交接')) {
+    const said = Array.isArray(input?.transcript_untrusted) ? input.transcript_untrusted.length : 0;
+    if (input?.you?.side === 'receiver') return said === 0 ? { decision: 'discuss', message: '什么时候要？' } : { decision: 'accept', message: '好，我接下。' };
+    return { decision: 'discuss', message: '今天之内。' };
+  }
   // Match the fillable-pdf contract guidance, not the generic fidelity sentence that
   // mentions fillable-pdf/1 on every executor and reviewer prompt.
   if (system.includes('Plan a real deliverable') && system.includes('This Run uses the fillable-pdf/1 contract')) {

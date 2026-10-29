@@ -824,6 +824,26 @@ try {
     trackBackground(work);
   }, routineIntervalMs) : undefined;
   routinePumpTimer?.unref();
+  // Bots catch up after a restart, finish open handoffs, and hand twice-failed work to someone else.
+  const botIntervalMs = Number(process.env.AEEIS_BOT_SWEEP_INTERVAL_MS ?? 30_000);
+  if (!Number.isFinite(botIntervalMs) || (botIntervalMs !== 0 && botIntervalMs < 5000)) throw new Error('AEEIS_BOT_SWEEP_INTERVAL_MS must be 0 or at least 5000 milliseconds');
+  let botWork: Promise<unknown> | undefined;
+  const botPumpTimer = botIntervalMs > 0 && app.aeeisBots ? setInterval(() => {
+    if (closing || botWork) return;
+    const work = (async () => {
+      for (const { room } of await domain.listRoomsForProjection()) {
+        if (closing) return;
+        if (room.status !== 'active' || (room.chat !== 'group' && room.chat !== 'direct')) continue;
+        const scope = { owner: room.owner ?? 'owner', tenantId: room.tenantId ?? 'local' };
+        await app.aeeisBots!.sweep(room, scope).catch(error => console.error('AEEIS bot sweep failed', room.id, error instanceof Error ? error.message : error));
+        await app.aeeisBots!.reassignFailures(room, scope).catch(error => console.error('AEEIS bot reassign failed', room.id, error instanceof Error ? error.message : error));
+      }
+      await app.aeeisBots!.drain();
+    })().catch(error => console.error('AEEIS bot pump failed', error instanceof Error ? error.message : error)).finally(() => { botWork = undefined; });
+    botWork = work;
+    trackBackground(work);
+  }, botIntervalMs) : undefined;
+  botPumpTimer?.unref();
   const reindexIntervalMs = Number(process.env.AEEIS_KNOWLEDGE_REINDEX_INTERVAL_MS ?? 0);
   if (!Number.isFinite(reindexIntervalMs) || (reindexIntervalMs !== 0 && reindexIntervalMs < 1000)) throw new Error('AEEIS_KNOWLEDGE_REINDEX_INTERVAL_MS must be 0 or at least 1000 milliseconds');
   const knowledgeReindexPump = knowledgeMaintenance && reindexIntervalMs > 0 ? setInterval(() => {
@@ -886,11 +906,11 @@ try {
     // persist before the process exits (compose stop_grace_period covers it).
     const drainMs = Number(process.env.AEEIS_SHUTDOWN_DRAIN_MS ?? 240_000);
     if (engine && !(await engine.drain(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 240_000))) console.error('AEEIS: shutdown drain timed out; in-flight runs will be recovered on boot');
-    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
+    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
 } catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
