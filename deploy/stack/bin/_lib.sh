@@ -90,6 +90,15 @@ dc() {
   if [[ -n "${AEEIS_GIT_COMMIT:-}" ]]; then files+=(-f "$STACK_DIR/compose.commit.yml"); fi
   docker compose -p "$AEEIS_STACK" "${files[@]}" "${env_args[@]}" "$@"
 }
+dc_run_supports_pull() {
+  local help
+  if ! help="$(dc run --help 2>/dev/null)"; then
+    # Omit the flag if probing fails; callers have already pre-pulled/verified images.
+    return 1
+  fi
+  # Capture first: piping large help output to grep -q can SIGPIPE under pipefail.
+  [[ "$help" == *--pull* ]]
+}
 temporal_cli() { dc exec -T temporal temporal --address temporal:7233 --namespace "${TEMPORAL_NAMESPACE:-aeeis}" "$@"; }
 
 # Probe a URL from inside the stack's shared network namespace (via the api
