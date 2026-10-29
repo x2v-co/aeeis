@@ -210,5 +210,12 @@ export class CombinedToolGateway implements ToolGateway {
     if (!gateway.reconcile) throw new Error('Provider does not support reconciliation');
     return gateway.reconcile(request, receipt);
   }
-  async health() { try { const tools = await this.listTools(); const health = await Promise.all(this.gateways.map(gateway => gateway.health?.())); return { ready: health.every(item => item?.ready !== false), detail: `${tools.length} configured tools; ${health.map(item => item?.detail ?? '').join('; ')}` }; } catch (error) { return { ready: false, detail: error instanceof Error ? error.message : 'Tool discovery failed' }; } }
+  async health() {
+    try {
+      const health = await Promise.all(this.gateways.map(async gateway => gateway.health
+        ? gateway.health()
+        : { ready: true, detail: `${(await gateway.listTools()).length} configured tools` }));
+      return { ready: health.every(item => item.ready), detail: health.map(item => item.detail).join('; ') };
+    } catch (error) { return { ready: false, detail: error instanceof Error ? error.message : 'Tool discovery failed' }; }
+  }
 }

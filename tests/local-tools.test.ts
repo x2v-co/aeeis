@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LocalToolGateway, CombinedToolGateway } from '../src/local-tools.js';
-import { receiptSchema, type ToolInvocation } from '../src/integrations.js';
+import { receiptSchema, type ToolGateway, type ToolInvocation } from '../src/integrations.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 import { buildApp } from '../src/runtime/http.js';
@@ -141,5 +141,43 @@ print("verified")` });
       await gateway.reap(async id => (await repository.get(id)).status);
       expect(await readFile(join(root,'workspaces',run.id,'artifacts/answer.md'),'utf8')).toContain('42');
     } finally { await app.close(); await repository.close(); }
+  });
+});
+
+describe('combined tool gateway health', () => {
+  const invoke: ToolGateway['invoke'] = async () => { throw new Error('unused'); };
+
+  it('probes gateways concurrently and lists each gateway at most once', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const registryList = vi.fn(async () => { await pending; return []; });
+    const fallbackList = vi.fn(async () => []);
+    const registry: ToolGateway = { listTools: registryList, invoke, health: vi.fn(async () => {
+      await registryList();
+      return { ready: true, detail: 'registry reachable' };
+    }) };
+    const fallback: ToolGateway = { listTools: fallbackList, invoke };
+    const combined = new CombinedToolGateway([registry, fallback]);
+    const combinedList = vi.spyOn(combined, 'listTools');
+    const health = combined.health();
+    expect(registry.health).toHaveBeenCalledTimes(1);
+    expect(registryList).toHaveBeenCalledTimes(1);
+    expect(fallbackList).toHaveBeenCalledTimes(1);
+    expect(combinedList).not.toHaveBeenCalled();
+    finish();
+    expect(await health).toEqual({ ready: true, detail: 'registry reachable; 0 configured tools' });
+    expect(registryList).toHaveBeenCalledTimes(1);
+    expect(fallbackList).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an unready gateway and preserves provider error handling', async () => {
+    const listTools = vi.fn(async () => []);
+    const unhealthy: ToolGateway = { listTools, invoke, health: async () => ({ ready: false, detail: 'registry unavailable' }) };
+    expect(await new CombinedToolGateway([unhealthy]).health()).toEqual({ ready: false, detail: 'registry unavailable' });
+    expect(listTools).not.toHaveBeenCalled();
+    const throwing: ToolGateway = { listTools: async () => { throw new Error('discovery failed'); }, invoke };
+    expect(await new CombinedToolGateway([throwing]).health()).toEqual({ ready: false, detail: 'discovery failed' });
+    const rejecting: ToolGateway = { listTools, invoke, health: async () => { throw 'private failure'; } };
+    expect(await new CombinedToolGateway([rejecting]).health()).toEqual({ ready: false, detail: 'Tool discovery failed' });
   });
 });
