@@ -785,7 +785,8 @@ describe('AEEIS HTTP boundary', () => {
     const scheduler = new TaskScheduler(domain, engine, dispatcher, new InMemoryTaskDispatchRepository());
     await scheduler.init();
     const detail = { unavailable: 'projection provider unavailable', missing: 'Projection sink health probe unavailable', throws: 'Projection sink health probe failed', timeout: 'Projection sink health probe timed out' }[probe];
-    const app = buildApp({ repository: repo, engine, dispatcher, domain, taskScheduler: scheduler, projectionSink, readinessCheckTimeoutMs: 30 });
+    // 250ms: core checks (file repo, model) must not hit the timeout on loaded 2-core deploy hosts; only the never-resolving projection probe should.
+    const app = buildApp({ repository: repo, engine, dispatcher, domain, taskScheduler: scheduler, projectionSink, readinessCheckTimeoutMs: 250 });
     try {
       const ready = await app.inject('/readyz');
       expect(ready.statusCode).toBe(200);
