@@ -6046,7 +6046,12 @@ async function refreshThread(): Promise<void> {
     throw error;
   }
 }
-async function refresh(): Promise<void> {
+/** Lists that change rarely and panels people seldom open. The 2-second background
+ * tick reuses them and reads them again every 30 seconds; any other refresh reads all. */
+const SLOW_REFRESH_MS = 30_000;
+let slowRefreshAt = 0;
+let slowLists: { candidates: EvolutionSummary[]; signals: ImprovementSignalSummary[]; competitions: CompetitionSummary[]; debates: DebateSummary[]; projections: ProjectionSummary[]; agents: AgentSummary[]; triggerPolicies: TriggerPolicySummary[]; triggerDecisions: TriggerDecisionSummary[]; reminderPage: ReminderPage } | undefined;
+async function refresh(background = false): Promise<void> {
   if (readOnlyShare) {
     try {
       const view = await api<(RunView & { explanation: RunExplanation }) | ThreadShareView>(`/share/${shareToken}`);
@@ -6076,12 +6081,20 @@ async function refresh(): Promise<void> {
   if (linkedThreadId) { await refreshThread(); return; }
   if (conversationEnabled) await refreshConversation().catch(error => { $('conversation-error').textContent = errorMessage(error); });
   const reminderQuery = reminderStatusFilter ? `&status=${encodeURIComponent(reminderStatusFilter)}` : '';
-  const [runPage, goals, allRooms, candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage, owned] = await Promise.all([
-    api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'), api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
-    api<{ items: CompetitionSummary[] }>('/collaborations/competitions/page?limit=12').then(page => page.items), api<{ items: DebateSummary[] }>('/collaborations/debates/page?limit=12').then(page => page.items), api<ProjectionSummary[]>('/collaborations/projections?limit=12'), api<AgentSummary[]>('/agents?limit=50').catch(() => []),
-    api<TriggerPolicySummary[]>('/collaborations/triggers/policies?limit=12').catch(() => []), api<TriggerDecisionSummary[]>('/collaborations/triggers/decisions?limit=20').catch(() => []), api<ReminderPage>(`/reminders/page?limit=20${reminderQuery}`).catch(() => ({ items: [] } as ReminderPage)),
-    api<OwnedBotView[]>('/bots').catch(() => null),
+  const full = !background || !slowLists || Date.now() - slowRefreshAt >= SLOW_REFRESH_MS;
+  const slow = full
+    ? Promise.all([
+      api<EvolutionSummary[]>('/evolution/candidates?limit=50'), api<ImprovementSignalSummary[]>('/evolution/signals?limit=50').catch(() => []),
+      api<{ items: CompetitionSummary[] }>('/collaborations/competitions/page?limit=12').then(page => page.items), api<{ items: DebateSummary[] }>('/collaborations/debates/page?limit=12').then(page => page.items), api<ProjectionSummary[]>('/collaborations/projections?limit=12'), api<AgentSummary[]>('/agents?limit=50').catch(() => []),
+      api<TriggerPolicySummary[]>('/collaborations/triggers/policies?limit=12').catch(() => []), api<TriggerDecisionSummary[]>('/collaborations/triggers/decisions?limit=20').catch(() => []), api<ReminderPage>(`/reminders/page?limit=20${reminderQuery}`).catch(() => ({ items: [] } as ReminderPage)),
+    ]).then(([candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage]) => ({ candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage }))
+    : Promise.resolve(slowLists!);
+  const [runPage, goals, allRooms, owned, lists] = await Promise.all([
+    api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'),
+    api<OwnedBotView[]>('/bots').catch(() => null), slow,
   ]);
+  if (full) { slowLists = lists; slowRefreshAt = Date.now(); }
+  const { candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage } = lists;
   const runs = runPage.items;
   runSummaries = runs;
   sideThreadRooms = allRooms.filter(room => room.description === SIDE_THREAD);
@@ -6094,7 +6107,7 @@ async function refresh(): Promise<void> {
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();
   renderAttentionInbox(runs);
-  await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
+  if (full) { await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems); }
   renderBotRoster();
   renderGroups(rooms);
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
@@ -8125,7 +8138,7 @@ async function copyRunLink(url: string): Promise<void> { await navigator.clipboa
 });
 if (!readOnlyShare) $<HTMLInputElement>('token').value = sessionStorage.getItem('aeeis.token') ?? '';
 void initialize();
-setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh().catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
+setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh(true).catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {
   if (!document.hidden && current && !DONE_STATUSES.has(current.status)) updateRunActivity(current);
 }, 1000);
