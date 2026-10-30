@@ -2336,13 +2336,13 @@ describe('entry bots and group chats', () => {
       calls.push({ url, method, body });
       if (url.startsWith('/api/routines?') && method === 'GET') return response({ routines: routines.filter(item => url.includes(`agentId=${encodeURIComponent(item.agentId)}`)) });
       if (url === '/api/routines' && method === 'POST') {
-        const routine = { id: `routine_${routines.length + 1}`, ...body, status: 'active', revision: 0, ...(body.trigger.kind === 'schedule' ? { nextDueAt: '2026-10-30T01:00:00.000Z' } : { webhookConfigured: true }) };
+        const routine = { id: `routine_${routines.length + 1}`, webhookEnabled: false, ...body, status: 'active', revision: 0, ...(body.trigger.kind === 'schedule' ? { nextDueAt: '2026-10-30T01:00:00.000Z' } : { webhookConfigured: true }) };
         routines.push(routine);
         return response({ routine, ...(body.trigger.kind === 'webhook' ? { webhookSecret: 'secret-shown-once-0123456789abcdef0123' } : {}) }, 201);
       }
       const id = url.split('/api/routines/')[1]?.split('/')[0];
       const routine = routines.find(item => item.id === id);
-      if (method === 'PATCH') { Object.assign(routine, { status: body.status, revision: routine.revision + 1 }); return response({ routine }); }
+      if (method === 'PATCH') { const { expectedRevision: _, ...change } = body; Object.assign(routine, change, { revision: routine.revision + 1 }); return response({ routine }); }
       return undefined;
     } });
     start(h.fetch);
@@ -2372,6 +2372,14 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('routine-secret').hidden).toBe(false));
     expect(el('routine-secret').textContent).toContain('secret-shown-once-0123456789abcdef0123');
     expect(el('routine-list').textContent).toContain('/webhooks/routines/routine_2');
+    expect(el('routine-list').textContent).toContain('Webhook 已关闭');
+    clickText('开启 Webhook', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('关闭 Webhook'));
+    expect(calls.at(-1)?.body).toEqual({ expectedRevision: 0, webhookEnabled: true });
+    expect(routines[1].status).toBe('active');
+    clickText('关闭 Webhook', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('Webhook 已关闭'));
+    expect(calls.at(-1)?.body).toEqual({ expectedRevision: 1, webhookEnabled: false });
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
   });
 

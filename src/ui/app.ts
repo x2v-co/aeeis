@@ -98,7 +98,7 @@ interface ConversationMessageView {
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
   trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' };
-  nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean;
+  nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
 interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; hasStandingInstruction?: boolean; presence?: LifePresence }
@@ -1340,13 +1340,15 @@ function renderRoutines(): void {
     const row = element('li'); row.dataset.status = routine.status; row.dataset.routineId = routine.id;
     const timing = routine.status === 'paused' ? '已暂停'
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
-      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : '等 Webhook';
+      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
     row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
     actions.append(toggle);
     if (routine.trigger.kind === 'webhook') {
+      const webhookToggle = button(routine.webhookEnabled ? '关闭 Webhook' : '开启 Webhook', () => changeRoutine(routine, { webhookEnabled: !routine.webhookEnabled })); webhookToggle.type = 'button';
+      actions.append(webhookToggle);
       const rotate = button('换密钥', async () => {
         const result = await api<{ routine: RoutineView; webhookSecret: string }>(`/routines/${encodeURIComponent(routine.id)}/rotate-secret`, {});
         routineSecret = { routineId: routine.id, secret: result.webhookSecret };

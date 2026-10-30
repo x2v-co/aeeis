@@ -48,11 +48,12 @@ import { globalBudgetBillingImportSchema, globalBudgetReconcileSchema, type Glob
 import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membership.js';
 import type { KnowledgeEmbeddingMaintenance, KnowledgeEmbeddingReindexStatus, KnowledgeProvider } from '../knowledge.js';
 import type { ProjectSourceProvider } from '../project-sources.js';
+import { ContentEncryptionUnavailable } from '../content-encryption.js';
 import { withTenantScope } from '../adapters/postgres-pool.js';
 import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
 import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.js';
 import { BotTeam } from '../bot-team.js';
-import { RoutineConflict, RoutineNotFound, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
+import { RoutineConflict, RoutineNotFound, RoutineRateLimitError, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
 import type { HermesDebateIngress } from '../hermes-debate-ingress.js';
 import { collaborationTriggerEventSchema, collaborationTriggerReconcileSchema, CollaborationTriggerNotFound, type CollaborationTriggerService } from '../collaboration-triggers.js';
 import { improvementSignalsForRun } from '../rsi-proposal-pump.js';
@@ -162,6 +163,7 @@ export function buildApp(options: Options) {
       if (isBootRecoverableRun(run.status)) await notify(run.id);
       return started;
     }, {
+      webhooksEnabled: process.env.AEEIS_ROUTINE_WEBHOOKS_ENABLED === '1',
       runActive: async (runId, scope) => {
         try { return !['succeeded', 'failed', 'cancelled'].includes((await options.repository.get(runId, scope)).status); }
         catch (error) { if (error instanceof NotFound) return false; throw error; }
@@ -500,6 +502,8 @@ export function buildApp(options: Options) {
     if (error instanceof BrainAccessDenied) return reply.code(403).send({ error: 'Brain access denied' });
     if (error instanceof AgentCallbackAuthenticationError) return reply.code(401).send({ error: 'Agent callback authentication failed' });
     if (error instanceof FeishuSignatureError || error instanceof RoutineSignatureError) return reply.code(401).send({ error: error.message });
+    if (error instanceof ContentEncryptionUnavailable) return reply.code(503).send({ error: 'Content encryption unavailable' });
+    if (error instanceof RoutineRateLimitError) return reply.header('retry-after', error.retryAfter).code(429).send({ error: error.message });
     if (error instanceof RoutineNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof RoutineConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof AgentResponseRejected) return reply.code(400).send({ error: 'Agent response rejected', kind: error.kind, detail: error.message });
@@ -533,7 +537,7 @@ export function buildApp(options: Options) {
       return options.feishuDebateIngress!.handle(rawBody, headers);
     });
   }
-  if (routines) {
+  if (routines && process.env.AEEIS_ROUTINE_WEBHOOKS_ENABLED === '1') {
     // Unauthenticated by design: the per-routine HMAC is the credential. Any body type is accepted and kept as text.
     app.register(async scoped => {
       scoped.removeAllContentTypeParsers();
