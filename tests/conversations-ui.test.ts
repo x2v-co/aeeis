@@ -2803,6 +2803,40 @@ describe('entry bots and group chats', () => {
     expect(doc().querySelectorAll('.group-run-card')).toHaveLength(2);
     expect(h.posts.some(post => /\/runs(?:\/|$)|\/approve$|\/messages$/.test(post.url))).toBe(false);
   });
+  it('leaves an @ for a Bot that replies to that Bot, without a second discussion card', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'reply' };
+    const events: any[] = [];
+    const h = harness(undefined, { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).endsWith('/goals') && method === 'GET') return response([]);
+      if (String(url).endsWith('/goals') && method === 'POST') return response({ id: 'goal_team', title: body.title, status: 'active', createdAt: date, roomId: 'room_team' });
+      if (String(url).includes('/context-manifests')) return response({ id: 'ctx_team' });
+      if (String(url).includes('/rooms/room_team/session-events') && method === 'POST') {
+        const event = { id: `evt_${events.length}`, operation: 'publish', sequence: events.length + 1, actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, evidenceRefs: body.evidenceRefs ?? [], createdAt: date };
+        events.push(event);
+        return response(event);
+      }
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: events });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
+    el<HTMLTextAreaElement>('group-text').value = '@阿研 整理一份发布风险';
+    el('group-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(events.some(event => event.type === 'message' && event.content === '@阿研 整理一份发布风险')).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    // 阿研 replies and proposes on its own; the browser does not open a discussion on its thread.
+    expect(events.some(event => event.content.includes('已请阿研回应'))).toBe(false);
+    expect(h.posts.some(post => post.url === '/api/conversations' && post.body.agentId === bot.id)).toBe(false);
+  });
   it('shows Bots that act on their own: automatic replies, proposals, side threads and the autonomy setting', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const side = { id: 'room_side', title: '阿研 ↔ AEEIS', description: '侧线程', status: 'active', createdAt: date, updatedAt: date };

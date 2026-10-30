@@ -2344,6 +2344,9 @@ function doingCount(agentId: string): number {
   }).length;
 }
 function handoffChain(conversationId: string, taskId: string): string[] {
+  // The server's chain is in event order; the fallback is for a card the board has not projected yet.
+  const card = boardCardFor(conversationId, taskId);
+  if (card) return card.chain;
   const lines = (boardState()?.citations ?? [])
     .filter(cite => cite.conversationId === conversationId && cite.taskId === taskId)
     .map(cite => `交给${cite.agentId ? (botById(cite.agentId)?.name ?? cite.agentId) : '这个人'}`);
@@ -3845,7 +3848,10 @@ async function submitGroupMessage(event: Event): Promise<void> {
         }
       }
     } else {
-      const targets = rawPointed.filter(bot => !spokenBy(bot, spoken));
+      // A Bot that replies on its own answers an @ in the group and proposes the task itself,
+      // so the browser does not also open a discussion for it. An explicit 交给 still does.
+      const replies = (bot: RosterBot) => botsActive && !chosen && ownedBotRecords.some(item => item.id === bot.id && (item.autonomy ?? 'reply') !== 'quiet');
+      const targets = rawPointed.filter(bot => !spokenBy(bot, spoken) && !replies(bot));
       const homeIn = members.some(bot => bot.id === home.id);
       const others = members.filter(bot => bot.id !== 'aeeis' && !rawPointed.some(item => item.id === bot.id));
       const reminded: RosterBot[] = [];

@@ -296,7 +296,10 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
   const citations: BoardCitation[] = [];
   const actions: BoardActionMark[] = [];
   const firstCite = new Map<string, BoardCitation>();
+  // The chain is every receipt and action for a task in event order. A receipt that only
+  // names the task's current holder repeats an action already in the chain and is left out.
   const chains = new Map<string, string[]>();
+  const holders = new Map<string, string>();
   for (const event of live) {
     const cite = eventCitation(event);
     if (cite) {
@@ -305,10 +308,17 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       const key = taskKey(cite.conversationId, cite.taskId);
       if (!firstCite.has(key)) firstCite.set(key, mark);
       const chain = chains.get(key) ?? [];
-      chain.push(`交给${cite.agentId ? nameOf(cite.agentId) : '这个人'}`);
+      if (!cite.agentId || holders.get(key) !== cite.agentId) chain.push(`交给${cite.agentId ? nameOf(cite.agentId) : '这个人'}`);
+      if (cite.agentId && !holders.has(key)) holders.set(key, cite.agentId);
       chains.set(key, chain);
     }
     const action = eventTaskAction(event);
+    if (action) {
+      const key = taskKey(action.conversationId, action.taskId);
+      const line = event.content.trim();
+      if (line) chains.set(key, [...(chains.get(key) ?? []), line]);
+      if ((action.kind === 'claim' || action.kind === 'assign' || action.kind === 'transfer') && action.agentId) holders.set(key, action.agentId);
+    }
     if (action) actions.push({ eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}) });
   }
   const cards: BoardCard[] = [];
@@ -332,7 +342,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       ...(runId ? { runId } : {}),
       column: boardColumn(status, decision, runId),
       decision,
-      chain: [...(chains.get(key) ?? []), ...decision.lines],
+      chain: chains.get(key) ?? [],
     });
   }
   const loads = new Map<string, number>();
