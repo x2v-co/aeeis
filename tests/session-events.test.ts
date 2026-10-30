@@ -56,6 +56,19 @@ describe('Shared Session canonical events', () => {
     await expect(events.create(room.id, { goalId: goal.id, type: 'canonical_response', content: 'Should fail.', contextManifestId: manifest.id, idempotencyKey: 'viewer-1' }, 'carol', 'team-a')).rejects.toThrow('writer role');
   });
 
+  it('keeps an archived room readable but refuses new events', async () => {
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships);
+    const room = await domain.createRoom({ title: 'Archived session' }, undefined, 'alice', 'team-a');
+    const goal = await domain.createGoal({ title: 'Goal', roomId: room.id }, undefined, 'alice', 'team-a');
+    const manifest = await domain.createContextManifest(goal.id, { purpose: 'shared', audienceMode: 'room' }, undefined, 'alice', 'team-a');
+    const events = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const before = await events.create(room.id, { goalId: goal.id, type: 'message', content: 'Before archive.', contextManifestId: manifest.id, idempotencyKey: 'archive-1' }, 'alice', 'team-a');
+    await domain.updateRoom(room.id, { status: 'archived' }, undefined, 'alice', 'team-a');
+    await expect(events.create(room.id, { goalId: goal.id, type: 'message', content: 'After archive.', contextManifestId: manifest.id, idempotencyKey: 'archive-2' }, 'alice', 'team-a')).rejects.toThrow('已归档');
+    expect((await events.page(room.id, 'alice', 'team-a')).items.map(item => item.id)).toEqual([before.id]);
+  });
+
   it('keeps canonical response revisions and retractions append-only', async () => {
     const memberships = new InMemoryRoomMembershipRepository();
     const domain = new AeeisService(new InMemoryStore(), [], memberships);

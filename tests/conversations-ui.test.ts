@@ -1582,6 +1582,14 @@ describe('entry bots and group chats', () => {
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
     await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
+    const asked: string[] = [];
+    dom.window.confirm = (text?: string) => { asked.push(text ?? ''); return false; };
+    el('chat-archive').click();
+    await Promise.resolve();
+    expect(asked[0]).toContain('归档群聊「发布协作」');
+    expect(el('group-panel').hidden).toBe(false);
+    expect(calls.some(call => call.method === 'PATCH')).toBe(false);
+    dom.window.confirm = () => true;
     el('chat-archive').click();
     await vi.waitFor(() => expect(el('group-panel').hidden).toBe(true));
     expect(el('groups').textContent ?? '').not.toContain('发布协作');
@@ -2829,6 +2837,9 @@ describe('entry bots and group chats', () => {
     await ready();
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
     await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
+    // The note under the composer describes Bot replies, not the old 👍 receipts.
+    expect(el('group-send-note').textContent).toContain('没有点名时 AEEIS 回复');
+    expect(el('group-send-note').textContent).not.toContain('👍');
     el<HTMLTextAreaElement>('group-text').value = '@阿研 整理一份发布风险';
     el('group-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(events.some(event => event.type === 'message' && event.content === '@阿研 整理一份发布风险')).toBe(true));

@@ -202,6 +202,7 @@ export class AeeisService {
     const room = await this.getRoomForPrincipal(roomId, principalId, tenantId);
     const role = await this.roomRole(room, principalId, tenantId);
     if (!role || !['owner', 'editor', 'agent'].includes(role)) throw new RoomMembershipConflict('Room writer role required for Session events');
+    if (room.status === 'archived') throw new AeeisConflict('这间已归档，只能阅读，不能再写入');
     return room;
   }
 
