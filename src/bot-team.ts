@@ -167,7 +167,10 @@ export class BotTeam {
     const card = await this.propose(room, event, scope, speaker, target, out.proposeTask.title, out.proposeTask.reason);
     const to = out.handoff ? roster.find(item => sameName(item.name, out.handoff!.to) && item.id !== target.id && item.autonomy !== 'quiet') : undefined;
     if (to) await this.offer(room, scope, card, target, to, out.handoff?.note, `bot-handoff:${event.id}:${speaker.id}`);
-    else if (target.id !== FRONT_DOOR || speaker.id === FRONT_DOOR) await this.maybeStart(room, scope, card, target, `bot-start:${event.id}:${target.id}`);
+    else if (target.id !== FRONT_DOOR || speaker.id === FRONT_DOOR) {
+      const asked = `${this.nameIn(roster, event.actorId, event.actorType)}在群里说：「${event.content}」`;
+      await this.maybeStart(room, scope, card, target, `bot-start:${event.id}:${target.id}`, out.proposeTask.reason ? `${asked}\n理由：${out.proposeTask.reason}` : asked);
+    }
   }
 
   /** A discussion task on the doer's life thread, a receipt that puts it on the board, and the `propose` mark. */
@@ -181,11 +184,12 @@ export class BotTeam {
   }
 
   /** Automatic or yolo Bots start their own task, inside their WIP. */
-  private async maybeStart(room: Room, scope: Ownership, card: { conversationId: string; taskId: string; goalId?: string }, doer: Speaker, key: string): Promise<void> {
+  /** `note` is what the Run reads as the request: who asked for this and why. */
+  private async maybeStart(room: Room, scope: Ownership, card: { conversationId: string; taskId: string; goalId?: string }, doer: Speaker, key: string, note: string): Promise<void> {
     if (!this.options.canExecute || (doer.autonomy !== 'auto' && doer.autonomy !== 'yolo')) return;
     const board = await this.options.board.board(room.id, scope.owner, scope.tenantId);
     if ((board.wip.find(load => load.agentId === doer.id)?.count ?? 0) >= WIP_LIMIT) return;
-    const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: card.conversationId, taskId: card.taskId, agentId: doer.id, review: doer.autonomy, key }, scope, this.options.canExecute);
+    const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: card.conversationId, taskId: card.taskId, agentId: doer.id, review: doer.autonomy, key, note: note.slice(0, 4000) }, scope, this.options.canExecute);
     await this.options.notifyRun(runId, scope);
   }
 
@@ -270,7 +274,7 @@ export class BotTeam {
       return;
     }
     await this.say(room, goalId, scope, undefined, `${to.name}接下了「${card.title ?? '这件事'}」（来自${from.name}）。`, `handoff-line:${offerId}`, [card.conversationId, card.taskId, to.id]);
-    await this.maybeStart(room, scope, { conversationId: card.conversationId, taskId: card.taskId, ...(goalId ? { goalId } : {}) }, to, `handoff-start:${offerId}`).catch(error => this.options.log?.('AEEIS bot start failed', error instanceof Error ? error.message : error));
+    await this.maybeStart(room, scope, { conversationId: card.conversationId, taskId: card.taskId, ...(goalId ? { goalId } : {}) }, to, `handoff-start:${offerId}`, `${from.name}把「${card.title ?? '这件事'}」交给我，我在侧线程里接下了。`).catch(error => this.options.log?.('AEEIS bot start failed', error instanceof Error ? error.message : error));
   }
 
   /** Nobody decided: the offer is withdrawn and the task waits for a person, which puts it in the inbox. */

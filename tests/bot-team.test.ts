@@ -112,6 +112,10 @@ describe('Bots that act on their own', () => {
     const runs = await f.repository.list();
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ origin: 'agent', executionReview: 'auto' });
+    // The Run reads who asked and why, not a bare "I'll do it".
+    expect(runs[0]!.goal).toContain('任务：起草发布说明');
+    expect(runs[0]!.goal).toContain('在群里说：「下周发布，需要一份发布说明」');
+    expect(runs[0]!.goal).toContain('理由：下周发布');
     expect(f.notify).toHaveBeenCalledWith(runs[0]!.id);
     expect((await f.events()).some(item => item.taskAction?.kind === 'propose')).toBe(true);
   });
