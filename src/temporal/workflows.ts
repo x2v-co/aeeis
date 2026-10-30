@@ -1,4 +1,4 @@
-import { ApplicationFailure, condition, continueAsNew, defineSignal, patched, proxyActivities, setHandler } from '@temporalio/workflow';
+import { ApplicationFailure, CancellationScope, condition, continueAsNew, defineSignal, isCancellation, patched, proxyActivities, setHandler } from '@temporalio/workflow';
 import type { AdvanceReminderActivityResult, AdvanceRunActivityResult } from './activity.js';
 import { decideRunAdvance } from './run-advance.js';
 
@@ -29,7 +29,10 @@ async function closeUnknownRun(runId: string, reason: string): Promise<boolean> 
   let result: AdvanceRunActivityResult;
   try {
     result = await terminalizeRun(runId, reason);
-  } catch { throw ApplicationFailure.nonRetryable('Run could not be terminalized after bounded activity retries', 'AeeisRunTimeout'); }
+  } catch (error) {
+    if (isCancellation(error) && CancellationScope.current().consideredCancelled && patched('run-cancellation-v1')) throw error;
+    throw ApplicationFailure.nonRetryable('Run could not be terminalized after bounded activity retries', 'AeeisRunTimeout');
+  }
   if (result.status === 'failed') throw ApplicationFailure.nonRetryable(reason, 'AeeisRunFailed');
   if (['succeeded', 'cancelled'].includes(result.status)) return true;
   // A business wait may win the race with terminalization; keep its workflow alive.
@@ -48,6 +51,10 @@ export async function agentRunWorkflow(runId: string, pollState?: { previousProg
       ? patched('run-advance-long-model-v1') ? advanceRunLong : advanceRunPolling
       : advanceRun)(runId); }
     catch (error) {
+      // The API persists cancellation before cancelling Temporal. Preserve the
+      // cancellation failure instead of attempting an activity in a cancelled scope.
+      // Gate the changed closing command so existing failure histories still replay.
+      if (isCancellation(error) && CancellationScope.current().consideredCancelled && patched('run-cancellation-v1')) throw error;
       if (patched('run-advance-terminal-unknown-v1')) {
         if (await closeUnknownRun(runId, 'Run activity failed after bounded retries')) return;
         continue;
