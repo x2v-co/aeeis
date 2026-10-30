@@ -131,6 +131,21 @@ describe('channel board on the server', () => {
     expect((await f.events.page(f.ids.roomId, 'alice', 'team-a', 50, 1_030)).items.map(item => item.content)).toEqual(['新消息']);
   });
 
+  it('keeps a task\'s handoff chain in event order, without echoing the holder', () => {
+    const owner = { owner: 'alice', actorId: 'alice', actorType: 'principal' };
+    const action = (kind: string, agentId: string) => ({ schemaVersion: 'channel-task-action/1' as const, kind: kind as 'propose', conversationId, taskId: 'task_risk', agentId });
+    const events = [
+      { id: 'e1', sequence: 1, type: 'system', content: '研究提议：风险摘要', evidenceRefs: [conversationId, 'task_risk', 'demo.research'], ...owner },
+      { id: 'e2', sequence: 2, type: 'task_update', content: '研究提议这件事', evidenceRefs: [conversationId, 'task_risk', 'demo.research'], taskAction: action('propose', 'demo.research'), ...owner },
+      { id: 'e3', sequence: 3, type: 'task_update', content: '交接中：交给 发布', evidenceRefs: [conversationId, 'task_risk', 'demo.release'], taskAction: action('offer', 'demo.release'), ...owner },
+      { id: 'e4', sequence: 4, type: 'task_update', content: '转交给 发布', evidenceRefs: [conversationId, 'task_risk', 'demo.release'], taskAction: action('transfer', 'demo.release'), ...owner },
+      { id: 'e5', sequence: 5, type: 'system', content: '发布接下了「风险摘要」（来自研究）。', evidenceRefs: [conversationId, 'task_risk', 'demo.release'], ...owner },
+    ];
+    const names: Record<string, string> = { 'demo.research': '研究', 'demo.release': '发布' };
+    const board = projectChannelBoard('room', events, new Map([[conversationId, { id: conversationId, agentId: 'demo.research', tasks: [{ id: 'task_risk', title: '风险摘要', status: 'discussion' }] }]]), id => names[id] ?? id);
+    expect(card(board, 'task_risk').chain).toEqual(['交给研究', '研究提议这件事', '交接中：交给 发布', '转交给 发布']);
+  });
+
   it('reads channels written before structured actions', () => {
     const owner = { owner: 'alice', actorId: 'alice', actorType: 'principal' };
     const events = [
