@@ -3085,6 +3085,28 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(doc().body.classList.contains('roster-focus')).toBe(false));
   });
 
+  it('shows a task\'s approval once in the channel, under the latest event that cites it', async () => {
+    const room = { id: 'room_once', title: '一张审批', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const cite = (id: string, sequence: number, content: string) => ({ id, operation: 'publish', sequence, actorType: 'principal', actorId: 'owner', type: 'system', content, evidenceRefs: ['conv_release', 'task_once', 'demo.release'], createdAt: date });
+    const events = [cite('evt_first', 1, '交给发布'), cite('evt_second', 2, '发布提议这件事'), cite('evt_third', 3, '发布接下了')];
+    const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_once', title: '写发布说明', threadId: 'thread_once', status: 'needs_approval', runId: 'run_once', pendingApproval: { planVersion: 1, planHash: 'hash_once', summary: '两步' }, createdAt: date }], messages: [], hasEarlierMessages: false };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_once/members')) return response([{ id: 'member_release', roomId: 'room_once', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_once/session-events')) return response({ items: String(url).includes('limit=20') ? [] : events });
+      if (url === '/api/conversations/conv_release') return response(release);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('一张审批'))!.click();
+    await vi.waitFor(() => expect(doc().querySelectorAll('#group-transcript [data-card="approval"]')).toHaveLength(1));
+    const items = [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')];
+    expect(items.map(item => item.querySelectorAll('[data-card="handoff"]').length)).toEqual([1, 1, 1]);
+    expect(items.at(-1)!.querySelector('[data-card="approval"]')).not.toBeNull();
+    expect(doc().querySelectorAll('#group-transcript [data-card="task"]')).toHaveLength(1);
+  });
+
   it('does not reread earlier channel pages on the next refresh', async () => {
     const first = Array.from({ length: 50 }, (_, index) => ({ id: `evt_old_${index}`, operation: 'publish', sequence: index + 1, actorType: 'principal', actorId: 'owner', type: 'message', content: `旧消息 ${index}`, createdAt: date }));
     const later = { id: 'evt_later', operation: 'publish', sequence: 51, actorType: 'principal', actorId: 'owner', type: 'system', content: '后面的交接', evidenceRefs: ['conv_release', 'task_later', 'demo.release'], createdAt: date };
