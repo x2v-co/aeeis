@@ -1164,6 +1164,24 @@ describe('entry bots and group chats', () => {
     expect(research.querySelector('.roster-avatar')?.getAttribute('data-state')).toBe('blocked');
     expect(h.posts.some(post => post.url.includes('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
   });
+  it('counts a task a group handed over with its new holder on the roster', async () => {
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/conversations' && request.method !== 'POST') {
+        return response([
+          fixture(),
+          { id: 'conv_release', title: '发布', revision: 2, agentId: 'demo.release', taskCount: 0, presence: { state: 'idle', label: '空闲' } },
+          { id: 'conv_research', title: '研究', revision: 1, agentId: 'demo.research', taskCount: 2, presence: { state: 'waiting', label: '等你', taskId: 'task_moved', taskTitle: '风险摘要' } },
+        ]);
+      }
+      if (url === '/api/board-holdings') return response({ items: [{ roomId: 'room_team', conversationId: 'conv_research', taskId: 'task_moved', holderId: 'demo.release', fromId: 'demo.research', title: '风险摘要', status: 'needs_approval' }] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('[data-bot-id="demo.release"]')?.textContent).toContain('等你 · 风险摘要'));
+    const research = doc().querySelector<HTMLElement>('[data-bot-id="demo.research"]')!;
+    expect(research.textContent).not.toContain('风险摘要');
+    expect(research.textContent).toContain('空闲 · 1 件事');
+  });
   it('opens a roster bot on that person\'s life thread and keeps the Run explicit', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const h = harness(undefined, { handler: (url, request) => {

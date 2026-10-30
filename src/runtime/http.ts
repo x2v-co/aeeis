@@ -996,6 +996,10 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     return boardService().board(request.params.id, principal.id, principal.tenantId);
   });
+  app.get('/api/board-holdings', async request => {
+    const principal = principalOf(request);
+    return { items: await boardService().holdings(principal.id, principal.tenantId) };
+  });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/task-actions', async request => {
     const principal = principalOf(request);
     const result = await boardService().act(request.params.id, request.body, principal.id, principal.tenantId);
