@@ -1012,6 +1012,18 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
   });
 
+  it('names a life-thread Run by its task, not by the header the model reads', async () => {
+    const goal = '私聊：agent:bot_0000aaaa\n说话人：agent:bot_0000bbbb\n任务：整理一份发布风险\n当前请求：我来做这件事。';
+    const h = harness(undefined, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [{ id: 'run_bot', goal, status: 'needs_approval', updatedAt: new Date().toISOString() }] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    el('attention-toggle').click();
+    await vi.waitFor(() => expect(doc().querySelector('#attention-items [data-inbox="approval"] .attention-goal')?.textContent).toBe('整理一份发布风险'));
+    expect(el('runs').textContent).toContain('整理一份发布风险');
+    expect(el('runs').textContent).not.toContain('agent:bot_');
+  });
   it('sorts the inbox by the five kinds and opens a failure without retrying it', async () => {
     const view = fixture();
     view.messages = [{ id: 'clarify_1', role: 'user', text: '这句交给谁', createdAt: new Date(Date.now() - 3_600_000).toISOString(), route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a'], focusEffect: 'keep' } }];

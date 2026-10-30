@@ -508,6 +508,12 @@ function syncComposerHeading(): void {
   else if (entryShowsBot() && activeBotId() !== 'aeeis') heading.textContent = '任务交给 AEEIS';
   else heading.textContent = '给 AEEIS 发消息';
 }
+/** A Run's goal as people read it. Runs started on a life thread carry a header for the model
+ * (私聊、说话人、任务、当前请求) with internal ids; people see the task line. */
+function runTitle(run: { goal: string }): string {
+  if (!/^(私聊|说话人)：/.test(run.goal)) return run.goal;
+  return /^任务：(.+)$/m.exec(run.goal)?.[1]?.trim() || run.goal;
+}
 function mirrorShell(titleText: string, presenceText: string, state?: string): void {
   const title = $('gb-title');
   const presence = $('gb-presence');
@@ -549,7 +555,7 @@ function syncPresence(run?: RunView): void {
   const active = Boolean(run && currentRunOpen);
   const state = presenceOf(active ? run?.status : undefined);
   const presenceState = active ? state.state : botPresence(runSummaries).state;
-  mirrorShell('AEEIS', active && run ? `${state.label} · ${run.goal}` : (runSummaries.length ? '入口 · 任务都还在跑' : '空闲 · 可以同时交给它几件事'), presenceState);
+  mirrorShell('AEEIS', active && run ? `${state.label} · ${runTitle(run)}` : (runSummaries.length ? '入口 · 任务都还在跑' : '空闲 · 可以同时交给它几件事'), presenceState);
   syncEmptyCopy();
   renderBotPlacement();
 }
@@ -5766,7 +5772,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
-      kind, title: run.goal, detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
+      kind, title: runTitle(run), detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
       open: () => openAttentionRun(run),
       quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
       act: () => openAttentionRun(run),
@@ -5876,7 +5882,7 @@ function renderRunQueue(runs: RunSummary[]): void {
     const dot = element('span', '', 'task-dot');
     dot.dataset.state = presence.state;
     const copy = element('span', '', 'roster-copy');
-    copy.append(element('strong', run.goal), element('small', presence.label));
+    copy.append(element('strong', runTitle(run)), element('small', presence.label));
     item.append(dot, copy);
     list.append(item);
   }
@@ -5930,8 +5936,8 @@ function renderMinimalRecentRuns(runs: RunSummary[]): void {
     });
     item.className = `minimal-run-chip${run.id === currentId ? ' is-selected' : ''}`;
     item.dataset.status = run.status;
-    item.title = run.goal;
-    item.append(element('strong', run.goal.slice(0, 44)), element('small', runStatusLabel(run.status)));
+    item.title = runTitle(run);
+    item.append(element('strong', runTitle(run).slice(0, 44)), element('small', runStatusLabel(run.status)));
     container.append(item);
   }
 }
@@ -5965,7 +5971,7 @@ function renderThreadTimeline(page: ThreadPage, throughSequence?: number): void 
   const list = $('thread-timeline'); list.replaceChildren();
   for (const run of page.runs) {
     const item = element('li', '', 'fact-row');
-    item.append(element('strong', `#${run.threadSequence} · ${runStatusLabel(run.status)} · ${run.goal}`));
+    item.append(element('strong', `#${run.threadSequence} · ${runStatusLabel(run.status)} · ${runTitle(run)}`));
     if (run.outputExcerpt) item.append(element('pre', run.outputExcerpt.slice(0, 1000)));
     if (run.parentRunId) {
       if (readOnlyShare) item.append(element('small', `父运行 #${page.runs.find(parent => parent.id === run.parentRunId)?.threadSequence ?? ''}`));
@@ -5989,7 +5995,7 @@ function renderThreadTimeline(page: ThreadPage, throughSequence?: number): void 
   if (pendingFollowup) { $<HTMLButtonElement>('thread-submit').disabled = followupSubmitting; return; }
   const select = $<HTMLSelectElement>('thread-parent'), previous = select.value;
   const parents = page.runs.filter(run => ['succeeded', 'failed', 'cancelled'].includes(run.status));
-  select.replaceChildren(...parents.map(run => { const option = element('option', `#${run.threadSequence} · ${run.goal}`); option.value = run.id; return option; }));
+  select.replaceChildren(...parents.map(run => { const option = element('option', `#${run.threadSequence} · ${runTitle(run)}`); option.value = run.id; return option; }));
   if (parents.some(run => run.id === previous)) select.value = previous;
   else if (parents.length) {
     select.value = parents.at(-1)!.id;
@@ -7328,7 +7334,7 @@ function render(run: RunView): void {
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;
   if (run.threadId && !readOnlyShare) threadLink.href = `/threads/${run.threadId}`;
-  $('run-title').textContent = run.goal;
+  $('run-title').textContent = runTitle(run);
   $('run-status').textContent = runStatusLabel(run.status);
   $('run-status').className = `status ${run.status}`;
   updateRunActivity(run);
