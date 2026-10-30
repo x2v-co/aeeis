@@ -235,3 +235,13 @@ openssl rand -base64 32 > secrets/content-key && chmod 400 secrets/content-key
 **生产启动检查。** 生产模式缺少主密钥、缺少 `AEEIS_DATABASE_MIGRATION_URL`、两个连接串相同，或应用登录仍是表 owner／超级用户／可绕过行级安全时，拒绝启动。只有一位主人的节点可以设置 `AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1`，不加密、不分角色启动，每次启动都会警告；它不能和多用户登录（OIDC、主体目录）同时使用。
 
 **已有部署升级。** 在 `stack.env` 里加 `AEEIS_APP_DB_PASSWORD` 和 `AEEIS_CONTENT_ENCRYPTION_KEY_FILE`，把密钥文件放到 `secrets/`，再部署。`postgres-roles` 先创建 `aeeis_app`，API 以 owner 迁移、授权、启用行级安全后，改用 `aeeis_app` 服务，并在后台加密旧数据。**回滚：** 旧版本读不了加密后的行，所以配置密钥之后不能回滚到本版本之前（没有解密导出的命令）。只想退回角色拆分时，把 `DATABASE_URL` 改回 owner 即可，行级安全对 owner 不生效。
+
+### 例程 Webhook（#128）
+
+`POST /webhooks/routines/:id` 默认关闭。SRE 在 API 环境中设 `AEEIS_ROUTINE_WEBHOOKS_ENABLED=1` 并重启，主人还需通过例程界面的「开启 Webhook」或 `POST/PATCH /api/routines` 设置 `webhookEnabled: true`。新建和旧例程都默认关闭；任一开关关闭、例程不存在或不是 Webhook 类型时返回 `404`。暂停/恢复仍独立控制例程状态。Stack 的 API 已通过 `env_file` 加载 `stack.env`，无需另外修改 Compose。
+
+Webhook secret 复用本节的 AES-256-GCM 信封加密和租户数据密钥，只加密 `webhookSecret` 字段，并绑定租户与例程 ID。需要 PostgreSQL 和现有 `AEEIS_CONTENT_ENCRYPTION_KEY_FILE`；即使设置 `AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1`，也不能新建或更新明文 secret，缺少 cipher 的写入返回 `503`。File 模式仍可使用定时例程、读取旧明文 secret，但当前启动流程不为 File 模式配置 cipher，不能创建或修改带 secret 的例程。旧明文可兼容读取，配置密钥后下一次成功修改例程（例如 PATCH 开关或换密钥）会将该条 secret 写成密文；未修改的旧条目仍是明文。例程 secret 不属于通用 `content:keys backfill` 的处理目标，升级时应逐条 PATCH 或轮换。主密钥备份、轮换和按租户 RLS 沿用本节流程，写入密文后旧版本不能读取。
+
+调用方发送 `x-aeeis-timestamp`（Unix 整数秒）、`x-aeeis-delivery`（每个例程内唯一的 nonce，1–200 字符，仅字母、数字及 `. _ : -`）和 `x-aeeis-signature: sha256=<hex>`。签名为 `HMAC-SHA256(secret, timestamp + "." + deliveryId + "." + 原始请求体)`，覆盖时间戳、nonce 和原始字节；任意篡改或时间偏差超过正负 300 秒均返回 `401`。调用方与服务器应同步时钟。重试可重新签名，但必须保留原投递 ID；去重记录随投递持久化，跨实例/重启生效，在例程存续期间不复用 nonce。重放返回 `duplicate`（已处理）或 `pending`（等待后台重试），不会由该请求再次启动 Run。
+
+每个 API 进程按例程限制每 60 秒最多 60 次入口尝试（含错误签名和重放），超限返回 `429` 和秒数 `Retry-After`；不同例程的额度独立。此限流不跨进程共享，重启会重置，多副本的部署可在 Ingress 再设聚合限流。`AEEIS_ROUTINE_INTERVAL_MS` 默认仍是 15000：它只影响定时例程和失败投递重试的检查延迟，Webhook 接收及重放/限流时间窗独立执行，本次无需调整。

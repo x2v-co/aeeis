@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import pg from 'pg';
 import { z } from 'zod';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
+import { ContentEncryptionUnavailable, contentEncryption, openField, sealField } from './content-encryption.js';
 import { calendarScheduleSchema, nextCalendarOccurrence } from './reminder-schedule.js';
 import { requestSchema } from './runtime/contracts.js';
 import type { Ownership } from './security/principal.js';
@@ -34,6 +35,8 @@ export const routineSchema = z.object({
   trigger: routineTriggerSchema, executionReview: z.enum(['required', 'auto', 'yolo']),
   runOptions: routineRunOptionsSchema.optional(),
   status: z.enum(['active', 'paused']),
+  /** Explicit opt-in, independent of pause/resume. Legacy routines default to disabled. */
+  webhookEnabled: z.boolean().default(false),
   /** Next scheduled start. Schedule routines only. */
   nextDueAt: isoDate.optional(),
   /** One missed start waiting for the previous Run to finish. Never more than one. */
@@ -67,6 +70,7 @@ export const createRoutineSchema = z.object({
   agentId: personId, name: z.string().trim().min(1, '先给例程起个名字').max(80), prompt: z.string().trim().min(1, '先写例程要做的事').max(4000),
   trigger: routineTriggerSchema, executionReview: z.enum(['required', 'auto', 'yolo']).default('required'),
   runOptions: routineRunOptionsSchema.optional(),
+  webhookEnabled: z.boolean().default(false),
 }).strict();
 export const updateRoutineSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
@@ -74,23 +78,31 @@ export const updateRoutineSchema = z.object({
   trigger: routineTriggerSchema.optional(), executionReview: z.enum(['required', 'auto', 'yolo']).optional(),
   runOptions: routineRunOptionsSchema.nullable().optional(),
   status: z.enum(['active', 'paused']).optional(),
+  webhookEnabled: z.boolean().optional(),
 }).strict();
 
 export class RoutineNotFound extends Error {}
 export class RoutineConflict extends Error {}
-/** Unknown routine, bad timestamp or bad signature. The caller learns nothing more. */
+/** Missing headers, bad timestamp or bad signature. */
 export class RoutineSignatureError extends Error {}
+export class RoutineRateLimitError extends Error {
+  constructor(readonly retryAfter: number) { super('Routine webhook rate limit exceeded'); }
+}
 
 export const MAX_DELIVERY_ATTEMPTS = 5;
 export const WEBHOOK_MAX_AGE_SECONDS = 300;
+export const WEBHOOK_RATE_LIMIT = 60;
+export const WEBHOOK_RATE_WINDOW_MS = 60_000;
 const DELIVERY_LEASE_MS = 60_000;
 
 export interface RoutineStore {
   init?(): Promise<void>;
   close?(): Promise<void>;
   create(routine: Routine): Promise<Routine>;
-  /** Missing scope is the webhook path, which only knows the id. */
+  /** Scope may be omitted by system/background readers. */
   get(id: string, scope?: Ownership): Promise<Routine>;
+  /** Reject disabled/non-webhook routines before decrypting their secret. */
+  getWebhook(id: string): Promise<Routine>;
   list(scope: Ownership): Promise<Routine[]>;
   /** Applies a change under the routine's lock. Return false from change to write nothing. */
   mutate(id: string, scope: Ownership, change: (routine: Routine) => boolean | void, now: string): Promise<Routine>;
@@ -104,6 +116,18 @@ export interface RoutineStore {
   claimDelivery(routineId: string, deliveryId: string, now: string, leaseUntil: string): Promise<RoutineDelivery | undefined>;
   deliveries(routineId: string, scope: Ownership, limit: number): Promise<RoutineDelivery[]>;
   pendingDeliveries(limit: number): Promise<RoutineDelivery[]>;
+}
+
+// Only the secret is sealed: scheduling and ownership fields remain queryable.
+// New writes containing a secret require the existing cipher, even on a single node.
+const storedRoutineSchema = routineSchema.extend({ webhookSecret: z.string().min(32).max(1000).optional() });
+async function sealRoutine(routine: Routine): Promise<Routine> {
+  if (routine.webhookSecret && !contentEncryption()) throw new ContentEncryptionUnavailable('Routine webhook secrets require AEEIS_CONTENT_ENCRYPTION_KEY_FILE and PostgreSQL');
+  return routine.webhookSecret ? { ...routine, webhookSecret: await sealField('routine-webhook-secret', routine.tenantId, routine.id, routine.webhookSecret) } : routine;
+}
+async function openRoutine(stored: unknown): Promise<Routine> {
+  const routine = storedRoutineSchema.parse(stored);
+  return routineSchema.parse(routine.webhookSecret ? { ...routine, webhookSecret: await openField('routine-webhook-secret', routine.tenantId, routine.id, routine.webhookSecret) } : routine);
 }
 
 const scoped = (item: { owner: string; tenantId: string }, scope?: Ownership) => !scope || (item.owner === scope.owner && item.tenantId === scope.tenantId);
@@ -124,22 +148,27 @@ export class InMemoryRoutineStore implements RoutineStore {
   async create(routine: Routine): Promise<Routine> {
     const parsed = routineSchema.parse(routine);
     if (this.routines.has(parsed.id)) throw new RoutineConflict('例程已存在');
-    this.routines.set(parsed.id, structuredClone(parsed)); this.changed();
+    this.routines.set(parsed.id, await sealRoutine(parsed)); this.changed();
     return structuredClone(parsed);
   }
   async get(id: string, scope?: Ownership): Promise<Routine> {
     const routine = this.routines.get(id);
     if (!routine || !scoped(routine, scope)) throw new RoutineNotFound('Unknown routine');
-    return structuredClone(routine);
+    return openRoutine(routine);
+  }
+  async getWebhook(id: string): Promise<Routine> {
+    const routine = this.routines.get(id);
+    if (!routine || routine.trigger.kind !== 'webhook' || !routine.webhookEnabled) throw new RoutineNotFound('Unknown routine');
+    return openRoutine(routine);
   }
   async list(scope: Ownership): Promise<Routine[]> {
-    return [...this.routines.values()].filter(item => scoped(item, scope)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map(item => structuredClone(item));
+    return Promise.all([...this.routines.values()].filter(item => scoped(item, scope)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map(openRoutine));
   }
   async mutate(id: string, scope: Ownership, change: (routine: Routine) => boolean | void, now: string): Promise<Routine> {
     const current = await this.get(id, scope);
     const next = applyChange(current, change, now);
     if (!next) return current;
-    this.routines.set(id, structuredClone(next)); this.changed();
+    this.routines.set(id, await sealRoutine(next)); this.changed();
     return structuredClone(next);
   }
   async remove(id: string, scope: Ownership): Promise<void> {
@@ -149,7 +178,7 @@ export class InMemoryRoutineStore implements RoutineStore {
     this.changed();
   }
   async due(now: string, limit: number): Promise<Routine[]> {
-    return [...this.routines.values()].filter(item => dueNow(item, now)).sort((a, b) => (a.pendingDueAt ?? a.nextDueAt ?? '').localeCompare(b.pendingDueAt ?? b.nextDueAt ?? '')).slice(0, limit).map(item => structuredClone(item));
+    return Promise.all([...this.routines.values()].filter(item => dueNow(item, now)).sort((a, b) => (a.pendingDueAt ?? a.nextDueAt ?? '').localeCompare(b.pendingDueAt ?? b.nextDueAt ?? '')).slice(0, limit).map(openRoutine));
   }
   async addDelivery(delivery: RoutineDelivery): Promise<{ delivery: RoutineDelivery; created: boolean }> {
     const parsed = routineDeliverySchema.parse(delivery);
@@ -180,7 +209,7 @@ export class InMemoryRoutineStore implements RoutineStore {
   protected changed(): void {}
 }
 
-const fileStateSchema = z.object({ routines: z.array(routineSchema).max(10_000).default([]), deliveries: z.array(routineDeliverySchema).max(100_000).default([]) }).strict();
+const fileStateSchema = z.object({ routines: z.array(storedRoutineSchema).max(10_000).default([]), deliveries: z.array(routineDeliverySchema).max(100_000).default([]) }).strict();
 /** Durable single-writer JSON store. Every change rewrites the file atomically. */
 export class JsonRoutineStore extends InMemoryRoutineStore {
   private lockOwned = false;
@@ -239,19 +268,24 @@ export class PostgresRoutineStore implements RoutineStore {
   async close(): Promise<void> { await this.pool.end(); }
   async create(routine: Routine): Promise<Routine> {
     const parsed = routineSchema.parse(routine);
-    const result = await this.pool.query('INSERT INTO aeeis_routines(id, owner, tenant_id, state, due_at, created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING', [parsed.id, parsed.owner, parsed.tenantId, parsed, dueColumn(parsed), parsed.createdAt]);
+    const result = await this.pool.query('INSERT INTO aeeis_routines(id, owner, tenant_id, state, due_at, created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING', [parsed.id, parsed.owner, parsed.tenantId, await sealRoutine(parsed), dueColumn(parsed), parsed.createdAt]);
     if (result.rowCount !== 1) throw new RoutineConflict('例程已存在');
     return parsed;
   }
   async get(id: string, scope?: Ownership): Promise<Routine> {
     const result = await this.pool.query<{ state: unknown }>('SELECT state FROM aeeis_routines WHERE id=$1', [id]);
-    const routine = result.rows[0] ? routineSchema.parse(result.rows[0].state) : undefined;
+    const routine = result.rows[0] ? storedRoutineSchema.parse(result.rows[0].state) : undefined;
     if (!routine || !scoped(routine, scope)) throw new RoutineNotFound('Unknown routine');
-    return routine;
+    return openRoutine(routine);
+  }
+  async getWebhook(id: string): Promise<Routine> {
+    const result = await this.pool.query<{ state: unknown }>("SELECT state FROM aeeis_routines WHERE id=$1 AND state->>'webhookEnabled' = 'true' AND state->'trigger'->>'kind' = 'webhook'", [id]);
+    if (!result.rows[0]) throw new RoutineNotFound('Unknown routine');
+    return openRoutine(result.rows[0].state);
   }
   async list(scope: Ownership): Promise<Routine[]> {
     const result = await this.pool.query<{ state: unknown }>('SELECT state FROM aeeis_routines WHERE tenant_id=$1 AND owner=$2 ORDER BY created_at, id', [scope.tenantId, scope.owner]);
-    return result.rows.map(row => routineSchema.parse(row.state));
+    return Promise.all(result.rows.map(row => openRoutine(row.state)));
   }
   async mutate(id: string, scope: Ownership, change: (routine: Routine) => boolean | void, now: string): Promise<Routine> {
     const client = await this.pool.connect();
@@ -259,9 +293,9 @@ export class PostgresRoutineStore implements RoutineStore {
       await client.query('BEGIN');
       const result = await client.query<{ state: unknown }>('SELECT state FROM aeeis_routines WHERE id=$1 AND tenant_id=$2 AND owner=$3 FOR UPDATE', [id, scope.tenantId, scope.owner]);
       if (!result.rows[0]) throw new RoutineNotFound('Unknown routine');
-      const current = routineSchema.parse(result.rows[0].state);
+      const current = await openRoutine(result.rows[0].state);
       const next = applyChange(current, change, now);
-      if (next) await client.query('UPDATE aeeis_routines SET state=$2, due_at=$3 WHERE id=$1', [id, next, dueColumn(next)]);
+      if (next) await client.query('UPDATE aeeis_routines SET state=$2, due_at=$3 WHERE id=$1', [id, await sealRoutine(next), dueColumn(next)]);
       await client.query('COMMIT');
       return next ?? current;
     } catch (error) {
@@ -284,7 +318,7 @@ export class PostgresRoutineStore implements RoutineStore {
   }
   async due(now: string, limit: number): Promise<Routine[]> {
     const result = await this.pool.query<{ state: unknown }>('SELECT state FROM aeeis_routines WHERE due_at IS NOT NULL AND due_at <= $1 ORDER BY due_at, id LIMIT $2', [now, limit]);
-    return result.rows.map(row => routineSchema.parse(row.state)).filter(item => dueNow(item, now));
+    return (await Promise.all(result.rows.map(row => openRoutine(row.state)))).filter(item => dueNow(item, now));
   }
   async addDelivery(delivery: RoutineDelivery): Promise<{ delivery: RoutineDelivery; created: boolean }> {
     const parsed = routineDeliverySchema.parse(delivery);
@@ -353,11 +387,13 @@ export interface RoutineServiceOptions {
   now?: () => string;
   /** True while the Run still has work ahead. A missing Run counts as finished. */
   runActive: (runId: string, scope: Ownership) => Promise<boolean>;
-  maxAgeSeconds?: number;
+  /** Default disabled; production wiring reads AEEIS_ROUTINE_WEBHOOKS_ENABLED. */
+  webhooksEnabled?: boolean;
 }
 
 export class RoutineService {
   private readonly now: () => string;
+  private readonly webhookRates = new Map<string, { count: number; until: number }>();
   constructor(private readonly store: RoutineStore, private readonly start: RoutineStarter, private readonly options: RoutineServiceOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -368,7 +404,7 @@ export class RoutineService {
     const secret = body.trigger.kind === 'webhook' ? newSecret() : undefined;
     const routine = await this.store.create(routineSchema.parse({
       schemaVersion: 'routine/1', id: `routine_${randomUUID()}`, ...scope, agentId: body.agentId, name: body.name, prompt: body.prompt,
-      trigger: body.trigger, executionReview: body.executionReview, ...(body.runOptions ? { runOptions: body.runOptions } : {}), status: 'active',
+      trigger: body.trigger, webhookEnabled: body.webhookEnabled, executionReview: body.executionReview, ...(body.runOptions ? { runOptions: body.runOptions } : {}), status: 'active',
       ...(body.trigger.kind === 'schedule' ? { nextDueAt: nextCalendarOccurrence(body.trigger.calendar, at) } : {}),
       ...(secret ? { webhookSecret: secret } : {}), revision: 0, createdAt: at, updatedAt: at,
     }));
@@ -391,6 +427,7 @@ export class RoutineService {
     const routine = await this.store.mutate(id, scope, current => {
       if (current.revision !== body.expectedRevision) throw new RoutineConflict('例程已经变化，请刷新后再改');
       if (body.trigger && body.trigger.kind !== current.trigger.kind) throw new RoutineConflict('不能把定时例程改成 Webhook 例程，请新建一个');
+      if (body.webhookEnabled !== undefined) current.webhookEnabled = body.webhookEnabled;
       if (body.name !== undefined) current.name = body.name;
       if (body.prompt !== undefined) current.prompt = body.prompt;
       if (body.executionReview !== undefined) current.executionReview = body.executionReview;
@@ -419,21 +456,21 @@ export class RoutineService {
 
   /**
    * Signed webhook delivery. The same delivery id starts work once; a replay
-   * returns the first result. Unknown routine, stale timestamp and bad
-   * signature all raise RoutineSignatureError.
+   * returns the first result. The delivery id is the signed nonce, durably
+   * deduplicated for the routine's lifetime. Disabled/unknown routes are 404.
    */
   async receiveWebhook(id: string, rawBody: string, headers: Record<string, string | string[] | undefined>): Promise<{ status: 'started' | 'duplicate' | 'pending' | 'failed'; deliveryId: string; runId?: string }> {
+    if (!this.options.webhooksEnabled) throw new RoutineNotFound('Unknown routine');
+    const routine = await this.store.getWebhook(id);
+    this.checkWebhookRate(id);
     const timestamp = header(headers, 'x-aeeis-timestamp');
     const signature = header(headers, 'x-aeeis-signature');
     const deliveryRaw = header(headers, 'x-aeeis-delivery');
     if (!timestamp || !signature || !deliveryRaw) throw new RoutineSignatureError('Webhook signature headers are required');
-    let routine: Routine;
-    try { routine = await this.store.get(id); }
-    catch (error) { if (error instanceof RoutineNotFound) throw new RoutineSignatureError('Webhook signature is invalid'); throw error; }
-    if (routine.trigger.kind !== 'webhook' || !routine.webhookSecret) throw new RoutineSignatureError('Webhook signature is invalid');
+    if (!routine.webhookSecret) throw new RoutineSignatureError('Webhook signature is invalid');
     const seconds = Number(timestamp);
     const nowSeconds = Math.floor(Date.parse(this.now()) / 1000);
-    if (!/^\d{1,12}$/.test(timestamp) || Math.abs(nowSeconds - seconds) > (this.options.maxAgeSeconds ?? WEBHOOK_MAX_AGE_SECONDS)) throw new RoutineSignatureError('Webhook timestamp is outside the allowed window');
+    if (!/^\d{1,12}$/.test(timestamp) || Math.abs(nowSeconds - seconds) > WEBHOOK_MAX_AGE_SECONDS) throw new RoutineSignatureError('Webhook timestamp is outside the allowed window');
     const expected = Buffer.from(signRoutineWebhook(routine.webhookSecret, timestamp, deliveryRaw, rawBody), 'utf8');
     const received = Buffer.from(signature, 'utf8');
     if (expected.length !== received.length || !timingSafeEqual(expected, received)) throw new RoutineSignatureError('Webhook signature is invalid');
@@ -445,13 +482,25 @@ export class RoutineService {
       schemaVersion: 'routine-delivery/1', routineId: routine.id, deliveryId, ...scope, kind: 'webhook',
       ...(rawBody.trim() ? { payload: rawBody } : {}), receivedAt: at, state: 'pending', attempts: 0,
     });
-    if (!created && delivery.state !== 'pending') return { status: 'duplicate', deliveryId, ...(delivery.runId ? { runId: delivery.runId } : {}) };
+    // The signed delivery id is the nonce. The store claims it atomically and durably,
+    // across replicas/restarts; only the pump retries a previously accepted delivery.
+    if (!created) return { status: delivery.state === 'pending' ? 'pending' : 'duplicate', deliveryId, ...(delivery.runId ? { runId: delivery.runId } : {}) };
     if (routine.status !== 'active') {
       await this.store.updateDelivery({ ...delivery, state: 'failed', error: '例程已暂停' });
       throw new RoutineConflict('例程已暂停');
     }
     const result = await this.attempt(routine, delivery);
-    return { status: !created && result.state === 'started' ? 'duplicate' : result.state, deliveryId, ...(result.runId ? { runId: result.runId } : {}) };
+    return { status: result.state, deliveryId, ...(result.runId ? { runId: result.runId } : {}) };
+  }
+
+  private checkWebhookRate(id: string): void {
+    const now = Date.parse(this.now());
+    // Expire inactive entries; unknown/disabled ids never allocate a bucket.
+    for (const [key, bucket] of this.webhookRates) if (bucket.until <= now) this.webhookRates.delete(key);
+    const bucket = this.webhookRates.get(id) ?? { count: 0, until: now + WEBHOOK_RATE_WINDOW_MS };
+    this.webhookRates.set(id, bucket);
+    if (bucket.count >= WEBHOOK_RATE_LIMIT) throw new RoutineRateLimitError(Math.max(1, Math.ceil((bucket.until - now) / 1000)));
+    bucket.count += 1;
   }
 
   /** One pass: start due schedule routines, then retry pending deliveries. */
