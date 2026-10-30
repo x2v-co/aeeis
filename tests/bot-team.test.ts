@@ -163,6 +163,10 @@ describe('Bots that act on their own', () => {
     expect(card.decision.offer).toBeUndefined();
     expect(card.decision.blockedNote).toContain('交接谈不拢：谈了 4 轮还没有结论');
     expect(card.decision.blockedNote).toContain('需要你决定');
+    // The block waits for a person outside the channel too: the roster and inbox read it here.
+    const holdings = (await f.app.inject({ method: 'GET', url: '/api/board-holdings', headers })).json().items as Array<Record<string, string>>;
+    expect(holdings).toEqual([expect.objectContaining({ taskId: card.taskId, holderId: f.researcher.id, fromId: f.researcher.id, roomId: f.roomId, blocked: card.decision.blockedNote })]);
+    expect(holdings[0]!.blockedAt).toEqual(expect.any(String));
   });
 
   it('starts the talk when a person hands a card over, and refuses a second offer meanwhile', async () => {
