@@ -2847,6 +2847,12 @@ describe('entry bots and group chats', () => {
     // 阿研 replies and proposes on its own; the browser does not open a discussion on its thread.
     expect(events.some(event => event.content.includes('已请阿研回应'))).toBe(false);
     expect(h.posts.some(post => post.url === '/api/conversations' && post.body.agentId === bot.id)).toBe(false);
+    // An undirected line gets AEEIS's reply, not a row of 👍.
+    el<HTMLTextAreaElement>('group-text').value = '下周发布：查竞品、写说明';
+    el('group-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(events.some(event => event.type === 'message' && event.content === '下周发布：查竞品、写说明')).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(events.some(event => event.content.includes('👍'))).toBe(false);
   });
   it('shows Bots that act on their own: automatic replies, proposals, side threads and the autonomy setting', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
@@ -2885,6 +2891,9 @@ describe('entry bots and group chats', () => {
     const reply = [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')].find(item => item.textContent?.includes('我请阿研整理风险。'))!;
     expect(reply.dataset.auto).toBe('true');
     expect(reply.querySelector('.bot-auto')?.textContent).toBe('自动回复');
+    // The board's own mark is not repeated under the receipt, so the proposer is never shown as the doer.
+    expect(el('group-transcript').textContent).not.toContain('AEEIS提议这件事');
+    expect([...el('group-transcript').querySelectorAll('[data-card="handoff"] strong')].map(node => node.textContent)).toEqual(['交给阿研']);
     el('channel-board-open').click();
     await vi.waitFor(() => expect(el('channel-board').textContent).toContain('提议 · AEEIS：发布前要'));
     doc().querySelector<HTMLButtonElement>(`[data-bot-id="${bot.id}"]`)!.click();

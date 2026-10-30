@@ -45,7 +45,7 @@ function responseFor(system, input) {
       })),
     };
   }
-  // Bots that act on their own: a short reply, one proposal when asked to get something done, and a handoff
+  // Bots that act on their own: a short reply, one proposal when asked to get something done (AEEIS splits a list), and a handoff
   // when another member is named after "交给". Handoff turns ask one question, then accept.
   if (system.includes('在团队群聊（或私聊）里回复一条消息')) {
     const text = String(input?.message?.text ?? '');
@@ -54,6 +54,13 @@ function responseFor(system, input) {
     const target = roster.find(member => member !== name && member !== 'AEEIS' && text.includes(`交给${member}`));
     const wants = /写|整理|做|查|出一份|准备/.test(text);
     const title = text.replace(/@\S+\s*/g, '').replace(/交给\S+/g, '').replace(/[，。,.!！?？]+$/u, '').trim().slice(0, 40) || '跟进这件事';
+    // AEEIS splits a list ("查竞品、整理风险、写说明") into tasks, dealt out to the other members in turn.
+    const parts = title.replace(/^[^：:]*[：:]/u, '').split(/[、；;]/u).map(part => part.trim()).filter(part => part.length >= 2);
+    const members = roster.filter(member => member !== 'AEEIS');
+    if (input?.you?.frontDoor && wants && parts.length > 1 && members.length) {
+      const tasks = parts.slice(0, 5).map((part, index) => ({ title: part.slice(0, 40), reason: '群里刚提到', for: members[index % members.length] }));
+      return { reply: `${name}：拆成 ${tasks.length} 件：${tasks.map(task => `${task.for}做「${task.title}」`).join('，')}。`, tasks };
+    }
     return {
       reply: wants ? `${name}：收到，我先记成一件事。` : `${name}：收到。`,
       ...(wants ? { proposeTask: { title, reason: '群里刚提到' } } : {}),

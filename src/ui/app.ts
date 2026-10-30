@@ -3630,7 +3630,8 @@ function renderGroupTranscript(): void {
     row.append(older);
     list.append(row);
   }
-  const shown = visibleChannelEvents().filter(event => event.operation !== 'retract');
+  // A Bot's proposal writes a receipt and a board mark; the receipt already says it, with the doer's name.
+  const shown = visibleChannelEvents().filter(event => event.operation !== 'retract' && !event.idempotencyKey?.startsWith('bot-propose-mark:'));
   const latestCite = new Map<string, string>();
   for (const event of shown) {
     const cite = handoffCitation(event);
@@ -3839,7 +3840,8 @@ async function submitGroupMessage(event: Event): Promise<void> {
         if (error) errors.push(error);
         else delivered.push(bot);
       }
-      const acked = delivered.filter(bot => !memberNeedsReply(bot));
+      // With Bot replies on, AEEIS answers this line itself; a row of 👍 would only repeat that it arrived.
+      const acked = botsActive ? [] : delivered.filter(bot => !memberNeedsReply(bot));
       const reminded = delivered.filter(memberNeedsReply);
       const line = [
         acked.length ? `已送到${receiptMarks(acked)}。` : '',

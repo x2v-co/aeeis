@@ -21,7 +21,7 @@ type Script = {
   plan?: () => unknown;
 };
 
-async function team(script: Script, options: { quiet?: boolean; writerAutonomy?: string } = {}) {
+async function team(script: Script, options: { quiet?: boolean; writerAutonomy?: string; researcherAutonomy?: string } = {}) {
   const bots = new InMemoryOwnedBotStore();
   const domain = new AeeisService(new InMemoryStore(), [], new InMemoryRoomMembershipRepository(), undefined, bots);
   const conversations = new InMemoryConversationStore();
@@ -44,7 +44,7 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
   cleanup.push(() => app.close());
   const bot = async (name: string, role: string, autonomy?: string) => (await app.inject({ method: 'POST', url: '/api/bots', headers, payload: { name, role, mark: 'letter', color: '#176b45', background: `${name}负责${role}。`, ...(autonomy ? { autonomy } : {}) } })).json() as { id: string; name: string };
-  const researcher = await bot('阿研', '研究', options.quiet ? 'quiet' : undefined);
+  const researcher = await bot('阿研', '研究', options.quiet ? 'quiet' : options.researcherAutonomy);
   const writer = await bot('阿写', '写作', options.writerAutonomy);
   const roomId = (await app.inject({ method: 'POST', url: '/api/rooms', headers, payload: { title: '发布协作', description: '群聊' } })).json().id as string;
   for (const member of [researcher, writer]) expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers, payload: { principalId: member.id, role: 'agent' } })).statusCode).toBe(200);
@@ -118,6 +118,45 @@ describe('Bots that act on their own', () => {
     expect(runs[0]!.goal).toContain('理由：下周发布');
     expect(f.notify).toHaveBeenCalledWith(runs[0]!.id);
     expect((await f.events()).some(item => item.taskAction?.kind === 'propose')).toBe(true);
+  });
+
+  it('splits one message into several tasks, and two automatic Bots start theirs side by side', async () => {
+    const f = await team({ reply: input => input.you.name === 'AEEIS' ? { reply: '拆成三件：阿研查两件，阿写起草。', tasks: [
+      { title: '查竞品的发布节奏', reason: '定发布日', for: '阿研' },
+      { title: '整理已知风险', for: '阿研' },
+      { title: '起草发布说明', reason: '下周发布', for: '阿写' },
+    ] } : { reply: '好' } }, { writerAutonomy: 'auto', researcherAutonomy: 'auto' });
+    await f.say('下周发布：查竞品节奏、整理风险、写发布说明');
+    const cards = (await f.board()).cards;
+    expect(cards.map(card => [card.title, card.ownerId])).toEqual(expect.arrayContaining([
+      ['查竞品的发布节奏', f.researcher.id], ['整理已知风险', f.researcher.id], ['起草发布说明', f.writer.id],
+    ]));
+    const items = await f.events();
+    expect(items.filter(item => item.taskAction?.kind === 'propose')).toHaveLength(3);
+    expect(items.filter(item => item.content.startsWith('AEEIS提议由'))).toHaveLength(3);
+    // Each task gets its own Run, even two for the same Bot; each Run knows what its siblings cover.
+    const runs = await f.repository.list();
+    expect(runs).toHaveLength(3);
+    expect(runs.every(run => run.origin === 'agent')).toBe(true);
+    const competitor = runs.find(run => run.goal.includes('任务：查竞品的发布节奏'))!;
+    expect(competitor.goal).toContain('同一句话还拆出了：「整理已知风险」、「起草发布说明」');
+    expect(new Set(runs.map(run => run.goal.match(/任务：(.+)/)?.[1]))).toEqual(new Set(['查竞品的发布节奏', '整理已知风险', '起草发布说明']));
+    expect(f.notify).toHaveBeenCalledTimes(3);
+    // Saying the same thing again does not add cards: the reply is keyed by the message.
+    await f.app.aeeisBots!.respond((items.find(item => item.content === '下周发布：查竞品节奏、整理风险、写发布说明') as any));
+    expect((await f.board()).cards).toHaveLength(3);
+  });
+
+  it('lets a member keep one task and hand the other over when it splits its own reply', async () => {
+    const f = await team({
+      reply: input => input.you.name === '阿研' ? { reply: '我查数据，说明给阿写。', tasks: [{ title: '查上线数据' }, { title: '写上线说明', for: '阿写', note: '你写得快' }] } : { reply: '好' },
+      turn: () => ({ decision: 'accept', message: '好，我来。' }),
+    });
+    await f.say('@阿研 上线前查数据并写说明');
+    const cards = (await f.board()).cards;
+    expect(cards.find(card => card.title === '查上线数据')).toMatchObject({ ownerId: f.researcher.id });
+    expect(cards.find(card => card.title === '写上线说明')).toMatchObject({ ownerId: f.writer.id, movedFrom: f.researcher.id });
+    expect((await f.events()).map(item => item.taskAction?.kind).filter(Boolean)).toEqual(['propose', 'propose', 'offer', 'transfer']);
   });
 
   it('hands work over in the side thread: the card moves only when the other Bot accepts', async () => {
