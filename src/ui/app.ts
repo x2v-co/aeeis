@@ -2925,14 +2925,17 @@ function showRoster(focused = true): void {
   document.body.classList.toggle('roster-focus', focused);
   if (focused) document.body.classList.remove('draft-open');
 }
+let shellView = '';
 function syncShellClasses(): void {
   const view = rosterView();
   document.body.classList.toggle('group-draft', view === 'draft');
   document.body.classList.toggle('group-open', view === 'group' || view === 'direct');
   if (view === 'bot' || view === 'draft' || view === 'group' || view === 'direct') {
-    document.body.classList.remove('roster-focus');
+    // Opening a view leaves the roster; a refresh of the same view keeps the roster the person went back to.
+    if (view !== shellView) document.body.classList.remove('roster-focus');
     document.body.classList.add('draft-open');
   }
+  shellView = view;
 }
 function syncEntrySurface(): void {
   const view = rosterView();

@@ -3014,6 +3014,30 @@ describe('entry bots and group chats', () => {
     expect(el('channel-board-note').textContent).not.toContain('还有没读到的交接');
     expect(h.posts).toHaveLength(0);
   });
+  it('keeps the roster after going back from an open group, through the next refresh', async () => {
+    const room = { id: 'room_back', title: '回到名册', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_back/members')) return response([{ id: 'member_release', roomId: 'room_back', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_back/session-events')) return response({ items: [] });
+      return undefined;
+    } });
+    const roomReads = () => h.fetch.mock.calls.filter(call => String(call[0]) === '/api/rooms?limit=50').length;
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
+    await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
+    el('gb-back').click();
+    expect(doc().body.classList.contains('roster-focus')).toBe(true);
+    const before = roomReads();
+    dom.window.dispatchEvent(new dom.window.Event('online'));
+    await vi.waitFor(() => expect(roomReads()).toBeGreaterThan(before));
+    await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
+    expect(doc().body.classList.contains('roster-focus')).toBe(true);
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
+    await vi.waitFor(() => expect(doc().body.classList.contains('roster-focus')).toBe(false));
+  });
+
   it('does not reread earlier channel pages on the next refresh', async () => {
     const first = Array.from({ length: 50 }, (_, index) => ({ id: `evt_old_${index}`, operation: 'publish', sequence: index + 1, actorType: 'principal', actorId: 'owner', type: 'message', content: `旧消息 ${index}`, createdAt: date }));
     const later = { id: 'evt_later', operation: 'publish', sequence: 51, actorType: 'principal', actorId: 'owner', type: 'system', content: '后面的交接', evidenceRefs: ['conv_release', 'task_later', 'demo.release'], createdAt: date };

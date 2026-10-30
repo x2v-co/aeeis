@@ -1593,3 +1593,18 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 #bot-side-threads summary { cursor: pointer; font-weight: 600; }
 #bot-side-thread-list { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 8px; }
 #bot-side-thread-list ol { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
+
+/* Narrow screens: the group stage scrolls as one page so messages and their decision buttons keep their height;
+   the composer stays compact at the bottom. */
+@media (max-width: 780px) {
+  body.gb.group-open .gb-transcript { overflow-y: auto; }
+  body.gb.group-open #group-panel:not([hidden]) { flex: none; overflow: visible; padding: 12px 14px 0; }
+  body.gb.group-open #group-transcript { flex: none; min-height: auto; overflow: visible; }
+  body.gb.group-open #group-composer { gap: 6px; padding: 8px 0 10px; }
+  body.gb.group-open #group-composer .quick-input-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; gap: 6px; }
+  body.gb.group-open #group-composer .quick-input-row textarea,
+  body.gb.group-open #group-composer .quick-input-row button { grid-column: 1 / -1; }
+  body.gb.group-open #group-composer #group-speaker,
+  body.gb.group-open #group-composer #group-handoff { width: 100%; min-width: 0; }
+  body.gb.group-open #group-send-note { display: none; }
+}
