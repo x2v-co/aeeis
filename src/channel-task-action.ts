@@ -64,6 +64,7 @@ export interface BoardEvent {
   content: string;
   evidenceRefs?: string[] | undefined;
   taskAction?: ChannelTaskAction | undefined;
+  idempotencyKey?: string | undefined;
   createdAt?: string | undefined;
 }
 
@@ -78,8 +79,13 @@ export interface BoardDecision {
   /** Handed to someone who has not taken it yet. The task stays with its holder. */
   offer?: { to: string; note?: string };
 }
-export interface BoardCitation { eventId: string; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string }
-export interface BoardActionMark { eventId: string; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string }
+/** `automatic`: the server wrote this receipt for a Bot (a proposal or a handoff line), not the person. */
+export interface BoardCitation { eventId: string; sequence?: number; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string; automatic?: boolean }
+export interface BoardActionMark { eventId: string; sequence?: number; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string }
+/** Records the server writes for the Bots: replies, proposals, handoffs and reassignment. */
+export function automaticKey(key: string | undefined): boolean {
+  return /^(bot-|handoff-)/.test(key ?? '');
+}
 export interface BoardCard {
   conversationId: string;
   taskId: string;
@@ -294,7 +300,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
   for (const event of live) {
     const cite = eventCitation(event);
     if (cite) {
-      const mark: BoardCitation = { eventId: event.id, ...cite, actorId: event.actorId, actorType: event.actorType, ...(event.createdAt ? { at: event.createdAt } : {}), content: event.content };
+      const mark: BoardCitation = { eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), ...cite, actorId: event.actorId, actorType: event.actorType, ...(event.createdAt ? { at: event.createdAt } : {}), content: event.content, ...(automaticKey(event.idempotencyKey) ? { automatic: true } : {}) };
       citations.push(mark);
       const key = taskKey(cite.conversationId, cite.taskId);
       if (!firstCite.has(key)) firstCite.set(key, mark);
@@ -303,7 +309,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       chains.set(key, chain);
     }
     const action = eventTaskAction(event);
-    if (action) actions.push({ eventId: event.id, kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}) });
+    if (action) actions.push({ eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}) });
   }
   const cards: BoardCard[] = [];
   for (const [key, cite] of firstCite) {
