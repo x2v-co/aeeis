@@ -169,7 +169,7 @@ describe('AEEIS Temporal workflow', () => {
     });
   }, 120_000);
 
-  it.each(['failed', 'succeeded'])('closes unknown outcomes automatically with terminal projection %s', async status => {
+  it.each(['failed', 'succeeded', 'cancelled'])('closes unknown outcomes automatically with terminal projection %s', async status => {
     const queue = `${taskQueue}-unknown-${status}`;
     let calls = 0;
     const localWorker = await Worker.create({
@@ -195,7 +195,9 @@ describe('AEEIS Temporal workflow', () => {
     });
     await localWorker.runUntil(async () => {
       const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: 'temporal-terminal-api-unavailable', taskQueue: queue, args: ['run-unknown'] });
-      await expect(handle.result()).rejects.toThrow();
+      await expect(handle.result()).rejects.toMatchObject({ cause: {
+        type: 'AeeisRunTimeout', message: 'Run could not be terminalized after bounded activity retries',
+      } });
       expect(closed).toBe(3);
       expect((await handle.describe()).status.name).toBe('FAILED');
     });
@@ -576,5 +578,66 @@ describe('AEEIS Temporal workflow', () => {
       await previousWorker.shutdown();
       await previousRun;
     }
+  }, 120_000);
+});
+
+// Cancellation abandons in-flight activities. Keep its test-server clock
+// separate from the durable timer assertions in the suite above.
+describe('AEEIS Temporal workflow cancellation', () => {
+  let environment: TestWorkflowEnvironment;
+  const taskQueue = `aeeis-workflow-cancellation-test-${process.pid}`;
+
+  beforeAll(async () => {
+    const executable = resolveTemporalTestServerExecutable(process.env);
+    environment = executable
+      ? await TestWorkflowEnvironment.createTimeSkipping({ server: { executable } })
+      : await TestWorkflowEnvironment.createTimeSkipping();
+  }, setupTimeoutMs);
+
+  afterAll(async () => { await environment?.teardown(); }, setupTimeoutMs);
+
+  it.each(['advanceRun', 'terminalizeRun'])('preserves workflow cancellation during %s without a terminalization failure', async phase => {
+    const queue = `${taskQueue}-cancelled-${phase}`;
+    let status = 'running', closed = 0;
+    let began!: () => void;
+    const advancing = new Promise<void>(resolve => { began = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    let finished!: () => void;
+    const activityFinished = new Promise<void>(resolve => { finished = resolve; });
+    const waitForCancellation = async () => {
+      began();
+      // Activity sleeps use wall time. Release and drain this activity explicitly
+      // so cancellation cannot leave it waiting during worker shutdown.
+      try { await released; return { status }; }
+      finally { finished(); }
+    };
+    const localWorker = await Worker.create({
+      connection: environment.nativeConnection, namespace: environment.namespace ?? 'default', taskQueue: queue, workflowBundle,
+      activities: {
+        advanceRun: async () => phase === 'advanceRun' ? waitForCancellation() : { status: 'unknown' },
+        terminalizeRun: async () => { closed++; return phase === 'terminalizeRun' ? waitForCancellation() : { status }; },
+      },
+    });
+    await localWorker.runUntil(async () => {
+      const handle = await environment.client.workflow.start('agentRunWorkflow', { workflowId: `temporal-cancelled-${phase}`, taskQueue: queue, args: ['run-cancelled'] });
+      try {
+        await advancing;
+        // The API commits cancellation before asking Temporal to cancel the workflow.
+        status = 'cancelled';
+        await handle.cancel();
+        await expect(handle.result()).rejects.toMatchObject({ cause: { name: 'CancelledFailure' } });
+      } finally {
+        release();
+        await activityFinished;
+        if ((await handle.describe()).status.name === 'RUNNING') await handle.terminate('test cleanup');
+      }
+      expect(closed).toBe(phase === 'terminalizeRun' ? 1 : 0);
+      expect((await handle.describe()).status.name).toBe('CANCELLED');
+      const history = await handle.fetchHistory();
+      expect(history.events?.some(event => event.workflowExecutionFailedEventAttributes)).toBe(false);
+      expect(history.events?.filter(event => event.activityTaskScheduledEventAttributes?.activityType?.name === 'terminalizeRun')).toHaveLength(closed);
+      await expect(Worker.runReplayHistory({ workflowBundle }, history, handle.workflowId)).resolves.toBeUndefined();
+    });
   }, 120_000);
 });
