@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker, bundleWorkflowCode } from '@temporalio/worker';
 import { notifyTemporalRunWorkflow } from '../src/runtime/dispatcher.js';
-import { parseTemporalSetupTimeoutMs } from './support/temporal-timeouts.js';
+import { parseTemporalSetupTimeoutMs, resolveTemporalTestServerExecutable } from './support/temporal-timeouts.js';
 
 const setupTimeoutMs = parseTemporalSetupTimeoutMs(process.env.AEEIS_TEST_TEMPORAL_SETUP_TIMEOUT_MS);
 
@@ -28,10 +28,10 @@ describe('AEEIS Temporal workflow', () => {
   const taskQueue = `aeeis-workflow-test-${process.pid}`;
 
   beforeAll(async () => {
-    const downloadDir = process.env.AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR;
-    environment = downloadDir
+    const executable = resolveTemporalTestServerExecutable(process.env);
+    environment = executable
       ? await TestWorkflowEnvironment.createTimeSkipping({
-        server: { executable: { type: 'cached-download', downloadDir } },
+        server: { executable },
       })
       : await TestWorkflowEnvironment.createTimeSkipping();
     worker = await Worker.create({

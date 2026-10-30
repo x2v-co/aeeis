@@ -53,6 +53,60 @@ max_over_time(aeeis_http_requests_in_flight[5m])
 
 Temporal Worker 异常时检查 Worker `/health`、`/readyz`、namespace、task queue、Build ID 和版本策略。生产发布前必须对代表性的线上 history 执行 `npm run temporal:replay`；发生 Worker 版本不兼容时停止 promotion，使用兼容 Build ID 处理旧 history。
 
+### Temporal 离线部署测试（kk-cn）
+
+kk-cn 访问 `temporal.download` 会收到 Cloudflare 522。`cached-download` 默认 TTL 为 1 天，即使预先填充 `AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR`，缓存过期后仍会重新下载。此类主机应设置 `AEEIS_TEST_TEMPORAL_SERVER_PATH`，直接使用本地可执行文件；它优先于下载目录，启动前会校验文件存在、是普通文件且可执行。
+
+`@temporalio/testing` 1.24.0 的默认版本通过[版本解析地址](https://temporal.download/temporal-test-server/default?arch=amd64&platform=linux&sdk-name=sdk-typescript&sdk-version=1.24.0)解析为 Java SDK test server 1.40.0。Linux amd64 的[归档文件](https://temporal.download/assets/temporalio/sdk-java/releases/download/v1.40.0/temporal-test-server_1.40.0_linux_amd64.tar.gz)中，可执行文件为 `temporal-test-server_1.40.0_linux_amd64/temporal-test-server`；SDK 下载后在 downloadDir 中将它命名为 `temporal-test-server-sdk-typescript-1.24.0`（Linux 下无扩展名）。
+
+1. 在可联网的 sg 主机上，从仓库目录运行一次工作流测试以下载二进制，然后记录文件类型和 SHA-256：
+
+   ```bash
+   AEEIS_TEST_TEMPORAL_DOWNLOAD_DIR=/var/tmp/aeeis-temporal-test npx vitest run tests/temporal-workflow.test.ts
+   file /var/tmp/aeeis-temporal-test/temporal-test-server-sdk-typescript-1.24.0
+   sha256sum /var/tmp/aeeis-temporal-test/temporal-test-server-sdk-typescript-1.24.0
+   ```
+
+   也可在 sg 直接下载上述 tar.gz 并解压，使用归档内的二进制：
+
+   ```bash
+   curl -fL 'https://temporal.download/assets/temporalio/sdk-java/releases/download/v1.40.0/temporal-test-server_1.40.0_linux_amd64.tar.gz' -o /var/tmp/temporal-test-server_1.40.0_linux_amd64.tar.gz
+   tar -xzf /var/tmp/temporal-test-server_1.40.0_linux_amd64.tar.gz -C /var/tmp
+   file /var/tmp/temporal-test-server_1.40.0_linux_amd64/temporal-test-server
+   sha256sum /var/tmp/temporal-test-server_1.40.0_linux_amd64/temporal-test-server
+   ```
+
+2. 在 kk-cn 准备目标目录：
+
+   ```bash
+   sudo install -d -m 755 /opt/aeeis/test-bin
+   ```
+
+   在 sg 用 scp 复制到 kk-cn 的临时目录（若采用直接解压方式，替换源文件路径）：
+
+   ```bash
+   scp /var/tmp/aeeis-temporal-test/temporal-test-server-sdk-typescript-1.24.0 kk-cn:/var/tmp/aeeis-temporal-test-server
+   ```
+
+   在 kk-cn 安装并校验；`file` 应显示 Linux x86-64 可执行文件，SHA-256 必须与 sg 源文件一致：
+
+   ```bash
+   sudo install -m 755 /var/tmp/aeeis-temporal-test-server /opt/aeeis/test-bin/temporal-test-server
+   sudo chmod 755 /opt/aeeis/test-bin/temporal-test-server
+   file /opt/aeeis/test-bin/temporal-test-server
+   sha256sum /opt/aeeis/test-bin/temporal-test-server
+   ```
+
+3. 在 kk-cn 的仓库目录运行部署测试：
+
+   ```bash
+   AEEIS_TEST_TEMPORAL_SERVER_PATH=/opt/aeeis/test-bin/temporal-test-server npm run test:deploy
+   ```
+
+若测试在容器内运行，必须把二进制以只读 bind mount 挂入容器，并传入环境变量，例如 Docker 参数 `--mount type=bind,src=/opt/aeeis/test-bin/temporal-test-server,dst=/opt/aeeis/test-bin/temporal-test-server,readonly -e AEEIS_TEST_TEMPORAL_SERVER_PATH=/opt/aeeis/test-bin/temporal-test-server`。路径必须是容器内可见的路径。
+
+升级 `@temporalio/testing` 后，重新检查上述版本解析地址（更新 `sdk-version`），在 sg 重新下载对应版本并刷新 kk-cn 的二进制，再比较 SHA-256；本地路径模式不会自动更新二进制。
+
 ## 4. Projection Outbox
 
 检查 projection event 的 destination、状态、attempt、hash 和最后错误。失败事件可以由 pump 按原幂等键重试；`unknown` 事件需要先确认外部 sink 是否已经收到，再执行 reconcile。不要删除 canonical 状态来“清理”投影积压。Feishu 或其他 sink 的凭证轮换后，先做单条低风险事件验证，再恢复批量 drain。
