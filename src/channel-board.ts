@@ -25,7 +25,11 @@ type ServerTaskActionInput = z.infer<typeof serverTaskActionInputSchema>;
  * reader cannot open it; the board then shows its tasks as unreadable. */
 export type BoardConversationReader = (conversationId: string, actorId: string, tenantId: string) => Promise<BoardConversationView | undefined>;
 export type BoardNameReader = (agentId: string, tenantId: string) => Promise<string | undefined>;
-export interface BoardHolding { roomId: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string }
+export interface BoardHolding {
+  roomId: string; roomTitle: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string;
+  /** The channel's block note: the task waits for a person even though no Run asks. */
+  blocked?: string; blockedAt?: string;
+}
 
 /** Channel task board on the server. The room's session events are the fact
  * source; every rule is checked here, and the browser only sends intent. */
@@ -44,8 +48,8 @@ export class ChannelBoardService {
     return projectChannelBoard(roomId, history, conversations, agentId => names.get(agentId) ?? agentId);
   }
 
-  /** Tasks the owner's group chats handed to someone other than the person
-   * whose thread holds them. The roster counts these with their holder. */
+  /** Tasks in the owner's group chats that the roster and inbox must place
+   * apart from their thread: handed to someone else, or blocked in the channel. */
   async holdings(actorId: string, tenantId: string): Promise<BoardHolding[]> {
     const rooms = (await this.domain.listRoomsForPrincipal(actorId, tenantId))
       .filter(room => room.status === 'active' && room.chat === 'group' && (room.owner ?? 'owner') === actorId);
@@ -53,8 +57,14 @@ export class ChannelBoardService {
     for (const room of rooms) {
       const board = await this.board(room.id, actorId, tenantId);
       for (const card of board.cards) {
-        if (!card.movedFrom || !card.ownerId || card.column === 'done' || card.decision.cancelled) continue;
-        held.push({ roomId: room.id, conversationId: card.conversationId, taskId: card.taskId, holderId: card.ownerId, fromId: card.movedFrom, ...(card.title ? { title: card.title } : {}), status: card.status });
+        if (card.column === 'done' || card.decision.cancelled) continue;
+        const blocked = card.column === 'blocked' ? card.decision.blockedNote : undefined;
+        if (!blocked && !(card.movedFrom && card.ownerId)) continue;
+        const blockedAt = blocked ? board.actions.filter(mark => mark.kind === 'block' && mark.conversationId === card.conversationId && mark.taskId === card.taskId).at(-1)?.at : undefined;
+        held.push({
+          roomId: room.id, roomTitle: room.title, conversationId: card.conversationId, taskId: card.taskId, holderId: card.ownerId, fromId: card.movedFrom ?? card.ownerId,
+          ...(card.title ? { title: card.title } : {}), status: card.status, ...(blocked ? { blocked } : {}), ...(blockedAt ? { blockedAt } : {}),
+        });
       }
     }
     return held;

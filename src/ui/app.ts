@@ -1761,7 +1761,7 @@ function taskCountOf(item: ConversationSummary | undefined): number | undefined 
 function presenceFromTasks(tasks: Array<{ id: string; title: string; status: string }>): LifePresence {
   const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
     : status === 'unknown' ? 1
-    : status === 'failed' ? 2
+    : status === 'failed' || status === 'channel_blocked' ? 2
     : status === 'paused' ? 3
     : status === 'planning' || status === 'reviewing' ? 4
     : status === 'running' || status === 'queued' || status === 'preparing' ? 5
@@ -1773,9 +1773,10 @@ function presenceFromTasks(tasks: Array<{ id: string; title: string; status: str
   const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
   return { state, label, taskId: lead.id, taskTitle: lead.title };
 }
-/** Tasks a group handed from one person's thread to another holder. The roster
- * counts each with its holder, so a transfer moves the work and its Run state. */
-interface BoardHoldingView { conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string }
+/** Tasks a group handed from one person's thread to another holder, or blocked in
+ * the channel. The roster counts each with its holder, so a transfer moves the work
+ * and its Run state; a channel block shows as stuck and waits in the inbox. */
+interface BoardHoldingView { roomId: string; roomTitle?: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; blocked?: string; blockedAt?: string }
 let boardHoldings: BoardHoldingView[] = [];
 let boardHoldingsReadAt = 0;
 async function loadBoardHoldings(): Promise<void> {
@@ -1787,7 +1788,7 @@ function lifePresence(agentId: string): LifePresence {
   const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
   const listed = lifeSummary(agentId);
   const away = new Set(boardHoldings.filter(item => item.fromId === agentId).map(item => item.taskId));
-  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.status }));
+  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.blocked ? 'channel_blocked' : item.status }));
   const own = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
   const tasks = own ? [...own.filter(task => !away.has(task.id)), ...held] : undefined;
   if (tasks?.length) {
@@ -2379,6 +2380,8 @@ async function postTaskAction(kind: TaskActionKind, view: ConversationView, task
       ...(extra.agentId ? { agentId: extra.agentId } : {}), ...(extra.reason ? { reason: extra.reason } : {}),
     });
     if (openGroupId === roomId && result?.board) { channelBoardState = result.board; channelBoardRoomId = roomId; }
+    // The roster and inbox read the board again on the next refresh.
+    boardHoldingsReadAt = 0;
     return true;
   } catch (error) {
     message(errorMessage(error));
@@ -5764,6 +5767,15 @@ function renderAttentionInbox(runs: RunSummary[]): void {
       act: () => openAttentionRun(run),
     });
   }
+  // A channel block waits for a person even when no Run asks; it counts as a question.
+  for (const hold of boardHoldings) {
+    if (!hold.blocked) continue;
+    const open = async () => { await openGroup(hold.roomId); await showChannelBoard(); };
+    items.push({
+      kind: 'question', title: hold.title ?? '频道里的事', detail: `阻塞：${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, at: hold.blockedAt, status: 'blocked', selected: false,
+      open, quick: '去处理', act: open,
+    });
+  }
   for (const message of conversation?.messages ?? []) {
     if (message.route.status !== 'clarify') continue;
     if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
@@ -5810,7 +5822,9 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     const meta = entry.at && Number.isFinite(Date.parse(entry.at)) ? formatTime(entry.at) : '刚刚更新';
     const quickAction = button(entry.quick, () => entry.act());
     quickAction.className = 'attention-quick-action';
-    quickAction.addEventListener('click', event => event.stopPropagation(), { capture: true });
+    // Stop at the bubble phase: stopping in a capture listener on the button itself
+    // also cancels the button's own click handler.
+    quickAction.addEventListener('click', event => event.stopPropagation());
     item.append(marker, body, element('time', meta, 'attention-time'), quickAction, element('span', '↗', 'attention-arrow'));
     list.append(item);
   }

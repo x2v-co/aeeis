@@ -1182,6 +1182,27 @@ describe('entry bots and group chats', () => {
     expect(research.textContent).not.toContain('风险摘要');
     expect(research.textContent).toContain('空闲 · 1 件事');
   });
+  it('puts a task blocked in a channel in the inbox and shows its holder as stuck', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/conversations' && request.method !== 'POST') {
+        return response([fixture(), { id: 'conv_research', title: '研究', revision: 1, agentId: 'demo.research', taskCount: 1, presence: { state: 'idle', label: '空闲' } }]);
+      }
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'member_research', roomId: 'room_team', principalId: 'demo.research', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
+      if (url === '/api/board-holdings') return response({ items: [{ roomId: 'room_team', roomTitle: '发布协作', conversationId: 'conv_research', taskId: 'task_s', holderId: 'demo.research', fromId: 'demo.research', title: '公开资料', status: 'discussion', blocked: '交接谈不拢：需要你决定', blockedAt: date }] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('[data-bot-id="demo.research"]')?.textContent).toContain('卡住 · 公开资料'));
+    el('attention-toggle').click();
+    await vi.waitFor(() => expect(doc().querySelector('#attention-items [data-inbox="question"]')?.textContent).toContain('阻塞：交接谈不拢：需要你决定 · 发布协作'));
+    doc().querySelector<HTMLButtonElement>('#attention-items [data-inbox="question"] .attention-quick-action')!.click();
+    await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
+    await vi.waitFor(() => expect(el('channel-board').hidden).toBe(false));
+    expect(h.posts.filter(post => post.url.includes('/task-actions') || post.url.endsWith('/messages'))).toHaveLength(0);
+  });
   it('opens a roster bot on that person\'s life thread and keeps the Run explicit', async () => {
     const rooms: Array<{ id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }> = [];
     const h = harness(undefined, { handler: (url, request) => {
