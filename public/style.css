@@ -1468,6 +1468,7 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-person-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
 .group-person-row label { grid-column: 1 / -1; }
 .group-candidate, .group-person { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; }
+.group-candidate input[type="checkbox"] { flex: none; width: auto; margin: 0; padding: 0; }
 .group-person button { margin-left: auto; }
 .group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .group-head-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -1575,7 +1576,8 @@ body.gb #life-speaker { height: 44px; width: auto; flex: none; min-width: 88px; 
 body.gb #group-speaker[hidden],
 body.gb #group-handoff[hidden],
 body.gb #life-speaker[hidden],
-body.gb #conversation-panel[hidden] { display: none !important; }
+body.gb #conversation-panel[hidden],
+body.gb.group-draft #conversation-panel { display: none !important; }
 body.gb #group-panel:not([hidden]) { display: flex; flex-direction: column; min-height: 0; }
 body.gb #group-panel:not([hidden]) #group-composer { display: flex; flex-direction: column; }
 body.gb.group-open #group-panel,

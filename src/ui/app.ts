@@ -3040,6 +3040,9 @@ function syncEntrySurface(): void {
   if (sendNote) sendNote.textContent = view === 'direct'
     ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。选一位说话人，只是标明这句话是谁说的。'
     : '批准、登录和密钥仍留在和 AEEIS 的单独对话。发送先写入这个 Room 的会话记录。没有点名时，其余成员用 👍 表示收到，写了常驻要求的成员会被提醒。@某一位时，这一位和 AEEIS 同时接收。没有收到这句话的成员不留表情。选一位说话人，只是标明这句话是谁说的。';
+  if (sendNote && botsActive) sendNote.textContent = view === 'direct'
+    ? '批准、登录和密钥仍留在和 AEEIS 的单独对话。对方会自己回复，回复只是讨论。'
+    : '批准、登录和密钥仍留在和 AEEIS 的单独对话。没有点名时 AEEIS 回复；@某一位时这一位回复。要做的事会作为提议出现在任务板上。';
   syncGroupSpeaker();
   syncLifeSpeaker();
   const directName = botById(directPrincipal)?.name ?? room?.title ?? directPrincipal;
@@ -3301,6 +3304,8 @@ async function archiveOpenChat(): Promise<void> {
   const id = openGroupId;
   const room = chatRoom();
   if (!id || !room || !isManagedChat(room)) return;
+  const what = room.description === '私聊' ? '这间私聊' : `群聊「${room.title}」`;
+  if (!window.confirm(`归档${what}？归档后从列表里撤下，历史和任务板仍能读，但不能再发消息。`)) return;
   const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`, { status: 'archived' }, 'PATCH');
   roomSummaries = roomSummaries.map(item => item.id === id ? { ...item, ...updated, status: 'archived' } : item);
   directMembers.delete(id);
