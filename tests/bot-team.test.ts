@@ -127,6 +127,10 @@ describe('Bots that act on their own', () => {
     const card = (await f.board()).cards.find(item => item.title === '写风险摘要')!;
     expect(card.decision).toMatchObject({ assigneeId: f.writer.id });
     expect(card.decision.offer).toBeUndefined();
+    // The holder is the one who accepted; the task still lives on the proposer's thread.
+    expect(card).toMatchObject({ ownerId: f.writer.id, movedFrom: f.researcher.id });
+    const holdings = await f.app.inject({ method: 'GET', url: '/api/board-holdings', headers });
+    expect(holdings.json().items).toEqual([expect.objectContaining({ taskId: card.taskId, holderId: f.writer.id, fromId: f.researcher.id, title: '写风险摘要' })]);
     const sides = (await f.domain.listRooms('alice', 'team-a')).filter(room => room.description === '侧线程');
     expect(sides).toHaveLength(1);
     const side = await f.app.inject({ method: 'GET', url: `/api/rooms/${sides[0]!.id}/session-events?limit=50`, headers });

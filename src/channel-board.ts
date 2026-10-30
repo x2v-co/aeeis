@@ -25,6 +25,7 @@ type ServerTaskActionInput = z.infer<typeof serverTaskActionInputSchema>;
  * reader cannot open it; the board then shows its tasks as unreadable. */
 export type BoardConversationReader = (conversationId: string, actorId: string, tenantId: string) => Promise<BoardConversationView | undefined>;
 export type BoardNameReader = (agentId: string, tenantId: string) => Promise<string | undefined>;
+export interface BoardHolding { roomId: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string }
 
 /** Channel task board on the server. The room's session events are the fact
  * source; every rule is checked here, and the browser only sends intent. */
@@ -41,6 +42,22 @@ export class ChannelBoardService {
     const conversations = await this.conversations(history, actorId, tenantId);
     const names = await this.names(history, tenantId);
     return projectChannelBoard(roomId, history, conversations, agentId => names.get(agentId) ?? agentId);
+  }
+
+  /** Tasks the owner's group chats handed to someone other than the person
+   * whose thread holds them. The roster counts these with their holder. */
+  async holdings(actorId: string, tenantId: string): Promise<BoardHolding[]> {
+    const rooms = (await this.domain.listRoomsForPrincipal(actorId, tenantId))
+      .filter(room => room.status === 'active' && room.chat === 'group' && (room.owner ?? 'owner') === actorId);
+    const held: BoardHolding[] = [];
+    for (const room of rooms) {
+      const board = await this.board(room.id, actorId, tenantId);
+      for (const card of board.cards) {
+        if (!card.movedFrom || !card.ownerId || card.column === 'done' || card.decision.cancelled) continue;
+        held.push({ roomId: room.id, conversationId: card.conversationId, taskId: card.taskId, holderId: card.ownerId, fromId: card.movedFrom, ...(card.title ? { title: card.title } : {}), status: card.status });
+      }
+    }
+    return held;
   }
 
   async act(roomId: string, raw: unknown, actorId: string, tenantId: string): Promise<{ event: SessionEvent; board: ChannelBoard }> {

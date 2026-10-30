@@ -1773,17 +1773,32 @@ function presenceFromTasks(tasks: Array<{ id: string; title: string; status: str
   const label = state === 'waiting' ? '等你' : state === 'unknown' ? '待核查' : state === 'blocked' ? '卡住' : state === 'paused' ? '已暂停' : state === 'thinking' ? '思考中' : '执行中';
   return { state, label, taskId: lead.id, taskTitle: lead.title };
 }
+/** Tasks a group handed from one person's thread to another holder. The roster
+ * counts each with its holder, so a transfer moves the work and its Run state. */
+interface BoardHoldingView { conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string }
+let boardHoldings: BoardHoldingView[] = [];
+let boardHoldingsReadAt = 0;
+async function loadBoardHoldings(): Promise<void> {
+  if (Date.now() - boardHoldingsReadAt < 10_000) return;
+  boardHoldingsReadAt = Date.now();
+  boardHoldings = await api<{ items?: BoardHoldingView[] }>('/board-holdings').then(page => Array.isArray(page.items) ? page.items : []).catch(() => boardHoldings);
+}
 function lifePresence(agentId: string): LifePresence {
   const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
   const listed = lifeSummary(agentId);
-  const tasks = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
+  const away = new Set(boardHoldings.filter(item => item.fromId === agentId).map(item => item.taskId));
+  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.status }));
+  const own = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
+  const tasks = own ? [...own.filter(task => !away.has(task.id)), ...held] : undefined;
   if (tasks?.length) {
     const derived = presenceFromTasks(tasks);
     if (derived.state !== 'idle') return derived;
     return { state: 'idle', label: `空闲 · ${tasks.length} 件事` };
   }
-  if (listed?.presence && listed.presence.state !== 'idle') return listed.presence;
-  const count = taskCountOf(listed);
+  const fromHeld = presenceFromTasks(held);
+  if (fromHeld.state !== 'idle') return fromHeld;
+  if (listed?.presence && listed.presence.state !== 'idle' && !(listed.presence.taskId && away.has(listed.presence.taskId))) return listed.presence;
+  const count = Math.max(0, (taskCountOf(listed) ?? 0) - away.size) + held.length;
   if (count) return { state: 'idle', label: `空闲 · ${count} 件事` };
   return { state: 'idle', label: '空闲' };
 }
@@ -1986,7 +2001,7 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'done', title: '完成' },
 ];
 interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[]; proposedBy?: string; proposalReason?: string; adopted?: boolean; offer?: { to: string; note?: string } }
-interface ChannelBoardCardView { conversationId: string; taskId: string; agentId?: string; ownerId: string; title?: string; status: string; runId?: string; column: string; decision: BoardDecision; chain: string[] }
+interface ChannelBoardCardView { conversationId: string; taskId: string; agentId?: string; ownerId: string; movedFrom?: string; title?: string; status: string; runId?: string; column: string; decision: BoardDecision; chain: string[] }
 interface ChannelBoardView {
   cursor: number;
   cards: ChannelBoardCardView[];
@@ -2103,6 +2118,12 @@ function boardState(): ChannelBoardView | undefined {
 }
 function boardCardFor(conversationId: string, taskId: string): ChannelBoardCardView | undefined {
   return boardState()?.cards.find(card => card.conversationId === conversationId && card.taskId === taskId);
+}
+/** "From X" when a handoff moved the task off X's thread; "claimed" when someone took it. */
+function holderNote(conversationId: string, taskId: string, decision: BoardDecision): string | undefined {
+  const movedFrom = boardCardFor(conversationId, taskId)?.movedFrom;
+  if (movedFrom) return `来自${participantLabel(movedFrom)}`;
+  return decision.assigneeId ? `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取` : undefined;
 }
 function boardDecision(conversationId: string, taskId: string): BoardDecision {
   return boardCardFor(conversationId, taskId)?.decision ?? emptyBoardDecision();
@@ -2288,7 +2309,8 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   if (blockNote) button.append(element('small', `阻塞：${blockNote}`));
   if (decision.proposedBy && !decision.adopted && !decision.cancelled && task.status === 'discussion') button.append(element('small', `提议 · ${participantLabel(decision.proposedBy)}${decision.proposalReason ? `：${decision.proposalReason}` : ''}`));
   if (decision.offer) button.append(element('small', `交接中 → ${participantLabel(decision.offer.to)}`));
-  if (decision.assigneeId) button.append(element('small', `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取`));
+  const held = holderNote(view.id, task.id, decision);
+  if (held) button.append(element('small', held));
   if (decision.conflicts.length) button.append(element('small', '已被领取'));
   if (decision.accepted) button.append(element('small', '已验收'));
   if (decision.revision) button.append(element('small', `要求修改：${decision.revision}`));
@@ -2300,14 +2322,15 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
 }
 function channelOwnerName(view: ConversationView, task: ConversationTaskView): string {
   const cite = channelCitations().find(item => item.conversationId === view.id && item.taskId === task.id);
-  return botById(cite?.agentId ?? view.agentId ?? '')?.name ?? cite?.agentId ?? view.agentId ?? '这个人';
+  const ownerId = boardCardFor(view.id, task.id)?.ownerId || cite?.agentId || view.agentId || '';
+  return botById(ownerId)?.name ?? (ownerId || '这个人');
 }
 function doingCount(agentId: string): number {
   return channelCitations().filter(cite => {
     const view = handoffViews.get(cite.conversationId);
     const task = view?.tasks.find(item => item.id === cite.taskId);
     if (!view || !task) return false;
-    const ownerId = cite.agentId ?? view.agentId ?? '';
+    const ownerId = boardCardFor(cite.conversationId, task.id)?.ownerId || cite.agentId || view.agentId || '';
     return ownerId === agentId && boardColumn(task.status, boardDecision(cite.conversationId, task.id), taskRunId(task)) === 'doing';
   }).length;
 }
@@ -2557,7 +2580,8 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
   const stopped = stopLine(task, decision);
   if (stopped) body.append(element('small', stopped));
   if (!blockNoteCurrent(task.status, decision) && decision.blockedNote) body.append(element('small', `频道里还留着阻塞说明：${decision.blockedNote}`));
-  if (decision.assigneeId) body.append(element('small', `${botById(decision.assigneeId)?.name ?? decision.assigneeId}已领取`));
+  const held = holderNote(view.id, task.id, decision);
+  if (held) body.append(element('small', held));
   if (decision.conflicts.length) body.append(element('small', '已被领取'));
   const steps = task.execution?.steps ?? [];
   body.append(element('small', steps.length ? steps.map(step => `${step.title}（${step.state === 'done' ? '已完成' : step.state === 'current' ? '正在做' : '还没开始'}）`).join('、') : '还没有执行步骤。'));
@@ -5171,13 +5195,13 @@ function studioRoster(): Array<{ id: string; name: string; seat: 'meet' | 'desk'
   return people;
 }
 function studioWork(agentId: string): Array<{ title: string; column: string }> {
-  return channelCitations().flatMap(cite => {
-    const owner = cite.agentId ?? handoffViews.get(cite.conversationId)?.agentId ?? '';
+  return (boardState()?.cards ?? []).flatMap(card => {
+    const owner = card.decision.released ? '' : (card.ownerId || handoffViews.get(card.conversationId)?.agentId || '');
     if (owner !== agentId) return [];
-    const view = handoffViews.get(cite.conversationId);
-    const task = view?.tasks.find(item => item.id === cite.taskId);
-    if (!view || !task) return [{ title: cite.taskId, column: 'capture' }];
-    return [{ title: task.title, column: boardColumn(task.status, boardDecision(view.id, task.id), taskRunId(task)) }];
+    const view = handoffViews.get(card.conversationId);
+    const task = view?.tasks.find(item => item.id === card.taskId);
+    if (!view || !task) return [{ title: card.title ?? card.taskId, column: 'capture' }];
+    return [{ title: task.title, column: boardColumn(task.status, card.decision, taskRunId(task)) }];
   });
 }
 function studioLabel(agentId: string): { label: string; task: string } {
@@ -6022,6 +6046,7 @@ async function refresh(): Promise<void> {
   if (owned) ownedBotRecords = owned.map(ownedRosterBot);
   await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
+  await loadBoardHoldings();
   renderAttentionInbox(runs);
   await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems);
   renderBotRoster();

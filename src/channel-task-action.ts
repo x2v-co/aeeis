@@ -84,7 +84,10 @@ export interface BoardCard {
   conversationId: string;
   taskId: string;
   agentId?: string;
+  /** Who holds the task now: the last claim, assignment or transfer, else the person it went to. */
   ownerId: string;
+  /** Set when the holder is not the person whose thread the task lives on. */
+  movedFrom?: string;
   title?: string;
   status: string;
   runId?: string;
@@ -310,12 +313,14 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
     const task = view?.tasks.find(item => item.id === cite.taskId);
     const status = task?.status ?? 'unreadable';
     const runId = task ? taskRunId(task) : undefined;
-    const ownerId = decision.released ? '' : (cite.agentId ?? view?.agentId ?? '');
+    const home = view?.agentId ?? cite.agentId ?? '';
+    const ownerId = decision.released ? '' : (decision.assigneeId ?? cite.agentId ?? view?.agentId ?? '');
     cards.push({
       conversationId: cite.conversationId,
       taskId: cite.taskId,
       ...(cite.agentId ? { agentId: cite.agentId } : {}),
       ownerId,
+      ...(ownerId && home && ownerId !== home ? { movedFrom: home } : {}),
       ...(task ? { title: task.title } : {}),
       status,
       ...(runId ? { runId } : {}),
