@@ -273,6 +273,8 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
   });
   return { view, fetch, posts, setPrincipal(value: string) { principal = value; } };
 }
+/** Interval callbacks the page registered; tests fire them by hand. */
+let intervals: Array<{ callback: () => void; ms: number }> = [];
 function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string> } = {}) {
   dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
@@ -282,7 +284,8 @@ function start(fetch: any, saved: { local?: Record<string, string>; session?: Re
     else dom.window.localStorage.setItem(key, value);
   }
   for (const [key, value] of Object.entries(saved.session ?? {})) dom.window.sessionStorage.setItem(key, value);
-  dom.window.fetch = fetch; dom.window.setInterval = (() => 1) as any;
+  intervals = [];
+  dom.window.fetch = fetch; dom.window.setInterval = ((callback: () => void, ms: number) => { intervals.push({ callback, ms }); return intervals.length; }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
   dom.window.eval(source);
@@ -3083,6 +3086,29 @@ describe('entry bots and group chats', () => {
     expect(doc().body.classList.contains('roster-focus')).toBe(true);
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
     await vi.waitFor(() => expect(doc().body.classList.contains('roster-focus')).toBe(false));
+  });
+
+  it('keeps the background tick light and reads rarely-changing lists every 30 seconds', async () => {
+    const h = harness();
+    start(h.fetch);
+    await ready();
+    const tick = intervals.find(item => item.ms === 2000)!;
+    const reads = (path: string) => h.fetch.mock.calls.filter(call => String(call[0]).startsWith(path)).length;
+    await vi.waitFor(() => expect(reads('/api/evolution/candidates')).toBe(1));
+    const runsBefore = reads('/api/runs/page');
+    tick.callback();
+    await vi.waitFor(() => expect(reads('/api/runs/page')).toBe(runsBefore + 1));
+    await vi.waitFor(() => expect(doc().querySelector('#attention-toggle')).not.toBeNull());
+    expect(reads('/api/evolution/candidates')).toBe(1);
+    expect(reads('/api/collaborations/')).toBe(5);
+    expect(reads('/api/agents')).toBe(1);
+    const realNow = dom.window.Date.now;
+    dom.window.Date.now = () => realNow() + 31_000;
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      tick.callback();
+      await vi.waitFor(() => expect(reads('/api/evolution/candidates')).toBe(2));
+    } finally { dom.window.Date.now = realNow; }
   });
 
   it('does not reread earlier channel pages on the next refresh', async () => {
