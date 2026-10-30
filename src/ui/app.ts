@@ -2746,7 +2746,9 @@ async function openChannelArtifact(runId: string): Promise<void> {
     body.replaceChildren(element('p', errorMessage(error)));
   }
 }
-function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts: { answer: Map<string, string>; reject: Map<string, string> } = { answer: new Map(), reject: new Map() }): void {
+/** `live` puts the task's current state, artifact and decisions under this event. Only the
+ * latest event that cites a task is live, so one plan shows one approval card in the channel. */
+function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts: { answer: Map<string, string>; reject: Map<string, string> } = { answer: new Map(), reject: new Map() }, live = true): void {
   const cite = handoffCitation(event);
   if (!cite) return;
   const view = handoffViews.get(cite.conversationId);
@@ -2770,7 +2772,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     card.append(open);
   }
   item.append(card);
-  if (!task) return;
+  if (!task || !live) return;
   const taskCard = element('div', '', 'group-run-card');
   taskCard.dataset.card = 'task';
   taskCard.dataset.handoff = cite.taskId;
@@ -3614,8 +3616,13 @@ function renderGroupTranscript(): void {
     row.append(older);
     list.append(row);
   }
-  for (const event of visibleChannelEvents()) {
-    if (event.operation === 'retract') continue;
+  const shown = visibleChannelEvents().filter(event => event.operation !== 'retract');
+  const latestCite = new Map<string, string>();
+  for (const event of shown) {
+    const cite = handoffCitation(event);
+    if (cite) latestCite.set(`${cite.conversationId}:${cite.taskId}`, event.id);
+  }
+  for (const event of shown) {
     const item = element('li', '', 'group-message');
     item.dataset.type = event.type;
     item.dataset.kind = event.type === 'system' ? 'system' : event.actorType === 'agent' ? 'bot' : event.type === 'message' ? 'human' : event.type;
@@ -3623,7 +3630,8 @@ function renderGroupTranscript(): void {
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
     if (event.actorType === 'agent' && event.idempotencyKey?.startsWith('bot-reply:')) { heading.append(element('small', '自动回复', 'bot-auto')); item.dataset.auto = 'true'; }
     item.append(heading, element('p', event.content));
-    appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts });
+    const cite = handoffCitation(event);
+    appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts }, !cite || latestCite.get(`${cite.conversationId}:${cite.taskId}`) === event.id);
     list.append(item);
   }
   syncGroupSpeaker();
