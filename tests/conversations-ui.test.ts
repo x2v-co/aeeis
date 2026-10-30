@@ -3465,6 +3465,40 @@ describe('entry bots and group chats', () => {
     expect(h.posts.filter(post => post.url === '/api/goals')).toHaveLength(1);
     expect(h.posts.some(post => String(post.url).includes('/memories'))).toBe(true);
   });
+  it('replays who handed what to whom, not who wrote the record', async () => {
+    const now = new Date().toISOString();
+    const refs = (agent: string) => ['conv_research', 'task_risk', agent];
+    const action = (kind: string, agentId: string) => ({ schemaVersion: 'channel-task-action/1', kind, conversationId: 'conv_research', taskId: 'task_risk', agentId });
+    const base = { operation: 'publish', actorType: 'principal', actorId: 'owner', createdAt: now };
+    const events = [
+      { ...base, id: 'evt_ask', type: 'system', content: '已请研究回应', evidenceRefs: refs('demo.research'), idempotencyKey: 'group-ask' },
+      { ...base, id: 'evt_receipt', type: 'system', content: '研究提议：风险摘要', evidenceRefs: refs('demo.research'), idempotencyKey: 'bot-propose-receipt:evt_ask:demo.research' },
+      { ...base, id: 'evt_propose', type: 'task_update', content: '研究提议这件事', evidenceRefs: refs('demo.research'), idempotencyKey: 'bot-propose-mark:evt_ask:demo.research', taskAction: action('propose', 'demo.research') },
+      { ...base, id: 'evt_offer', type: 'task_update', content: '交接中：交给 发布', evidenceRefs: refs('demo.release'), idempotencyKey: 'bot-handoff:evt_ask:demo.research', taskAction: action('offer', 'demo.release') },
+      { ...base, id: 'evt_transfer', type: 'task_update', content: '转交给 发布', evidenceRefs: refs('demo.release'), idempotencyKey: 'handoff-end:evt_offer', taskAction: action('transfer', 'demo.release') },
+      { ...base, id: 'evt_line', type: 'system', content: '发布接下了「风险摘要」（来自研究）。', evidenceRefs: refs('demo.release'), idempotencyKey: 'handoff-line:evt_offer' },
+    ];
+    const room = { id: 'room_hops', title: '谁交给谁', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const research = { id: 'conv_research', title: '研究', revision: 0, agentId: 'demo.research', tasks: [{ id: 'task_risk', title: '风险摘要', threadId: 'thread_risk', status: 'discussion', createdAt: now }], messages: [], hasEarlierMessages: false };
+    const member = (principalId: string) => ({ id: `member_${principalId}`, roomId: 'room_hops', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
+    const h = harness(undefined, { handler: (url) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (String(url).includes('/rooms/room_hops/members')) return response([member('demo.research'), member('demo.release')]);
+      if (String(url).includes('/rooms/room_hops/session-events')) return response({ items: String(url).includes('limit=20') ? [] : events });
+      if (url === '/api/conversations/conv_research') return response(research);
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('谁交给谁'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('发布接下了'));
+    el('channel-studio-open').click();
+    await vi.waitFor(() => expect(el('studio-replay-caption').textContent).toContain('可以回放 2 次交接'));
+    doc().body.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(el('studio-replay-caption').textContent).toContain('1 / 2 · 你 → 研究');
+    doc().body.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(el('studio-replay-caption').textContent).toContain('2 / 2 · 研究 → 发布');
+  });
   it('shows the channel studio without executing', async () => {
     const now = new Date().toISOString();
     const handoff = { id: 'evt_handoff', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_run', 'demo.release'], createdAt: now };

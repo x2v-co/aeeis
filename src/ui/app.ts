@@ -2008,8 +2008,8 @@ interface ChannelBoardCardView { conversationId: string; taskId: string; agentId
 interface ChannelBoardView {
   cursor: number;
   cards: ChannelBoardCardView[];
-  citations: Array<{ eventId: string; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string }>;
-  actions: Array<{ eventId: string; kind: string; conversationId: string; taskId: string; agentId?: string; at?: string }>;
+  citations: Array<{ eventId: string; sequence?: number; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string; automatic?: boolean }>;
+  actions: Array<{ eventId: string; sequence?: number; kind: string; conversationId: string; taskId: string; agentId?: string; at?: string }>;
   wip: Array<{ agentId: string; count: number }>;
 }
 function channelLog(): SessionEventSummary[] {
@@ -5226,21 +5226,43 @@ function studioLabel(agentId: string): { label: string; task: string } {
   if (any) return { label: '待整理', task: any.title };
   return { label: '空闲', task: '现在没有交给这个人的事' };
 }
+/** Who handed what to whom, in order. A person's own receipt goes from 你 to the member it
+ * names; a Bot's proposal for someone else goes from the proposer; an assignment or transfer
+ * goes from the task's holder at the time. Lines the server wrote for the Bots only echo these. */
 function studioHops(): StudioHop[] {
+  const board = boardState();
+  if (!board) return [];
+  type Step = { sequence: number; cite?: (typeof board.citations)[number]; action?: (typeof board.actions)[number] };
+  const steps: Step[] = [
+    ...board.citations.map((cite, index) => ({ sequence: cite.sequence ?? index, cite })),
+    ...board.actions.map((action, index) => ({ sequence: action.sequence ?? index, action })),
+  ].sort((left, right) => left.sequence - right.sequence);
+  const contentOf = new Map(board.citations.map(cite => [cite.eventId, cite.content]));
+  const holders = new Map<string, string>();
   const hops: StudioHop[] = [];
-  for (const cite of boardState()?.citations ?? []) {
-    const agentId = cite.agentId && botById(cite.agentId) ? cite.agentId : undefined;
-    hops.push({
-      id: cite.eventId,
-      fromId: cite.actorType === 'agent' ? cite.actorId : 'you',
-      toId: agentId ?? '未知',
-      fromName: cite.actorType === 'agent' ? participantLabel(cite.actorId) : '你',
-      toName: agentId ? participantLabel(agentId) : '这个人',
-      at: cite.at ?? '',
-      content: cite.content,
-      conversationId: cite.conversationId,
-      taskId: cite.taskId,
-    });
+  const add = (id: string, at: string | undefined, conversationId: string, taskId: string, fromId: string, toId: string, content: string) => {
+    hops.push({ id, fromId, toId, fromName: fromId === 'you' ? '你' : participantLabel(fromId), toName: participantLabel(toId), at: at ?? '', content, conversationId, taskId });
+  };
+  for (const step of steps) {
+    if (step.cite) {
+      const cite = step.cite;
+      const key = `${cite.conversationId}:${cite.taskId}`;
+      const agentId = cite.agentId && botById(cite.agentId) ? cite.agentId : undefined;
+      if (!agentId) continue;
+      if (!holders.has(key)) holders.set(key, agentId);
+      if (!cite.automatic && cite.actorType !== 'agent') add(cite.eventId, cite.at, cite.conversationId, cite.taskId, 'you', agentId, cite.content);
+      continue;
+    }
+    const action = step.action!;
+    const key = `${action.conversationId}:${action.taskId}`;
+    const holder = holders.get(key);
+    const content = contentOf.get(action.eventId) ?? '';
+    if ((action.kind === 'assign' || action.kind === 'transfer') && action.agentId) {
+      if (holder !== action.agentId) add(action.eventId, action.at, action.conversationId, action.taskId, holder ?? 'you', action.agentId, content || `交给${participantLabel(action.agentId)}`);
+      holders.set(key, action.agentId);
+    } else if (action.kind === 'claim' && action.agentId) holders.set(key, action.agentId);
+    else if (action.kind === 'release') holders.delete(key);
+    else if (action.kind === 'propose' && action.agentId && holder && action.agentId !== holder) add(action.eventId, action.at, action.conversationId, action.taskId, action.agentId, holder, content || `${participantLabel(action.agentId)}提议交给${participantLabel(holder)}`);
   }
   return hops;
 }
