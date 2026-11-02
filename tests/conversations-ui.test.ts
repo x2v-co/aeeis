@@ -1295,6 +1295,36 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
     expect(card().querySelector('[data-teaching-action]')).toBeNull();
   });
+  it('says in the group that a person has taken over a Run, without offering to resume it', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'paused', runId: 'run_q', latestRunId: 'run_q', takenOver: { at: date } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    await vi.waitFor(() => expect(doc().querySelector('#group-transcript [data-card="takeover"]')?.textContent).toContain('人已接管'));
+    expect(doc().querySelector('#group-transcript [data-card="takeover"]')?.textContent).toContain('在工作台交还。这里只读');
+    expect(doc().querySelector('#group-transcript [data-card="takeover"]')?.textContent).not.toContain('在这个人的对话里处理');
+    expect([...doc().querySelectorAll('#group-transcript button')].some(button => button.textContent === '继续')).toBe(false);
+  });
   it('answers a Run from the inbox on the open group\'s own card, and leaves the group for a Run that is not in it', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
