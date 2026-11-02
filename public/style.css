@@ -1610,5 +1610,12 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
   body.gb.group-open #group-composer #group-handoff { width: 100%; min-width: 0; }
   body.gb.group-open #group-send-note { display: none; }
 }
+.channel-evidence-list { display: grid; gap: 6px; margin-top: 6px; }
+.channel-evidence-item p { white-space: pre-wrap; margin: 2px 0 0; }
+.channel-metrics-list { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 4px 12px; margin: 6px 0; }
+.channel-metrics-list dt { color: var(--muted); }
+.channel-metrics-list dd { margin: 0; }
+.channel-metrics-list dd small { display: block; color: var(--muted); }
+.channel-metrics-list dd[data-state="attention"] { color: var(--red); }
 .handback { display: grid; gap: 6px; width: 100%; }
 .handback textarea { width: 100%; }

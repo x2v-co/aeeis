@@ -2736,6 +2736,7 @@ async function openChannelArtifact(runId: string): Promise<void> {
   if (!panel || !body || !roomId) return;
   body.replaceChildren(element('p', '正在读取产物。看一眼不会执行。'));
   panel.hidden = false;
+  trackUi('ui.artifact.view', roomId);
   try {
     const run = await api<RunView>(`/runs/${encodeURIComponent(runId)}`);
     if (openGroupId !== roomId) return;
@@ -2750,12 +2751,47 @@ async function openChannelArtifact(runId: string): Promise<void> {
       block.append(element('strong', artifact.title.trim() || '未命名产物'));
       const text = artifact.content.trim();
       block.append(element('p', text ? (text.length > 4000 ? `${text.slice(0, 4000)}…` : text) : '这篇产物还没有正文。'));
-      if (artifact.evidenceRefs?.length) block.append(element('small', `证据：${artifact.evidenceRefs.slice(0, 8).join('、')}`));
+      if (artifact.evidenceRefs?.length) {
+        block.append(element('small', `证据：${artifact.evidenceRefs.slice(0, 8).join('、')}`));
+        block.append(evidenceToggle(run, artifact.evidenceRefs.slice(0, 8), roomId));
+      }
       body.append(block);
     }
   } catch (error) {
     body.replaceChildren(element('p', errorMessage(error)));
   }
+}
+/** Opens the sources an artifact cites, in place. Refs that are not a source of this Run stay as their id. */
+function evidenceToggle(run: RunView, refs: string[], roomId: string): HTMLElement {
+  const box = element('div', '', 'channel-evidence');
+  const list = element('div', '', 'channel-evidence-list');
+  list.hidden = true;
+  const toggle = button('看证据', async () => {
+    list.hidden = !list.hidden;
+    toggle.textContent = list.hidden ? '看证据' : '收起证据';
+    toggle.setAttribute('aria-expanded', String(!list.hidden));
+    if (list.hidden || list.childElementCount) return;
+    trackUi('ui.evidence.open', roomId);
+    const sources = new Map((run.context?.sources ?? []).map(source => [source.id, source]));
+    for (const ref of refs) {
+      const source = sources.get(ref);
+      const item = element('article', '', 'channel-evidence-item');
+      item.append(element('strong', source?.title?.trim() || ref));
+      const text = source?.content?.trim() ?? '';
+      item.append(element('p', text ? (text.length > 1200 ? `${text.slice(0, 1200)}…` : text) : '这条证据不是本次 Run 读取的资料，打开工作台看来源。'));
+      list.append(item);
+    }
+  });
+  toggle.type = 'button';
+  toggle.dataset.evidenceToggle = '';
+  toggle.setAttribute('aria-expanded', 'false');
+  box.append(toggle, list);
+  return box;
+}
+/** Interaction-design §18.2 events only the browser sees. Fire and forget: a lost count never blocks the person. */
+function trackUi(name: 'ui.channel.open' | 'ui.artifact.view' | 'ui.evidence.open' | 'ui.digest.view' | 'ui.studio.open', roomId: string): void {
+  if (readOnlyShare || !roomId) return;
+  void api('/ui-events', { name, roomId }).catch(() => undefined);
 }
 /** `live` puts the task's current state, artifact and decisions under this event. Only the
  * latest event that cites a task is live, so one plan shows one approval card in the channel. */
@@ -3474,7 +3510,7 @@ function renderGroups(all: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); }
+  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); trackUi('ui.channel.open', id); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -5485,6 +5521,7 @@ async function openChannelStudio(): Promise<void> {
   if (!roomId || !panel) return;
   panel.hidden = false;
   studioKey = '';
+  trackUi('ui.studio.open', roomId);
   await ensureCitedViews(roomId);
   if (openGroupId !== roomId) return;
   renderStudio();
@@ -5573,10 +5610,62 @@ async function openChannelDigest(): Promise<void> {
   const panel = $('channel-digest');
   if (!roomId || !panel) return;
   panel.hidden = false;
+  trackUi('ui.digest.view', roomId);
   await ensureCitedViews(roomId);
   if (openGroupId !== roomId) return;
   renderDigestBody();
-  await renderTeamRules();
+  await Promise.all([renderTeamRules(), renderChannelMetrics(roomId)]);
+}
+interface ChannelIndicatorView { key: string; value?: number; unit: 'ratio' | 'ms' | 'count'; samples: number; ok?: boolean; detail?: Record<string, number> }
+const INDICATOR_COPY: Record<string, [string, string]> = {
+  completion_rate: ['任务完成率', '建立基线'],
+  first_reply: ['首响时间（中位）', '目标 < 30 秒'],
+  cycle_time: ['任务周期（中位）', '建立基线'],
+  handoff_depth: ['交接深度（中位）', '目标中位 1–2，最多 5'],
+  parallel_use: ['并行利用率', '建立基线'],
+  interventions: ['每件的人工介入', '目标 < 0.5'],
+  intervened_share: ['有人介入的任务占比', '目标 < 50%'],
+  blocked_time: ['阻塞时长（p90）', '目标 < 4 小时'],
+  noise: ['每件的 Bot 消息数', '目标 < 6'],
+  evidence_open_rate: ['证据打开率', '目标 > 30%'],
+  duplicate_effects: ['重复副作用', '目标 0'],
+  handoff_failure_rate: ['交接失败率', '目标 < 5%'],
+};
+function formatIndicator(item: ChannelIndicatorView): string {
+  if (item.value === undefined) return '还没有数据';
+  if (item.unit === 'ratio') return `${Math.round(item.value * 100)}%`;
+  if (item.unit === 'count') return Number.isInteger(item.value) ? String(item.value) : item.value.toFixed(1);
+  const seconds = item.value / 1000;
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`;
+  if (seconds < 86_400) return `${(seconds / 3600).toFixed(1)} 小时`;
+  return `${(seconds / 86_400).toFixed(1)} 天`;
+}
+/** §18.1 for this channel over the last 7 days, computed on the server from what the room and its Runs recorded. */
+async function renderChannelMetrics(roomId: string): Promise<void> {
+  const box = $('channel-metrics');
+  if (!box) return;
+  box.replaceChildren(element('p', '正在汇总。'));
+  try {
+    const metrics = await api<{ tasks: { created: number; done: number }; indicators: ChannelIndicatorView[] }>(`/rooms/${encodeURIComponent(roomId)}/metrics?days=7`);
+    if (openGroupId !== roomId) return;
+    const list = element('dl', '', 'channel-metrics-list');
+    for (const item of metrics.indicators) {
+      const [label, target] = INDICATOR_COPY[item.key] ?? [item.key, ''];
+      const verdict = item.value === undefined ? '' : item.ok === undefined ? '' : item.ok ? ' · 达标' : ' · 未达标';
+      const extra = item.key === 'handoff_depth' && item.detail?.max !== undefined ? `，最多 ${item.detail.max}` : '';
+      const term = element('dt', label);
+      const value = element('dd', `${formatIndicator(item)}${extra}${verdict}`);
+      value.dataset.indicator = item.key;
+      if (item.ok !== undefined && item.value !== undefined) value.dataset.state = item.ok ? 'ok' : 'attention';
+      value.append(element('small', ` ${target} · ${item.samples} 个样本`));
+      list.append(term, value);
+    }
+    box.replaceChildren(element('p', `近 7 天：记下 ${metrics.tasks.created} 件，验收 ${metrics.tasks.done} 件。`), list,
+      element('small', '只统计结构、时长和次数，不读消息正文、证据内容和模型输出。'));
+  } catch (error) {
+    if (openGroupId === roomId) box.replaceChildren(element('p', errorMessage(error)));
+  }
 }
 async function saveTeamRule(event: Event): Promise<void> {
   event.preventDefault();
