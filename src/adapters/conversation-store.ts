@@ -48,7 +48,7 @@ const schema = z.object({
     notificationRunId: runId.optional(),
     source: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('channel'), channel: z.string().regex(/^[a-z][a-z0-9_.-]{1,63}$/), externalEventId: z.string().min(1).max(500), receivedAt: timestamp }).strict(),
-      z.object({ kind: z.literal('routine'), routineId: z.string().regex(/^routine_[a-f0-9-]{36}$/), deliveryId: z.string().min(1).max(200), trigger: z.enum(['schedule', 'webhook']) }).strict(),
+      z.object({ kind: z.literal('routine'), routineId: z.string().regex(/^routine_[a-f0-9-]{36}$/), deliveryId: z.string().min(1).max(200), trigger: z.enum(['schedule', 'webhook', 'manual']) }).strict(),
     ]).optional(),
   }).strict()).max(1000),
 }).strict();

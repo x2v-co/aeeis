@@ -75,6 +75,7 @@ import { JsonSessionEventRepository, PostgresSessionEventRepository, SessionEven
 import { loadFileEnvironment } from './config-secrets.js';
 import { prepareDatabaseSecurity } from './database-security.js';
 import { JsonDeviceSessionRepository, PostgresDeviceSessionRepository, type DeviceSessionRepository } from './device-sessions.js';
+import { JsonUiEventCountStore, PostgresUiEventCountStore, type UiEventCountStore } from './ui-event-counts.js';
 import { FileResourceRegistry, type ResourceRegistry } from './runtime/resources.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
 
@@ -260,6 +261,10 @@ const deviceSessions: DeviceSessionRepository = process.env.DATABASE_URL
   ? new PostgresDeviceSessionRepository(process.env.DATABASE_URL)
   : new JsonDeviceSessionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/device-sessions.json`);
 await deviceSessions.init?.();
+const uiEvents: UiEventCountStore = process.env.DATABASE_URL
+  ? new PostgresUiEventCountStore(process.env.DATABASE_URL)
+  : new JsonUiEventCountStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/ui-event-counts.json`);
+await uiEvents.init?.();
 const taskDispatchRepository = process.env.DATABASE_URL
   ? new PostgresTaskDispatchRepository(process.env.DATABASE_URL)
   : new FileTaskDispatchRepository(process.env.AEEIS_TASK_DISPATCH_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/task-dispatch.json`);
@@ -583,6 +588,7 @@ try {
     ...(channelIdentityResolver ? { channelIdentityResolver } : {}),
     sessionEvents,
     deviceSessions,
+    uiEvents,
     ownedBots,
     actionPolicies,
     routines: routineStore,
@@ -915,7 +921,7 @@ try {
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
+} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
