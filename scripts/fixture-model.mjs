@@ -149,6 +149,13 @@ function responseFor(system, input) {
   const answers = Array.isArray(input.answers) ? input.answers.filter((answer) => typeof answer?.answer === 'string' && answer.answer.trim()) : [];
   const catalogTools = Array.isArray(input.capabilityCatalog?.tools) ? input.capabilityCatalog.tools : [];
   const websiteRun = system.includes('website-builder/1');
+  // A task named with "先问我" stops once to ask, so a demo can walk blocked → answered → delivered. Only the task's own
+  // line counts: a Bot's Run goal also quotes the whole message and its sibling tasks.
+  const goal = String(input.goal ?? '');
+  if ((goal.match(/^任务：(.*)$/m)?.[1] ?? goal).includes('先问我') && input.task?.id === 'inspect' && !(input.observations?.length)) {
+    if (!answers.length) return { type: 'question', question: '开始之前想先确认一下：这件事以哪个范围为准？' };
+    return { type: 'finish', title: '按你的回答做完了', content: `按你的回答做完了：${answers.at(-1).answer.trim()}`, evidenceRefs: source?.id ? [source.id] : [] };
+  }
   if (websiteRun && input.task?.id === 'inspect' && !(input.observations?.length)) {
     const globTool = catalogTools.find((tool) => tool?.id === 'glob');
     if (globTool) return { type: 'capability', toolId: globTool.id, toolVersion: String(globTool.version), input: { pattern: '**/*', limit: 100 }, purpose: 'Inspect the website workspace before changing files.' };
