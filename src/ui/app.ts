@@ -5864,7 +5864,7 @@ function syncNotifyToggle(): void {
   const note = $('attention-notify-note');
   if (!toggle || !note) return;
   const supported = typeof Notification !== 'undefined';
-  toggle.disabled = !supported;
+  toggle.disabled = !supported || Notification.permission === 'denied';
   toggle.checked = supported && notificationsWanted() && Notification.permission === 'granted';
   note.textContent = !supported ? '这个浏览器不支持通知。' : Notification.permission === 'denied' ? '浏览器拒绝了通知，要在浏览器设置里打开。' : toggle.checked ? '只在页面不在前台时提醒，同一件事只提醒一次。' : '默认关闭。';
 }
@@ -5876,6 +5876,7 @@ async function changeNotifications(): Promise<void> {
   syncNotifyToggle();
 }
 $('attention-notify')?.addEventListener('change', () => { void changeNotifications().catch(error => message(errorMessage(error))); });
+syncNotifyToggle();
 function renderAttentionInbox(runs: RunSummary[]): void {
   lastInboxRuns = runs;
   if (typingNow()) {

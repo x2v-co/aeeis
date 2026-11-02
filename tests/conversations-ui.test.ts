@@ -275,7 +275,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
 }
 /** Interval callbacks the page registered; tests fire them by hand. */
 let intervals: Array<{ callback: () => void; ms: number }> = [];
-function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string> } = {}) {
+function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string>; setup?: (window: any) => void } = {}) {
   dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
@@ -288,6 +288,7 @@ function start(fetch: any, saved: { local?: Record<string, string>; session?: Re
   dom.window.fetch = fetch; dom.window.setInterval = ((callback: () => void, ms: number) => { intervals.push({ callback, ms }); return intervals.length; }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
+  saved.setup?.(dom.window);
   dom.window.eval(source);
 }
 const doc = () => dom.window.document;
@@ -1015,6 +1016,86 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
   });
 
+  it('sends a browser notification once for each new approval or question, only when turned on and the page is away', async () => {
+    const shown: Array<{ title: string; body: string; tag: string }> = [];
+    let permission = 'default';
+    class FakeNotification {
+      static get permission() { return permission; }
+      static async requestPermission() { permission = 'granted'; return permission; }
+      onclick: (() => void) | null = null;
+      constructor(title: string, options: { body: string; tag: string }) { shown.push({ title, body: options.body, tag: options.tag }); }
+      close() {}
+    }
+    const runs = [{ id: 'run_old', goal: '整理旧计划', status: 'needs_approval', updatedAt: date }] as Array<{ id: string; goal: string; status: string; updatedAt: string }>;
+    const h = harness(undefined, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      return undefined;
+    } });
+    start(h.fetch, { setup: window => { window.Notification = FakeNotification; window.document.hasFocus = () => false; } });
+    await ready();
+    const tick = async () => { intervals.find(item => item.ms === 2000)!.callback(); await new Promise(resolve => setTimeout(resolve, 60)); };
+    await vi.waitFor(() => expect(el('attention-notify-note').textContent).toBe('默认关闭。'));
+    expect(el<HTMLInputElement>('attention-notify').checked).toBe(false);
+    // Off by default: nothing is shown for a new approval.
+    runs.push({ id: 'run_quiet', goal: '不提醒的这件', status: 'needs_input', updatedAt: date });
+    await tick();
+    expect(shown).toHaveLength(0);
+    el<HTMLInputElement>('attention-notify').checked = true;
+    el('attention-notify').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(el('attention-notify-note').textContent).toContain('同一件事只提醒一次'));
+    expect(dom.window.localStorage.getItem('aeeis.notify-s1')).toBe('1');
+    // Turning it on does not announce what was already waiting.
+    await tick();
+    expect(shown).toHaveLength(0);
+    runs.push({ id: 'run_new', goal: '确认发版时间', status: 'needs_input', updatedAt: date });
+    runs.push({ id: 'run_failed', goal: '失败的这件', status: 'failed', updatedAt: date });
+    await tick();
+    await vi.waitFor(() => expect(shown).toHaveLength(1));
+    expect(shown[0]).toMatchObject({ title: '提问：确认发版时间', tag: 'run:run_new:needs_input' });
+    await tick(); await tick();
+    expect(shown).toHaveLength(1);
+    // It left the inbox and came back: a new event, told once more.
+    runs.find(run => run.id === 'run_new')!.status = 'running';
+    await tick();
+    runs.find(run => run.id === 'run_new')!.status = 'needs_input';
+    await tick();
+    await vi.waitFor(() => expect(shown).toHaveLength(2));
+    // A focused page already shows the inbox.
+    dom.window.document.hasFocus = () => true;
+    runs.push({ id: 'run_seen', goal: '看得见的这件', status: 'needs_approval', updatedAt: date });
+    await tick();
+    expect(shown).toHaveLength(2);
+  });
+  it('keeps the notification switch off and explains why when the browser refuses or lacks notifications', async () => {
+    start(harness().fetch, { setup: window => { window.Notification = class { static permission = 'denied'; static async requestPermission() { return 'denied'; } }; } });
+    await ready();
+    expect(el<HTMLInputElement>('attention-notify').disabled).toBe(true);
+    expect(el('attention-notify-note').textContent).toBe('浏览器拒绝了通知，要在浏览器设置里打开。');
+    start(harness().fetch);
+    await ready();
+    expect(el<HTMLInputElement>('attention-notify').disabled).toBe(true);
+    expect(el('attention-notify-note').textContent).toBe('这个浏览器不支持通知。');
+  });
+  it('holds new inbox items while someone is typing and shows them once they stop', async () => {
+    const runs = [] as Array<{ id: string; goal: string; status: string; updatedAt: string }>;
+    const h = harness(undefined, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const tick = async () => { intervals.find(item => item.ms === 2000)!.callback(); await new Promise(resolve => setTimeout(resolve, 60)); };
+    const field = el<HTMLTextAreaElement>('conversation-text');
+    field.focus();
+    field.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    runs.push({ id: 'run_new', goal: '确认发版时间', status: 'needs_approval', updatedAt: date });
+    await tick();
+    expect(el('attention-toggle').hidden).toBe(true);
+    expect(doc().activeElement).toBe(field);
+    field.blur();
+    await vi.waitFor(() => expect(el('attention-toggle').hidden).toBe(false), { timeout: 3000 });
+    expect(el('attention-toggle').dataset.count).toBe('1');
+  });
   it('names a life-thread Run by its task, not by the header the model reads', async () => {
     const goal = '私聊：agent:bot_0000aaaa\n说话人：agent:bot_0000bbbb\n任务：整理一份发布风险\n当前请求：我来做这件事。';
     const h = harness(undefined, { handler(url) {
