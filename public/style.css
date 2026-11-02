@@ -1617,3 +1617,5 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 .channel-metrics-list dd { margin: 0; }
 .channel-metrics-list dd small { display: block; color: var(--muted); }
 .channel-metrics-list dd[data-state="attention"] { color: var(--red); }
+.handback { display: grid; gap: 6px; width: 100%; }
+.handback textarea { width: 100%; }

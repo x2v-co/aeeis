@@ -539,9 +539,20 @@ sudo systemctl enable --now "aeeis-stack@$AEEIS_STACK.service" \
 ```
 
 Set `AEEIS_NOTIFY_WEBHOOK` in `STACK_ENV` to an approved regional webhook that
-accepts JSON `{"text":"..."}`. Backup/health failures trigger
-`aeeis-notify@<instance>.service`; an unset webhook logs to its journal, and
-delivery errors never fail hard. Check with
+accepts JSON `{"text":"..."}`. Hosts `open.feishu.cn` and `open.larksuite.com`
+automatically use Feishu's `{"msg_type":"text","content":{"text":"..."}}`
+payload; set `AEEIS_NOTIFY_FORMAT=feishu` to select it for another host.
+Feishu replies require numeric `code=0` (or `StatusCode=0`); rejected/invalid
+replies and transport errors log a URL-free error and exit non-zero.
+Webhook requests bypass proxies unless `AEEIS_NOTIFY_WEBHOOK_PROXY` is set.
+For Telegram fallback, set `AEEIS_NOTIFY_TG_BOT_TOKEN` and
+`AEEIS_NOTIFY_TG_CHAT_ID`; Telegram still sends after a webhook failure and uses
+`AEEIS_NOTIFY_PROXY`, or the first line of `AEEIS_NOTIFY_PROXY_FILE`
+(default `/etc/notify-failure/proxy`; `KEY=url` form accepted).
+Backup/health failures trigger `aeeis-notify@<instance>.service`; with neither
+target configured, alerts log to its journal only. Generic webhook and Telegram
+delivery remain best effort, and the notification unit ignores handler errors
+to preserve the original service failure. Check with
 `sudo systemctl start "aeeis-notify@$AEEIS_STACK.service"` and
 `sudo journalctl -u "aeeis-notify@$AEEIS_STACK.service" -n 20`. A manual check
 sends a test failure message. Keep the legacy auto-start units disabled.
