@@ -2835,6 +2835,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     const extra = element('div', '', 'group-run-card');
     extra.dataset.card = 'approval';
     extra.dataset.handoff = cite.taskId;
+    extra.dataset.run = task.runId;
     extra.append(element('strong', '审批'), element('small', `待批准：${task.pendingApproval.summary}`), element('small', '在这里批准或拒绝。不会改讨论焦点，也不会另开一件 Run。'));
     const approve = dashboardButton('批准并执行', () => approveConversationTask(task, 'task'));
     approve.dataset.approve = task.id;
@@ -2856,6 +2857,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     const extra = element('div', '', 'group-run-card');
     extra.dataset.card = 'question';
     extra.dataset.handoff = cite.taskId;
+    extra.dataset.run = task.runId;
     extra.append(element('strong', '提问'), element('small', `待回答：${task.pendingQuestion.text}`), element('small', '在这里回答。不会改讨论焦点，也不会另开一件 Run。'));
     const field = document.createElement('textarea');
     field.className = 'conversation-answer'; field.maxLength = 8000; field.rows = 2;
@@ -5751,6 +5753,20 @@ function attentionCopy(status: string): [string, string] {
   return copy[status] ?? ['需要关注', '打开运行查看下一步'];
 }
 async function openAttentionRun(run: RunSummary): Promise<void> {
+  if (document.body.classList.contains('group-open')) {
+    // The workbench is hidden in a group: answer or approve on this group's own card, else leave the group for the workbench.
+    const cardFor = () => [...document.querySelectorAll<HTMLElement>('#group-transcript [data-run]')].find(item => item.dataset.run === run.id);
+    if (cardFor()) {
+      setAttentionInboxOpen(false);
+      hideChannelSurfaces();
+      renderGroupTranscript();
+      const card = cardFor();
+      card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card?.querySelector<HTMLElement>('textarea[data-answer], button')?.focus();
+      return;
+    }
+    leaveGroup();
+  }
   currentId = run.id;
   localStorage.setItem('aeeis.run', run.id);
   current = undefined;
