@@ -412,6 +412,8 @@ export interface AgentRun {
   review?: Review;
   error?: string;
   resumeStatus?: RunStatus;
+  /** A person paused the Bot to do the work by hand. Handing back writes a note to the unfinished steps and resumes. */
+  takeover?: { by: string; at: string };
   resumeModelCallId?: string;
   /** How an interrupted model call should be handled after provider reconciliation. */
   reconcileDisposition?: 'running' | 'paused' | 'cancelled';

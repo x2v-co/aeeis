@@ -50,6 +50,7 @@ interface RunGraphsView {
 interface RunView extends RunSummary {
   workingMemoryEnabled?: boolean;
   canEdit?: boolean;
+  takeover?: { by: string; at: string };
   actionApproval?: { status: 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string; idempotencyKey: string; reason: string; decision?: string };
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
@@ -87,7 +88,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
@@ -337,7 +338,7 @@ function eventLabel(type: string): string {
     'external.usage.recorded': '外部用量已记录', 'external.usage_recorded': '外部用量已记录', 'external.budget_stopped': '外部预算已停止',
     'model.usage_recorded': '模型用量已记录',
     'input.requested': '等待补充信息', 'input.received': '已收到补充信息', 'review.requested': '开始独立审核', 'review.completed': '审核完成',
-    'plan.repair_requested': '计划格式修复中', 'plan.revision_requested': '已请求修改计划', 'run.paused': '运行已暂停', 'run.resumed': '运行已继续',
+    'plan.repair_requested': '计划格式修复中', 'plan.revision_requested': '已请求修改计划', 'run.paused': '运行已暂停', 'run.resumed': '运行已继续', 'run.taken_over': '人已接管', 'run.handed_back': '人已交还，Bot 接着做',
     'run.retry_requested': '已请求重试', 'run.reconciled': '状态已对齐', 'run.interrupted': '运行中断', 'run.cancel.workflow_failed': '取消后台任务失败',
     'run.cancelled_reconcile_requested': '已请求核查取消前的调用', 'run.cancelled_reconcile_failed': '取消前的调用核查失败', 'artifact.created': '产物已生成',
     'model.unknown': '模型结果待核查', 'model.reconciled': '模型结果已核查', 'model.validation_failed': '模型输出校验失败', 'model.budget_stopped': '模型预算已停止',
@@ -2048,6 +2049,7 @@ function citedTaskSignature(event: SessionEventSummary): string {
     latestRunId: task.latestRunId ?? '',
     approval: task.pendingApproval?.summary ?? '',
     question: task.pendingQuestion?.text ?? '',
+    takenOver: task.takenOver?.at ?? '',
     steps: (task.execution?.steps ?? []).map(step => `${step.state}:${step.title}`),
     evidence: task.execution?.evidence ?? [],
     plan: delivery?.planSummary ?? '',
@@ -2824,11 +2826,11 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     }
     item.append(artifact);
   }
-  const decision = (kind: string, title: string, copy: string) => {
+  const decision = (kind: string, title: string, copy: string, where = '在这个人的对话里处理。') => {
     const extra = element('div', '', 'group-run-card');
     extra.dataset.card = kind;
     extra.dataset.handoff = cite.taskId;
-    extra.append(element('strong', title), element('small', copy), element('small', '在这个人的对话里处理。这里只读，不会执行。'));
+    extra.append(element('strong', title), element('small', copy), element('small', `${where}这里只读，不会执行。`));
     item.append(extra);
   };
   if (task.pendingApproval && task.runId) {
@@ -2871,6 +2873,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
     extra.append(field, submit);
     item.append(extra);
   } else if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
+  if (task.takenOver) decision('takeover', '人已接管', 'Bot 停下了，由人来做。做完后写一句说明交还，Bot 接着做。', '在工作台交还。');
   if (task.status === 'unknown' || task.status === 'waiting_external') decision('reconcile', '核查', task.status === 'unknown' ? '结果需要核查。' : '还在等外部回执。');
   if (task.status === 'failed') decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
 }
@@ -4334,7 +4337,8 @@ function renderConversation(): void {
         pause.dataset.runPause = task.id;
         actions.append(pause);
       }
-      if (runId && task.status === 'paused') {
+      if (runId && task.status === 'paused' && task.takenOver) actions.append(element('small', '人已接管。做完后在工作台写说明交还。'));
+      else if (runId && task.status === 'paused') {
         const resume = dashboardButton('继续', () => controlConversationRun(task, 'resume'));
         resume.dataset.runResume = task.id;
         actions.append(resume);
@@ -7162,6 +7166,27 @@ async function renderCandidateDetail(): Promise<void> {
   }));
   if (['approved', 'shadowing', 'canarying', 'held', 'promoted'].includes(candidate.status)) controls.append(button('回滚候选', async () => { const reason = window.prompt('回滚原因（必填）')?.trim(); if (reason) await candidateCommand(candidate.id, 'rollback', { reason }); }));
 }
+function canTakeOver(run: RunView): boolean {
+  return !run.takeover && run.steps.length > 0 && ['running', 'reviewing', 'paused'].includes(run.status);
+}
+async function takeOverRun(run: RunView): Promise<void> {
+  if (!window.confirm(`接管「${runTitle(run)}」？Bot 会停下，由你来做。做完后写一句说明交还，Bot 从你做到的地方接着做。接管不绕过审批。`)) return;
+  await command('takeover');
+}
+function handbackControls(): HTMLElement {
+  const box = element('div', '', 'handback');
+  const note = document.createElement('textarea');
+  note.id = 'handback-note'; note.maxLength = 2000; note.rows = 2;
+  note.placeholder = '写下你做了什么、做到哪一步。交还后 Bot 读这句接着做。';
+  note.setAttribute('aria-label', '交还说明');
+  const submit = button('交还', async () => {
+    const text = note.value.trim();
+    if (!text) { message('交还前写一句说明：你做了什么、做到哪一步。'); note.focus(); return; }
+    await command('handback', { note: text });
+  });
+  box.append(element('small', '你已接管，Bot 停在这里。'), note, submit);
+  return box;
+}
 async function command(action: string, body: unknown = {}): Promise<void> {
   await api(`/runs/${currentId}/${action}`, body);
   await refresh();
@@ -7188,7 +7213,8 @@ function updateRunActivity(run: RunView): void {
   };
   const latest = run.events.at(-1);
   const compacting = ['running', 'reviewing'].includes(run.status) ? compactionProgress(latest) : undefined;
-  const [title, detail] = compacting ?? copy[run.status] ?? ['运行状态已更新', `当前状态：${run.status}`];
+  const taken: [string, string] | undefined = run.status === 'paused' && run.takeover ? ['你已接管', 'Bot 停在这里。做完后写一句说明交还，Bot 接着做'] : undefined;
+  const [title, detail] = compacting ?? taken ?? copy[run.status] ?? ['运行状态已更新', `当前状态：${run.status}`];
   if (stage.textContent !== title) stage.textContent = title;
   const anchor = run.events.find(event => ['run.created', 'run.started', 'run.planned'].includes(event.type))?.at ?? run.updatedAt;
   const elapsedMs = anchor ? Date.now() - Date.parse(anchor) : 0;
@@ -7246,7 +7272,7 @@ function renderRunDecision(run: RunView): void {
     failed: ['运行失败', '可以重试失败步骤，或让 Agent 重新规划。'],
     cancelled: ['已取消', '取消前的状态、证据和外部调用仍然可追溯。'],
   };
-  const [badge, badgeDetail] = labels[run.status] ?? ['状态更新', `当前状态：${run.status}`];
+  const [badge, badgeDetail] = run.status === 'paused' && run.takeover ? ['人已接管', 'Bot 停在这里，由你来做。做完后写一句说明交还，Bot 从你做到的地方接着做。'] : labels[run.status] ?? ['状态更新', `当前状态：${run.status}`];
   const plan = run.plans.at(-1);
   const total = plan?.nodes.length ?? run.steps.length;
   const doneStatuses = new Set(['succeeded', 'completed', 'done']);
@@ -7370,6 +7396,7 @@ function renderRunDecision(run: RunView): void {
     paused: ['继续运行', '所有已产生的事实和证据都会被保留。'],
     succeeded: ['查看证据与产物', '交付已经完成，可以继续沉淀为长期目标。'],
   };
+  if (run.status === 'paused' && run.takeover) actions.paused = ['写说明并交还', '写下你做了什么、做到哪一步，Bot 读这句接着做。'];
   let [action, detail] = actions[run.status] ?? (active ? [`等待「${nodeLabel}」完成`, 'Agent 正在执行，新的事件会自动出现。'] : ['等待下一步', '运行状态变化后，这里会给出可执行动作。']);
   if (run.status === 'queued' && !taskSchedulerConfigured) {
     action = '等待运行服务配置';
@@ -7404,6 +7431,7 @@ function renderRunDecision(run: RunView): void {
       openInputPanel('reconcile');
     });
     else if (run.status === 'failed') installAction('重试失败步骤', () => command('retry'));
+    else if (run.status === 'paused' && run.takeover) installAction('写说明并交还', async () => { $<HTMLTextAreaElement>('handback-note')?.focus(); });
     else if (run.status === 'paused') installAction('继续运行', () => command('resume'));
     else if (run.status === 'succeeded') installAction('查看证据与产物', async () => {
       setRunDetailsMode(true);
@@ -7553,7 +7581,9 @@ function render(run: RunView): void {
   const controls = $('controls'); controls.replaceChildren();
   controls.hidden = readOnlyShare || run.canEdit === false;
   if (['queued', 'planning', 'running', 'reviewing'].includes(run.status)) controls.append(button('暂停', () => command('pause')));
-  if (run.status === 'paused') controls.append(button('继续', () => command('resume')));
+  if (run.status === 'paused' && !run.takeover) controls.append(button('继续', () => command('resume')));
+  if (canTakeOver(run)) controls.append(button('接管', () => takeOverRun(run)));
+  if (run.takeover && run.status === 'paused') controls.append(handbackControls());
   if (run.status === 'waiting_external') controls.append(button('核查外部 Agent 结果', async () => { openInputPanel('reconcile'); }));
   if (run.status === 'needs_input' || run.status === 'unknown') controls.append(button(run.status === 'unknown' ? '填写核查说明' : '填写补充信息', async () => {
     openInputPanel(run.status === 'unknown' ? 'reconcile' : 'answer');
@@ -7845,6 +7875,7 @@ function renderDeliverySummary(run: RunView): void {
     failed: '运行未完成，可以查看原因并重试或重新规划。',
     cancelled: '运行已取消；已有产物和证据仍可查看。',
   };
+  if (run.status === 'paused' && run.takeover) messages.paused = '人已接管，Bot 停在这里。交还后它从你做到的地方接着做。';
   $('delivery-message').textContent = messages[run.status] ?? `当前状态：${runStatusLabel(run.status)}`;
   const metrics = $('delivery-metrics'); metrics.replaceChildren();
   const plan = run.plans.at(-1);

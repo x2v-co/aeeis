@@ -429,7 +429,7 @@ export class ConversationService implements LifeThreadInbox {
         catch { machine = { state: 'unknown', ready: false }; }
       }
       const execution = executionView(run);
-      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
+      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const lastDelivery = this.latestDelivery(loaded);

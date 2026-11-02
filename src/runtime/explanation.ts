@@ -21,7 +21,7 @@ export interface RunExplanation {
     updatedAt: string;
   };
   attention: {
-    kind: 'none' | 'approve_plan' | 'approve_action' | 'provide_input' | 'reconcile_external' | 'resume' | 'review' | 'inspect_failure';
+    kind: 'none' | 'approve_plan' | 'approve_action' | 'provide_input' | 'reconcile_external' | 'resume' | 'hand_back' | 'review' | 'inspect_failure';
     nextAction: string;
     blockers: Array<{ kind: string; detail: string; refs: string[] }>;
   };
@@ -91,6 +91,7 @@ function attentionFor(run: AgentRun): RunExplanation['attention'] {
     return { kind: 'provide_input', nextAction: '回答 Agent 的问题，提供继续执行所需的信息。', blockers: [{ kind: 'input', detail, refs: run.question?.taskId ? [run.question.taskId] : [] }] };
   }
   if (run.status === 'waiting_external' || run.status === 'unknown') return { kind: 'reconcile_external', nextAction: '核查外部 Tool、Agent 或模型的最终结果；不明结果不会被盲目重试。', blockers: [{ kind: run.status, detail: run.pendingTool ? `等待 Tool ${run.pendingTool.toolId} 的核查` : run.pendingDelegation?.failure ? `Agent 返回被拒绝（${run.pendingDelegation.failure.kind}）：${run.pendingDelegation.failure.message}` : run.pendingDelegation ? `等待 Agent ${run.pendingDelegation.agentId} 的核查` : '存在需要显式核查的外部结果', refs: [ ...(run.pendingTool?.receiptId ? [run.pendingTool.receiptId] : []), ...(run.pendingDelegation?.receiptRef ? [run.pendingDelegation.receiptRef] : []) ] }] };
+  if (run.status === 'paused' && run.takeover) return { kind: 'hand_back', nextAction: '人已接管。做完后写一句说明交还，Bot 从那里接着做；或取消本次 Run。', blockers: [{ kind: 'taken_over', detail: '人接管了这件事，Bot 停在这里，不会自己继续。', refs: [] }] };
   if (run.status === 'paused') return { kind: 'resume', nextAction: '确认边界后恢复运行，或取消本次 Run。', blockers: [{ kind: 'paused', detail: 'Run 已暂停，外部结果不会自动唤醒它。', refs: [] }] };
   if (run.status === 'reviewing') return { kind: 'review', nextAction: '等待独立审核完成，或检查审核输入和证据。', blockers: [{ kind: 'review', detail: '产物已生成，正在等待独立 Reviewer。', refs: [] }] };
   if (run.status === 'failed') return { kind: 'inspect_failure', nextAction: '检查失败原因和证据，再决定重试、纠正或重新规划。', blockers: [{ kind: 'failure', detail: run.error ?? 'Run 执行失败', refs: [] }] };

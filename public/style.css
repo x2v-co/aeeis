@@ -1614,3 +1614,5 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 .upgrade-card p { margin: 4px 0; white-space: pre-wrap; }
 .upgrade-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .upgrade-actions textarea { flex: 1 1 100%; }
+.handback { display: grid; gap: 6px; width: 100%; }
+.handback textarea { width: 100%; }
