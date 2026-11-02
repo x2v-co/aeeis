@@ -81,7 +81,8 @@ export interface BoardDecision {
 }
 /** `automatic`: the server wrote this receipt for a Bot (a proposal or a handoff line), not the person. */
 export interface BoardCitation { eventId: string; sequence?: number; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string; automatic?: boolean }
-export interface BoardActionMark { eventId: string; sequence?: number; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string }
+/** `automatic`: the server wrote this action for a Bot (a proposal, a handoff and its outcome), not the person. */
+export interface BoardActionMark { eventId: string; sequence?: number; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string; automatic?: boolean }
 /** Records the server writes for the Bots: replies, proposals, handoffs and reassignment. */
 export function automaticKey(key: string | undefined): boolean {
   return /^(bot-|handoff-)/.test(key ?? '');
@@ -319,7 +320,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       if (line) chains.set(key, [...(chains.get(key) ?? []), line]);
       if ((action.kind === 'claim' || action.kind === 'assign' || action.kind === 'transfer') && action.agentId) holders.set(key, action.agentId);
     }
-    if (action) actions.push({ eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}) });
+    if (action) actions.push({ eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}), ...(automaticKey(event.idempotencyKey) ? { automatic: true } : {}) });
   }
   const cards: BoardCard[] = [];
   for (const [key, cite] of firstCite) {

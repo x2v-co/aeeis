@@ -1632,3 +1632,9 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 .channel-metrics-list dd[data-state="attention"] { color: var(--red); }
 .handback { display: grid; gap: 6px; width: 100%; }
 .handback textarea { width: 100%; }
+.task-replay { display: grid; gap: 6px; margin-top: 8px; }
+.task-replay p { margin: 0; }
+.task-replay-list { margin: 0; padding-left: 20px; color: var(--muted); }
+.task-replay-list li[data-current="true"] { color: var(--ink); font-weight: 600; }
+.task-replay-nav { display: flex; gap: 6px; }
+.task-replay-nav button { width: auto; }

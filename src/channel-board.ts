@@ -41,6 +41,12 @@ export class ChannelBoardService {
     private readonly nameOf: BoardNameReader = async () => undefined,
   ) {}
 
+  /** Display name of a participant; the id itself when there is none. */
+  async nameFor(agentId: string, tenantId: string): Promise<string> {
+    if (agentId === 'aeeis') return 'AEEIS';
+    return await this.nameOf(agentId, tenantId).catch(() => undefined) ?? agentId;
+  }
+
   async board(roomId: string, actorId: string, tenantId: string): Promise<ChannelBoard> {
     const history = await this.events.history(roomId, actorId, tenantId);
     const conversations = await this.conversations(history, actorId, tenantId);
