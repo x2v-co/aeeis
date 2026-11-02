@@ -511,6 +511,8 @@
 <button type="button" class="quiet-button" data-digest-window="week" aria-pressed="true">本周</button>
 </div>
 <div id="channel-digest-body"></div>
+<h4>度量</h4>
+<div id="channel-metrics"></div>
 <form id="channel-rule-form">
 <label for="channel-rule-text">团队规则</label>
 <textarea id="channel-rule-text" maxlength="500" required placeholder="例如：发布风险必须先查变更记录"></textarea>
@@ -560,6 +562,7 @@
 <div id="channel-task-body"></div>
 </section>
 <ol id="group-transcript" aria-label="会话记录"></ol>
+<section id="channel-upgrades" aria-label="团队升级" hidden></section>
 <p id="group-thread-empty" class="muted">还没有消息。写下共同要完成的事，并用 @ 点名下一步交给谁。</p>
 <form id="group-composer">
 <div class="quick-input-row">

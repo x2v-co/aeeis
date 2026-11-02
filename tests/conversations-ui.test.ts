@@ -30,6 +30,7 @@ function runFixture() {
 }
 function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; handler?: (url: string, options: any) => any } = {}) {
   const posts: Array<{ url: string; body: any; key: string; raw: string }> = [];
+  const uiEvents: Array<{ name: string; roomId: string }> = [];
   const lives = new Map<string, any>();
   const conversationFor = (requestUrl: string) => {
     const match = String(requestUrl).match(/\/api\/conversations\/([^/?]+)/);
@@ -70,7 +71,9 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     return projectChannelBoard(roomId, items, conversations, nameOf);
   };
   const fetch = vi.fn(async (url: string, request: any) => {
-    if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
+    // §18.2 counts change no state; `uiEvents` keeps them apart from the writes these tests guard.
+    if (request.method === 'POST' && url === '/api/ui-events') uiEvents.push(JSON.parse(request.body));
+    else if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
     const boardRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/board$/)?.[1];
     if (boardRoom) return response(await mockBoard(decodeURIComponent(boardRoom)));
     const actionRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/task-actions$/)?.[1];
@@ -271,7 +274,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (url.includes('/page?')) return response({ items: [], goals: [] });
     return response([]);
   });
-  return { view, fetch, posts, setPrincipal(value: string) { principal = value; } };
+  return { view, fetch, posts, uiEvents, setPrincipal(value: string) { principal = value; } };
 }
 /** Interval callbacks the page registered; tests fire them by hand. */
 let intervals: Array<{ callback: () => void; ms: number }> = [];
@@ -1294,6 +1297,148 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(card().dataset.state).toBe('revoked'));
     expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
     expect(card().querySelector('[data-teaching-action]')).toBeNull();
+  });
+  it('shows Bot upgrades as cards in the group, acts on them by state, and gives a member only a summary', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'needs_input', runId: 'run_q', latestRunId: 'run_q', pendingQuestion: { text: '哪天发？' } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    const upgrades: any[] = [
+      { kind: 'full', id: 'evo_one', target: 'prompt', baseVersion: 'prompt/1', version: 'prompt/2', status: 'evaluating', updatedAt: date, change: '先写结论', reason: '三次被要求先写结论', risk: 'low',
+        evaluations: [{ kind: 'replay', passed: true, score: 0.9 }], evaluated: true, shadow: { passed: 0, failed: 0, needed: 1 }, canary: { passed: 0, failed: 0, needed: 1 }, sources: 2, fromThisChannel: true, affectedChannels: 3, active: false, canActivate: true },
+      { kind: 'full', id: 'evo_two', target: 'skill', baseVersion: 's/1', version: 's/2', status: 'promoted', updatedAt: date, change: '换检索', reason: '更快', risk: 'medium',
+        evaluations: [], evaluated: true, shadow: { passed: 3, failed: 0, needed: 3 }, canary: { passed: 3, failed: 0, needed: 3 }, sources: 1, fromThisChannel: false, affectedChannels: 3, active: true, canActivate: true },
+      { kind: 'summary', id: 'evo_three', target: 'model-policy', version: 'm/2', status: 'shadowing', updatedAt: date },
+    ];
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (url === '/api/rooms/room_team/upgrades') return response({ items: upgrades });
+      if (method === 'POST' && String(url).startsWith('/api/evolution/candidates/')) {
+        const [, , , , id, action] = String(url).split('/');
+        const item = upgrades.find(candidate => candidate.id === id)!;
+        item.status = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : action === 'rollback' ? 'rolled_back' : action === 'promote' ? 'promoted' : item.status;
+        return response({ id, status: item.status });
+      }
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    const card = (id: string) => doc().querySelector<HTMLElement>(`#channel-upgrades [data-upgrade="${id}"]`);
+    await vi.waitFor(() => expect(card('evo_one')).not.toBeNull());
+    expect(el('channel-upgrades').hidden).toBe(false);
+    expect(card('evo_one')!.textContent).toContain('升级：提示词从 prompt/1 到 prompt/2');
+    expect(card('evo_one')!.textContent).toContain('改什么：先写结论');
+    expect(card('evo_one')!.textContent).toContain('为什么：三次被要求先写结论');
+    expect(card('evo_one')!.textContent).toContain('回放通过 0.9 · 2 条来源 · 由这个群里的一件事引出');
+    expect(card('evo_one')!.textContent).toContain('上线并启用后，你的 3 个群聊里 Bot 新开的 Run 用这个版本；正在做的事不受影响');
+    expect(card('evo_two')!.textContent).toContain('已用到新 Run');
+    expect(card('evo_two')!.textContent).toContain('影子运行 3/3 通过');
+    expect(card('evo_two')!.querySelector('[data-upgrade-action="reject"]')).toBeNull();
+    expect(card('evo_two')!.querySelector('[data-upgrade-action="rollback"]')).not.toBeNull();
+    expect(card('evo_three')!.dataset.upgradeKind).toBe('summary');
+    expect(card('evo_three')!.textContent).toBe('团队升级模型选择升到 m/2 · 影子运行中');
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="approve"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_one/approve')?.body).toEqual({ approvalRef: 'room:room_team' }));
+    await vi.waitFor(() => expect(card('evo_one')!.querySelector('[data-upgrade-action="promote"]')).not.toBeNull());
+    expect(card('evo_one')!.querySelector('[data-upgrade-action="start-shadow"]')).not.toBeNull();
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="reject"]')!.click();
+    await vi.waitFor(() => expect(el('error').textContent).toContain('拒绝前写下原因'));
+    expect(h.posts.some(post => post.url.endsWith('/reject'))).toBe(false);
+    card('evo_one')!.querySelector<HTMLTextAreaElement>('textarea[data-upgrade-reason]')!.value = '先不改语气';
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="reject"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_one/reject')?.body).toEqual({ reason: '先不改语气' }));
+    await vi.waitFor(() => expect(card('evo_one')!.dataset.status).toBe('rejected'));
+    expect(card('evo_one')!.textContent).toContain('新开的 Run 不用这个版本');
+    expect(card('evo_one')!.querySelector('[data-upgrade-action]')).toBeNull();
+    card('evo_two')!.querySelector<HTMLTextAreaElement>('textarea[data-upgrade-reason]')!.value = '回答变长了';
+    dom.window.confirm = () => false;
+    card('evo_two')!.querySelector<HTMLButtonElement>('[data-upgrade-action="rollback"]')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.posts.some(post => post.url.endsWith('/rollback'))).toBe(false);
+    dom.window.confirm = () => true;
+    card('evo_two')!.querySelector<HTMLButtonElement>('[data-upgrade-action="rollback"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_two/rollback')?.body).toEqual({ reason: '回答变长了' }));
+  });
+  it('counts what only the browser sees, opens cited evidence in place, and shows the channel\'s indicators in the digest', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'succeeded', runId: 'run_q', latestRunId: 'run_q', execution: { steps: [], evidence: ['清单'] } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (url === '/api/runs/run_q') return response({ id: 'run_q', revision: 1, goal: '确认发版时间', status: 'succeeded', canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [],
+        context: { sources: [{ id: 'source_1', title: '发版清单', content: '周三晚上发。', source: 'local', hash: 'h' }] },
+        artifacts: [{ id: 'artifact_q', title: '发版时间', content: '定在周三。', evidenceRefs: ['source_1', 'outside_ref'] }] });
+      if (url === '/api/rooms/room_team/metrics?days=7') return response({ tasks: { created: 3, done: 1 }, indicators: [
+        { key: 'first_reply', unit: 'ms', value: 12_000, samples: 4, ok: true },
+        { key: 'blocked_time', unit: 'ms', value: 5 * 3_600_000, samples: 1, ok: false },
+        { key: 'handoff_depth', unit: 'count', value: 1, samples: 3, ok: true, detail: { max: 2 } },
+        { key: 'parallel_use', unit: 'ratio', value: 0.25, samples: 2 },
+        { key: 'cycle_time', unit: 'ms', samples: 0 },
+      ] });
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    await vi.waitFor(() => expect(h.uiEvents).toContainEqual({ name: 'ui.channel.open', roomId: 'room_team' }));
+    await vi.waitFor(() => expect(doc().querySelector('#group-transcript [data-read-artifact="run_q"]')).not.toBeNull());
+    doc().querySelector<HTMLButtonElement>('#group-transcript [data-read-artifact="run_q"]')!.click();
+    await vi.waitFor(() => expect(el('channel-artifact-body').textContent).toContain('定在周三。'));
+    expect(h.uiEvents).toContainEqual({ name: 'ui.artifact.view', roomId: 'room_team' });
+    const toggle = el('channel-artifact-body').querySelector<HTMLButtonElement>('[data-evidence-toggle]')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    toggle.click();
+    await vi.waitFor(() => expect(el('channel-artifact-body').textContent).toContain('周三晚上发。'));
+    expect(el('channel-artifact-body').textContent).toContain('发版清单');
+    expect(el('channel-artifact-body').textContent).toContain('这条证据不是本次 Run 读取的资料');
+    expect(toggle.textContent).toBe('收起证据');
+    expect(h.uiEvents.filter(event => event.name === 'ui.evidence.open')).toHaveLength(1);
+    toggle.click(); toggle.click();
+    expect(h.uiEvents.filter(event => event.name === 'ui.evidence.open')).toHaveLength(1);
+    el('channel-digest-open').click();
+    await vi.waitFor(() => expect(el('channel-metrics').textContent).toContain('近 7 天：记下 3 件，验收 1 件。'));
+    expect(h.uiEvents).toContainEqual({ name: 'ui.digest.view', roomId: 'room_team' });
+    const value = (key: string) => doc().querySelector<HTMLElement>(`#channel-metrics [data-indicator="${key}"]`)!;
+    expect(value('first_reply').textContent).toContain('12 秒 · 达标');
+    expect(value('first_reply').textContent).toContain('目标 < 30 秒 · 4 个样本');
+    expect(value('blocked_time').textContent).toContain('5.0 小时 · 未达标');
+    expect(value('blocked_time').dataset.state).toBe('attention');
+    expect(value('handoff_depth').textContent).toContain('1，最多 2 · 达标');
+    expect(value('parallel_use').textContent).toContain('25%');
+    expect(value('parallel_use').textContent).not.toContain('达标');
+    expect(value('cycle_time').textContent).toContain('还没有数据');
+    expect(el('channel-metrics').textContent).toContain('不读消息正文');
+    el('channel-studio-open').click();
+    await vi.waitFor(() => expect(h.uiEvents).toContainEqual({ name: 'ui.studio.open', roomId: 'room_team' }));
+    expect(h.posts).toHaveLength(0);
   });
   it('says in the group that a person has taken over a Run, without offering to resume it', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
