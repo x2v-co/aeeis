@@ -38,6 +38,7 @@ export async function preserveRunOutput(run: AgentRun, limitation: string): Prom
   }
   delete run.error;
   delete run.resumeStatus;
+  delete run.takeover;
   populateRunLimitations(run);
   return true;
 }

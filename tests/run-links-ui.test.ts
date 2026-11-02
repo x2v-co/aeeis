@@ -475,3 +475,55 @@ describe('plan review workbench', () => {
     expect(f.posts).toHaveLength(0);
   });
 });
+describe('workbench takeover', () => {
+  it('takes over a running Run after confirming, and hands it back only with a note', async () => {
+    const run = fixture();
+    Object.assign(run, { status: 'running', review: undefined, error: undefined, events: [] });
+    run.plans[0]!.nodes.push({ id: 'second', title: 'Second', instruction: 'Do second', dependsOn: ['task'] });
+    run.steps = [{ taskId: 'task', status: 'succeeded', attempts: 1, observations: [] }, { taskId: 'second', status: 'pending', attempts: 0, observations: [] }];
+    const posts: Array<{ url: string; body: unknown }> = [];
+    const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST' && url === `/api/runs/${run.id}/takeover`) {
+        posts.push({ url, body: JSON.parse(init.body ?? '{}') });
+        Object.assign(run, { status: 'paused', resumeStatus: 'running', takeover: { by: 'owner', at: new Date().toISOString() }, revision: run.revision + 1 });
+        return response(run);
+      }
+      if (init?.method === 'POST' && url === `/api/runs/${run.id}/handback`) {
+        posts.push({ url, body: JSON.parse(init.body ?? '{}') });
+        Object.assign(run, { status: 'running', revision: run.revision + 1 }); delete (run as Partial<AgentRun>).takeover; delete run.resumeStatus;
+        return response(run);
+      }
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document;
+    const control = (text: string) => [...doc.querySelectorAll<HTMLButtonElement>('#controls button')].find(button => button.textContent === text);
+    await vi.waitFor(() => expect(control('接管')).toBeTruthy());
+    dom.window.confirm = () => false;
+    control('接管')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(posts).toHaveLength(0);
+    dom.window.confirm = () => true;
+    control('接管')!.click();
+    await vi.waitFor(() => expect(doc.getElementById('handback-note')).not.toBeNull());
+    expect(posts[0]).toEqual({ url: `/api/runs/${run.id}/takeover`, body: {} });
+    expect(control('继续')).toBeUndefined();
+    expect(control('接管')).toBeUndefined();
+    await vi.waitFor(() => expect(doc.getElementById('decision-badge')?.textContent).toBe('人已接管'));
+    control('交还')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(posts).toHaveLength(1);
+    (doc.getElementById('handback-note') as HTMLTextAreaElement).value = '第一段我写好了';
+    control('交还')!.click();
+    await vi.waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1]).toEqual({ url: `/api/runs/${run.id}/handback`, body: { note: '第一段我写好了' } });
+    await vi.waitFor(() => expect(doc.getElementById('handback-note')).toBeNull());
+    expect(control('暂停')).toBeTruthy();
+  });
+});

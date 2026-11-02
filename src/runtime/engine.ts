@@ -70,6 +70,7 @@ export function taskRunIdFor(owner: string, tenantId: string, task: { domainPlan
   return `run_${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(12, 15)}-8${hex.slice(15, 18)}-${hex.slice(18, 30)}`;
 }
 const runnable = new Set<RunStatus>(['queued', 'planning', 'running', 'reviewing']);
+const HANDBACK_QUESTION = 'A person took over this work and handed it back with this note. Continue from what they did; do not redo it.';
 const terminalRunStatuses = new Set<RunStatus>(['succeeded', 'failed', 'cancelled']);
 /**
  * Read-only, idempotent tools whose interrupted invocation can be re-issued
@@ -1463,10 +1464,28 @@ export class AgentEngine {
         run.resumeStatus = run.status; run.status = 'paused'; event(run, 'run.paused');
       } else if (action === 'resume') {
         if (run.status !== 'paused') throw new Conflict('Run is not paused');
+        if (run.takeover) throw new Conflict('A person has taken over this Run; hand it back with a note');
         run.status = run.resumeStatus ?? 'running'; delete run.resumeStatus; event(run, 'run.resumed');
+      } else if (action === 'takeover') {
+        z.object({}).strict().parse(body ?? {});
+        if (run.takeover) throw new Conflict('Run is already taken over');
+        if (!run.steps.length) throw new Conflict('Only a Run with an approved plan can be taken over; pause or cancel it while it is planning');
+        if (run.status !== 'paused' && !runnable.has(run.status)) throw new Conflict('Only active or paused work can be taken over');
+        if (run.status !== 'paused') { run.resumeStatus = run.status; run.status = 'paused'; }
+        const by = scope?.owner ?? run.owner;
+        run.takeover = { by, at: new Date().toISOString() };
+        event(run, 'run.taken_over', { by });
+      } else if (action === 'handback') {
+        const { note } = z.object({ note: z.string().trim().min(1).max(2000) }).strict().parse(body);
+        if (run.status !== 'paused' || !run.takeover) throw new Conflict('Run is not taken over');
+        // The note reaches the model the way an answer does: on every unfinished step, or the last one when only review is left.
+        const open = run.steps.filter(step => step.status !== 'succeeded');
+        for (const step of open.length ? open : run.steps.slice(-1)) run.answers.push({ taskId: step.taskId, question: HANDBACK_QUESTION, answer: note });
+        run.status = run.resumeStatus ?? 'running'; delete run.resumeStatus; delete run.takeover;
+        event(run, 'run.handed_back', { steps: open.length || 1 });
       } else if (action === 'cancel') {
         if (['succeeded', 'cancelled'].includes(run.status)) throw new Conflict('Run already finished');
-        run.status = 'cancelled'; event(run, 'run.cancelled');
+        run.status = 'cancelled'; delete run.takeover; event(run, 'run.cancelled');
       } else if (action === 'retry' || action === 'reconcile') {
         if (action === 'retry' && run.status !== 'failed') throw new Conflict('Only failed runs can be retried; unknown requires reconciliation');
         if (action === 'reconcile') {
