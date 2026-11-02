@@ -24,6 +24,7 @@ import { FileEvolutionActivationStore } from '../src/evolution-activation.js';
 import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 import { materialContentHash } from '../src/runtime/materials.js';
 import { InMemoryResourceRegistry } from '../src/runtime/resources.js';
+import { explainRun } from '../src/runtime/explanation.js';
 
 const pin: ModelPin = { model: 'fixture-model', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' };
 
@@ -579,6 +580,38 @@ describe('AEEIS runtime', () => {
     expect(await engine.advance(run.id)).toBe('cancelled');
     expect((await repo.get(run.id)).events.some(event => event.type === 'review.requested')).toBe(false);
     spy.mockRestore();
+    await repo.close();
+  });
+
+  it('lets a person take over a Run and hand it back with a note the remaining steps read', async () => {
+    const repo = await repository();
+    const engine = new AgentEngine(repo, new PlanningFixture());
+    const run = await engine.create({ goal: 'Take over by hand' });
+    await expect(engine.command(run.id, 'takeover', {})).rejects.toThrow('approved plan');
+    await engine.advance(run.id);
+    await repo.mutate(run.id, current => {
+      current.approval = { planHash: current.plans[0]!.hash, approved: true, actor: 'owner', at: new Date().toISOString() };
+      current.status = 'running';
+      current.steps[0]!.status = 'succeeded';
+    });
+    const taken = await engine.command(run.id, 'takeover', {}, { owner: 'owner', tenantId: 'local' });
+    expect(taken.status).toBe('paused');
+    expect(taken.resumeStatus).toBe('running');
+    expect(taken.takeover?.by).toBe('owner');
+    expect(explainRun(taken).attention).toMatchObject({ kind: 'hand_back', blockers: [{ kind: 'taken_over' }] });
+    await expect(engine.command(run.id, 'takeover', {})).rejects.toThrow('already taken over');
+    await expect(engine.command(run.id, 'resume', {})).rejects.toThrow('hand it back');
+    await expect(engine.command(run.id, 'handback', { note: '  ' })).rejects.toThrow();
+    const back = await engine.command(run.id, 'handback', { note: '我已经把第一段写好了，接着写第二段' });
+    expect(back.status).toBe('running');
+    expect(back.takeover).toBeUndefined();
+    expect(back.resumeStatus).toBeUndefined();
+    const open = back.steps.filter(step => step.status !== 'succeeded').map(step => step.taskId);
+    expect(open.length).toBeGreaterThan(0);
+    expect(back.answers.map(answer => answer.taskId)).toEqual(open);
+    expect(back.answers.every(answer => answer.answer === '我已经把第一段写好了，接着写第二段')).toBe(true);
+    expect(back.events.map(event => event.type)).toEqual(expect.arrayContaining(['run.taken_over', 'run.handed_back']));
+    await expect(engine.command(run.id, 'handback', { note: '再交一次' })).rejects.toThrow('not taken over');
     await repo.close();
   });
 
