@@ -15,6 +15,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
+import { ChannelTeachingService } from '../channel-teaching.js';
 import { channelUpgradeCards } from '../channel-upgrades.js';
 import { EvolutionTransitionError } from '../evolution.js';
 import { channelMetrics } from '../channel-metrics.js';
@@ -180,20 +181,30 @@ export function buildApp(options: Options) {
       if (!conversations) return undefined;
       const view = await conversations.get(conversationId, { owner: actorId, tenantId });
       return { id: view.id, ...(view.agentId ? { agentId: view.agentId } : {}), tasks: view.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...(task.runId ? { runId: task.runId } : {}), ...(task.latestRunId ? { latestRunId: task.latestRunId } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}) })) };
-    }, async (agentId, tenantId) => {
-      if (agentId === 'aeeis') return 'AEEIS';
-      if (agentId.startsWith('bot_') && options.ownedBots) {
-        const bot = await options.ownedBots.get(agentId).catch(() => undefined);
-        return bot && bot.tenantId === tenantId ? bot.name : undefined;
-      }
-      if (options.agentDirectory) {
-        const card = await Promise.resolve(options.agentDirectory.get(agentId)).catch(() => undefined);
-        return card?.name;
-      }
-      return undefined;
+    }, async (agentId, tenantId) => nameOfParticipant(agentId, tenantId))
+    : undefined;
+  /** Display name of a group participant: AEEIS, one of the owner's Bots, or a registered Agent. */
+  async function nameOfParticipant(agentId: string, tenantId: string): Promise<string | undefined> {
+    if (agentId === 'aeeis') return 'AEEIS';
+    if (agentId.startsWith('bot_') && options.ownedBots) {
+      const bot = await options.ownedBots.get(agentId).catch(() => undefined);
+      return bot && bot.tenantId === tenantId ? bot.name : undefined;
+    }
+    if (options.agentDirectory) {
+      const card = await Promise.resolve(options.agentDirectory.get(agentId)).catch(() => undefined);
+      return card?.name;
+    }
+    return undefined;
+  }
+  const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  const teaching = channelBoard && options.sessionEvents && options.domain
+    ? new ChannelTeachingService({
+      events: options.sessionEvents, domain: options.domain, board: channelBoard, nameOf: nameOfParticipant,
+      readRun: async (runId, scope) => { try { return await options.repository.get(runId, scope); } catch (error) { if (error instanceof NotFound) return undefined; throw error; } },
+      ...(routines ? { routines } : {}),
     })
     : undefined;
-  const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  const teachingService = () => { if (!teaching) throw new Conflict('Channel teaching is not configured'); return teaching; };
   // Bots that reply, propose and hand off on their own. Needs a model; AEEIS_BOT_REPLIES=0 keeps them quiet.
   const botTeam = channelBoard && conversations && options.sessionEvents && options.domain && options.ownedBots && options.engine?.modelConfigured && process.env.AEEIS_BOT_REPLIES !== '0'
     ? new BotTeam({
@@ -1005,6 +1016,24 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     return boardService().board(request.params.id, principal.id, principal.tenantId);
   });
+  // Interaction-design §8.7: "watch me do it once", turned into a routine for one Bot.
+  app.get<{ Params: { id: string } }>('/api/rooms/:id/teachings', async request => {
+    const principal = principalOf(request);
+    return { items: await teachingService().list(request.params.id, { owner: principal.id, tenantId: principal.tenantId }) };
+  });
+  app.post<{ Params: { id: string } }>('/api/rooms/:id/teachings', async request => {
+    const principal = principalOf(request);
+    return teachingService().start(request.params.id, request.body, { owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.post<{ Params: { id: string; teachingId: string; action: string } }>('/api/rooms/:id/teachings/:teachingId/:action', async request => {
+    const principal = principalOf(request);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const { id, teachingId, action } = request.params;
+    if (action === 'stop') return teachingService().stop(id, teachingId, scope);
+    if (action === 'adopt') return teachingService().adopt(id, teachingId, request.body, scope);
+    if (action === 'revoke') return teachingService().revoke(id, teachingId, request.body, scope);
+    throw new Conflict('Unsupported teaching action');
+  });
   // Interaction-design §8.9: Bot upgrades as cards in a group chat. The room owner (or an operator) gets the full card;
   // other members get only a "team upgrade" summary.
   app.get<{ Params: { id: string } }>('/api/rooms/:id/upgrades', async request => {
@@ -1116,6 +1145,10 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     await routineService().remove(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
     return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string } }>('/api/routines/:id/run', async request => {
+    const principal = principalOf(request);
+    return routineService().runNow(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
   });
   app.post<{ Params: { id: string } }>('/api/routines/:id/rotate-secret', async request => {
     const principal = principalOf(request);

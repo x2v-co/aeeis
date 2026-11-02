@@ -57,7 +57,7 @@ export interface ConversationMessage {
 }
 export type ConversationMessageSource =
   | { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string }
-  | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' };
+  | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
 export interface Conversation extends Ownership {
   schemaVersion: 'conversation/1';
   id: string;

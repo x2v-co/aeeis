@@ -525,9 +525,17 @@
 <h3>带教</h3>
 <button id="channel-teach-close" type="button" class="quiet-button">收起</button>
 </div>
-<p class="muted">一行一个步骤。草案先记在这个频道，只影响这里。收进档案仍要这个人有一次做成并带证据。看一眼不会执行。</p>
+<p class="muted">点「开始示范」，在这个群里照常做一遍：说的话、对任务的处理、Run 的计划和你做的决定都会记下来。结束后生成例程草案，看过再收进这位 Bot 的例程，叫它时才做。只影响这一位。</p>
 <label for="channel-teach-person">教给谁</label>
 <select id="channel-teach-person"></select>
+<div class="studio-toolbar">
+<button id="channel-teach-start" type="button">开始示范</button>
+<button id="channel-teach-stop" type="button" hidden>结束示范</button>
+</div>
+<div id="channel-teachings"></div>
+<details id="channel-teach-manual">
+<summary>也可以手写步骤</summary>
+<p class="muted">一行一个步骤。草案先记在这个频道，只影响这里。收进档案仍要这个人有一次做成并带证据。看一眼不会执行。</p>
 <label for="channel-teach-steps">步骤</label>
 <textarea id="channel-teach-steps" maxlength="2000" placeholder="一行一个步骤"></textarea>
 <div class="studio-toolbar">
@@ -537,6 +545,7 @@
 </div>
 <ol id="channel-teach-preview"></ol>
 <div id="channel-teach-saved"></div>
+</details>
 </section>
 <section id="channel-bot" hidden>
 <div class="group-head">

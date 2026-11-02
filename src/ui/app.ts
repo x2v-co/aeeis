@@ -94,11 +94,11 @@ interface ConversationMessageView {
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
-  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' };
+  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
 }
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
-  trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' };
+  trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -1311,9 +1311,15 @@ const ROUTINE_WEEKDAYS = ['', '周一', '周二', '周三', '周四', '周五', 
 const ROUTINE_REVIEW: Record<RoutineView['executionReview'], string> = { required: '每一步都问我', auto: '自动判断', yolo: '放手' };
 function routineWhen(routine: RoutineView): string {
   if (routine.trigger.kind === 'webhook') return '收到 Webhook 时';
+  if (routine.trigger.kind === 'manual') return '你叫它时';
   const calendar = routine.trigger.calendar;
   const days = calendar.frequency === 'weekly' ? (calendar.daysOfWeek ?? []).map(day => ROUTINE_WEEKDAYS[day]).join('、') : calendar.frequency === 'monthly' ? `每月 ${calendar.dayOfMonth} 日` : '每天';
   return `${days} ${calendar.time}（${calendar.timeZone}）`;
+}
+async function runRoutineNow(id: string, name: string): Promise<void> {
+  const result = await api<{ status: string; runId?: string }>(`/routines/${encodeURIComponent(id)}/run`, {});
+  message(result.status === 'started' ? `已让它按「${name}」做一次。` : result.status === 'pending' ? `「${name}」排上了，稍后开始。` : `「${name}」没能开始，稍后会再试。`);
+  await refresh();
 }
 function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
 function syncRoutines(agentId: string): void {
@@ -1347,12 +1353,16 @@ function renderRoutines(): void {
     const row = element('li'); row.dataset.status = routine.status; row.dataset.routineId = routine.id;
     const timing = routine.status === 'paused' ? '已暂停'
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
-      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
+      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.trigger.kind === 'manual' ? '等你叫它' : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
     row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
     actions.append(toggle);
+    if (routine.trigger.kind === 'manual' && routine.status === 'active') {
+      const now = button('现在做一次', async () => { await runRoutineNow(routine.id, routine.name); }); now.type = 'button'; now.dataset.routineRun = routine.id;
+      actions.append(now);
+    }
     if (routine.trigger.kind === 'webhook') {
       const webhookToggle = button(routine.webhookEnabled ? '关闭 Webhook' : '开启 Webhook', () => changeRoutine(routine, { webhookEnabled: !routine.webhookEnabled })); webhookToggle.type = 'button';
       actions.append(webhookToggle);
@@ -5826,7 +5836,112 @@ async function openChannelTeach(): Promise<void> {
   if (!panel || !openGroupId) return;
   panel.hidden = false;
   renderTeachPeople();
-  await renderTeachingSaved();
+  await Promise.all([renderTeachingSaved(), renderTeachings(openGroupId)]);
+}
+interface TeachingView {
+  id: string; agentId: string; agentName: string; startedAt: string; stoppedAt?: string; routineId?: string;
+  state: 'recording' | 'recorded' | 'adopted' | 'revoked';
+  draft?: { steps: Array<{ at: string; text: string; source: 'message' | 'action' | 'run'; decision: boolean }>; decisions: string[]; tools: string[]; prompt: string; executionReview: 'required' | 'auto' };
+}
+const TEACHING_STATES: Record<TeachingView['state'], string> = { recording: '正在录', recorded: '待确认', adopted: '已收成例程', revoked: '已撤销' };
+const teachingReplay = new Map<string, number>();
+/** Interaction-design §8.7: demonstrations recorded in this group, each a routine draft for one Bot. */
+async function renderTeachings(roomId: string): Promise<void> {
+  const list = $('channel-teachings');
+  if (!list) return;
+  const loaded = await api<{ items?: TeachingView[] }>(`/rooms/${encodeURIComponent(roomId)}/teachings`);
+  if (openGroupId !== roomId) return;
+  // A server without recorded teaching answers without a list.
+  const items = Array.isArray(loaded.items) ? loaded.items : [];
+  renderTeachPeople();
+  const recording = items.find(item => item.state === 'recording');
+  const start = $<HTMLButtonElement>('channel-teach-start'), stop = $<HTMLButtonElement>('channel-teach-stop');
+  if (start) start.hidden = Boolean(recording);
+  if (stop) { stop.hidden = !recording; stop.dataset.teaching = recording?.id ?? ''; stop.textContent = recording ? `结束示范（教给${recording.agentName}）` : '结束示范'; }
+  list.replaceChildren(...items.map(item => teachingCard(item, roomId)));
+  if (!items.length) list.append(element('p', '这个群里还没有录过示范。', 'muted'));
+}
+function teachingCard(item: TeachingView, roomId: string): HTMLElement {
+  const card = element('article', '', 'teaching-card');
+  card.dataset.teaching = item.id; card.dataset.state = item.state;
+  card.append(element('strong', `教给${item.agentName}`), element('small', `${TEACHING_STATES[item.state]} · ${formatTime(item.startedAt)} 开始${item.stoppedAt ? `，${formatTime(item.stoppedAt)} 结束` : ''}`));
+  const reload = async () => { await renderTeachings(roomId); void refresh(); };
+  const steps = item.draft?.steps ?? [];
+  if (item.state === 'recording') card.append(element('p', '正在录。照常在群里做，做完点上面的「结束示范」。'));
+  if (item.draft && !steps.length) card.append(element('p', '这段示范里没有记下步骤。'));
+  if (steps.length) {
+    // Replay: one step at a time, with when it happened and whether a person decided there.
+    const index = Math.min(teachingReplay.get(item.id) ?? 0, steps.length - 1);
+    const step = steps[index]!;
+    const replay = element('div', '', 'teaching-replay');
+    const caption = element('p', `第 ${index + 1} / ${steps.length} 步 · ${formatTime(step.at)}${step.decision ? ' · 要人确认' : ''}：${step.text}`);
+    caption.dataset.teachingStep = String(index);
+    const move = (delta: number) => { teachingReplay.set(item.id, Math.max(0, Math.min(steps.length - 1, index + delta))); card.replaceWith(teachingCard(item, roomId)); };
+    const back = button('上一步', async () => move(-1)); back.type = 'button'; back.disabled = index === 0;
+    const next = button('下一步', async () => move(1)); next.type = 'button'; next.disabled = index === steps.length - 1;
+    replay.append(caption, back, next);
+    card.append(replay);
+    const all = element('ol', '', 'teaching-steps');
+    for (const [position, entry] of steps.entries()) {
+      const row = element('li', `${entry.text}${entry.decision ? '（要人确认）' : ''}`);
+      if (position === index) row.dataset.current = 'true';
+      all.append(row);
+    }
+    card.append(all);
+    if (item.draft?.tools.length) card.append(element('small', `用到的工具：${item.draft.tools.join('、')}`));
+  }
+  if (item.state === 'recorded' && item.draft && steps.length) {
+    const form = element('div', '', 'teaching-adopt');
+    const name = document.createElement('input'); name.maxLength = 80; name.value = `${item.agentName}的示范`; name.setAttribute('aria-label', '例程名字'); name.dataset.teachingName = item.id;
+    const prompt = document.createElement('textarea'); prompt.maxLength = 4000; prompt.rows = 6; prompt.value = item.draft.prompt; prompt.setAttribute('aria-label', '例程要做的事'); prompt.dataset.teachingPrompt = item.id;
+    const review = document.createElement('select'); review.setAttribute('aria-label', '执行时怎么批'); review.dataset.teachingReview = item.id;
+    for (const value of ['required', 'auto', 'yolo'] as const) { const option = document.createElement('option'); option.value = value; option.textContent = ROUTINE_REVIEW[value]; review.append(option); }
+    review.value = item.draft.executionReview;
+    const adopt = dashboardButton('收成例程', async () => {
+      await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(item.id)}/adopt`, { name: name.value.trim(), prompt: prompt.value.trim(), executionReview: review.value });
+      message(`已收进${item.agentName}的例程。叫它时才做。`);
+      await reload();
+    });
+    adopt.dataset.teachingAction = 'adopt';
+    form.append(name, prompt, review, adopt);
+    card.append(form);
+  }
+  if (item.state === 'adopted' && item.routineId) {
+    const routineId = item.routineId;
+    const run = dashboardButton('让它做一次', async () => { await runRoutineNow(routineId, `${item.agentName}学会的这段示范`); });
+    run.dataset.teachingAction = 'run';
+    card.append(run);
+  }
+  if (item.state === 'recorded' || item.state === 'adopted') {
+    const reason = document.createElement('textarea'); reason.rows = 2; reason.maxLength = 500; reason.dataset.teachingReason = item.id;
+    reason.placeholder = item.routineId ? '撤销前写下原因。收成的例程会一起删除。' : '撤销前写下原因。';
+    const revoke = dashboardButton('撤销', async () => {
+      const text = reason.value.trim();
+      if (!text) { message('撤销前写下原因。'); reason.focus(); return; }
+      await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(item.id)}/revoke`, { reason: text });
+      message('已撤销这段带教。');
+      await reload();
+    });
+    revoke.dataset.teachingAction = 'revoke';
+    card.append(reason, revoke);
+  }
+  return card;
+}
+async function startTeaching(): Promise<void> {
+  const roomId = openGroupId;
+  const agentId = $<HTMLSelectElement>('channel-teach-person')?.value ?? '';
+  if (!roomId || !agentId) { message('先选教给谁。'); return; }
+  await api(`/rooms/${encodeURIComponent(roomId)}/teachings`, { agentId });
+  message(`开始示范，教给${participantLabel(agentId)}。照常在群里做，做完点「结束示范」。`);
+  await renderTeachings(roomId); void refresh();
+}
+async function stopTeaching(): Promise<void> {
+  const roomId = openGroupId;
+  const id = $<HTMLButtonElement>('channel-teach-stop')?.dataset.teaching ?? '';
+  if (!roomId || !id) return;
+  await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(id)}/stop`, {});
+  message('示范结束，草案在下面，看过再收成例程。');
+  await renderTeachings(roomId); void refresh();
 }
 async function saveTeachingDraft(): Promise<void> {
   const text = teachingDraft();
@@ -5922,6 +6037,8 @@ $('channel-rule-form')?.addEventListener('submit', event => { void saveTeamRule(
 $('channel-teach-open')?.addEventListener('click', () => { void openChannelTeach().catch(error => message(errorMessage(error))); });
 $('channel-teach-close')?.addEventListener('click', () => { const panel = $('channel-teach'); if (panel) panel.hidden = true; });
 $('channel-teach-draft')?.addEventListener('click', () => renderTeachingPreview());
+$('channel-teach-start')?.addEventListener('click', () => { void startTeaching().catch(error => message(errorMessage(error))); });
+$('channel-teach-stop')?.addEventListener('click', () => { void stopTeaching().catch(error => message(errorMessage(error))); });
 $('channel-teach-save')?.addEventListener('click', () => { void saveTeachingDraft().catch(error => message(errorMessage(error))); });
 $('channel-teach-profile')?.addEventListener('click', () => { void keepTeachingProfile().catch(error => message(errorMessage(error))); });
 $('channel-bot-close')?.addEventListener('click', () => { const panel = $('channel-bot'); if (panel) panel.hidden = true; });
