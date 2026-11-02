@@ -531,45 +531,160 @@ expect_failure "$STACK_DIR/bin/backup.sh"
 no_service_changes
 unset AEEIS_BACKUP_UPLOAD_CMD AEEIS_BACKUP_QUIESCE
 
-# Webhook handling uses a JSON payload, bounds requests, and never fails hard.
+# Notification tests stub curl completely: no Feishu/Telegram network requests.
 export FAKE_CURL_LOG="$test_dir/curl.json"
-cat > "$test_dir/bin/curl" <<'PY'
+cat > "$test_dir/bin/curl" <<'CURL'
 #!/usr/bin/env python3
 import json,os,sys
 args = sys.argv[1:]
 assert args[args.index('--connect-timeout')+1] == '5'
 assert args[args.index('--max-time')+1] == '15'
 assert '--fail' in args
+assert args[args.index('-H')+1] == 'Content-Type: application/json'
 payload = json.loads(args[args.index('--data-binary')+1])
-assert isinstance(payload['text'], str)
-with open(os.environ['FAKE_CURL_LOG'], 'w') as f: json.dump({'args':args,'payload':payload}, f)
-sys.exit(int(os.getenv('FAKE_CURL_EXIT', '0')))
-PY
+telegram = '--config' in args
+if telegram:
+    assert args[args.index('--config')+1] == '-'
+    config = sys.stdin.read()
+    assert config.startswith('url = "https://api.telegram.org/bot')
+    assert config.endswith('/sendMessage"\n')
+else:
+    # Assert routing without recording the webhook URL in the test log.
+    assert args[-1] == os.environ['FAKE_WEBHOOK_EXPECTED']
+    args[-1] = '<webhook>'
+with open(os.environ['FAKE_CURL_LOG'], 'a') as f:
+    f.write(json.dumps({'kind': 'telegram' if telegram else 'webhook',
+                        'args': args, 'payload': payload}) + '\n')
+if not telegram:
+    # Also check that curl/response diagnostics cannot leak into the journal.
+    print('private curl diagnostic', file=sys.stderr)
+    print(os.getenv('FAKE_CURL_RESPONSE', '{"code":0}'))
+sys.exit(0 if telegram else int(os.getenv('FAKE_CURL_EXIT', '0')))
+CURL
 chmod +x "$test_dir/bin/curl"
-export AEEIS_NOTIFY_WEBHOOK=
-"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
-grep -q 'journal only' "$test_dir/output"
-test ! -e "$FAKE_CURL_LOG"
-printf '\nAEEIS_NOTIFY_WEBHOOK=https://notify.invalid/stack-hook\n' >> "$AEEIS_ENV_FILE"
-export AEEIS_NOTIFY_WEBHOOK=https://notify.invalid/inherited-hook
-export MONITOR_UNIT='aeeis-health@aeeis-cn-prod.service' MONITOR_SERVICE_RESULT=exit-code
-"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
-python3 - <<'PY'
-import json,os
-call = json.load(open(os.environ['FAKE_CURL_LOG']))
-assert call['args'][-1] == 'https://notify.invalid/stack-hook'
-assert os.environ['MONITOR_UNIT'] in call['payload']['text']
-assert 'result=exit-code' in call['payload']['text']
-PY
-export FAKE_CURL_EXIT=22
-"$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
-grep -q 'webhook delivery failed' "$test_dir/output"
-AEEIS_ENV_FILE="$test_dir/missing.env" "$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
-grep -q 'stack env unavailable' "$test_dir/output"
-printf 'exit 99\n' > "$test_dir/broken.env"
-AEEIS_ENV_FILE="$test_dir/broken.env" "$STACK_DIR/bin/notify.sh" aeeis-cn-prod > "$test_dir/output" 2>&1
-grep -q 'handler error' "$test_dir/output"
-unset AEEIS_NOTIFY_WEBHOOK MONITOR_UNIT MONITOR_SERVICE_RESULT FAKE_CURL_EXIT
+python3 - <<'NOTIFY'
+import json, os, subprocess
+from pathlib import Path
+
+log = Path(os.environ['FAKE_CURL_LOG'])
+root = log.parent
+entrypoint = str(Path(os.environ['FAKE_STACK_DIR']) / 'bin/notify.sh')
+config = root / 'notify.conf'
+config.write_text('')
+proxy_file = root / 'notify-proxy'
+proxy_file.write_text('PROXY=http://127.0.0.1:9\n')
+# Isolate from real inherited notification settings, including credentials.
+base = {k: v for k, v in os.environ.items()
+        if not k.startswith(('AEEIS_NOTIFY_', 'MONITOR_', 'FAKE_CURL_'))}
+base.update(AEEIS_ENV_FILE=str(config), FAKE_CURL_LOG=str(log),
+            AEEIS_NOTIFY_PROXY_FILE=str(root / 'no-proxy'),
+            MONITOR_UNIT='unit "quoted"\nbackslash\\中文',
+            MONITOR_SERVICE_RESULT='exit-code',
+            HTTP_PROXY='http://127.0.0.1:8', HTTPS_PROXY='http://127.0.0.1:8',
+            ALL_PROXY='http://127.0.0.1:8', NO_PROXY='*')
+webhook = 'http://127.0.0.1:1/selftest'
+
+def run(*, target=webhook, expected_target=None, response='{"code":0}', status=0, **settings):
+    log.unlink(missing_ok=True)
+    env = dict(base, AEEIS_NOTIFY_WEBHOOK=target,
+               FAKE_WEBHOOK_EXPECTED=expected_target or target,
+               FAKE_CURL_RESPONSE=response)
+    env.update(settings)
+    result = subprocess.run([entrypoint, 'aeeis-cn-prod'], env=env,
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == status, (result.returncode, result.stderr)
+    # Responses and curl diagnostics must never be included in output.
+    assert 'private curl diagnostic' not in result.stdout + result.stderr
+    assert 'private response diagnostic' not in result.stdout + result.stderr
+    if target:
+        assert target not in result.stdout + result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return result, calls
+
+def direct(call):
+    args = call['args']
+    assert args[args.index('--noproxy')+1] == '*'
+    assert '--proxy' not in args
+
+result, calls = run(target='')
+assert 'journal only' in result.stdout and calls == []
+# The protected stack configuration still overrides inherited configuration.
+config.write_text('AEEIS_NOTIFY_WEBHOOK=' + webhook + '\n')
+result, calls = run(target='http://127.0.0.1:1/inherited', expected_target=webhook,
+                    AEEIS_NOTIFY_PROXY='http://127.0.0.1:7')
+assert len(calls) == 1
+assert set(calls[0]['payload']) == {'text'}
+assert base['MONITOR_UNIT'] in calls[0]['payload']['text']
+assert 'result=exit-code' in calls[0]['payload']['text']
+direct(calls[0])
+config.write_text('')
+# Generic receivers keep their existing payload and best-effort semantics.
+_, calls = run(response='not JSON')
+direct(calls[0])
+result, _ = run(FAKE_CURL_EXIT='22')
+assert 'webhook delivery failed' in result.stderr
+# Both official hostnames are detected; uppercase hosts/ports are URL parsed.
+# These are fabricated endpoints consumed only by the stub above.
+for target in ('http://open.feishu.cn:1/selftest',
+               'http://OPEN.LARKSUITE.COM:1/selftest', webhook):
+    settings = {'AEEIS_NOTIFY_FORMAT': 'feishu'} if target == webhook else {}
+    _, calls = run(target=target, AEEIS_NOTIFY_PROXY='http://127.0.0.1:7', **settings)
+    assert len(calls) == 1
+    assert set(calls[0]['payload']) == {'msg_type', 'content'}
+    assert calls[0]['payload']['msg_type'] == 'text'
+    assert set(calls[0]['payload']['content']) == {'text'}
+    assert base['MONITOR_UNIT'] in calls[0]['payload']['content']['text']
+    direct(calls[0])
+# Host-like text in a path or a different domain must remain generic.
+for target in ('http://127.0.0.1:1/open.feishu.cn',
+               'http://open.feishu.cn.localhost:1/selftest',
+               'http://open.feishu.cn@127.0.0.1:1/selftest'):
+    _, calls = run(target=target)
+    assert set(calls[0]['payload']) == {'text'}
+# Explicit webhook proxy overrides even NO_PROXY='*', independently of TG.
+_, calls = run(AEEIS_NOTIFY_FORMAT='feishu',
+               AEEIS_NOTIFY_PROXY='http://127.0.0.1:7',
+               AEEIS_NOTIFY_WEBHOOK_PROXY='http://127.0.0.1:6')
+args = calls[0]['args']
+assert args[args.index('--proxy')+1] == 'http://127.0.0.1:6'
+assert args[args.index('--noproxy')+1] == ''
+# Feishu's alternate success key is supported; malformed/error replies fail.
+run(AEEIS_NOTIFY_FORMAT='feishu', response='{"StatusCode":0}')
+for response in ('{"code":19024,"msg":"private response diagnostic"}',
+                 '{"StatusCode":1}', '{}', 'not JSON', '[]', 'null',
+                 '{"code":false}', '{"code":"0"}'):
+    result, _ = run(AEEIS_NOTIFY_FORMAT='feishu', response=response, status=1)
+    assert 'feishu webhook response invalid or rejected' in result.stderr
+result, _ = run(AEEIS_NOTIFY_FORMAT='feishu', FAKE_CURL_EXIT='22', status=1)
+assert 'webhook delivery failed' in result.stderr
+# A failed Feishu request still delivers Telegram using its existing proxy.
+tg = {'AEEIS_NOTIFY_TG_BOT_TOKEN': 'fake-selftest-token',
+      'AEEIS_NOTIFY_TG_CHAT_ID': 'fake-chat'}
+for failure in ({'response': '{"code":1}'}, {'FAKE_CURL_EXIT': '22'}):
+    _, calls = run(AEEIS_NOTIFY_FORMAT='feishu', status=1,
+                   AEEIS_NOTIFY_PROXY='http://127.0.0.1:7', **tg, **failure)
+    assert [c['kind'] for c in calls] == ['webhook', 'telegram']
+    direct(calls[0])
+    args = calls[1]['args']
+    assert args[args.index('--proxy')+1] == 'http://127.0.0.1:7'
+    assert '--noproxy' not in args
+    assert calls[1]['payload']['chat_id'] == 'fake-chat'
+    assert calls[1]['payload']['text'].startswith('[aeeis] AEEIS failure:')
+    assert base['MONITOR_UNIT'] in calls[1]['payload']['text']
+    assert calls[1]['payload']['disable_web_page_preview'] is True
+# Telegram alone also retains proxy-file fallback.
+_, calls = run(target='', AEEIS_NOTIFY_PROXY_FILE=str(proxy_file), **tg)
+assert len(calls) == 1 and calls[0]['kind'] == 'telegram'
+args = calls[0]['args']
+assert args[args.index('--proxy')+1] == 'http://127.0.0.1:9'
+assert '--noproxy' not in args
+# Absent/broken config remains best effort.
+result, _ = run(target='', AEEIS_ENV_FILE=str(root / 'missing-notify.conf'))
+assert 'stack env unavailable' in result.stderr
+config.write_text('exit 99\n')
+result, calls = run(target='')
+assert 'handler error' in result.stderr and calls == []
+NOTIFY
 
 # Execute the unit shell commands with an overridden checkout containing spaces.
 # This also checks that all commands cd into the configured deploy directory.
