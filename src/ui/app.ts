@@ -5820,18 +5820,75 @@ function inboxKindLabel(kind: InboxKind): string {
   if (kind === 'failure') return '失败';
   return '点名';
 }
+const NOTIFY_PREFERENCE = 'aeeis.notify-s1';
+const NOTIFIED_ITEMS = 'aeeis.notified-s1';
+/** Inbox items that need a person's decision now (§9.1 S1): an approval, a question, a channel block. */
+const S1_STATUSES = new Set(['needs_approval', 'needs_input', 'blocked']);
+let lastInboxRuns: RunSummary[] = [];
+let lastTypedAt = 0;
+let inboxHold = 0;
+document.addEventListener('keydown', event => { if (textEntry(event.target)) lastTypedAt = Date.now(); }, true);
+function textEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target instanceof HTMLTextAreaElement) return true;
+  return target instanceof HTMLInputElement && ['text', 'search', 'email', 'url', ''].includes(target.type);
+}
+/** §9.4: while someone is typing, new inbox items wait so nothing moves under their cursor. */
+function typingNow(): boolean { return textEntry(document.activeElement) && Date.now() - lastTypedAt < 4000; }
+function notificationsWanted(): boolean { try { return localStorage.getItem(NOTIFY_PREFERENCE) === '1'; } catch { return false; } }
+function notifiedItems(): Set<string> { try { return new Set(JSON.parse(localStorage.getItem(NOTIFIED_ITEMS) ?? '[]') as string[]); } catch { return new Set(); } }
+function rememberNotified(keys: string[]): void { try { localStorage.setItem(NOTIFIED_ITEMS, JSON.stringify(keys.slice(0, 200))); } catch { /* storage may be unavailable */ } }
+/**
+ * §9.4: browser notifications are opt-in and only for S1. Each item notifies once; an item that leaves the inbox
+ * and comes back is a new event. Only the keys currently waiting are remembered, so turning notifications on does
+ * not announce the backlog, and nothing is repeated to nag. A visible, focused page already shows the inbox.
+ */
+function notifyNewDecisions(entries: ReadonlyArray<{ key: string; kind: InboxKind; status: string; title: string; detail: string; open: () => Promise<void> }>): void {
+  const waiting = entries.filter(entry => S1_STATUSES.has(entry.status));
+  const seen = notifiedItems();
+  const fresh = waiting.filter(entry => !seen.has(entry.key));
+  rememberNotified(waiting.map(entry => entry.key));
+  if (!fresh.length || !notificationsWanted() || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  if (document.visibilityState === 'visible' && document.hasFocus()) return;
+  for (const entry of fresh.slice(0, 3)) {
+    const note = new Notification(`${inboxKindLabel(entry.kind)}：${entry.title.slice(0, 80)}`, { body: entry.detail.slice(0, 160), tag: entry.key });
+    note.onclick = () => { window.focus(); note.close(); void entry.open().catch(error => message(errorMessage(error))); };
+  }
+}
+function syncNotifyToggle(): void {
+  const toggle = $<HTMLInputElement>('attention-notify');
+  const note = $('attention-notify-note');
+  if (!toggle || !note) return;
+  const supported = typeof Notification !== 'undefined';
+  toggle.disabled = !supported;
+  toggle.checked = supported && notificationsWanted() && Notification.permission === 'granted';
+  note.textContent = !supported ? '这个浏览器不支持通知。' : Notification.permission === 'denied' ? '浏览器拒绝了通知，要在浏览器设置里打开。' : toggle.checked ? '只在页面不在前台时提醒，同一件事只提醒一次。' : '默认关闭。';
+}
+async function changeNotifications(): Promise<void> {
+  const toggle = $<HTMLInputElement>('attention-notify');
+  if (!toggle) return;
+  const wanted = toggle.checked && typeof Notification !== 'undefined' && (Notification.permission === 'granted' || await Notification.requestPermission() === 'granted');
+  try { localStorage.setItem(NOTIFY_PREFERENCE, wanted ? '1' : '0'); } catch { /* storage may be unavailable */ }
+  syncNotifyToggle();
+}
+$('attention-notify')?.addEventListener('change', () => { void changeNotifications().catch(error => message(errorMessage(error))); });
 function renderAttentionInbox(runs: RunSummary[]): void {
+  lastInboxRuns = runs;
+  if (typingNow()) {
+    if (!inboxHold) inboxHold = window.setTimeout(function release() { inboxHold = typingNow() ? window.setTimeout(release, 1000) : 0; if (!inboxHold) renderAttentionInbox(lastInboxRuns); }, 1000);
+    return;
+  }
   const panel = $('attention-inbox');
   const list = $('attention-items');
   const count = $('attention-count');
   if (!panel || !list || !count) return;
-  const items: Array<{ kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
+  const items: Array<{ key: string; kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
   for (const run of runs) {
     const kind = inboxKind(run.status);
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
-      kind, title: runTitle(run), detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
+      key: `run:${run.id}:${run.status}`, kind, title: runTitle(run), detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
       open: () => openAttentionRun(run),
       quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
       act: () => openAttentionRun(run),
@@ -5842,7 +5899,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     if (!hold.blocked) continue;
     const open = async () => { await openGroup(hold.roomId); await showChannelBoard(); };
     items.push({
-      kind: 'question', title: hold.title ?? '频道里的事', detail: `阻塞：${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, at: hold.blockedAt, status: 'blocked', selected: false,
+      key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, kind: 'question', title: hold.title ?? '频道里的事', detail: `阻塞：${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, at: hold.blockedAt, status: 'blocked', selected: false,
       open, quick: '去处理', act: open,
     });
   }
@@ -5850,7 +5907,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     if (message.route.status !== 'clarify') continue;
     if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
     items.push({
-      kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
+      key: `mention:${message.id}`, kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
       open: async () => { prepareConversationReply(message); openConversationRoute(); },
       quick: '查看',
       act: async () => { prepareConversationReply(message); openConversationRoute(); },
@@ -5858,6 +5915,8 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   }
   const stamp = (at?: string) => { const value = Date.parse(at ?? ''); return Number.isFinite(value) ? value : 0; };
   items.sort((left, right) => inboxSeverity(left.kind) - inboxSeverity(right.kind) || stamp(left.at) - stamp(right.at));
+  notifyNewDecisions(items);
+  syncNotifyToggle();
   const attention = items.slice(0, 8);
   if (!attention.length) attentionInboxOpen = false;
   const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;

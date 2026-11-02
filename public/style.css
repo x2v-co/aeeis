@@ -1610,3 +1610,5 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
   body.gb.group-open #group-composer #group-handoff { width: 100%; min-width: 0; }
   body.gb.group-open #group-send-note { display: none; }
 }
+.attention-notify { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; }
+.attention-notify input[type="checkbox"] { flex: none; width: auto; margin: 0; }
