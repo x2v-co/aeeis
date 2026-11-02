@@ -51,6 +51,15 @@ export function quantile(values: readonly number[], q: number): number | undefin
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
 }
 const time = (at: string | undefined) => { const value = Date.parse(at ?? ''); return Number.isFinite(value) ? value : undefined; };
+/** When a Run was executing: from its first executor call (or plan approval) to its end. A Run still executing runs to
+ * `now`; one waiting on a person stopped at its last event. Undefined when it never started executing. */
+export function runExecutionSpan(run: AgentRun, now: number): { start: number; end: number } | undefined {
+  const started = run.events.find(event => event.type === 'model.started' && event.data.phase === 'executor') ?? run.events.find(event => event.type === 'plan.approved');
+  const start = time(started?.at); if (start === undefined) return undefined;
+  const end = time([...run.events].reverse().find(event => TERMINAL_RUN_EVENTS.has(event.type))?.at)
+    ?? (EXECUTING.has(run.status) ? now : time(run.events.at(-1)?.at) ?? time(run.updatedAt) ?? now);
+  return { start, end };
+}
 const taskKey = (item: { conversationId: string; taskId: string }) => `${item.conversationId}:${item.taskId}`;
 
 export function channelMetrics(input: ChannelMetricsInput): ChannelMetrics {
@@ -106,12 +115,8 @@ export function channelMetrics(input: ChannelMetricsInput): ChannelMetrics {
   const spans: Array<{ agent: string; start: number; end: number }> = [];
   for (const [key, run] of runsByKey) {
     const agent = cardByKey.get(key)?.ownerId; if (!agent) continue;
-    const started = run.events.find(event => event.type === 'model.started' && event.data.phase === 'executor') ?? run.events.find(event => event.type === 'plan.approved');
-    const start = time(started?.at); if (start === undefined) continue;
-    // A Run still executing counts to the end of the window; one waiting on a person stopped at its last event.
-    const end = time([...run.events].reverse().find(event => TERMINAL_RUN_EVENTS.has(event.type))?.at)
-      ?? (EXECUTING.has(run.status) ? to : time(run.events.at(-1)?.at) ?? time(run.updatedAt) ?? to);
-    const clipped = { agent, start: Math.max(start, from), end: Math.min(end, to) };
+    const span = runExecutionSpan(run, to); if (!span) continue;
+    const clipped = { agent, start: Math.max(span.start, from), end: Math.min(span.end, to) };
     if (clipped.end > clipped.start) spans.push(clipped);
   }
   const parallel = overlapOfDistinct(spans, 2);

@@ -1915,6 +1915,11 @@ describe('entry bots and group chats', () => {
         plans: [], steps: [], events: [], calls: [], context: { sources: [] },
         artifacts: [{ id: 'artifact_note', title: '工作区清单', content: '周三那一版可以发。', evidenceRefs: ['清单'] }],
       });
+      if (String(url).startsWith('/api/rooms/room_handoff/tasks/conv_release/task_new_0/timeline')) return response({ items: [
+        { at: date, who: '你', text: '已交给发布，记为讨论「请核对发布说明」', source: 'room', human: true },
+        { at: date, who: '发布', text: '开了一件 Run', source: 'run', human: false },
+        { at: date, who: '你', text: '批准了计划', source: 'run', human: true },
+      ] });
       if (url === '/api/conversations/conv_release' && method !== 'POST') return response(release);
       if (method === 'POST' && String(url).endsWith('/answer')) {
         const task = release.tasks.find(item => item.pendingQuestion);
@@ -2094,6 +2099,17 @@ describe('entry bots and group chats', () => {
     expect(el('channel-task').hidden).toBe(false);
     expect(el('channel-task-body').textContent).toContain('看一眼不会执行，也不会改讨论焦点。');
     expect(el('channel-task-body').textContent).toContain('未验证');
+    const replay = () => el('channel-task-body').querySelector<HTMLElement>('[data-task-replay="task_new_0"]')!;
+    expect(replay().querySelector('[data-replay-step]')).toBeNull();
+    replay().querySelector<HTMLButtonElement>('[data-task-replay-load]')!.click();
+    await vi.waitFor(() => expect(replay().querySelector('[data-replay-step]')?.textContent).toContain('1 / 3'));
+    expect(replay().querySelector('[data-replay-step]')!.textContent).toContain('你（人做的决定）：已交给发布');
+    clickText('下一步', replay());
+    expect(replay().querySelector('[data-replay-step]')!.textContent).toContain('2 / 3');
+    expect(replay().querySelector('[data-replay-step]')!.textContent).toContain('发布：开了一件 Run');
+    expect(replay().querySelector('[data-current="true"]')?.textContent).toContain('开了一件 Run');
+    clickText('下一步', replay());
+    expect([...replay().querySelectorAll('button')].find(button => button.textContent === '下一步')!.disabled).toBe(true);
     expect(h.posts).toHaveLength(postsBeforeBoard);
     expect(el('conversation-focus').textContent).toContain('发布方案');
     el('channel-board-close').click();
@@ -3839,6 +3855,7 @@ describe('entry bots and group chats', () => {
       { id: 'task_block', title: '等权限的事', threadId: 'thread_block', status: 'discussion', createdAt: now },
       { id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: now },
     ], messages: [], hasEarlierMessages: false };
+    const digestQueries: string[] = [];
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
@@ -3860,6 +3877,7 @@ describe('entry bots and group chats', () => {
         return response(memory);
       }
       if (String(url).includes('/memories')) return response(memories);
+      if (String(url).startsWith('/api/rooms/room_digest/digest?')) { digestQueries.push(String(url)); return response({ runs: 2, runTimeMs: 90 * 60_000, cycleMs: 3 * 3_600_000, accepted: 1, tokens: 12345, moneyUsd: 0.4123, credits: 3, unreportedCalls: 1 }); }
       if (url === '/api/conversations/conv_release') return response(release);
       return undefined;
     } });
@@ -3869,7 +3887,10 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
     el('channel-digest-open').click();
     await vi.waitFor(() => expect(el('channel-digest-body').textContent).toContain(`本周：交接 ${weekHandoffs}，阻塞 1，完成 1。现在需要你 1。`));
-    expect(el('channel-digest-body').textContent).toContain('花费记在各件事的抽屉里');
+    await vi.waitFor(() => expect(el('channel-digest-body').textContent).toContain('耗时：2 件 Run 执行了 1.5 小时，验收的事从开口到验收中位 3.0 小时。花费：12,345 tokens · 约 $0.41 · 工具 3 credits（1 次调用没报用量，没算进去）。'));
+    const weekQuery = new URL(`http://localhost${digestQueries.at(-1)}`).searchParams;
+    expect(new Date(weekQuery.get('from')!).getDay()).toBe(1);
+    expect(new Date(weekQuery.get('from')!).getHours()).toBe(0);
     expect(el('channel-digest-body').textContent).not.toContain('上周的交接');
     expect(el('channel-rule-list').textContent).toContain('这个频道还没有团队规则');
     expect(el('channel-rule-list').textContent).not.toContain('手填的事实');

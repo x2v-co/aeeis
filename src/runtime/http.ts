@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
 import { channelMetrics } from '../channel-metrics.js';
+import { channelDigestCost, taskTimeline } from '../channel-digest.js';
 import { emptyUiEventCounts, uiEventDay, uiEventInputSchema, type UiEventCountStore } from '../ui-event-counts.js';
 import { z } from 'zod';
 import { AgentEngine, Conflict, digest, event } from './engine.js';
@@ -192,6 +193,14 @@ export function buildApp(options: Options) {
     })
     : undefined;
   const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  /** The Runs this reader can open, by id. Others are left out. */
+  const readableRuns = async (ids: readonly string[], scope: Ownership): Promise<Map<string, AgentRun>> => {
+    const runs = new Map<string, AgentRun>();
+    await Promise.all([...new Set(ids)].map(async runId => {
+      try { runs.set(runId, await options.repository.get(runId, scope)); } catch { /* a Run this reader cannot open is left out */ }
+    }));
+    return runs;
+  };
   // Bots that reply, propose and hand off on their own. Needs a model; AEEIS_BOT_REPLIES=0 keeps them quiet.
   const botTeam = channelBoard && conversations && options.sessionEvents && options.domain && options.ownedBots && options.engine?.modelConfigured && process.env.AEEIS_BOT_REPLIES !== '0'
     ? new BotTeam({
@@ -1010,13 +1019,32 @@ export function buildApp(options: Options) {
     const history = await options.sessionEvents.history(request.params.id, principal.id, principal.tenantId);
     const board = await boardService().board(request.params.id, principal.id, principal.tenantId);
     const scope = { owner: principal.id, tenantId: principal.tenantId };
-    const runs = new Map<string, AgentRun>();
-    await Promise.all([...new Set(board.cards.flatMap(card => card.runId ? [card.runId] : []))].map(async runId => {
-      try { runs.set(runId, await options.repository.get(runId, scope)); } catch { /* a Run this reader cannot open is left out */ }
-    }));
+    const runs = await readableRuns(board.cards.flatMap(card => card.runId ? [card.runId] : []), scope);
     const to = new Date(), from = new Date(to.getTime() - days * 86_400_000);
     const ui = options.uiEvents ? await options.uiEvents.counts(scope, request.params.id, uiEventDay(from.toISOString()), uiEventDay(to.toISOString())) : emptyUiEventCounts();
     return channelMetrics({ roomId: request.params.id, from: from.toISOString(), to: to.toISOString(), history, board, runs, ui });
+  });
+  // Interaction-design §8.8: time and money for a digest window. The browser sends its own local day or week.
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>('/api/rooms/:id/digest', async request => {
+    const principal = principalOf(request);
+    const window = z.object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) }).strict().parse(request.query);
+    const span = Date.parse(window.to) - Date.parse(window.from);
+    if (!(span > 0) || span > 31 * 86_400_000) throw new RangeError('A digest window is from 1 ms to 31 days');
+    const board = await boardService().board(request.params.id, principal.id, principal.tenantId);
+    const runs = await readableRuns(board.cards.flatMap(card => card.runId ? [card.runId] : []), { owner: principal.id, tenantId: principal.tenantId });
+    return channelDigestCost({ ...window, board, runs });
+  });
+  // Interaction-design §8.8: one task from the request to delivery.
+  app.get<{ Params: { id: string; conversationId: string; taskId: string } }>('/api/rooms/:id/tasks/:conversationId/:taskId/timeline', async request => {
+    const principal = principalOf(request);
+    const { id, conversationId, taskId } = request.params;
+    const board = await boardService().board(id, principal.id, principal.tenantId);
+    const card = board.cards.find(item => item.conversationId === conversationId && item.taskId === taskId);
+    if (!card) throw new NotFound('Unknown task in this room');
+    const run = card.runId ? (await readableRuns([card.runId], { owner: principal.id, tenantId: principal.tenantId })).get(card.runId) : undefined;
+    const ids = new Set([...board.citations.map(cite => cite.actorId), ...board.actions.flatMap(action => action.agentId ? [action.agentId] : []), card.ownerId]);
+    const names = new Map(await Promise.all([...ids].map(async agentId => [agentId, await boardService().nameFor(agentId, principal.tenantId)] as const)));
+    return { items: taskTimeline({ board, conversationId, taskId, ...(run ? { run } : {}), nameOf: agentId => names.get(agentId) ?? agentId }) };
   });
   /** Browser-only §18.2 events. Only the name, room and day are kept. */
   app.post('/api/ui-events', async (request, reply) => {

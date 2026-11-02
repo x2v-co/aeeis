@@ -2582,6 +2582,38 @@ async function reviseChannelTask(view: ConversationView, task: ConversationTaskV
   message(`已为「${task.title}」另开一条修改讨论。原来的产物还在。`);
   await afterChannelWrite(view, task.id);
 }
+interface TaskTimelineView { at: string; who: string; text: string; source: 'room' | 'run'; human: boolean }
+/** §8.8: replay one task from the request to delivery, one moment at a time. Loads only when asked. */
+function taskReplay(roomId: string, conversationId: string, taskId: string): HTMLElement {
+  const box = element('section', '', 'task-replay');
+  box.dataset.taskReplay = taskId;
+  const load = dashboardButton('回放这件事', async () => {
+    const { items } = await api<{ items: TaskTimelineView[] }>(`/rooms/${encodeURIComponent(roomId)}/tasks/${encodeURIComponent(conversationId)}/${encodeURIComponent(taskId)}/timeline`);
+    if (!box.isConnected) return;
+    if (!items.length) { box.replaceChildren(element('small', '这件事还没有可以回放的记录。')); return; }
+    let index = 0;
+    const caption = element('p', '');
+    caption.dataset.replayStep = '';
+    const list = element('ol', '', 'task-replay-list');
+    for (const item of items) list.append(element('li', `${formatTime(item.at)} · ${item.who}：${item.text}`));
+    const back = button('上一步', async () => show(index - 1)); back.type = 'button';
+    const next = button('下一步', async () => show(index + 1)); next.type = 'button';
+    const show = (to: number) => {
+      index = Math.max(0, Math.min(items.length - 1, to));
+      const item = items[index]!;
+      caption.textContent = `${index + 1} / ${items.length} · ${formatTime(item.at)} · ${item.who}${item.human ? '（人做的决定）' : ''}：${item.text}`;
+      back.disabled = index === 0; next.disabled = index === items.length - 1;
+      [...list.children].forEach((row, position) => { if (position === index) (row as HTMLElement).dataset.current = 'true'; else delete (row as HTMLElement).dataset.current; });
+    };
+    const nav = element('div', '', 'task-replay-nav');
+    nav.append(back, next);
+    box.replaceChildren(element('strong', '从开口到交付'), caption, nav, list);
+    show(0);
+  });
+  load.dataset.taskReplayLoad = taskId;
+  box.append(load);
+  return box;
+}
 function openChannelTask(view: ConversationView, task: ConversationTaskView, owner: string): void {
   const panel = $('channel-task');
   const title = $('channel-task-title');
@@ -2609,6 +2641,7 @@ function openChannelTask(view: ConversationView, task: ConversationTaskView, own
   spend.dataset.spend = task.id;
   body.append(spend);
   body.append(element('small', '看一眼不会执行，也不会改讨论焦点。'));
+  if (openGroupId) body.append(taskReplay(openGroupId, view.id, task.id));
   const runId = task.runId ?? task.latestRunId ?? (view.lastDelivery?.taskId === task.id ? view.lastDelivery.runId : undefined);
   if (runId) {
     const read = dashboardButton('阅读全文', () => openChannelArtifact(runId));
@@ -5567,7 +5600,34 @@ function renderDigestBody(): void {
   const blocked = digestTaskCount('block');
   const done = digestTaskCount('accept');
   const label = digestWindow === 'day' ? '今日' : '本周';
-  body.replaceChildren(element('p', `${label}：交接 ${handoffs}，阻塞 ${blocked}，完成 ${done}。现在需要你 ${digestNeedsYou()}。`), element('small', '花费记在各件事的抽屉里。今日和本周按这台机器的本地日历，一周从周一开始。'));
+  const spend = element('p', '正在汇总耗时和花费。');
+  spend.dataset.digestCost = digestWindow;
+  body.replaceChildren(element('p', `${label}：交接 ${handoffs}，阻塞 ${blocked}，完成 ${done}。现在需要你 ${digestNeedsYou()}。`), spend, element('small', '今日和本周按这台机器的本地日历，一周从周一开始。耗时只算 Run 在执行的时间，等人不算。'));
+  if (openGroupId) void renderDigestCost(openGroupId, digestWindow, spend).catch(error => { spend.textContent = errorMessage(error); });
+}
+/** Start of the local calendar day or week (Monday) the digest covers. */
+function digestWindowStart(span: DigestWindow): Date {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (span === 'week') { const weekday = start.getDay(); start.setDate(start.getDate() - (weekday === 0 ? 6 : weekday - 1)); }
+  return start;
+}
+function formatDuration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return `${Math.max(0, Math.round(ms / 1000))} 秒`;
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = ms / 3_600_000;
+  return hours < 48 ? `${hours.toFixed(1)} 小时` : `${(hours / 24).toFixed(1)} 天`;
+}
+/** §8.8: the time and money behind the digest window, from the server. */
+async function renderDigestCost(roomId: string, span: DigestWindow, line: HTMLElement): Promise<void> {
+  const from = digestWindowStart(span).toISOString(), to = new Date(Date.now() + 1000).toISOString();
+  const cost = await api<{ runs: number; runTimeMs: number; cycleMs?: number; accepted: number; tokens: number; moneyUsd?: number; credits: number; unreportedCalls: number }>(`/rooms/${encodeURIComponent(roomId)}/digest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+  if (openGroupId !== roomId || digestWindow !== span || !line.isConnected) return;
+  if (typeof cost.tokens !== 'number' || typeof cost.runTimeMs !== 'number') { line.textContent = '这台服务还不能汇总耗时和花费。'; return; }
+  const time = cost.runs ? `耗时：${cost.runs} 件 Run 执行了 ${formatDuration(cost.runTimeMs)}${cost.cycleMs !== undefined ? `，验收的事从开口到验收中位 ${formatDuration(cost.cycleMs)}` : ''}。` : '耗时：这段时间没有 Run 在执行。';
+  const money = [`${cost.tokens.toLocaleString('zh-CN')} tokens`, ...(cost.moneyUsd !== undefined ? [`约 $${cost.moneyUsd.toFixed(2)}`] : []), ...(cost.credits ? [`工具 ${cost.credits} credits`] : [])].join(' · ');
+  line.textContent = `${time}花费：${money}${cost.unreportedCalls ? `（${cost.unreportedCalls} 次调用没报用量，没算进去）` : ''}。`;
 }
 async function scopedMemories(selector: { exact?: string; prefix?: string; kind?: string }): Promise<{ goal?: GoalSummary; items: MemoryView[] }> {
   const goal = await listedChannelGoal();

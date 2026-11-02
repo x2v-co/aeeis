@@ -190,6 +190,34 @@ describe('Bots that act on their own', () => {
     expect(JSON.stringify(metrics)).not.toContain('上线前查数据');
   });
 
+  it('replays one task from the request to the handoff, and sums the digest window from the Runs', async () => {
+    const f = await team({
+      reply: input => input.you.name === '阿研' ? { reply: '我查数据，说明给阿写。', tasks: [{ title: '查上线数据' }, { title: '写上线说明', for: '阿写', note: '你写得快' }] } : { reply: '好' },
+      turn: () => ({ decision: 'accept', message: '好，我来。' }),
+    }, { writerAutonomy: 'auto' });
+    await f.say('@阿研 上线前查数据并写说明');
+    const card = (await f.board()).cards.find(item => item.title === '写上线说明')!;
+    const timeline = await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/tasks/${card.conversationId}/${card.taskId}/timeline`, headers });
+    expect(timeline.statusCode, timeline.body).toBe(200);
+    const lines = (timeline.json().items as Array<{ who: string; text: string }>).map(item => `${item.who}：${item.text}`);
+    expect(lines).toEqual([
+      '自动记录：阿研提议：写上线说明',
+      '自动记录：阿研提议这件事',
+      '自动记录：交接中：交给 阿写',
+      '自动记录：转交给 阿写',
+      '自动记录：阿写接下了「写上线说明」（来自阿研）。',
+      '阿写：开了一件 Run',
+    ]);
+    expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/tasks/${card.conversationId}/task_missing/timeline`, headers })).statusCode).toBe(404);
+    const from = new Date(Date.now() - 3_600_000).toISOString(), to = new Date(Date.now() + 60_000).toISOString();
+    const digest = await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/digest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, headers });
+    expect(digest.statusCode, digest.body).toBe(200);
+    expect(digest.json()).toMatchObject({ from, to, accepted: 0, credits: 0 });
+    expect(digest.json().tokens).toBeGreaterThanOrEqual(0);
+    expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/digest?from=${encodeURIComponent(to)}&to=${encodeURIComponent(from)}`, headers })).statusCode).toBe(400);
+    expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/digest?from=${encodeURIComponent('2026-01-01T00:00:00.000Z')}&to=${encodeURIComponent(to)}`, headers })).statusCode).toBe(400);
+  });
+
   it('hands work over in the side thread: the card moves only when the other Bot accepts', async () => {
     const turns = [{ decision: 'discuss', message: '需要多久交？' }, { decision: 'discuss', message: '今天下班前。' }, { decision: 'accept', message: '好，我来。' }];
     let turn = 0;
