@@ -278,7 +278,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
 }
 /** Interval callbacks the page registered; tests fire them by hand. */
 let intervals: Array<{ callback: () => void; ms: number }> = [];
-function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string> } = {}) {
+function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string>; setup?: (window: any) => void } = {}) {
   dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
@@ -291,6 +291,7 @@ function start(fetch: any, saved: { local?: Record<string, string>; session?: Re
   dom.window.fetch = fetch; dom.window.setInterval = ((callback: () => void, ms: number) => { intervals.push({ callback, ms }); return intervals.length; }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
+  saved.setup?.(dom.window);
   dom.window.eval(source);
 }
 const doc = () => dom.window.document;
@@ -1018,6 +1019,86 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
   });
 
+  it('sends a browser notification once for each new approval or question, only when turned on and the page is away', async () => {
+    const shown: Array<{ title: string; body: string; tag: string }> = [];
+    let permission = 'default';
+    class FakeNotification {
+      static get permission() { return permission; }
+      static async requestPermission() { permission = 'granted'; return permission; }
+      onclick: (() => void) | null = null;
+      constructor(title: string, options: { body: string; tag: string }) { shown.push({ title, body: options.body, tag: options.tag }); }
+      close() {}
+    }
+    const runs = [{ id: 'run_old', goal: '整理旧计划', status: 'needs_approval', updatedAt: date }] as Array<{ id: string; goal: string; status: string; updatedAt: string }>;
+    const h = harness(undefined, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      return undefined;
+    } });
+    start(h.fetch, { setup: window => { window.Notification = FakeNotification; window.document.hasFocus = () => false; } });
+    await ready();
+    const tick = async () => { intervals.find(item => item.ms === 2000)!.callback(); await new Promise(resolve => setTimeout(resolve, 60)); };
+    await vi.waitFor(() => expect(el('attention-notify-note').textContent).toBe('默认关闭。'));
+    expect(el<HTMLInputElement>('attention-notify').checked).toBe(false);
+    // Off by default: nothing is shown for a new approval.
+    runs.push({ id: 'run_quiet', goal: '不提醒的这件', status: 'needs_input', updatedAt: date });
+    await tick();
+    expect(shown).toHaveLength(0);
+    el<HTMLInputElement>('attention-notify').checked = true;
+    el('attention-notify').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(el('attention-notify-note').textContent).toContain('同一件事只提醒一次'));
+    expect(dom.window.localStorage.getItem('aeeis.notify-s1')).toBe('1');
+    // Turning it on does not announce what was already waiting.
+    await tick();
+    expect(shown).toHaveLength(0);
+    runs.push({ id: 'run_new', goal: '确认发版时间', status: 'needs_input', updatedAt: date });
+    runs.push({ id: 'run_failed', goal: '失败的这件', status: 'failed', updatedAt: date });
+    await tick();
+    await vi.waitFor(() => expect(shown).toHaveLength(1));
+    expect(shown[0]).toMatchObject({ title: '提问：确认发版时间', tag: 'run:run_new:needs_input' });
+    await tick(); await tick();
+    expect(shown).toHaveLength(1);
+    // It left the inbox and came back: a new event, told once more.
+    runs.find(run => run.id === 'run_new')!.status = 'running';
+    await tick();
+    runs.find(run => run.id === 'run_new')!.status = 'needs_input';
+    await tick();
+    await vi.waitFor(() => expect(shown).toHaveLength(2));
+    // A focused page already shows the inbox.
+    dom.window.document.hasFocus = () => true;
+    runs.push({ id: 'run_seen', goal: '看得见的这件', status: 'needs_approval', updatedAt: date });
+    await tick();
+    expect(shown).toHaveLength(2);
+  });
+  it('keeps the notification switch off and explains why when the browser refuses or lacks notifications', async () => {
+    start(harness().fetch, { setup: window => { window.Notification = class { static permission = 'denied'; static async requestPermission() { return 'denied'; } }; } });
+    await ready();
+    expect(el<HTMLInputElement>('attention-notify').disabled).toBe(true);
+    expect(el('attention-notify-note').textContent).toBe('浏览器拒绝了通知，要在浏览器设置里打开。');
+    start(harness().fetch);
+    await ready();
+    expect(el<HTMLInputElement>('attention-notify').disabled).toBe(true);
+    expect(el('attention-notify-note').textContent).toBe('这个浏览器不支持通知。');
+  });
+  it('holds new inbox items while someone is typing and shows them once they stop', async () => {
+    const runs = [] as Array<{ id: string; goal: string; status: string; updatedAt: string }>;
+    const h = harness(undefined, { handler(url) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    const tick = async () => { intervals.find(item => item.ms === 2000)!.callback(); await new Promise(resolve => setTimeout(resolve, 60)); };
+    const field = el<HTMLTextAreaElement>('conversation-text');
+    field.focus();
+    field.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    runs.push({ id: 'run_new', goal: '确认发版时间', status: 'needs_approval', updatedAt: date });
+    await tick();
+    expect(el('attention-toggle').hidden).toBe(true);
+    expect(doc().activeElement).toBe(field);
+    field.blur();
+    await vi.waitFor(() => expect(el('attention-toggle').hidden).toBe(false), { timeout: 3000 });
+    expect(el('attention-toggle').dataset.count).toBe('1');
+  });
   it('names a life-thread Run by its task, not by the header the model reads', async () => {
     const goal = '私聊：agent:bot_0000aaaa\n说话人：agent:bot_0000bbbb\n任务：整理一份发布风险\n当前请求：我来做这件事。';
     const h = harness(undefined, { handler(url) {
@@ -1220,6 +1301,158 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
     await vi.waitFor(() => expect(el('channel-board').hidden).toBe(false));
     expect(h.posts.filter(post => post.url.includes('/task-actions') || post.url.endsWith('/messages'))).toHaveLength(0);
+  });
+  it('records a demonstration from the teach panel, replays it step by step, adopts it as a routine and revokes it', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'needs_input', runId: 'run_q', latestRunId: 'run_q', pendingQuestion: { text: '哪天发？' } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    let teaching: any;
+    const draft = { steps: [
+      { at: date, text: '@阿研 上线前先查数据', source: 'message', decision: false },
+      { at: date, text: '查上线数据：核对清单', source: 'run', decision: false },
+      { at: date, text: '阻塞：等运维给数据', source: 'action', decision: true },
+    ], decisions: ['阻塞：等运维给数据'], tools: ['web-search'], prompt: '按「发布协作」里的一次示范来做。', executionReview: 'required' };
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (url === '/api/rooms/room_team/teachings' && method === 'GET') return response({ items: teaching ? [teaching] : [] });
+      if (url === '/api/rooms/room_team/teachings' && method === 'POST') { teaching = { id: 'teach_one', agentId: bot.id, agentName: '阿研', startedAt: date, state: 'recording' }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/stop') { teaching = { ...teaching, state: 'recorded', stoppedAt: date, draft }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/adopt') { teaching = { ...teaching, state: 'adopted', routineId: 'routine_one' }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/revoke') { teaching = { ...teaching, state: 'revoked' }; delete teaching.draft; return response(teaching); }
+      if (url === '/api/routines/routine_one/run') return response({ status: 'started', deliveryId: 'manual:1', runId: 'run_new' });
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    await vi.waitFor(() => expect(el('group-members').textContent).toContain('阿研'));
+    el('channel-teach-open').click();
+    await vi.waitFor(() => expect(el('channel-teachings').textContent).toContain('还没有录过示范'));
+    await vi.waitFor(() => expect([...el<HTMLSelectElement>('channel-teach-person').options].some(option => option.value === bot.id)).toBe(true));
+    el<HTMLSelectElement>('channel-teach-person').value = bot.id;
+    el('channel-teach-start').click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/rooms/room_team/teachings')?.body).toEqual({ agentId: bot.id }));
+    await vi.waitFor(() => expect(el('channel-teach-stop').hidden).toBe(false));
+    expect(el('channel-teach-start').hidden).toBe(true);
+    expect(el('channel-teach-stop').textContent).toBe('结束示范（教给阿研）');
+    expect(el('channel-teachings').textContent).toContain('正在录');
+    el('channel-teach-stop').click();
+    const card = () => doc().querySelector<HTMLElement>('#channel-teachings [data-teaching="teach_one"]')!;
+    await vi.waitFor(() => expect(card().dataset.state).toBe('recorded'));
+    expect(el('channel-teach-start').hidden).toBe(false);
+    const caption = () => card().querySelector<HTMLElement>('[data-teaching-step]')!;
+    expect(caption().textContent).toContain('第 1 / 3 步');
+    expect(caption().textContent).toContain('@阿研 上线前先查数据');
+    clickText('下一步', card()); clickText('下一步', card());
+    await vi.waitFor(() => expect(caption().textContent).toContain('第 3 / 3 步'));
+    expect(caption().textContent).toContain('要人确认：阻塞：等运维给数据');
+    expect(card().querySelector<HTMLButtonElement>('.teaching-replay button:last-child')!.disabled).toBe(true);
+    expect(card().textContent).toContain('用到的工具：web-search');
+    expect(card().querySelector<HTMLTextAreaElement>('[data-teaching-prompt]')!.value).toBe('按「发布协作」里的一次示范来做。');
+    expect(card().querySelector<HTMLSelectElement>('[data-teaching-review]')!.value).toBe('required');
+    card().querySelector<HTMLInputElement>('[data-teaching-name]')!.value = '上线检查';
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="adopt"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url.endsWith('/teach_one/adopt'))?.body).toEqual({ name: '上线检查', prompt: '按「发布协作」里的一次示范来做。', executionReview: 'required' }));
+    await vi.waitFor(() => expect(card().dataset.state).toBe('adopted'));
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="run"]')!.click();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/routines/routine_one/run')).toBe(true));
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="revoke"]')!.click();
+    await vi.waitFor(() => expect(el('error').textContent).toContain('撤销前写下原因'));
+    expect(h.posts.some(post => post.url.endsWith('/revoke'))).toBe(false);
+    card().querySelector<HTMLTextAreaElement>('[data-teaching-reason]')!.value = '流程改了';
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="revoke"]')!.click();
+    await vi.waitFor(() => expect(card().dataset.state).toBe('revoked'));
+    expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
+    expect(card().querySelector('[data-teaching-action]')).toBeNull();
+  });
+  it('shows Bot upgrades as cards in the group, acts on them by state, and gives a member only a summary', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'needs_input', runId: 'run_q', latestRunId: 'run_q', pendingQuestion: { text: '哪天发？' } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    const upgrades: any[] = [
+      { kind: 'full', id: 'evo_one', target: 'prompt', baseVersion: 'prompt/1', version: 'prompt/2', status: 'evaluating', updatedAt: date, change: '先写结论', reason: '三次被要求先写结论', risk: 'low',
+        evaluations: [{ kind: 'replay', passed: true, score: 0.9 }], evaluated: true, shadow: { passed: 0, failed: 0, needed: 1 }, canary: { passed: 0, failed: 0, needed: 1 }, sources: 2, fromThisChannel: true, affectedChannels: 3, active: false, canActivate: true },
+      { kind: 'full', id: 'evo_two', target: 'skill', baseVersion: 's/1', version: 's/2', status: 'promoted', updatedAt: date, change: '换检索', reason: '更快', risk: 'medium',
+        evaluations: [], evaluated: true, shadow: { passed: 3, failed: 0, needed: 3 }, canary: { passed: 3, failed: 0, needed: 3 }, sources: 1, fromThisChannel: false, affectedChannels: 3, active: true, canActivate: true },
+      { kind: 'summary', id: 'evo_three', target: 'model-policy', version: 'm/2', status: 'shadowing', updatedAt: date },
+    ];
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (url === '/api/rooms/room_team/upgrades') return response({ items: upgrades });
+      if (method === 'POST' && String(url).startsWith('/api/evolution/candidates/')) {
+        const [, , , , id, action] = String(url).split('/');
+        const item = upgrades.find(candidate => candidate.id === id)!;
+        item.status = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : action === 'rollback' ? 'rolled_back' : action === 'promote' ? 'promoted' : item.status;
+        return response({ id, status: item.status });
+      }
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    const card = (id: string) => doc().querySelector<HTMLElement>(`#channel-upgrades [data-upgrade="${id}"]`);
+    await vi.waitFor(() => expect(card('evo_one')).not.toBeNull());
+    expect(el('channel-upgrades').hidden).toBe(false);
+    expect(card('evo_one')!.textContent).toContain('升级：提示词从 prompt/1 到 prompt/2');
+    expect(card('evo_one')!.textContent).toContain('改什么：先写结论');
+    expect(card('evo_one')!.textContent).toContain('为什么：三次被要求先写结论');
+    expect(card('evo_one')!.textContent).toContain('回放通过 0.9 · 2 条来源 · 由这个群里的一件事引出');
+    expect(card('evo_one')!.textContent).toContain('上线并启用后，你的 3 个群聊里 Bot 新开的 Run 用这个版本；正在做的事不受影响');
+    expect(card('evo_two')!.textContent).toContain('已用到新 Run');
+    expect(card('evo_two')!.textContent).toContain('影子运行 3/3 通过');
+    expect(card('evo_two')!.querySelector('[data-upgrade-action="reject"]')).toBeNull();
+    expect(card('evo_two')!.querySelector('[data-upgrade-action="rollback"]')).not.toBeNull();
+    expect(card('evo_three')!.dataset.upgradeKind).toBe('summary');
+    expect(card('evo_three')!.textContent).toBe('团队升级模型选择升到 m/2 · 影子运行中');
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="approve"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_one/approve')?.body).toEqual({ approvalRef: 'room:room_team' }));
+    await vi.waitFor(() => expect(card('evo_one')!.querySelector('[data-upgrade-action="promote"]')).not.toBeNull());
+    expect(card('evo_one')!.querySelector('[data-upgrade-action="start-shadow"]')).not.toBeNull();
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="reject"]')!.click();
+    await vi.waitFor(() => expect(el('error').textContent).toContain('拒绝前写下原因'));
+    expect(h.posts.some(post => post.url.endsWith('/reject'))).toBe(false);
+    card('evo_one')!.querySelector<HTMLTextAreaElement>('textarea[data-upgrade-reason]')!.value = '先不改语气';
+    card('evo_one')!.querySelector<HTMLButtonElement>('[data-upgrade-action="reject"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_one/reject')?.body).toEqual({ reason: '先不改语气' }));
+    await vi.waitFor(() => expect(card('evo_one')!.dataset.status).toBe('rejected'));
+    expect(card('evo_one')!.textContent).toContain('新开的 Run 不用这个版本');
+    expect(card('evo_one')!.querySelector('[data-upgrade-action]')).toBeNull();
+    card('evo_two')!.querySelector<HTMLTextAreaElement>('textarea[data-upgrade-reason]')!.value = '回答变长了';
+    dom.window.confirm = () => false;
+    card('evo_two')!.querySelector<HTMLButtonElement>('[data-upgrade-action="rollback"]')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.posts.some(post => post.url.endsWith('/rollback'))).toBe(false);
+    dom.window.confirm = () => true;
+    card('evo_two')!.querySelector<HTMLButtonElement>('[data-upgrade-action="rollback"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/evolution/candidates/evo_two/rollback')?.body).toEqual({ reason: '回答变长了' }));
   });
   it('counts what only the browser sees, opens cited evidence in place, and shows the channel\'s indicators in the digest', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };

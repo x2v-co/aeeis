@@ -15,6 +15,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
+import { ChannelTeachingService } from '../channel-teaching.js';
+import { channelUpgradeCards } from '../channel-upgrades.js';
+import { EvolutionTransitionError } from '../evolution.js';
 import { channelMetrics } from '../channel-metrics.js';
 import { channelDigestCost, taskTimeline } from '../channel-digest.js';
 import { emptyUiEventCounts, uiEventDay, uiEventInputSchema, type UiEventCountStore } from '../ui-event-counts.js';
@@ -179,20 +182,30 @@ export function buildApp(options: Options) {
       if (!conversations) return undefined;
       const view = await conversations.get(conversationId, { owner: actorId, tenantId });
       return { id: view.id, ...(view.agentId ? { agentId: view.agentId } : {}), tasks: view.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...(task.runId ? { runId: task.runId } : {}), ...(task.latestRunId ? { latestRunId: task.latestRunId } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}) })) };
-    }, async (agentId, tenantId) => {
-      if (agentId === 'aeeis') return 'AEEIS';
-      if (agentId.startsWith('bot_') && options.ownedBots) {
-        const bot = await options.ownedBots.get(agentId).catch(() => undefined);
-        return bot && bot.tenantId === tenantId ? bot.name : undefined;
-      }
-      if (options.agentDirectory) {
-        const card = await Promise.resolve(options.agentDirectory.get(agentId)).catch(() => undefined);
-        return card?.name;
-      }
-      return undefined;
+    }, async (agentId, tenantId) => nameOfParticipant(agentId, tenantId))
+    : undefined;
+  /** Display name of a group participant: AEEIS, one of the owner's Bots, or a registered Agent. */
+  async function nameOfParticipant(agentId: string, tenantId: string): Promise<string | undefined> {
+    if (agentId === 'aeeis') return 'AEEIS';
+    if (agentId.startsWith('bot_') && options.ownedBots) {
+      const bot = await options.ownedBots.get(agentId).catch(() => undefined);
+      return bot && bot.tenantId === tenantId ? bot.name : undefined;
+    }
+    if (options.agentDirectory) {
+      const card = await Promise.resolve(options.agentDirectory.get(agentId)).catch(() => undefined);
+      return card?.name;
+    }
+    return undefined;
+  }
+  const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  const teaching = channelBoard && options.sessionEvents && options.domain
+    ? new ChannelTeachingService({
+      events: options.sessionEvents, domain: options.domain, board: channelBoard, nameOf: nameOfParticipant,
+      readRun: async (runId, scope) => { try { return await options.repository.get(runId, scope); } catch (error) { if (error instanceof NotFound) return undefined; throw error; } },
+      ...(routines ? { routines } : {}),
     })
     : undefined;
-  const boardService = () => { if (!channelBoard) throw new Conflict('Channel board is not configured'); return channelBoard; };
+  const teachingService = () => { if (!teaching) throw new Conflict('Channel teaching is not configured'); return teaching; };
   /** The Runs this reader can open, by id. Others are left out. */
   const readableRuns = async (ids: readonly string[], scope: Ownership): Promise<Map<string, AgentRun>> => {
     const runs = new Map<string, AgentRun>();
@@ -522,6 +535,7 @@ export function buildApp(options: Options) {
     if (error instanceof DeviceSessionNotFound) return reply.code(401).send({ error: 'Unknown device session' });
     if (error instanceof DeviceSessionConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof NotFound || error instanceof EvolutionNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof EvolutionTransitionError) return reply.code(409).send({ error: error.message });
     if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound || error instanceof OwnedBotNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof PrincipalDirectoryUnavailable) return reply.code(503).send({ error: 'Principal directory unavailable; invitation refused' });
     if (error instanceof ChannelIdentityUnavailable) return reply.code(503).send({ error: 'Channel identity resolver unavailable; event admission refused' });
@@ -1011,6 +1025,46 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     return boardService().board(request.params.id, principal.id, principal.tenantId);
   });
+  // Interaction-design §8.7: "watch me do it once", turned into a routine for one Bot.
+  app.get<{ Params: { id: string } }>('/api/rooms/:id/teachings', async request => {
+    const principal = principalOf(request);
+    return { items: await teachingService().list(request.params.id, { owner: principal.id, tenantId: principal.tenantId }) };
+  });
+  app.post<{ Params: { id: string } }>('/api/rooms/:id/teachings', async request => {
+    const principal = principalOf(request);
+    return teachingService().start(request.params.id, request.body, { owner: principal.id, tenantId: principal.tenantId });
+  });
+  app.post<{ Params: { id: string; teachingId: string; action: string } }>('/api/rooms/:id/teachings/:teachingId/:action', async request => {
+    const principal = principalOf(request);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const { id, teachingId, action } = request.params;
+    if (action === 'stop') return teachingService().stop(id, teachingId, scope);
+    if (action === 'adopt') return teachingService().adopt(id, teachingId, request.body, scope);
+    if (action === 'revoke') return teachingService().revoke(id, teachingId, request.body, scope);
+    throw new Conflict('Unsupported teaching action');
+  });
+  // Interaction-design §8.9: Bot upgrades as cards in a group chat. The room owner (or an operator) gets the full card;
+  // other members get only a "team upgrade" summary.
+  app.get<{ Params: { id: string } }>('/api/rooms/:id/upgrades', async request => {
+    if (!options.rsi || !options.domain) return { items: [] };
+    const principal = principalOf(request);
+    const room = await options.domain.getRoomForPrincipal(request.params.id, principal.id, principal.tenantId);
+    if (room.chat !== 'group') return { items: [] };
+    const roomOwner = room.owner ?? 'owner';
+    const manager = roomOwner === principal.id || principal.roles.includes('operator');
+    const candidates = await options.rsi.list({ owner: roomOwner, tenantId: principal.tenantId }, 100);
+    const roomRunIds = new Set<string>();
+    let affectedChannels = 0;
+    let activation: { configured: boolean; active: ReadonlySet<string> } = { configured: false, active: new Set() };
+    if (manager) {
+      const status = await options.rsi.activationStatus({ owner: roomOwner, tenantId: principal.tenantId }).catch(() => undefined);
+      if (status) activation = { configured: status.configured, active: new Set(status.active.map(item => item.candidateId)) };
+      const board = channelBoard ? await channelBoard.board(room.id, principal.id, principal.tenantId).catch(() => undefined) : undefined;
+      for (const card of board?.cards ?? []) if (card.runId) roomRunIds.add(card.runId);
+      affectedChannels = (await options.domain.listRoomsForPrincipal(principal.id, principal.tenantId)).filter(item => item.status === 'active' && item.chat === 'group' && (item.owner ?? 'owner') === roomOwner).length;
+    }
+    return { items: channelUpgradeCards(candidates, { manager, roomRunIds, affectedChannels, activation, now: new Date().toISOString() }) };
+  });
   // Interaction-design §18: the channel's indicators over the last `days` days, read from what the room and its Runs already record.
   app.get<{ Params: { id: string }; Querystring: { days?: string } }>('/api/rooms/:id/metrics', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
@@ -1119,6 +1173,10 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     await routineService().remove(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
     return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string } }>('/api/routines/:id/run', async request => {
+    const principal = principalOf(request);
+    return routineService().runNow(request.params.id, { owner: principal.id, tenantId: principal.tenantId });
   });
   app.post<{ Params: { id: string } }>('/api/routines/:id/rotate-secret', async request => {
     const principal = principalOf(request);
@@ -1410,6 +1468,7 @@ export function buildApp(options: Options) {
       const body = z.object({ id: z.string().trim().min(1).max(200), passed: z.boolean(), score: z.number().min(0).max(1), evidenceRefs: z.array(z.string().trim().min(1).max(200)).min(1).max(100), recordedAt: z.string().datetime({ offset: true }).optional() }).strict().parse(request.body);
       return options.rsi.recordTraffic(id, { ...body, recordedAt: body.recordedAt ?? new Date().toISOString() }, scope);
     }
+    if (action === 'reject') return options.rsi.reject(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason, scope);
     if (action === 'rollback') return options.rsi.rollback(id, z.object({ reason: z.string().min(1).max(4000) }).strict().parse(request.body).reason, scope);
     throw new Conflict('Unsupported evolution action');
   });

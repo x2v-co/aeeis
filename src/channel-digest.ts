@@ -73,17 +73,18 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
   const key = `${input.conversationId}:${input.taskId}`;
   const card = input.board.cards.find(item => taskKey(item) === key);
   const name = input.nameOf;
-  const entries: TaskTimelineEntry[] = [];
+  // Room records keep the room's own order when they share a millisecond; Run moments come after them.
+  const entries: Array<TaskTimelineEntry & { order: number }> = [];
   for (const cite of input.board.citations) {
     if (taskKey(cite) !== key || !cite.at) continue;
     const human = cite.actorType !== 'agent' && !cite.automatic;
-    entries.push({ at: cite.at, who: cite.actorType === 'agent' ? name(cite.actorId) : cite.automatic ? '自动记录' : OWNER, text: clip(cite.content), source: 'room', human });
+    entries.push({ order: cite.sequence ?? 0, at: cite.at, who: cite.actorType === 'agent' ? name(cite.actorId) : cite.automatic ? '自动记录' : OWNER, text: clip(cite.content), source: 'room', human });
   }
   for (const action of input.board.actions) {
     if (taskKey(action) !== key || !action.at) continue;
     const byBot = Boolean(action.automatic);
     const line = taskActionLine({ schemaVersion: 'channel-task-action/1', kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}) }, action.agentId ? name(action.agentId) : undefined);
-    entries.push({ at: action.at, who: byBot ? '自动记录' : OWNER, text: line, source: 'room', human: !byBot });
+    entries.push({ order: action.sequence ?? 0, at: action.at, who: byBot ? '自动记录' : OWNER, text: line, source: 'room', human: !byBot });
   }
   const run = input.run;
   if (run) {
@@ -91,7 +92,7 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
     const nodes = new Map((run.plans.at(-1)?.nodes ?? []).map(node => [node.id, node.title]));
     const asked = run.events.filter(event => event.type === 'input.requested');
     const received = run.events.filter(event => event.type === 'input.received');
-    const push = (at: string, human: boolean, text: string) => entries.push({ at, who: human ? OWNER : doer, text: clip(text), source: 'run', human });
+    const push = (at: string, human: boolean, text: string) => entries.push({ order: Number.MAX_SAFE_INTEGER, at, who: human ? OWNER : doer, text: clip(text), source: 'run', human });
     const str = (value: unknown) => typeof value === 'string' ? value : '';
     for (const event of run.events) {
       const step = typeof event.data.taskId === 'string' ? nodes.get(event.data.taskId) ?? event.data.taskId : '';
@@ -121,5 +122,5 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
       }
     }
   }
-  return entries.sort((left, right) => left.at.localeCompare(right.at));
+  return entries.sort((left, right) => left.at.localeCompare(right.at) || left.order - right.order).map(({ order: _order, ...entry }) => entry);
 }

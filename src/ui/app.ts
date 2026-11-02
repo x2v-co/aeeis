@@ -94,11 +94,11 @@ interface ConversationMessageView {
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
-  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' };
+  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
 }
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
-  trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' };
+  trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -1311,9 +1311,15 @@ const ROUTINE_WEEKDAYS = ['', '周一', '周二', '周三', '周四', '周五', 
 const ROUTINE_REVIEW: Record<RoutineView['executionReview'], string> = { required: '每一步都问我', auto: '自动判断', yolo: '放手' };
 function routineWhen(routine: RoutineView): string {
   if (routine.trigger.kind === 'webhook') return '收到 Webhook 时';
+  if (routine.trigger.kind === 'manual') return '你叫它时';
   const calendar = routine.trigger.calendar;
   const days = calendar.frequency === 'weekly' ? (calendar.daysOfWeek ?? []).map(day => ROUTINE_WEEKDAYS[day]).join('、') : calendar.frequency === 'monthly' ? `每月 ${calendar.dayOfMonth} 日` : '每天';
   return `${days} ${calendar.time}（${calendar.timeZone}）`;
+}
+async function runRoutineNow(id: string, name: string): Promise<void> {
+  const result = await api<{ status: string; runId?: string }>(`/routines/${encodeURIComponent(id)}/run`, {});
+  message(result.status === 'started' ? `已让它按「${name}」做一次。` : result.status === 'pending' ? `「${name}」排上了，稍后开始。` : `「${name}」没能开始，稍后会再试。`);
+  await refresh();
 }
 function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
 function syncRoutines(agentId: string): void {
@@ -1347,12 +1353,16 @@ function renderRoutines(): void {
     const row = element('li'); row.dataset.status = routine.status; row.dataset.routineId = routine.id;
     const timing = routine.status === 'paused' ? '已暂停'
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
-      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
+      : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.trigger.kind === 'manual' ? '等你叫它' : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
     row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
     actions.append(toggle);
+    if (routine.trigger.kind === 'manual' && routine.status === 'active') {
+      const now = button('现在做一次', async () => { await runRoutineNow(routine.id, routine.name); }); now.type = 'button'; now.dataset.routineRun = routine.id;
+      actions.append(now);
+    }
     if (routine.trigger.kind === 'webhook') {
       const webhookToggle = button(routine.webhookEnabled ? '关闭 Webhook' : '开启 Webhook', () => changeRoutine(routine, { webhookEnabled: !routine.webhookEnabled })); webhookToggle.type = 'button';
       actions.append(webhookToggle);
@@ -3012,6 +3022,7 @@ function hideChannelSurfaces(): void {
 }
 function leaveGroup(): void {
   openGroupId = '';
+  clearChannelUpgrades();
   groupMembers = [];
   resetChannelLog();
   handoffViews.clear();
@@ -3543,7 +3554,7 @@ function renderGroups(all: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); trackUi('ui.channel.open', id); }
+  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); clearChannelUpgrades(); trackUi('ui.channel.open', id); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -3642,8 +3653,113 @@ function trackChannelRead(run: Promise<void>): Promise<void> {
 async function loadGroup(id: string): Promise<void> {
   if (channelReadFlight) await channelReadFlight.catch(() => undefined);
   if (openGroupId !== id) return;
+  if (upgradesRoomId !== id) void renderChannelUpgrades(id).catch(error => message(errorMessage(error)));
   if (channelLoadedRoomId === id) return trackChannelRead(refreshLoadedChannel(id));
   return trackChannelRead(loadGroupFromStart(id));
+}
+interface ChannelUpgradeView {
+  kind: 'full' | 'summary'; id: string; target: string; version: string; status: string; updatedAt: string;
+  baseVersion?: string; change?: string; reason?: string; risk?: 'low' | 'medium' | 'high';
+  evaluations?: Array<{ kind: string; passed: boolean; score: number }>; evaluated?: boolean;
+  shadow?: { passed: number; failed: number; needed: number }; canary?: { passed: number; failed: number; needed: number };
+  sources?: number; fromThisChannel?: boolean; affectedChannels?: number; active?: boolean; canActivate?: boolean;
+}
+const UPGRADE_TARGETS: Record<string, string> = { profile: '档案', skill: '技能', prompt: '提示词', workflow: '工作流程', 'tool-policy': '工具权限', 'model-policy': '模型选择' };
+const UPGRADE_STATUSES: Record<string, string> = { proposed: '刚提出', evaluating: '评估中', held: '已暂停', approved: '已批准', shadowing: '影子运行中', canarying: '灰度中', promoted: '已上线', rejected: '已拒绝', rolled_back: '已回滚' };
+const UPGRADE_CHECKS: Record<string, string> = { replay: '回放', holdout: '留出集', safety: '安全', cost: '花费', shadow: '影子' };
+const UPGRADE_RISKS: Record<string, string> = { low: '低', medium: '中', high: '高' };
+let upgradesRoomId = '';
+let upgradesKey = '';
+/** Interaction-design §8.9: Bot upgrades as cards in the group, never a silent swap. Only the owner gets the full card. */
+async function renderChannelUpgrades(roomId: string): Promise<void> {
+  const box = $('channel-upgrades');
+  if (!box) return;
+  const loaded = await api<{ items?: ChannelUpgradeView[] }>(`/rooms/${encodeURIComponent(roomId)}/upgrades`).catch(() => undefined);
+  if (openGroupId !== roomId || !loaded) return;
+  // A server without upgrade cards answers without a list.
+  const items = Array.isArray(loaded.items) ? loaded.items : [];
+  const key = `${roomId}\0${JSON.stringify(items)}`;
+  if (key === upgradesKey) return;
+  upgradesRoomId = roomId;
+  upgradesKey = key;
+  box.replaceChildren(...items.map(item => item.kind === 'full' ? upgradeCard(item, roomId) : upgradeSummary(item)));
+  box.hidden = items.length === 0;
+}
+function clearChannelUpgrades(): void {
+  upgradesRoomId = ''; upgradesKey = '';
+  const box = $('channel-upgrades');
+  if (box) { box.replaceChildren(); box.hidden = true; }
+}
+function upgradeSummary(item: ChannelUpgradeView): HTMLElement {
+  const card = element('article', '', 'group-run-card upgrade-card');
+  card.dataset.upgrade = item.id; card.dataset.upgradeKind = 'summary';
+  card.append(element('strong', '团队升级'), element('small', `${UPGRADE_TARGETS[item.target] ?? item.target}升到 ${item.version} · ${UPGRADE_STATUSES[item.status] ?? item.status}`));
+  return card;
+}
+function upgradeCard(item: ChannelUpgradeView, roomId: string): HTMLElement {
+  const card = element('article', '', 'group-run-card upgrade-card');
+  card.dataset.upgrade = item.id; card.dataset.upgradeKind = 'full'; card.dataset.status = item.status;
+  const target = UPGRADE_TARGETS[item.target] ?? item.target;
+  card.append(element('strong', `升级：${target}从 ${item.baseVersion} 到 ${item.version}`), element('small', `${UPGRADE_STATUSES[item.status] ?? item.status} · 风险${UPGRADE_RISKS[item.risk ?? ''] ?? item.risk}`));
+  card.append(element('p', `改什么：${item.change ?? ''}`), element('p', `为什么：${item.reason ?? ''}`));
+  const evidence = [
+    item.evaluations?.length ? item.evaluations.map(check => `${UPGRADE_CHECKS[check.kind] ?? check.kind}${check.passed ? '通过' : '没通过'} ${check.score}`).join('、') : '还没有评估',
+    ...(item.shadow && (item.shadow.passed || item.shadow.failed || item.status === 'shadowing') ? [`影子运行 ${item.shadow.passed}/${item.shadow.needed} 通过${item.shadow.failed ? `，${item.shadow.failed} 次没通过` : ''}`] : []),
+    ...(item.canary && (item.canary.passed || item.canary.failed || item.status === 'canarying') ? [`灰度 ${item.canary.passed}/${item.canary.needed} 通过${item.canary.failed ? `，${item.canary.failed} 次没通过` : ''}`] : []),
+    `${item.sources ?? 0} 条来源`,
+    ...(item.fromThisChannel ? ['由这个群里的一件事引出'] : []),
+  ];
+  card.append(element('small', `证据：${evidence.join(' · ')}`));
+  const live = item.status === 'promoted' && item.active;
+  const impact = item.status === 'rejected' || item.status === 'rolled_back' ? '新开的 Run 不用这个版本。'
+    : live ? `已用到新 Run：你的 ${item.affectedChannels ?? 0} 个群聊里，Bot 新开的 Run 用这个版本；正在做的事不受影响。`
+    : `影响：上线并启用后，你的 ${item.affectedChannels ?? 0} 个群聊里 Bot 新开的 Run 用这个版本；正在做的事不受影响。`;
+  card.append(element('small', impact));
+  const act = (label: string, action: string, body: unknown = {}) => {
+    const control = dashboardButton(label, async () => {
+      await api(`/evolution/candidates/${encodeURIComponent(item.id)}/${action}`, body);
+      upgradesKey = '';
+      await renderChannelUpgrades(roomId);
+    });
+    control.dataset.upgradeAction = action;
+    return control;
+  };
+  const actions = element('div', '', 'upgrade-actions');
+  const ref = `room:${roomId}`;
+  if (['evaluating', 'held'].includes(item.status) && item.evaluated) actions.append(act('批准', 'approve', { approvalRef: ref }));
+  else if (['proposed', 'evaluating', 'held'].includes(item.status)) card.append(element('small', '评估还没全部通过，先不能批准。'));
+  if (item.status === 'approved') {
+    actions.append(act('先影子运行', 'start-shadow'));
+    if (item.risk === 'low') actions.append(act('上线', 'promote'));
+  }
+  if (item.status === 'shadowing' && item.shadow && item.shadow.passed >= item.shadow.needed && !item.shadow.failed) actions.append(act('开始灰度', 'start-canary'));
+  if (item.status === 'canarying' && item.canary && item.canary.passed >= item.canary.needed && !item.canary.failed) actions.append(act('上线', 'promote'));
+  if (item.status === 'promoted' && !item.active && item.canActivate) actions.append(act('用到新 Run', 'activate', { activationRef: ref }));
+  const rejectable = ['proposed', 'evaluating', 'held', 'approved'].includes(item.status);
+  const revertible = ['approved', 'shadowing', 'canarying', 'promoted', 'held'].includes(item.status);
+  if (rejectable || revertible) {
+    const reason = document.createElement('textarea');
+    reason.rows = 2; reason.maxLength = 1000; reason.dataset.upgradeReason = item.id;
+    reason.placeholder = rejectable ? '拒绝或回滚前写下原因' : '回滚前写下原因';
+    reason.setAttribute('aria-label', `${target}升级的原因`);
+    const withReason = (label: string, action: string) => {
+      const control = dashboardButton(label, async () => {
+        const text = reason.value.trim();
+        if (!text) { message(`${label}前写下原因。`); reason.focus(); return; }
+        if (action === 'rollback' && !window.confirm(`回滚${target}到 ${item.baseVersion}？新开的 Run 改回原来的版本，正在做的事不受影响。`)) return;
+        await api(`/evolution/candidates/${encodeURIComponent(item.id)}/${action}`, { reason: text });
+        upgradesKey = '';
+        await renderChannelUpgrades(roomId);
+      });
+      control.dataset.upgradeAction = action;
+      return control;
+    };
+    actions.append(reason);
+    if (rejectable) actions.append(withReason('拒绝', 'reject'));
+    if (revertible) actions.append(withReason('回滚', 'rollback'));
+  }
+  if (actions.childElementCount) card.append(actions);
+  return card;
 }
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
@@ -5780,7 +5896,112 @@ async function openChannelTeach(): Promise<void> {
   if (!panel || !openGroupId) return;
   panel.hidden = false;
   renderTeachPeople();
-  await renderTeachingSaved();
+  await Promise.all([renderTeachingSaved(), renderTeachings(openGroupId)]);
+}
+interface TeachingView {
+  id: string; agentId: string; agentName: string; startedAt: string; stoppedAt?: string; routineId?: string;
+  state: 'recording' | 'recorded' | 'adopted' | 'revoked';
+  draft?: { steps: Array<{ at: string; text: string; source: 'message' | 'action' | 'run'; decision: boolean }>; decisions: string[]; tools: string[]; prompt: string; executionReview: 'required' | 'auto' };
+}
+const TEACHING_STATES: Record<TeachingView['state'], string> = { recording: '正在录', recorded: '待确认', adopted: '已收成例程', revoked: '已撤销' };
+const teachingReplay = new Map<string, number>();
+/** Interaction-design §8.7: demonstrations recorded in this group, each a routine draft for one Bot. */
+async function renderTeachings(roomId: string): Promise<void> {
+  const list = $('channel-teachings');
+  if (!list) return;
+  const loaded = await api<{ items?: TeachingView[] }>(`/rooms/${encodeURIComponent(roomId)}/teachings`);
+  if (openGroupId !== roomId) return;
+  // A server without recorded teaching answers without a list.
+  const items = Array.isArray(loaded.items) ? loaded.items : [];
+  renderTeachPeople();
+  const recording = items.find(item => item.state === 'recording');
+  const start = $<HTMLButtonElement>('channel-teach-start'), stop = $<HTMLButtonElement>('channel-teach-stop');
+  if (start) start.hidden = Boolean(recording);
+  if (stop) { stop.hidden = !recording; stop.dataset.teaching = recording?.id ?? ''; stop.textContent = recording ? `结束示范（教给${recording.agentName}）` : '结束示范'; }
+  list.replaceChildren(...items.map(item => teachingCard(item, roomId)));
+  if (!items.length) list.append(element('p', '这个群里还没有录过示范。', 'muted'));
+}
+function teachingCard(item: TeachingView, roomId: string): HTMLElement {
+  const card = element('article', '', 'teaching-card');
+  card.dataset.teaching = item.id; card.dataset.state = item.state;
+  card.append(element('strong', `教给${item.agentName}`), element('small', `${TEACHING_STATES[item.state]} · ${formatTime(item.startedAt)} 开始${item.stoppedAt ? `，${formatTime(item.stoppedAt)} 结束` : ''}`));
+  const reload = async () => { await renderTeachings(roomId); void refresh(); };
+  const steps = item.draft?.steps ?? [];
+  if (item.state === 'recording') card.append(element('p', '正在录。照常在群里做，做完点上面的「结束示范」。'));
+  if (item.draft && !steps.length) card.append(element('p', '这段示范里没有记下步骤。'));
+  if (steps.length) {
+    // Replay: one step at a time, with when it happened and whether a person decided there.
+    const index = Math.min(teachingReplay.get(item.id) ?? 0, steps.length - 1);
+    const step = steps[index]!;
+    const replay = element('div', '', 'teaching-replay');
+    const caption = element('p', `第 ${index + 1} / ${steps.length} 步 · ${formatTime(step.at)}${step.decision ? ' · 要人确认' : ''}：${step.text}`);
+    caption.dataset.teachingStep = String(index);
+    const move = (delta: number) => { teachingReplay.set(item.id, Math.max(0, Math.min(steps.length - 1, index + delta))); card.replaceWith(teachingCard(item, roomId)); };
+    const back = button('上一步', async () => move(-1)); back.type = 'button'; back.disabled = index === 0;
+    const next = button('下一步', async () => move(1)); next.type = 'button'; next.disabled = index === steps.length - 1;
+    replay.append(caption, back, next);
+    card.append(replay);
+    const all = element('ol', '', 'teaching-steps');
+    for (const [position, entry] of steps.entries()) {
+      const row = element('li', `${entry.text}${entry.decision ? '（要人确认）' : ''}`);
+      if (position === index) row.dataset.current = 'true';
+      all.append(row);
+    }
+    card.append(all);
+    if (item.draft?.tools.length) card.append(element('small', `用到的工具：${item.draft.tools.join('、')}`));
+  }
+  if (item.state === 'recorded' && item.draft && steps.length) {
+    const form = element('div', '', 'teaching-adopt');
+    const name = document.createElement('input'); name.maxLength = 80; name.value = `${item.agentName}的示范`; name.setAttribute('aria-label', '例程名字'); name.dataset.teachingName = item.id;
+    const prompt = document.createElement('textarea'); prompt.maxLength = 4000; prompt.rows = 6; prompt.value = item.draft.prompt; prompt.setAttribute('aria-label', '例程要做的事'); prompt.dataset.teachingPrompt = item.id;
+    const review = document.createElement('select'); review.setAttribute('aria-label', '执行时怎么批'); review.dataset.teachingReview = item.id;
+    for (const value of ['required', 'auto', 'yolo'] as const) { const option = document.createElement('option'); option.value = value; option.textContent = ROUTINE_REVIEW[value]; review.append(option); }
+    review.value = item.draft.executionReview;
+    const adopt = dashboardButton('收成例程', async () => {
+      await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(item.id)}/adopt`, { name: name.value.trim(), prompt: prompt.value.trim(), executionReview: review.value });
+      message(`已收进${item.agentName}的例程。叫它时才做。`);
+      await reload();
+    });
+    adopt.dataset.teachingAction = 'adopt';
+    form.append(name, prompt, review, adopt);
+    card.append(form);
+  }
+  if (item.state === 'adopted' && item.routineId) {
+    const routineId = item.routineId;
+    const run = dashboardButton('让它做一次', async () => { await runRoutineNow(routineId, `${item.agentName}学会的这段示范`); });
+    run.dataset.teachingAction = 'run';
+    card.append(run);
+  }
+  if (item.state === 'recorded' || item.state === 'adopted') {
+    const reason = document.createElement('textarea'); reason.rows = 2; reason.maxLength = 500; reason.dataset.teachingReason = item.id;
+    reason.placeholder = item.routineId ? '撤销前写下原因。收成的例程会一起删除。' : '撤销前写下原因。';
+    const revoke = dashboardButton('撤销', async () => {
+      const text = reason.value.trim();
+      if (!text) { message('撤销前写下原因。'); reason.focus(); return; }
+      await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(item.id)}/revoke`, { reason: text });
+      message('已撤销这段带教。');
+      await reload();
+    });
+    revoke.dataset.teachingAction = 'revoke';
+    card.append(reason, revoke);
+  }
+  return card;
+}
+async function startTeaching(): Promise<void> {
+  const roomId = openGroupId;
+  const agentId = $<HTMLSelectElement>('channel-teach-person')?.value ?? '';
+  if (!roomId || !agentId) { message('先选教给谁。'); return; }
+  await api(`/rooms/${encodeURIComponent(roomId)}/teachings`, { agentId });
+  message(`开始示范，教给${participantLabel(agentId)}。照常在群里做，做完点「结束示范」。`);
+  await renderTeachings(roomId); void refresh();
+}
+async function stopTeaching(): Promise<void> {
+  const roomId = openGroupId;
+  const id = $<HTMLButtonElement>('channel-teach-stop')?.dataset.teaching ?? '';
+  if (!roomId || !id) return;
+  await api(`/rooms/${encodeURIComponent(roomId)}/teachings/${encodeURIComponent(id)}/stop`, {});
+  message('示范结束，草案在下面，看过再收成例程。');
+  await renderTeachings(roomId); void refresh();
 }
 async function saveTeachingDraft(): Promise<void> {
   const text = teachingDraft();
@@ -5876,6 +6097,8 @@ $('channel-rule-form')?.addEventListener('submit', event => { void saveTeamRule(
 $('channel-teach-open')?.addEventListener('click', () => { void openChannelTeach().catch(error => message(errorMessage(error))); });
 $('channel-teach-close')?.addEventListener('click', () => { const panel = $('channel-teach'); if (panel) panel.hidden = true; });
 $('channel-teach-draft')?.addEventListener('click', () => renderTeachingPreview());
+$('channel-teach-start')?.addEventListener('click', () => { void startTeaching().catch(error => message(errorMessage(error))); });
+$('channel-teach-stop')?.addEventListener('click', () => { void stopTeaching().catch(error => message(errorMessage(error))); });
 $('channel-teach-save')?.addEventListener('click', () => { void saveTeachingDraft().catch(error => message(errorMessage(error))); });
 $('channel-teach-profile')?.addEventListener('click', () => { void keepTeachingProfile().catch(error => message(errorMessage(error))); });
 $('channel-bot-close')?.addEventListener('click', () => { const panel = $('channel-bot'); if (panel) panel.hidden = true; });
@@ -5973,18 +6196,76 @@ function inboxKindLabel(kind: InboxKind): string {
   if (kind === 'failure') return '失败';
   return '点名';
 }
+const NOTIFY_PREFERENCE = 'aeeis.notify-s1';
+const NOTIFIED_ITEMS = 'aeeis.notified-s1';
+/** Inbox items that need a person's decision now (§9.1 S1): an approval, a question, a channel block. */
+const S1_STATUSES = new Set(['needs_approval', 'needs_input', 'blocked']);
+let lastInboxRuns: RunSummary[] = [];
+let lastTypedAt = 0;
+let inboxHold = 0;
+document.addEventListener('keydown', event => { if (textEntry(event.target)) lastTypedAt = Date.now(); }, true);
+function textEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target instanceof HTMLTextAreaElement) return true;
+  return target instanceof HTMLInputElement && ['text', 'search', 'email', 'url', ''].includes(target.type);
+}
+/** §9.4: while someone is typing, new inbox items wait so nothing moves under their cursor. */
+function typingNow(): boolean { return textEntry(document.activeElement) && Date.now() - lastTypedAt < 4000; }
+function notificationsWanted(): boolean { try { return localStorage.getItem(NOTIFY_PREFERENCE) === '1'; } catch { return false; } }
+function notifiedItems(): Set<string> { try { return new Set(JSON.parse(localStorage.getItem(NOTIFIED_ITEMS) ?? '[]') as string[]); } catch { return new Set(); } }
+function rememberNotified(keys: string[]): void { try { localStorage.setItem(NOTIFIED_ITEMS, JSON.stringify(keys.slice(0, 200))); } catch { /* storage may be unavailable */ } }
+/**
+ * §9.4: browser notifications are opt-in and only for S1. Each item notifies once; an item that leaves the inbox
+ * and comes back is a new event. Only the keys currently waiting are remembered, so turning notifications on does
+ * not announce the backlog, and nothing is repeated to nag. A visible, focused page already shows the inbox.
+ */
+function notifyNewDecisions(entries: ReadonlyArray<{ key: string; kind: InboxKind; status: string; title: string; detail: string; open: () => Promise<void> }>): void {
+  const waiting = entries.filter(entry => S1_STATUSES.has(entry.status));
+  const seen = notifiedItems();
+  const fresh = waiting.filter(entry => !seen.has(entry.key));
+  rememberNotified(waiting.map(entry => entry.key));
+  if (!fresh.length || !notificationsWanted() || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  if (document.visibilityState === 'visible' && document.hasFocus()) return;
+  for (const entry of fresh.slice(0, 3)) {
+    const note = new Notification(`${inboxKindLabel(entry.kind)}：${entry.title.slice(0, 80)}`, { body: entry.detail.slice(0, 160), tag: entry.key });
+    note.onclick = () => { window.focus(); note.close(); void entry.open().catch(error => message(errorMessage(error))); };
+  }
+}
+function syncNotifyToggle(): void {
+  const toggle = $<HTMLInputElement>('attention-notify');
+  const note = $('attention-notify-note');
+  if (!toggle || !note) return;
+  const supported = typeof Notification !== 'undefined';
+  toggle.disabled = !supported || Notification.permission === 'denied';
+  toggle.checked = supported && notificationsWanted() && Notification.permission === 'granted';
+  note.textContent = !supported ? '这个浏览器不支持通知。' : Notification.permission === 'denied' ? '浏览器拒绝了通知，要在浏览器设置里打开。' : toggle.checked ? '只在页面不在前台时提醒，同一件事只提醒一次。' : '默认关闭。';
+}
+async function changeNotifications(): Promise<void> {
+  const toggle = $<HTMLInputElement>('attention-notify');
+  if (!toggle) return;
+  const wanted = toggle.checked && typeof Notification !== 'undefined' && (Notification.permission === 'granted' || await Notification.requestPermission() === 'granted');
+  try { localStorage.setItem(NOTIFY_PREFERENCE, wanted ? '1' : '0'); } catch { /* storage may be unavailable */ }
+  syncNotifyToggle();
+}
+$('attention-notify')?.addEventListener('change', () => { void changeNotifications().catch(error => message(errorMessage(error))); });
+syncNotifyToggle();
 function renderAttentionInbox(runs: RunSummary[]): void {
+  lastInboxRuns = runs;
+  if (typingNow()) {
+    if (!inboxHold) inboxHold = window.setTimeout(function release() { inboxHold = typingNow() ? window.setTimeout(release, 1000) : 0; if (!inboxHold) renderAttentionInbox(lastInboxRuns); }, 1000);
+    return;
+  }
   const panel = $('attention-inbox');
   const list = $('attention-items');
   const count = $('attention-count');
   if (!panel || !list || !count) return;
-  const items: Array<{ kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
+  const items: Array<{ key: string; kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
   for (const run of runs) {
     const kind = inboxKind(run.status);
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
-      kind, title: runTitle(run), detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
+      key: `run:${run.id}:${run.status}`, kind, title: runTitle(run), detail: `${label} · ${next}`, at: run.updatedAt, status: run.status, selected: run.id === currentId,
       open: () => openAttentionRun(run),
       quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
       act: () => openAttentionRun(run),
@@ -5995,7 +6276,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     if (!hold.blocked) continue;
     const open = async () => { await openGroup(hold.roomId); await showChannelBoard(); };
     items.push({
-      kind: 'question', title: hold.title ?? '频道里的事', detail: `阻塞：${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, at: hold.blockedAt, status: 'blocked', selected: false,
+      key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, kind: 'question', title: hold.title ?? '频道里的事', detail: `阻塞：${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, at: hold.blockedAt, status: 'blocked', selected: false,
       open, quick: '去处理', act: open,
     });
   }
@@ -6003,7 +6284,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     if (message.route.status !== 'clarify') continue;
     if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
     items.push({
-      kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
+      key: `mention:${message.id}`, kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,
       open: async () => { prepareConversationReply(message); openConversationRoute(); },
       quick: '查看',
       act: async () => { prepareConversationReply(message); openConversationRoute(); },
@@ -6011,6 +6292,8 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   }
   const stamp = (at?: string) => { const value = Date.parse(at ?? ''); return Number.isFinite(value) ? value : 0; };
   items.sort((left, right) => inboxSeverity(left.kind) - inboxSeverity(right.kind) || stamp(left.at) - stamp(right.at));
+  notifyNewDecisions(items);
+  syncNotifyToggle();
   const attention = items.slice(0, 8);
   if (!attention.length) attentionInboxOpen = false;
   const attentionToggle = $('attention-toggle') as HTMLButtonElement | null;
@@ -6295,6 +6578,7 @@ async function refresh(background = false): Promise<void> {
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();
   renderAttentionInbox(runs);
+  if (full && openGroupId) void renderChannelUpgrades(openGroupId).catch(error => message(errorMessage(error)));
   if (full) { await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems); }
   renderBotRoster();
   renderGroups(rooms);

@@ -89,6 +89,15 @@ describe('task timeline', () => {
     expect(entries.every(entry => !entry.text.includes('别的事'))).toBe(true);
   });
 
+  it('keeps the room\'s own order for records written in the same millisecond', () => {
+    const board = {
+      schemaVersion: 'channel-board/1', roomId: 'room_a', cursor: 3, wip: [], cards: [card('task_a', 'bot_two')],
+      citations: [cite('task_a', 3, { content: '阿写接下了', automatic: true, sequence: 3 })],
+      actions: [mark('transfer', 'task_a', 3, { agentId: 'bot_two', automatic: true, sequence: 2 })],
+    } as unknown as ChannelBoard;
+    expect(taskTimeline({ board, conversationId: 'conv_a', taskId: 'task_a', nameOf: () => '阿写' }).map(entry => entry.text)).toEqual(['转交给 阿写', '阿写接下了']);
+  });
+
   it('keeps only the room part when the reader cannot open the Run', () => {
     const board = { schemaVersion: 'channel-board/1', roomId: 'room_a', cursor: 1, wip: [], cards: [card('task_a', 'bot_two', 'run_a')], citations: [cite('task_a', 1, { content: '已交给阿写' })], actions: [] } as unknown as ChannelBoard;
     expect(taskTimeline({ board, conversationId: 'conv_a', taskId: 'task_a', nameOf: id => id })).toEqual([{ at: at(1), who: '你', text: '已交给阿写', source: 'room', human: true }]);

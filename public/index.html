@@ -525,9 +525,17 @@
 <h3>带教</h3>
 <button id="channel-teach-close" type="button" class="quiet-button">收起</button>
 </div>
-<p class="muted">一行一个步骤。草案先记在这个频道，只影响这里。收进档案仍要这个人有一次做成并带证据。看一眼不会执行。</p>
+<p class="muted">点「开始示范」，在这个群里照常做一遍：说的话、对任务的处理、Run 的计划和你做的决定都会记下来。结束后生成例程草案，看过再收进这位 Bot 的例程，叫它时才做。只影响这一位。</p>
 <label for="channel-teach-person">教给谁</label>
 <select id="channel-teach-person"></select>
+<div class="studio-toolbar">
+<button id="channel-teach-start" type="button">开始示范</button>
+<button id="channel-teach-stop" type="button" hidden>结束示范</button>
+</div>
+<div id="channel-teachings"></div>
+<details id="channel-teach-manual">
+<summary>也可以手写步骤</summary>
+<p class="muted">一行一个步骤。草案先记在这个频道，只影响这里。收进档案仍要这个人有一次做成并带证据。看一眼不会执行。</p>
 <label for="channel-teach-steps">步骤</label>
 <textarea id="channel-teach-steps" maxlength="2000" placeholder="一行一个步骤"></textarea>
 <div class="studio-toolbar">
@@ -537,6 +545,7 @@
 </div>
 <ol id="channel-teach-preview"></ol>
 <div id="channel-teach-saved"></div>
+</details>
 </section>
 <section id="channel-bot" hidden>
 <div class="group-head">
@@ -553,6 +562,7 @@
 <div id="channel-task-body"></div>
 </section>
 <ol id="group-transcript" aria-label="会话记录"></ol>
+<section id="channel-upgrades" aria-label="团队升级" hidden></section>
 <p id="group-thread-empty" class="muted">还没有消息。写下共同要完成的事，并用 @ 点名下一步交给谁。</p>
 <form id="group-composer">
 <div class="quick-input-row">
@@ -976,6 +986,12 @@
 <button type="submit">加入</button>
 </form>
 <p id="action-policy-note" class="muted" role="status"></p>
+</section>
+<section id="settings-notify" class="settings-section" aria-labelledby="settings-notify-title">
+<h2 id="settings-notify-title">通知</h2>
+<p class="muted">收件箱和徽标一直都在。浏览器通知只给要你决定的事：审批、提问和频道里的阻塞。页面不在前台时才提醒，同一件事只提醒一次，不会催。只在这台浏览器上生效。</p>
+<label class="attention-notify"><input id="attention-notify" type="checkbox"> 有审批或提问时发浏览器通知</label>
+<p id="attention-notify-note" class="muted" role="status">默认关闭。</p>
 </section>
 <section id="settings-access" class="settings-section" aria-labelledby="settings-access-title">
 <h2 id="settings-access-title">访问</h2>

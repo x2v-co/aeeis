@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/runtime/http.js';
+import { InMemoryRoutineStore } from '../src/routines.js';
 import { InMemoryUiEventCountStore } from '../src/ui-event-counts.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { InMemoryConversationStore } from '../src/adapters/conversation-store.js';
@@ -42,7 +43,7 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   }) };
   const engine = new AgentEngine(repository, model);
   const notify = vi.fn(async () => undefined);
-  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, uiEvents: new InMemoryUiEventCountStore(), principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
+  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, routines: new InMemoryRoutineStore(), uiEvents: new InMemoryUiEventCountStore(), principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
   cleanup.push(() => app.close());
   const bot = async (name: string, role: string, autonomy?: string) => (await app.inject({ method: 'POST', url: '/api/bots', headers, payload: { name, role, mark: 'letter', color: '#176b45', background: `${name}负责${role}。`, ...(autonomy ? { autonomy } : {}) } })).json() as { id: string; name: string };
   const researcher = await bot('阿研', '研究', options.quiet ? 'quiet' : options.researcherAutonomy);
@@ -158,6 +159,74 @@ describe('Bots that act on their own', () => {
     expect(cards.find(card => card.title === '查上线数据')).toMatchObject({ ownerId: f.researcher.id });
     expect(cards.find(card => card.title === '写上线说明')).toMatchObject({ ownerId: f.writer.id, movedFrom: f.researcher.id });
     expect((await f.events()).map(item => item.taskAction?.kind).filter(Boolean)).toEqual(['propose', 'propose', 'offer', 'transfer']);
+  });
+
+  it('records a demonstration in the group, drafts a routine for one Bot, runs it when asked, and revokes it', async () => {
+    const f = await team({ reply: input => input.you.name === '阿研' ? { reply: '我来查。', tasks: [{ title: '查上线数据' }] } : { reply: '好' } }, { researcherAutonomy: 'auto' });
+    const teachings = async () => (await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/teachings`, headers })).json().items as Array<Record<string, any>>;
+    const start = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings`, headers, payload: { agentId: f.researcher.id } });
+    expect(start.statusCode, start.body).toBe(200);
+    const id = start.json().id as string;
+    expect(start.json()).toMatchObject({ agentId: f.researcher.id, agentName: '阿研', state: 'recording' });
+    expect((await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings`, headers, payload: { agentId: f.writer.id } })).statusCode).toBe(409);
+    expect((await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/adopt`, headers, payload: { name: '上线检查' } })).statusCode).toBe(409);
+    await f.say('@阿研 上线前先查数据');
+    const card = (await f.board()).cards.find(item => item.title === '查上线数据')!;
+    const block = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/task-actions`, headers, payload: { kind: 'block', conversationId: card.conversationId, taskId: card.taskId, reason: '等运维给数据', goalId: f.goalId, contextManifestId: await f.manifestId(), idempotencyKey: 'block-1' } });
+    expect(block.statusCode, block.body).toBe(200);
+    // The dispatcher is a stub here: plan the Bot's Run so the draft can read its steps.
+    for (const run of await f.repository.list()) await f.engine.advance(run.id);
+    const stop = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/stop`, headers, payload: {} });
+    expect(stop.statusCode, stop.body).toBe(200);
+    const recorded = stop.json();
+    expect(recorded.state).toBe('recorded');
+    const texts = (recorded.draft.steps as Array<{ text: string; source: string; decision: boolean }>);
+    expect(texts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '@阿研 上线前先查数据', source: 'message', decision: false }),
+      expect.objectContaining({ text: '阻塞：等运维给数据', source: 'action', decision: true }),
+      expect.objectContaining({ text: '查上线数据：Work', source: 'run' }),
+    ]));
+    // The Bot's own reply and the teaching markers are not steps.
+    expect(texts.some(step => step.text.includes('我来查') || step.text.includes('开始示范'))).toBe(false);
+    expect(recorded.draft).toMatchObject({ executionReview: 'required', decisions: ['阻塞：等运维给数据'] });
+    expect(recorded.draft.prompt).toContain('到这些地方先停下，等人确认：\n- 阻塞：等运维给数据');
+    expect((await f.events()).filter(item => item.content.startsWith('开始示范：教给阿研') || item.content.startsWith('示范结束'))).toHaveLength(2);
+
+    const adopted = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/adopt`, headers, payload: { name: '上线检查' } });
+    expect(adopted.statusCode, adopted.body).toBe(200);
+    expect(adopted.json()).toMatchObject({ state: 'adopted', routineId: expect.stringMatching(/^routine_/) });
+    const routineId = adopted.json().routineId as string;
+    const routines = (await f.app.inject({ method: 'GET', url: `/api/routines?agentId=${f.researcher.id}`, headers })).json().routines as Array<Record<string, any>>;
+    expect(routines).toEqual([expect.objectContaining({ id: routineId, name: '上线检查', trigger: { kind: 'manual' }, executionReview: 'required', status: 'active' })]);
+    expect(routines[0]!.prompt).toContain('按「发布协作」里的一次示范来做');
+    expect((await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/adopt`, headers, payload: { name: '再来一次' } })).statusCode).toBe(409);
+    const run = await f.app.inject({ method: 'POST', url: `/api/routines/${routineId}/run`, headers, payload: {} });
+    expect(run.statusCode, run.body).toBe(200);
+    expect(run.json()).toMatchObject({ status: 'started', runId: expect.any(String) });
+    const started = await f.repository.get(run.json().runId, { owner: 'alice', tenantId: 'team-a' });
+    expect(started.goal).toContain('主人让它现在做一次');
+
+    expect((await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/revoke`, headers, payload: { reason: '' } })).statusCode).toBe(400);
+    const revoked = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${id}/revoke`, headers, payload: { reason: '流程改了' } });
+    expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(revoked.json().state).toBe('revoked');
+    expect((await f.app.inject({ method: 'GET', url: `/api/routines/${routineId}`, headers })).statusCode).toBe(404);
+    expect((await teachings()).map(item => item.state)).toEqual(['revoked']);
+
+    // Approving a plan is written on the Run, not in the room: a decision made while recording still counts,
+    // even on a task the room cited before, and nothing decided outside the recording leaks in.
+    const pending = (await f.repository.list()).find(item => item.status === 'needs_approval' && item.goal.includes('查上线数据'))!;
+    expect(pending).toBeTruthy();
+    const second = (await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings`, headers, payload: { agentId: f.researcher.id } })).json().id as string;
+    const plan = pending.plans.at(-1)!;
+    const approved = await f.app.inject({ method: 'POST', url: `/api/runs/${pending.id}/approve`, headers, payload: { planHash: plan.hash, planVersion: plan.version } });
+    expect(approved.statusCode, approved.body).toBe(200);
+    const recordedAgain = (await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/teachings/${second}/stop`, headers, payload: {} })).json();
+    expect(recordedAgain.draft.steps).toEqual([
+      expect.objectContaining({ text: '批准「查上线数据」的计划', source: 'run', decision: true }),
+      expect.objectContaining({ text: '查上线数据：Work', source: 'run', decision: false }),
+    ]);
+    expect(recordedAgain.draft.steps.some((step: { text: string }) => step.text.includes('阻塞'))).toBe(false);
   });
 
   it('measures the channel from what it recorded: tasks, first reply, handoffs and evidence opened', async () => {
