@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/runtime/http.js';
+import { InMemoryUiEventCountStore } from '../src/ui-event-counts.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { InMemoryConversationStore } from '../src/adapters/conversation-store.js';
 import { InMemoryStore } from '../src/adapters/in-memory-store.js';
@@ -41,7 +42,7 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   }) };
   const engine = new AgentEngine(repository, model);
   const notify = vi.fn(async () => undefined);
-  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
+  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, uiEvents: new InMemoryUiEventCountStore(), principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
   cleanup.push(() => app.close());
   const bot = async (name: string, role: string, autonomy?: string) => (await app.inject({ method: 'POST', url: '/api/bots', headers, payload: { name, role, mark: 'letter', color: '#176b45', background: `${name}负责${role}。`, ...(autonomy ? { autonomy } : {}) } })).json() as { id: string; name: string };
   const researcher = await bot('阿研', '研究', options.quiet ? 'quiet' : options.researcherAutonomy);
@@ -157,6 +158,36 @@ describe('Bots that act on their own', () => {
     expect(cards.find(card => card.title === '查上线数据')).toMatchObject({ ownerId: f.researcher.id });
     expect(cards.find(card => card.title === '写上线说明')).toMatchObject({ ownerId: f.writer.id, movedFrom: f.researcher.id });
     expect((await f.events()).map(item => item.taskAction?.kind).filter(Boolean)).toEqual(['propose', 'propose', 'offer', 'transfer']);
+  });
+
+  it('measures the channel from what it recorded: tasks, first reply, handoffs and evidence opened', async () => {
+    const f = await team({
+      reply: input => input.you.name === '阿研' ? { reply: '我查数据，说明给阿写。', tasks: [{ title: '查上线数据' }, { title: '写上线说明', for: '阿写', note: '你写得快' }] } : { reply: '好' },
+      turn: () => ({ decision: 'accept', message: '好，我来。' }),
+    });
+    await f.say('@阿研 上线前查数据并写说明');
+    for (const name of ['ui.artifact.view', 'ui.artifact.view', 'ui.evidence.open']) {
+      expect((await f.app.inject({ method: 'POST', url: '/api/ui-events', headers, payload: { name, roomId: f.roomId } })).statusCode).toBe(204);
+    }
+    expect((await f.app.inject({ method: 'POST', url: '/api/ui-events', headers, payload: { name: 'ui.artifact.view', roomId: f.roomId, content: '正文不收' } })).statusCode).toBe(400);
+    expect((await f.app.inject({ method: 'POST', url: '/api/ui-events', headers, payload: { name: 'ui.message.read', roomId: f.roomId } })).statusCode).toBe(400);
+    expect((await f.app.inject({ method: 'POST', url: '/api/ui-events', headers, payload: { name: 'ui.studio.open', roomId: 'room_nobody' } })).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/metrics?days=0`, headers })).statusCode).toBe(400);
+    const response = await f.app.inject({ method: 'GET', url: `/api/rooms/${f.roomId}/metrics?days=7`, headers });
+    expect(response.statusCode, response.body).toBe(200);
+    const metrics = response.json() as { tasks: { created: number; done: number }; indicators: Array<{ key: string; value?: number; samples: number; ok?: boolean; detail?: Record<string, number> }> };
+    const of = (key: string) => metrics.indicators.find(item => item.key === key)!;
+    expect(metrics.tasks).toEqual({ created: 2, done: 0 });
+    expect(of('completion_rate')).toMatchObject({ value: 0, samples: 2 });
+    expect(of('first_reply')).toMatchObject({ samples: 1, ok: true });
+    expect(of('handoff_depth')).toMatchObject({ value: 0, samples: 2, ok: true, detail: { max: 1 } });
+    expect(of('handoff_failure_rate')).toMatchObject({ value: 0, samples: 1, ok: true });
+    expect(of('evidence_open_rate')).toMatchObject({ value: 0.5, samples: 2, ok: true });
+    expect(of('noise').detail?.botMessages).toBeGreaterThanOrEqual(1);
+    expect(of('cycle_time').value).toBeUndefined();
+    expect(of('blocked_time')).toMatchObject({ samples: 0 });
+    expect(of('duplicate_effects')).toMatchObject({ value: 0, ok: true });
+    expect(JSON.stringify(metrics)).not.toContain('上线前查数据');
   });
 
   it('hands work over in the side thread: the card moves only when the other Bot accepts', async () => {

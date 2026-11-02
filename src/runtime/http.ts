@@ -17,6 +17,8 @@ import { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
 import { channelUpgradeCards } from '../channel-upgrades.js';
 import { EvolutionTransitionError } from '../evolution.js';
+import { channelMetrics } from '../channel-metrics.js';
+import { emptyUiEventCounts, uiEventDay, uiEventInputSchema, type UiEventCountStore } from '../ui-event-counts.js';
 import { z } from 'zod';
 import { AgentEngine, Conflict, digest, event } from './engine.js';
 import { encodeRunEventCursor, NotFound, type RunRepository } from './repository.js';
@@ -75,7 +77,7 @@ import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService; aeeisBots?: BotTeam } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -1024,6 +1026,31 @@ export function buildApp(options: Options) {
       affectedChannels = (await options.domain.listRoomsForPrincipal(principal.id, principal.tenantId)).filter(item => item.status === 'active' && item.chat === 'group' && (item.owner ?? 'owner') === roomOwner).length;
     }
     return { items: channelUpgradeCards(candidates, { manager, roomRunIds, affectedChannels, activation, now: new Date().toISOString() }) };
+  });
+  // Interaction-design §18: the channel's indicators over the last `days` days, read from what the room and its Runs already record.
+  app.get<{ Params: { id: string }; Querystring: { days?: string } }>('/api/rooms/:id/metrics', async request => {
+    if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
+    const principal = principalOf(request);
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(90).default(7) }).strict().parse(request.query);
+    const history = await options.sessionEvents.history(request.params.id, principal.id, principal.tenantId);
+    const board = await boardService().board(request.params.id, principal.id, principal.tenantId);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const runs = new Map<string, AgentRun>();
+    await Promise.all([...new Set(board.cards.flatMap(card => card.runId ? [card.runId] : []))].map(async runId => {
+      try { runs.set(runId, await options.repository.get(runId, scope)); } catch { /* a Run this reader cannot open is left out */ }
+    }));
+    const to = new Date(), from = new Date(to.getTime() - days * 86_400_000);
+    const ui = options.uiEvents ? await options.uiEvents.counts(scope, request.params.id, uiEventDay(from.toISOString()), uiEventDay(to.toISOString())) : emptyUiEventCounts();
+    return channelMetrics({ roomId: request.params.id, from: from.toISOString(), to: to.toISOString(), history, board, runs, ui });
+  });
+  /** Browser-only §18.2 events. Only the name, room and day are kept. */
+  app.post('/api/ui-events', async (request, reply) => {
+    if (!options.uiEvents || !options.domain) return reply.code(204).send();
+    const input = uiEventInputSchema.parse(request.body);
+    const principal = principalOf(request);
+    await options.domain.getRoomForPrincipal(input.roomId, principal.id, principal.tenantId);
+    await options.uiEvents.record({ owner: principal.id, tenantId: principal.tenantId }, input);
+    return reply.code(204).send();
   });
   app.get('/api/board-holdings', async request => {
     const principal = principalOf(request);
