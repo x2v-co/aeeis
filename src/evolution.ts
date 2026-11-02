@@ -42,9 +42,12 @@ export const evolutionCandidateSchema = z.object({
 export type EvolutionCandidate = z.infer<typeof evolutionCandidateSchema>;
 export type EvolutionEvaluation = Omit<EvolutionCandidate['evaluations'][number], 'id' | 'completedAt'> & { id?: string; completedAt?: string };
 
+/** A candidate's state does not allow this step. */
+export class EvolutionTransitionError extends Error {}
+
 export class EvolutionEngine {
   constructor(private readonly requiredEvaluationKinds: Array<EvolutionCandidate['evaluations'][number]['kind']> = ['replay', 'holdout', 'safety']) {
-    if (requiredEvaluationKinds.length === 0) throw new Error('At least one RSI evaluation gate is required');
+    if (requiredEvaluationKinds.length === 0) throw new EvolutionTransitionError('At least one RSI evaluation gate is required');
   }
 
   propose(input: Pick<EvolutionCandidate, 'target' | 'baseVersion' | 'proposedVersion' | 'change' | 'sourceReceiptRefs' | 'reason' | 'risk'> & Partial<Pick<EvolutionCandidate, 'owner' | 'tenantId' | 'proposalSignalId'>> & { id?: EvolutionCandidate['id'] }): EvolutionCandidate {
@@ -52,58 +55,63 @@ export class EvolutionEngine {
     return evolutionCandidateSchema.parse({ schemaVersion: 1, ...input, id: input.id ?? 'evo_' + randomUUID(), status: 'proposed', createdAt: now, updatedAt: now, evaluations: [] });
   }
   evaluate(candidate: EvolutionCandidate, evaluation: EvolutionEvaluation): EvolutionCandidate {
-    if (!['proposed', 'evaluating', 'held'].includes(candidate.status)) throw new Error('Candidate cannot accept evaluations in its current state');
+    if (!['proposed', 'evaluating', 'held'].includes(candidate.status)) throw new EvolutionTransitionError('Candidate cannot accept evaluations in its current state');
     const next = structuredClone(candidate); next.status = 'evaluating';
-    if (next.evaluations.some(item => item.kind === evaluation.kind)) throw new Error(`Evaluation gate already recorded: ${evaluation.kind}`);
+    if (next.evaluations.some(item => item.kind === evaluation.kind)) throw new EvolutionTransitionError(`Evaluation gate already recorded: ${evaluation.kind}`);
     next.evaluations.push({ id: evaluation.id ?? 'evaluation_' + randomUUID(), kind: evaluation.kind, passed: evaluation.passed, score: evaluation.score, evidenceRefs: evaluation.evidenceRefs, completedAt: evaluation.completedAt ?? new Date().toISOString() });
     if (next.evaluations.some(item => !item.passed)) next.status = 'held';
     return evolutionCandidateSchema.parse(next);
   }
   approve(candidate: EvolutionCandidate, approvalRef: string): EvolutionCandidate {
-    if (candidate.status !== 'evaluating' && candidate.status !== 'held') throw new Error('Candidate must be evaluated before approval');
-    if (candidate.evaluations.length === 0 || candidate.evaluations.some(item => !item.passed)) throw new Error('All required evaluations must pass before approval');
+    if (candidate.status !== 'evaluating' && candidate.status !== 'held') throw new EvolutionTransitionError('Candidate must be evaluated before approval');
+    if (candidate.evaluations.length === 0 || candidate.evaluations.some(item => !item.passed)) throw new EvolutionTransitionError('All required evaluations must pass before approval');
     const completedKinds = new Set(candidate.evaluations.map(item => item.kind));
     const missing = this.requiredEvaluationKinds.filter(kind => !completedKinds.has(kind));
-    if (missing.length > 0) throw new Error('Required evaluations are missing: ' + missing.join(', '));
+    if (missing.length > 0) throw new EvolutionTransitionError('Required evaluations are missing: ' + missing.join(', '));
     const next = structuredClone(candidate); next.status = 'approved'; next.approvalRef = approvalRef; return evolutionCandidateSchema.parse(next);
   }
   startShadow(candidate: EvolutionCandidate): EvolutionCandidate {
-    if (candidate.status !== 'approved') throw new Error('Candidate requires explicit approval before shadow rollout');
+    if (candidate.status !== 'approved') throw new EvolutionTransitionError('Candidate requires explicit approval before shadow rollout');
     const next = structuredClone(candidate); next.status = 'shadowing'; next.shadowStartedAt = new Date().toISOString(); next.shadowObservations = [];
     return evolutionCandidateSchema.parse(next);
   }
   recordShadow(candidate: EvolutionCandidate, observation: RolloutObservation): EvolutionCandidate {
-    if (candidate.status !== 'shadowing') throw new Error('Candidate is not in shadow rollout');
+    if (candidate.status !== 'shadowing') throw new EvolutionTransitionError('Candidate is not in shadow rollout');
     const next = structuredClone(candidate); next.shadowObservations ??= [];
-    if (next.shadowObservations.some(item => item.id === observation.id)) throw new Error('Shadow observation already exists');
+    if (next.shadowObservations.some(item => item.id === observation.id)) throw new EvolutionTransitionError('Shadow observation already exists');
     next.shadowObservations.push(rolloutObservationSchema.parse(observation));
     if (!observation.passed) next.status = 'held';
     return evolutionCandidateSchema.parse(next);
   }
   startCanary(candidate: EvolutionCandidate): EvolutionCandidate {
-    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new Error('Pending rollout attempt requires completion or reconciliation');
-    if (candidate.status !== 'shadowing') throw new Error('Candidate must be in shadow rollout before canary rollout');
-    if (!rolloutReady(candidate.shadowObservations, candidate.risk, 'shadow')) throw new Error('Shadow rollout has not met its observation gate');
+    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new EvolutionTransitionError('Pending rollout attempt requires completion or reconciliation');
+    if (candidate.status !== 'shadowing') throw new EvolutionTransitionError('Candidate must be in shadow rollout before canary rollout');
+    if (!rolloutReady(candidate.shadowObservations, candidate.risk, 'shadow')) throw new EvolutionTransitionError('Shadow rollout has not met its observation gate');
     const next = structuredClone(candidate); next.status = 'canarying'; next.canaryStartedAt = new Date().toISOString(); next.canaryObservations = [];
     return evolutionCandidateSchema.parse(next);
   }
   recordCanary(candidate: EvolutionCandidate, observation: RolloutObservation): EvolutionCandidate {
-    if (candidate.status !== 'canarying') throw new Error('Candidate is not in canary rollout');
+    if (candidate.status !== 'canarying') throw new EvolutionTransitionError('Candidate is not in canary rollout');
     const next = structuredClone(candidate); next.canaryObservations ??= [];
-    if (next.canaryObservations.some(item => item.id === observation.id)) throw new Error('Canary observation already exists');
+    if (next.canaryObservations.some(item => item.id === observation.id)) throw new EvolutionTransitionError('Canary observation already exists');
     next.canaryObservations.push(rolloutObservationSchema.parse(observation));
     if (!observation.passed) next.status = 'held';
     return evolutionCandidateSchema.parse(next);
   }
   promote(candidate: EvolutionCandidate): EvolutionCandidate {
-    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new Error('Pending rollout attempt requires completion or reconciliation');
+    if (candidate.rolloutAttempts?.some(attempt => attempt.state === 'started')) throw new EvolutionTransitionError('Pending rollout attempt requires completion or reconciliation');
     const direct = candidate.status === 'approved' && candidate.risk === 'low';
     const canary = candidate.status === 'canarying' && rolloutReady(candidate.canaryObservations, candidate.risk, 'canary');
-    if (!direct && !canary) throw new Error(candidate.status === 'approved' ? 'Medium and high risk candidates require shadow and canary rollout before promotion' : 'Candidate requires explicit approval and a completed rollout before promotion');
+    if (!direct && !canary) throw new EvolutionTransitionError(candidate.status === 'approved' ? 'Medium and high risk candidates require shadow and canary rollout before promotion' : 'Candidate requires explicit approval and a completed rollout before promotion');
     const next = structuredClone(candidate); next.status = 'promoted'; next.promotedAt = new Date().toISOString(); return evolutionCandidateSchema.parse(next);
   }
+  /** Turns down a candidate before any rollout: new Runs never used it, so there is nothing to undo. */
+  reject(candidate: EvolutionCandidate, reason: string): EvolutionCandidate {
+    if (!['proposed', 'evaluating', 'held', 'approved'].includes(candidate.status)) throw new EvolutionTransitionError('Only a candidate that has not started rollout can be rejected; roll it back instead');
+    const next = structuredClone(candidate); next.status = 'rejected'; next.reason = next.reason + '\nRejected: ' + reason; return evolutionCandidateSchema.parse(next);
+  }
   rollback(candidate: EvolutionCandidate, reason: string): EvolutionCandidate {
-    if (!['promoted', 'approved', 'shadowing', 'canarying', 'held'].includes(candidate.status)) throw new Error('Only an approved or rolled out candidate can be rolled back');
+    if (!['promoted', 'approved', 'shadowing', 'canarying', 'held'].includes(candidate.status)) throw new EvolutionTransitionError('Only an approved or rolled out candidate can be rolled back');
     const next = structuredClone(candidate); next.status = 'rolled_back'; next.rolledBackAt = new Date().toISOString(); next.reason = next.reason + '\nRollback: ' + reason; return evolutionCandidateSchema.parse(next);
   }
 }

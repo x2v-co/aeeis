@@ -513,6 +513,7 @@ export class RsiService {
   recordShadow(id: string, input: unknown, scope?: EvolutionScope): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.recordShadow(candidate, parseRolloutObservation(input)), scope); }
   startCanary(id: string, scope?: EvolutionScope): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.startCanary(candidate), scope); }
   recordCanary(id: string, input: unknown, scope?: EvolutionScope): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.recordCanary(candidate, parseRolloutObservation(input)), scope); }
+  reject(id: string, reason: string, scope?: EvolutionScope): Promise<EvolutionCandidate> { const validated = z.string().trim().min(1).max(4000).parse(reason); return this.repository.mutate(id, candidate => this.engine.reject(candidate, validated), scope); }
   promote(id: string, scope?: EvolutionScope): Promise<EvolutionCandidate> { return this.repository.mutate(id, candidate => this.engine.promote(candidate), scope); }
   async rollback(id: string, reason: string, scope?: EvolutionScope): Promise<EvolutionCandidate> {
     const validatedReason = z.string().trim().min(1).max(4000).parse(reason);
