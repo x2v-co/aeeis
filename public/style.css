@@ -1610,3 +1610,7 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
   body.gb.group-open #group-composer #group-handoff { width: 100%; min-width: 0; }
   body.gb.group-open #group-send-note { display: none; }
 }
+#channel-upgrades:not([hidden]) { display: grid; gap: 8px; margin: 8px 0; }
+.upgrade-card p { margin: 4px 0; white-space: pre-wrap; }
+.upgrade-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.upgrade-actions textarea { flex: 1 1 100%; }

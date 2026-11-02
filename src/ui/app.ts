@@ -2940,6 +2940,7 @@ function hideChannelSurfaces(): void {
 }
 function leaveGroup(): void {
   openGroupId = '';
+  clearChannelUpgrades();
   groupMembers = [];
   resetChannelLog();
   handoffViews.clear();
@@ -3471,7 +3472,7 @@ function renderGroups(all: RoomSummary[]): void {
 async function openGroup(id: string): Promise<void> {
   const room = roomSummaries.find(item => item.id === id);
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
-  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); }
+  if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); clearChannelUpgrades(); }
   openGroupId = id;
   groupDraftOpen = false;
   showRoster(false);
@@ -3570,8 +3571,113 @@ function trackChannelRead(run: Promise<void>): Promise<void> {
 async function loadGroup(id: string): Promise<void> {
   if (channelReadFlight) await channelReadFlight.catch(() => undefined);
   if (openGroupId !== id) return;
+  if (upgradesRoomId !== id) void renderChannelUpgrades(id).catch(error => message(errorMessage(error)));
   if (channelLoadedRoomId === id) return trackChannelRead(refreshLoadedChannel(id));
   return trackChannelRead(loadGroupFromStart(id));
+}
+interface ChannelUpgradeView {
+  kind: 'full' | 'summary'; id: string; target: string; version: string; status: string; updatedAt: string;
+  baseVersion?: string; change?: string; reason?: string; risk?: 'low' | 'medium' | 'high';
+  evaluations?: Array<{ kind: string; passed: boolean; score: number }>; evaluated?: boolean;
+  shadow?: { passed: number; failed: number; needed: number }; canary?: { passed: number; failed: number; needed: number };
+  sources?: number; fromThisChannel?: boolean; affectedChannels?: number; active?: boolean; canActivate?: boolean;
+}
+const UPGRADE_TARGETS: Record<string, string> = { profile: '档案', skill: '技能', prompt: '提示词', workflow: '工作流程', 'tool-policy': '工具权限', 'model-policy': '模型选择' };
+const UPGRADE_STATUSES: Record<string, string> = { proposed: '刚提出', evaluating: '评估中', held: '已暂停', approved: '已批准', shadowing: '影子运行中', canarying: '灰度中', promoted: '已上线', rejected: '已拒绝', rolled_back: '已回滚' };
+const UPGRADE_CHECKS: Record<string, string> = { replay: '回放', holdout: '留出集', safety: '安全', cost: '花费', shadow: '影子' };
+const UPGRADE_RISKS: Record<string, string> = { low: '低', medium: '中', high: '高' };
+let upgradesRoomId = '';
+let upgradesKey = '';
+/** Interaction-design §8.9: Bot upgrades as cards in the group, never a silent swap. Only the owner gets the full card. */
+async function renderChannelUpgrades(roomId: string): Promise<void> {
+  const box = $('channel-upgrades');
+  if (!box) return;
+  const loaded = await api<{ items?: ChannelUpgradeView[] }>(`/rooms/${encodeURIComponent(roomId)}/upgrades`).catch(() => undefined);
+  if (openGroupId !== roomId || !loaded) return;
+  // A server without upgrade cards answers without a list.
+  const items = Array.isArray(loaded.items) ? loaded.items : [];
+  const key = `${roomId}\0${JSON.stringify(items)}`;
+  if (key === upgradesKey) return;
+  upgradesRoomId = roomId;
+  upgradesKey = key;
+  box.replaceChildren(...items.map(item => item.kind === 'full' ? upgradeCard(item, roomId) : upgradeSummary(item)));
+  box.hidden = items.length === 0;
+}
+function clearChannelUpgrades(): void {
+  upgradesRoomId = ''; upgradesKey = '';
+  const box = $('channel-upgrades');
+  if (box) { box.replaceChildren(); box.hidden = true; }
+}
+function upgradeSummary(item: ChannelUpgradeView): HTMLElement {
+  const card = element('article', '', 'group-run-card upgrade-card');
+  card.dataset.upgrade = item.id; card.dataset.upgradeKind = 'summary';
+  card.append(element('strong', '团队升级'), element('small', `${UPGRADE_TARGETS[item.target] ?? item.target}升到 ${item.version} · ${UPGRADE_STATUSES[item.status] ?? item.status}`));
+  return card;
+}
+function upgradeCard(item: ChannelUpgradeView, roomId: string): HTMLElement {
+  const card = element('article', '', 'group-run-card upgrade-card');
+  card.dataset.upgrade = item.id; card.dataset.upgradeKind = 'full'; card.dataset.status = item.status;
+  const target = UPGRADE_TARGETS[item.target] ?? item.target;
+  card.append(element('strong', `升级：${target}从 ${item.baseVersion} 到 ${item.version}`), element('small', `${UPGRADE_STATUSES[item.status] ?? item.status} · 风险${UPGRADE_RISKS[item.risk ?? ''] ?? item.risk}`));
+  card.append(element('p', `改什么：${item.change ?? ''}`), element('p', `为什么：${item.reason ?? ''}`));
+  const evidence = [
+    item.evaluations?.length ? item.evaluations.map(check => `${UPGRADE_CHECKS[check.kind] ?? check.kind}${check.passed ? '通过' : '没通过'} ${check.score}`).join('、') : '还没有评估',
+    ...(item.shadow && (item.shadow.passed || item.shadow.failed || item.status === 'shadowing') ? [`影子运行 ${item.shadow.passed}/${item.shadow.needed} 通过${item.shadow.failed ? `，${item.shadow.failed} 次没通过` : ''}`] : []),
+    ...(item.canary && (item.canary.passed || item.canary.failed || item.status === 'canarying') ? [`灰度 ${item.canary.passed}/${item.canary.needed} 通过${item.canary.failed ? `，${item.canary.failed} 次没通过` : ''}`] : []),
+    `${item.sources ?? 0} 条来源`,
+    ...(item.fromThisChannel ? ['由这个群里的一件事引出'] : []),
+  ];
+  card.append(element('small', `证据：${evidence.join(' · ')}`));
+  const live = item.status === 'promoted' && item.active;
+  const impact = item.status === 'rejected' || item.status === 'rolled_back' ? '新开的 Run 不用这个版本。'
+    : live ? `已用到新 Run：你的 ${item.affectedChannels ?? 0} 个群聊里，Bot 新开的 Run 用这个版本；正在做的事不受影响。`
+    : `影响：上线并启用后，你的 ${item.affectedChannels ?? 0} 个群聊里 Bot 新开的 Run 用这个版本；正在做的事不受影响。`;
+  card.append(element('small', impact));
+  const act = (label: string, action: string, body: unknown = {}) => {
+    const control = dashboardButton(label, async () => {
+      await api(`/evolution/candidates/${encodeURIComponent(item.id)}/${action}`, body);
+      upgradesKey = '';
+      await renderChannelUpgrades(roomId);
+    });
+    control.dataset.upgradeAction = action;
+    return control;
+  };
+  const actions = element('div', '', 'upgrade-actions');
+  const ref = `room:${roomId}`;
+  if (['evaluating', 'held'].includes(item.status) && item.evaluated) actions.append(act('批准', 'approve', { approvalRef: ref }));
+  else if (['proposed', 'evaluating', 'held'].includes(item.status)) card.append(element('small', '评估还没全部通过，先不能批准。'));
+  if (item.status === 'approved') {
+    actions.append(act('先影子运行', 'start-shadow'));
+    if (item.risk === 'low') actions.append(act('上线', 'promote'));
+  }
+  if (item.status === 'shadowing' && item.shadow && item.shadow.passed >= item.shadow.needed && !item.shadow.failed) actions.append(act('开始灰度', 'start-canary'));
+  if (item.status === 'canarying' && item.canary && item.canary.passed >= item.canary.needed && !item.canary.failed) actions.append(act('上线', 'promote'));
+  if (item.status === 'promoted' && !item.active && item.canActivate) actions.append(act('用到新 Run', 'activate', { activationRef: ref }));
+  const rejectable = ['proposed', 'evaluating', 'held', 'approved'].includes(item.status);
+  const revertible = ['approved', 'shadowing', 'canarying', 'promoted', 'held'].includes(item.status);
+  if (rejectable || revertible) {
+    const reason = document.createElement('textarea');
+    reason.rows = 2; reason.maxLength = 1000; reason.dataset.upgradeReason = item.id;
+    reason.placeholder = rejectable ? '拒绝或回滚前写下原因' : '回滚前写下原因';
+    reason.setAttribute('aria-label', `${target}升级的原因`);
+    const withReason = (label: string, action: string) => {
+      const control = dashboardButton(label, async () => {
+        const text = reason.value.trim();
+        if (!text) { message(`${label}前写下原因。`); reason.focus(); return; }
+        if (action === 'rollback' && !window.confirm(`回滚${target}到 ${item.baseVersion}？新开的 Run 改回原来的版本，正在做的事不受影响。`)) return;
+        await api(`/evolution/candidates/${encodeURIComponent(item.id)}/${action}`, { reason: text });
+        upgradesKey = '';
+        await renderChannelUpgrades(roomId);
+      });
+      control.dataset.upgradeAction = action;
+      return control;
+    };
+    actions.append(reason);
+    if (rejectable) actions.append(withReason('拒绝', 'reject'));
+    if (revertible) actions.append(withReason('回滚', 'rollback'));
+  }
+  if (actions.childElementCount) card.append(actions);
+  return card;
 }
 function renderGroupTranscript(): void {
   const list = $('group-transcript');
@@ -6142,6 +6248,7 @@ async function refresh(background = false): Promise<void> {
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();
   renderAttentionInbox(runs);
+  if (full && openGroupId) void renderChannelUpgrades(openGroupId).catch(error => message(errorMessage(error)));
   if (full) { await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems); }
   renderBotRoster();
   renderGroups(rooms);
