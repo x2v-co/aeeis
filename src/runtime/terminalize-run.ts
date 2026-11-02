@@ -30,6 +30,7 @@ export async function terminalizeRun(repository: RunRepository, runId: string, r
       event(run, 'run.failed', { reason, terminalized: true, producedArtifacts: 0 });
     }
     delete run.resumeStatus;
+    delete run.takeover;
     populateRunLimitations(run);
   });
 }

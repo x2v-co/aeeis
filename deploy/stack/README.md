@@ -232,13 +232,23 @@ for exact limits, backups and reservation/dispatch recovery.
   reads `stack.env` and `.current.<stack>.env`, and waits for the tailnet address.
   Backup and health timers run daily and every 5 minutes.
   Both services use `OnFailure=aeeis-notify@<instance>.service`; set
-  `AEEIS_NOTIFY_WEBHOOK` in the protected stack env to receive JSON `text`
-  messages. For Telegram set `AEEIS_NOTIFY_TG_BOT_TOKEN` and
+  `AEEIS_NOTIFY_WEBHOOK` in the protected stack env to receive JSON `{"text":"..."}`
+  messages. Webhooks hosted at `open.feishu.cn` or `open.larksuite.com`, or with
+  `AEEIS_NOTIFY_FORMAT=feishu`, receive
+  `{"msg_type":"text","content":{"text":"..."}}`. Feishu responses must contain
+  numeric `code=0` (or `StatusCode=0`); invalid/error responses and transport
+  failures log an error without the URL and make `notify.sh` exit non-zero.
+  Webhooks bypass proxies (`curl --noproxy '*'`) unless
+  `AEEIS_NOTIFY_WEBHOOK_PROXY` explicitly selects a proxy.
+  For Telegram set `AEEIS_NOTIFY_TG_BOT_TOKEN` and
   `AEEIS_NOTIFY_TG_CHAT_ID` (text prefixed `[aeeis]`; may be combined with the
-  webhook). curl uses `AEEIS_NOTIFY_PROXY`, else the first line of
+  webhook, including when webhook delivery fails). Telegram uses
+  `AEEIS_NOTIFY_PROXY`, else the first line of
   `AEEIS_NOTIFY_PROXY_FILE` (default `/etc/notify-failure/proxy`; `KEY=url`
   form accepted) when present. With no target configured, alerts log to the
-  journal only; delivery failures are best effort.
+  journal only. Generic webhook and Telegram delivery remain best effort;
+  the notification systemd unit ignores the handler's exit status so it
+  preserves the original backup/health failure.
   Follow the runbook's installation steps, including removing the old
   `10-notify.conf` drop-ins now that notifications are in the repo units.
 - Optional `AEEIS_POSTGRES_VOLUME`, `AEEIS_TEMPORAL_POSTGRES_VOLUME` and

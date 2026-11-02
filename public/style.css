@@ -1612,3 +1612,5 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 }
 .attention-notify { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; }
 .attention-notify input[type="checkbox"] { flex: none; width: auto; margin: 0; }
+.handback { display: grid; gap: 6px; width: 100%; }
+.handback textarea { width: 100%; }
