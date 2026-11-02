@@ -32,6 +32,30 @@ function unit(options: { busy?: () => boolean; fail?: () => boolean } = {}) {
   return { store, service, starts, at: (value: string) => { now = value; } };
 }
 
+describe('manual routines', () => {
+  it('start only when asked, one at a time, and never on the schedule pump', async () => {
+    let busy = false;
+    const f = unit({ busy: () => busy });
+    const { routine } = await f.service.create({ agentId: 'bot_writer', name: '上线检查', prompt: '按示范核对上线清单', trigger: { kind: 'manual' } }, scope);
+    expect(routine).toMatchObject({ trigger: { kind: 'manual' } });
+    expect(routine.nextDueAt).toBeUndefined();
+    f.at('2026-11-05T01:00:00.000Z');
+    expect(await f.service.pump()).toMatchObject({ started: 0 });
+    const first = await f.service.runNow(routine.id, scope);
+    expect(first).toMatchObject({ status: 'started', runId: 'run_1', deliveryId: expect.stringMatching(/^manual:/) });
+    expect(f.starts[0]).toMatchObject({ origin: 'routine', taskTitle: '例程：上线检查' });
+    expect(f.starts[0]!.delivery.kind).toBe('manual');
+    expect(f.starts[0]!.text).toBe('按示范核对上线清单\n\n例程「上线检查」：主人让它现在做一次。');
+    busy = true;
+    await expect(f.service.runNow(routine.id, scope)).rejects.toThrow('上一次还没做完');
+    busy = false;
+    await f.service.update(routine.id, { expectedRevision: (await f.service.get(routine.id, scope)).routine.revision, status: 'paused' }, scope);
+    await expect(f.service.runNow(routine.id, scope)).rejects.toThrow('例程已暂停');
+    await expect(f.service.runNow(routine.id, { owner: 'mallory', tenantId: 'team-a' })).rejects.toThrow('Unknown routine');
+    expect(f.starts).toHaveLength(1);
+  });
+});
+
 describe('scheduled routines', () => {
   it('starts once at the scheduled time with the saved prompt and the timing', async () => {
     const f = unit();

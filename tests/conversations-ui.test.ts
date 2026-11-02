@@ -1218,6 +1218,83 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('channel-board').hidden).toBe(false));
     expect(h.posts.filter(post => post.url.includes('/task-actions') || post.url.endsWith('/messages'))).toHaveLength(0);
   });
+  it('records a demonstration from the teach panel, replays it step by step, adopts it as a routine and revokes it', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
+    const research = { id: 'conv_research', title: '阿研', revision: 1, agentId: bot.id, hasEarlierMessages: false, messages: [] as any[],
+      tasks: [{ id: 'task_q', title: '确认发版时间', threadId: 'thread_q', status: 'needs_input', runId: 'run_q', latestRunId: 'run_q', pendingQuestion: { text: '哪天发？' } }] };
+    const cite = { id: 'evt_q', sequence: 1, operation: 'publish', owner: 'owner', classification: 'internal', contextManifestId: 'ctx_team', audienceSnapshot: { digest: 'abcdef1234567890', members: [] }, createdAt: date,
+      type: 'system', actorType: 'principal', actorId: 'owner', content: 'AEEIS提议由阿研做：确认发版时间', evidenceRefs: ['conv_research', 'task_q', bot.id], idempotencyKey: 'bot-propose-receipt:evt_ask:aeeis' };
+    let teaching: any;
+    const draft = { steps: [
+      { at: date, text: '@阿研 上线前先查数据', source: 'message', decision: false },
+      { at: date, text: '查上线数据：核对清单', source: 'run', decision: false },
+      { at: date, text: '阻塞：等运维给数据', source: 'action', decision: true },
+    ], decisions: ['阻塞：等运维给数据'], tools: ['web-search'], prompt: '按「发布协作」里的一次示范来做。', executionReview: 'required' };
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
+      if (url === '/api/conversations/conv_research') return response(research);
+      if (url === '/api/rooms/room_team/teachings' && method === 'GET') return response({ items: teaching ? [teaching] : [] });
+      if (url === '/api/rooms/room_team/teachings' && method === 'POST') { teaching = { id: 'teach_one', agentId: bot.id, agentName: '阿研', startedAt: date, state: 'recording' }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/stop') { teaching = { ...teaching, state: 'recorded', stoppedAt: date, draft }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/adopt') { teaching = { ...teaching, state: 'adopted', routineId: 'routine_one' }; return response(teaching); }
+      if (url === '/api/rooms/room_team/teachings/teach_one/revoke') { teaching = { ...teaching, state: 'revoked' }; delete teaching.draft; return response(teaching); }
+      if (url === '/api/routines/routine_one/run') return response({ status: 'started', deliveryId: 'manual:1', runId: 'run_new' });
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: 'run_q', goal: '确认发版时间', status: 'needs_input', updatedAt: date },
+        { id: 'run_other', goal: '别处的计划', status: 'needs_approval', updatedAt: date },
+      ] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    await vi.waitFor(() => expect(el('group-members').textContent).toContain('阿研'));
+    el('channel-teach-open').click();
+    await vi.waitFor(() => expect(el('channel-teachings').textContent).toContain('还没有录过示范'));
+    await vi.waitFor(() => expect([...el<HTMLSelectElement>('channel-teach-person').options].some(option => option.value === bot.id)).toBe(true));
+    el<HTMLSelectElement>('channel-teach-person').value = bot.id;
+    el('channel-teach-start').click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === '/api/rooms/room_team/teachings')?.body).toEqual({ agentId: bot.id }));
+    await vi.waitFor(() => expect(el('channel-teach-stop').hidden).toBe(false));
+    expect(el('channel-teach-start').hidden).toBe(true);
+    expect(el('channel-teach-stop').textContent).toBe('结束示范（教给阿研）');
+    expect(el('channel-teachings').textContent).toContain('正在录');
+    el('channel-teach-stop').click();
+    const card = () => doc().querySelector<HTMLElement>('#channel-teachings [data-teaching="teach_one"]')!;
+    await vi.waitFor(() => expect(card().dataset.state).toBe('recorded'));
+    expect(el('channel-teach-start').hidden).toBe(false);
+    const caption = () => card().querySelector<HTMLElement>('[data-teaching-step]')!;
+    expect(caption().textContent).toContain('第 1 / 3 步');
+    expect(caption().textContent).toContain('@阿研 上线前先查数据');
+    clickText('下一步', card()); clickText('下一步', card());
+    await vi.waitFor(() => expect(caption().textContent).toContain('第 3 / 3 步'));
+    expect(caption().textContent).toContain('要人确认：阻塞：等运维给数据');
+    expect(card().querySelector<HTMLButtonElement>('.teaching-replay button:last-child')!.disabled).toBe(true);
+    expect(card().textContent).toContain('用到的工具：web-search');
+    expect(card().querySelector<HTMLTextAreaElement>('[data-teaching-prompt]')!.value).toBe('按「发布协作」里的一次示范来做。');
+    expect(card().querySelector<HTMLSelectElement>('[data-teaching-review]')!.value).toBe('required');
+    card().querySelector<HTMLInputElement>('[data-teaching-name]')!.value = '上线检查';
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="adopt"]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url.endsWith('/teach_one/adopt'))?.body).toEqual({ name: '上线检查', prompt: '按「发布协作」里的一次示范来做。', executionReview: 'required' }));
+    await vi.waitFor(() => expect(card().dataset.state).toBe('adopted'));
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="run"]')!.click();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/routines/routine_one/run')).toBe(true));
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="revoke"]')!.click();
+    await vi.waitFor(() => expect(el('error').textContent).toContain('撤销前写下原因'));
+    expect(h.posts.some(post => post.url.endsWith('/revoke'))).toBe(false);
+    card().querySelector<HTMLTextAreaElement>('[data-teaching-reason]')!.value = '流程改了';
+    card().querySelector<HTMLButtonElement>('[data-teaching-action="revoke"]')!.click();
+    await vi.waitFor(() => expect(card().dataset.state).toBe('revoked'));
+    expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
+    expect(card().querySelector('[data-teaching-action]')).toBeNull();
+  });
   it('answers a Run from the inbox on the open group\'s own card, and leaves the group for a Run that is not in it', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
