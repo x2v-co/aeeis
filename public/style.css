@@ -291,9 +291,9 @@ button:focus-visible, a:focus-visible { outline: 3px solid rgba(23, 23, 23, .35)
 .advanced-panel h2::before { content: ""; }
 .panel-toggle { position: absolute; top: 14px; right: 0; padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 11px; font-weight: 600; }
 .panel-toggle:hover { transform: none; color: var(--ink); border-color: var(--ink); }
-.control-rail .advanced-panel { position: relative; }
-.control-rail .advanced-panel.collapsed { padding-bottom: 12px; }
-.control-rail .advanced-panel.collapsed > :not(h2):not(.panel-toggle) { display: none; }
+:is(.control-rail, .gb-pane) .advanced-panel { position: relative; }
+:is(.control-rail, .gb-pane) .advanced-panel.collapsed { padding-bottom: 12px; }
+:is(.control-rail, .gb-pane) .advanced-panel.collapsed > :not(h2):not(.panel-toggle) { display: none; }
 .layout > div:last-child { min-width: 0; }
 #graph { max-width: 100%; overflow: auto; }
 .layout > div:last-child > section, .layout > div:last-child > div#detail > section { border: 1px solid var(--line); border-radius: 12px; padding: clamp(18px, 2.2vw, 28px); margin-bottom: 14px; background: var(--surface); box-shadow: none; animation: section-in .65s var(--ease-out) both; }
@@ -1559,6 +1559,8 @@ body.shared-run #conversation-panel, body.thread-page #conversation-panel { disp
 body.gb.conversation-mode .gb-transcript { display: flex; flex-direction: column; }
 body.gb.conversation-mode #conversation-panel:not([hidden]) { flex: 1; min-height: 0; }
 body.gb.conversation-mode .conversation-layout { grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; }
+/* The computer is its own grid column here, not a fixed overlay, so the conversation keeps the whole stage. */
+body.gb.conversation-mode.computer-open .conversation-layout { margin-right: 0; }
 body.gb.conversation-mode #command-center { height: auto; min-height: 0; }
 body.gb.conversation-mode #empty { display: none !important; }
 body.gb.conversation-mode #quick-run,
