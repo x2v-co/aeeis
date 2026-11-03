@@ -1313,6 +1313,10 @@ describe('single-entry conversation routing', () => {
     expect(takenTask.takenOver?.at).toEqual(expect.any(String));
     const resumed = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/resume`, headers: f.headers, payload: {} });
     expect(resumed.statusCode).toBe(409);
+    // Without a tool gateway there is no Bot workspace to hand over; the person works outside and writes a note.
+    const tool = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/takeover-tool`, headers: f.headers, payload: { toolId: 'shell', input: { command: 'ls' } } });
+    expect(tool.statusCode, tool.body).toBe(409);
+    expect(tool.json().error).toContain('no tool gateway');
     const handed = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/handback`, headers: f.headers, payload: { note: '预算我已经核过了' } });
     expect(handed.statusCode, handed.body).toBe(200);
     const handedTask = (await f.fresh(entry.id)).tasks.find((item: { id: string }) => item.id === aId);

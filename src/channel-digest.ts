@@ -115,6 +115,7 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
         case 'run.paused': push(event.at, true, '暂停'); break;
         case 'run.resumed': push(event.at, true, '继续'); break;
         case 'run.taken_over': push(event.at, true, '接手做了一段'); break;
+        case 'takeover.tool': push(event.at, true, `在 Bot 的工作区里用 ${str(event.data.toolId)}${str(event.data.summary) ? `：${str(event.data.summary)}` : ''}`); break;
         case 'run.handed_back': push(event.at, true, '写了说明交还'); break;
         case 'review.completed': push(event.at, false, event.data.verdict === 'accepted' ? '独立审核通过' : '独立审核要求修改'); break;
         case 'run.failed': push(event.at, false, `失败：${str(event.data.reason) || run.error || '没有写原因'}`); break;

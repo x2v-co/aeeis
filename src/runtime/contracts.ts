@@ -318,6 +318,9 @@ export interface Step {
   /** r78: index of the retry call that may borrow time after a share-limited overall timeout. */
   timeoutBoostCallIndex?: number;
 }
+/** One thing the person did in the Bot's own tool session (its Run machine) while they had it taken over. */
+export interface TakeoverAction { at: string; toolId: string; summary: string; status: 'completed' | 'failed' | 'unknown'; receiptId: string }
+
 export interface AgentRun {
   /** Private runtime originals and derived summaries; never project into debug/share views. */
   workingMemory?: WorkingMemory;
@@ -413,7 +416,7 @@ export interface AgentRun {
   error?: string;
   resumeStatus?: RunStatus;
   /** A person paused the Bot to do the work by hand. Handing back writes a note to the unfinished steps and resumes. */
-  takeover?: { by: string; at: string };
+  takeover?: { by: string; at: string; actions?: TakeoverAction[] };
   resumeModelCallId?: string;
   /** How an interrupted model call should be handled after provider reconciliation. */
   reconcileDisposition?: 'running' | 'paused' | 'cancelled';
