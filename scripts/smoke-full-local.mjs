@@ -213,13 +213,70 @@ async function waitForRun(runId, statuses, { allowQueuedReservation = false } = 
   }
 }
 
+const maxActionApprovals = Number(process.env.AEEIS_SMOKE_MAX_ACTION_APPROVALS ?? 20);
+
+function describeWait(run) {
+  if (!run) return 'no Run read yet';
+  const action = run.actionApproval;
+  return JSON.stringify({
+    status: run.status,
+    planVersion: run.plans?.at(-1)?.version,
+    planApproved: run.approval?.approved === true && run.approval?.planHash === run.plans?.at(-1)?.hash,
+    ...(action ? { actionApproval: { status: action.status, kind: action.kind, ref: action.ref, taskId: action.taskId } } : {}),
+    ...(run.error ? { error: run.error } : {}),
+    ...(run.question ? { question: run.question.text } : {}),
+    recentEvents: (run.events ?? []).slice(-5).map(item => ({ type: item.type, ...(item.data?.failure ? { failure: item.data.failure } : {}), ...(item.data?.reason ? { reason: item.data.reason } : {}) })),
+  });
+}
+
+/** Approve the plan, then every action the Run stops on (write@3 and other tools ask step by step since #124),
+ * until it finishes. The decision is "once" so the smoke never widens the owner's standing policy. */
 async function approveRun(runId, options = {}) {
-  const run = await waitForRun(runId, ['needs_approval', 'succeeded', 'failed', 'cancelled'], options);
-  if (run.status !== 'needs_approval') throw new Error(`Expected ${runId} to need approval, got ${run.status}: ${run.error ?? 'no error'}`);
-  const latestPlan = run.plans?.at(-1);
-  if (!latestPlan?.hash) throw new Error(`Run ${runId} did not return an approvable plan hash`);
-  await request(`/api/runs/${runId}/approve`, { method: 'POST', body: JSON.stringify({ planHash: latestPlan.hash, planVersion: latestPlan.version }) });
-  return waitForRun(runId, ['succeeded', 'failed', 'cancelled'], options);
+  const terminal = ['succeeded', 'failed', 'cancelled'];
+  const first = await waitForRun(runId, ['needs_approval', ...terminal], options);
+  if (first.status !== 'needs_approval') throw new Error(`Expected ${runId} to need approval, got ${first.status}: ${first.error ?? 'no error'}`);
+  const approvedPlans = new Set();
+  const approvedActions = [];
+  let run = first;
+  while (true) {
+    if (terminal.includes(run.status)) return run;
+    // These states wait for a person or a reconcile, not for an approval; polling would only run out the clock.
+    if (['unknown', 'needs_input', 'paused'].includes(run.status)) {
+      throw new Error(`Run ${runId} stopped in ${run.status} after ${approvedPlans.size} plan approval(s) and ${approvedActions.length} action approval(s); the smoke cannot resolve it: ${describeWait(run)}`);
+    }
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`full local smoke timed out after ${timeoutMs}ms approving ${runId}; approved ${approvedPlans.size} plan(s) and ${approvedActions.length} action(s) [${approvedActions.join(', ')}]; last state ${describeWait(run)}`);
+    }
+    const plan = run.plans?.at(-1);
+    const action = run.actionApproval;
+    if (run.status === 'needs_approval' && action?.status === 'pending' && !approvedActions.includes(action.idempotencyKey)) {
+      if (approvedActions.length >= maxActionApprovals) {
+        throw new Error(`Run ${runId} asked for more than ${maxActionApprovals} action approvals; last pending ${action.kind} ${action.ref} (task ${action.taskId}). Raise AEEIS_SMOKE_MAX_ACTION_APPROVALS if this is expected.`);
+      }
+      try {
+        await request(`/api/runs/${runId}/approve-action`, { method: 'POST', body: JSON.stringify({ idempotencyKey: action.idempotencyKey, decision: 'once' }) });
+      } catch (error) {
+        throw new Error(`Approving action ${action.kind} ${action.ref} (task ${action.taskId}) on ${runId} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      approvedActions.push(action.idempotencyKey);
+      console.log(`[smoke] ${runId}: approved action ${action.kind} ${action.ref} (task ${action.taskId}) once`);
+    } else if (run.status === 'needs_approval' && action?.status !== 'pending' && action?.status !== 'judging' && plan?.hash && !approvedPlans.has(plan.hash)) {
+      try {
+        await request(`/api/runs/${runId}/approve`, { method: 'POST', body: JSON.stringify({ planHash: plan.hash, planVersion: plan.version }) });
+      } catch (error) {
+        throw new Error(`Approving plan v${plan.version} on ${runId} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      approvedPlans.add(plan.hash);
+    } else if (run.status === 'needs_approval' && !plan?.hash && action?.status !== 'pending' && action?.status !== 'judging') {
+      throw new Error(`Run ${runId} needs approval but has neither an approvable plan hash nor a pending action: ${describeWait(run)}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+    try {
+      run = await request(`/api/runs/${runId}`);
+    } catch (error) {
+      throw new Error(`Reading ${runId} while approving failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
 
 // Exercise the complete website-builder resource path through the catalog
