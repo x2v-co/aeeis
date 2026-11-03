@@ -28,7 +28,7 @@ function fixture(): AgentRun {
     calls: [], answers: [], toolReceipts: [], allowedTools: [], allowedAgents: [], privacy: 'internal', brainMaxItems: 1, knowledgeMaxItems: 1, memoryMaxItems: 1,
     review: { verdict: 'needs_revision', summary: 'Missing data', issues: ['Missing structured output'] }, error: 'Model failed' };
 }
-function start(path: string, fetch: any, intervals?: Array<() => void>) {
+function start(path: string, fetch: any, intervals?: Array<() => void>, setup?: (window: any) => void) {
   dom = new JSDOM(html, { url: `http://localhost${path}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   dom.window.localStorage.setItem('aeeis.run', `run_${randomUUID()}`);
@@ -38,6 +38,7 @@ function start(path: string, fetch: any, intervals?: Array<() => void>) {
   dom.window.setInterval = ((callback: () => void) => { intervals?.push(callback); return 1; }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
+  setup?.(dom.window);
   dom.window.eval(source);
 }
 const response = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
@@ -585,5 +586,65 @@ describe('workbench takeover', () => {
     await vi.waitFor(() => expect(workspace().querySelectorAll('.takeover-log li')).toHaveLength(5));
     expect(fetch.mock.calls.length).toBeGreaterThan(fetched);
     expect((doc.getElementById('takeover-editor') as HTMLTextAreaElement).value).toBe('还没保存的改动');
+  });
+});
+
+describe('push to this device', () => {
+  it('subscribes through the service worker with the server key, and unsubscribes on the server and in the browser', async () => {
+    const run = fixture();
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    let subscription: { endpoint: string; unsubscribe: () => Promise<boolean>; toJSON: () => unknown } | null = null;
+    let subscribedKey: Uint8Array | undefined;
+    const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      calls.push({ url, method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(init.body) } : {}) });
+      if (url === '/api/push/config') return response({ web: { publicKey: 'BA' + 'A'.repeat(85) }, apns: false, fcm: false });
+      if (url === '/api/push/subscriptions' && init?.method === 'POST') return response({ id: 'push_00000000-0000-4000-8000-000000000001' });
+      if (url.startsWith('/api/push/subscriptions/')) return { ok: true, status: 204, text: async () => '' };
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch, undefined, window => {
+      const pushManager = {
+        getSubscription: async () => subscription,
+        subscribe: async (options: { applicationServerKey: Uint8Array }) => {
+          subscribedKey = options.applicationServerKey;
+          subscription = { endpoint: 'https://push.example.test/abc', unsubscribe: async () => { subscription = null; return true; }, toJSON: () => ({ endpoint: 'https://push.example.test/abc', keys: { p256dh: 'p256', auth: 'auth' } }) };
+          return subscription;
+        },
+      };
+      const registration = { pushManager };
+      window.PushManager = function PushManager() {};
+      window.Notification = Object.assign(function Notification() {}, { permission: 'granted', requestPermission: async () => 'granted' });
+      Object.defineProperty(window.navigator, 'serviceWorker', { configurable: true, value: { register: async () => registration, getRegistration: async () => registration, ready: Promise.resolve(registration), addEventListener: () => {} } });
+    });
+    const doc = dom.window.document;
+    const toggle = doc.getElementById('push-notify') as HTMLInputElement;
+    await vi.waitFor(() => expect(doc.getElementById('push-notify-note')?.textContent).toContain('默认关闭。打开后'));
+    expect(toggle.disabled).toBe(false);
+    toggle.checked = true;
+    toggle.dispatchEvent(new dom.window.Event('change'));
+    await vi.waitFor(() => expect(doc.getElementById('push-notify-note')?.textContent).toContain('已打开'));
+    expect(subscribedKey?.[0]).toBe(4);
+    expect(subscribedKey).toHaveLength(65);
+    expect(calls.find(call => call.url === '/api/push/subscriptions' && call.method === 'POST')?.body).toEqual({ channel: 'web', label: '这台电脑的浏览器', endpoint: 'https://push.example.test/abc', keys: { p256dh: 'p256', auth: 'auth' } });
+    expect(dom.window.localStorage.getItem('aeeis.push-subscription')).toBe('push_00000000-0000-4000-8000-000000000001');
+    toggle.checked = false;
+    toggle.dispatchEvent(new dom.window.Event('change'));
+    await vi.waitFor(() => expect(calls.some(call => call.method === 'DELETE' && call.url === '/api/push/subscriptions/push_00000000-0000-4000-8000-000000000001')).toBe(true));
+    await vi.waitFor(() => expect(subscription).toBeNull());
+    expect(dom.window.localStorage.getItem('aeeis.push-subscription')).toBeNull();
+  });
+
+  it('says why push is off when the browser cannot do it', async () => {
+    const run = fixture();
+    start(`/runs/${run.id}`, vi.fn(async (url: string) => url === `/api/runs/${run.id}` ? response(run) : url === '/api/status' ? response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local' }) : response([])));
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('push-notify-note')?.textContent).toBe('这个浏览器不支持推送。'));
+    expect((doc.getElementById('push-notify') as HTMLInputElement).disabled).toBe(true);
   });
 });

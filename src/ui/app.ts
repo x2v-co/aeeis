@@ -6225,11 +6225,75 @@ function notifyNewDecisions(entries: ReadonlyArray<{ key: string; kind: InboxKin
   const fresh = waiting.filter(entry => !seen.has(entry.key));
   rememberNotified(waiting.map(entry => entry.key));
   if (!fresh.length || !notificationsWanted() || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  // With push on, the service worker already shows these, page open or not; showing them here too would be twice.
+  if (pushSubscriptionId()) return;
   if (document.visibilityState === 'visible' && document.hasFocus()) return;
   for (const entry of fresh.slice(0, 3)) {
     const note = new Notification(`${inboxKindLabel(entry.kind)}：${entry.title.slice(0, 80)}`, { body: entry.detail.slice(0, 160), tag: entry.key });
     note.onclick = () => { window.focus(); note.close(); void entry.open().catch(error => message(errorMessage(error))); };
   }
+}
+const PUSH_SUBSCRIPTION = 'aeeis.push-subscription';
+function pushSubscriptionId(): string { try { return localStorage.getItem(PUSH_SUBSCRIPTION) ?? ''; } catch { return ''; } }
+const pushSupported = () => typeof navigator !== 'undefined' && 'serviceWorker' in navigator && typeof window !== 'undefined' && 'PushManager' in window && typeof Notification !== 'undefined';
+/** iPhone and iPad deliver Web Push only to an app added to the home screen (iOS 16.4 and later). */
+const needsHomeScreen = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !(window.matchMedia?.('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone);
+function pushKeyBytes(value: string): Uint8Array {
+  const raw = atob((value + '='.repeat((4 - value.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, character => character.charCodeAt(0));
+}
+async function syncPushToggle(): Promise<void> {
+  const toggle = $<HTMLInputElement>('push-notify');
+  const note = $('push-notify-note');
+  if (!toggle || !note) return;
+  if (!pushSupported()) { toggle.disabled = true; toggle.checked = false; note.textContent = needsHomeScreen() ? '在 iPhone 上先用 Safari 的「添加到主屏幕」装上 AEEIS，再从主屏幕打开，才能收到推送。' : '这个浏览器不支持推送。'; return; }
+  const config = await api<{ web: { publicKey: string } | null }>('/push/config').catch(() => ({ web: null }));
+  if (!config.web) { toggle.disabled = true; toggle.checked = false; note.textContent = '这个 AEEIS 没有打开推送。'; return; }
+  const registration = await navigator.serviceWorker.getRegistration('/');
+  const subscription = await registration?.pushManager.getSubscription();
+  toggle.disabled = Notification.permission === 'denied';
+  toggle.checked = Boolean(subscription && pushSubscriptionId());
+  note.textContent = Notification.permission === 'denied' ? '浏览器拒绝了通知，要在浏览器设置里打开。' : toggle.checked ? '已打开：页面关着也会推到这台设备，同一件事只推一次。' : '默认关闭。打开后，页面关着也能收到审批、提问和阻塞。';
+}
+async function changePush(): Promise<void> {
+  const toggle = $<HTMLInputElement>('push-notify');
+  if (!toggle || !pushSupported()) return;
+  const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  const existing = await registration.pushManager.getSubscription();
+  if (!toggle.checked) {
+    const id = pushSubscriptionId();
+    if (id) await api(`/push/subscriptions/${encodeURIComponent(id)}`, undefined, 'DELETE').catch(() => undefined);
+    await existing?.unsubscribe();
+    try { localStorage.removeItem(PUSH_SUBSCRIPTION); } catch { /* storage may be unavailable */ }
+    await syncPushToggle(); return;
+  }
+  try {
+    if (Notification.permission !== 'granted' && await Notification.requestPermission() !== 'granted') { await syncPushToggle(); return; }
+    const config = await api<{ web: { publicKey: string } | null }>('/push/config');
+    if (!config.web) { await syncPushToggle(); return; }
+    await navigator.serviceWorker.ready;
+    const subscription = existing ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: pushKeyBytes(config.web.publicKey) as BufferSource });
+    const json = subscription.toJSON() as { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
+    const label = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone 主屏幕' : /Android/.test(navigator.userAgent) ? 'Android 浏览器' : '这台电脑的浏览器';
+    const created = await api<{ id: string }>('/push/subscriptions', { channel: 'web', label, endpoint: json.endpoint, keys: { p256dh: json.keys?.p256dh, auth: json.keys?.auth } });
+    try { localStorage.setItem(PUSH_SUBSCRIPTION, created.id); } catch { /* storage may be unavailable */ }
+  } finally { await syncPushToggle(); }
+}
+$('push-notify')?.addEventListener('change', () => { void changePush().catch(error => { message(errorMessage(error)); void syncPushToggle(); }); });
+// The service worker makes AEEIS installable; a push click focuses an open page and asks it to open the item.
+if (!readOnlyShare && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  void navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(() => syncPushToggle()).catch(() => undefined);
+  navigator.serviceWorker.addEventListener('message', event => {
+    const data = event.data as { type?: string; url?: string } | undefined;
+    if (data?.type === 'aeeis.open' && typeof data.url === 'string' && new URL(data.url, window.location.origin).origin === window.location.origin) window.location.assign(data.url);
+  });
+} else if (!readOnlyShare) void syncPushToggle();
+/** A push for a channel block links to `/#room=<id>`. */
+async function openLinkedRoom(): Promise<void> {
+  const roomId = /^#room=([^&]+)$/.exec(window.location.hash)?.[1];
+  if (!roomId) return;
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  await openGroup(decodeURIComponent(roomId)).catch(error => message(errorMessage(error)));
 }
 function syncNotifyToggle(): void {
   const toggle = $<HTMLInputElement>('attention-notify');
@@ -8674,6 +8738,7 @@ async function initialize(): Promise<void> {
     }
     await initializeConversations(status);
     await refresh(); message('');
+    await openLinkedRoom();
     if (minimalMode && !currentId) window.requestAnimationFrame(() => {
       if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
       else if (quickRunReady) $<HTMLInputElement>('quick-goal').focus();

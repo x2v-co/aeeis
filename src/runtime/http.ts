@@ -21,6 +21,7 @@ import { EvolutionTransitionError } from '../evolution.js';
 import { channelMetrics } from '../channel-metrics.js';
 import { channelDigestCost, taskTimeline } from '../channel-digest.js';
 import { emptyUiEventCounts, uiEventDay, uiEventInputSchema, type UiEventCountStore } from '../ui-event-counts.js';
+import { pushSubscriptionInputSchema, pushSubscriptionView, type PushChannel, type PushMessage, type PushStore } from '../push.js';
 import { z } from 'zod';
 import { AgentEngine, Conflict, digest, event } from './engine.js';
 import { encodeRunEventCursor, NotFound, type RunRepository } from './repository.js';
@@ -77,9 +78,9 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
-declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService; aeeisBots?: BotTeam } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
-interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { conversationStore?: ConversationStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -695,6 +696,14 @@ export function buildApp(options: Options) {
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
   }
+  // Installable web app (§11.6): manifest, a service worker for push, and icons. The worker caches nothing.
+  app.get('/manifest.webmanifest', async (_request, reply) => reply.type('application/manifest+json; charset=utf-8').send(await readFile(new URL('../../public/manifest.webmanifest', import.meta.url), 'utf8')));
+  app.get('/sw.js', async (_request, reply) => reply.type('text/javascript; charset=utf-8').header('service-worker-allowed', '/').header('cache-control', 'no-cache').send(await readFile(new URL('../../public/sw.js', import.meta.url), 'utf8')));
+  const icons = new Set(['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png', 'badge-72.png']);
+  app.get<{ Params: { name: string } }>('/icons/:name', async (request, reply) => {
+    if (!icons.has(request.params.name)) return reply.code(404).send({ error: 'Not found' });
+    return reply.type('image/png').header('cache-control', 'public, max-age=86400').send(await readFile(new URL(`../../public/icons/${request.params.name}`, import.meta.url)));
+  });
   const teamAssets: Record<string, [string, string]> = {
     '/team': ['index.html', 'text/html; charset=utf-8'],
     '/team/': ['index.html', 'text/html; charset=utf-8'],
@@ -1107,6 +1116,47 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     await options.domain.getRoomForPrincipal(input.roomId, principal.id, principal.tenantId);
     await options.uiEvents.record({ owner: principal.id, tenantId: principal.tenantId }, input);
+    return reply.code(204).send();
+  });
+  /**
+   * §9.4 push: what a person is asked about right now, as it would reach their phone. The same S1 rule as the inbox:
+   * a Run waiting for approval or an answer, and a blocked task in a group they own. The push pump scans this.
+   */
+  const pushMessages = async (scope: Ownership): Promise<PushMessage[]> => {
+    const clip = (text: string, length: number) => { const flat = text.replace(/\s+/g, ' ').trim(); return flat.length > length ? `${flat.slice(0, length)}…` : flat; };
+    const runs = (await options.repository.list(scope, 200)).filter(run => run.status === 'needs_approval' || run.status === 'needs_input');
+    const messages: PushMessage[] = runs.map(run => ({
+      key: `run:${run.id}:${run.status}`, url: `/runs/${run.id}`,
+      title: `${run.status === 'needs_approval' ? '等你批准' : '等你回答'}：${clip(run.goal, 60)}`,
+      body: clip(run.status === 'needs_input' ? run.question?.text ?? 'Bot 需要一条补充信息才能继续。' : run.plans.at(-1)?.summary ?? '计划等你批准后才会执行。', 160),
+    }));
+    if (channelBoard) for (const hold of await channelBoard.holdings(scope.owner, scope.tenantId)) {
+      if (!hold.blocked) continue;
+      messages.push({ key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, url: `/#room=${encodeURIComponent(hold.roomId)}`, title: `阻塞：${clip(hold.title ?? '频道里的事', 60)}`, body: clip(`${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, 160) });
+    }
+    return messages;
+  };
+  app.decorate('aeeisPushMessages', pushMessages);
+  const pushStore = () => { if (!options.push) throw new Conflict('Push is not configured'); return options.push.store; };
+  app.get('/api/push/config', async () => ({
+    web: options.push?.channels.includes('web') && options.push.webPublicKey ? { publicKey: options.push.webPublicKey } : null,
+    apns: Boolean(options.push?.channels.includes('apns')), fcm: Boolean(options.push?.channels.includes('fcm')),
+  }));
+  app.get('/api/push/subscriptions', async request => {
+    const principal = principalOf(request);
+    return { items: (await pushStore().list({ owner: principal.id, tenantId: principal.tenantId })).map(pushSubscriptionView) };
+  });
+  app.post('/api/push/subscriptions', async (request, reply) => {
+    const principal = principalOf(request);
+    const input = pushSubscriptionInputSchema.parse(request.body);
+    if (!options.push?.channels.includes(input.channel)) throw new Conflict(`Push channel ${input.channel} is not configured on this AEEIS`);
+    const created = await pushStore().add({ owner: principal.id, tenantId: principal.tenantId }, input);
+    return reply.code(201).send(pushSubscriptionView(created));
+  });
+  app.delete<{ Params: { id: string } }>('/api/push/subscriptions/:id', async (request, reply) => {
+    const principal = principalOf(request);
+    const id = z.string().regex(/^push_[0-9a-f-]{36}$/).parse(request.params.id);
+    if (!await pushStore().remove({ owner: principal.id, tenantId: principal.tenantId }, id)) throw new NotFound('Unknown push subscription');
     return reply.code(204).send();
   });
   app.get('/api/board-holdings', async request => {
