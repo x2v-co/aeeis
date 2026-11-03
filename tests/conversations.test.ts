@@ -324,6 +324,34 @@ describe('single-entry conversation routing', () => {
     expect(next.json().conversation.lastDelivery.planSummary).toBe('按栏目交周报');
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('shows each succeeded Run\'s answer under the message that asked for it, to the owner only', async () => {
+    const f = await fixture(), entry = await f.create();
+    const first = await f.addTask(entry.id, '周报标题', 'execute');
+    const second = await f.addTask(entry.id, '发布说明', 'execute');
+    const pending = await f.addTask(entry.id, '还在做', 'execute');
+    await f.repository.mutate(first.runId, run => {
+      run.status = 'succeeded';
+      run.artifacts = [
+        { id: 'artifact_draft', taskId: 'work', title: '草稿', content: 'draft body', evidenceRefs: [], hash: 'a'.repeat(64), createdAt: run.createdAt },
+        { id: 'artifact_titles', taskId: 'work', title: '标题', content: '  1. 按期上线\n2. 风险收敛  ', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt },
+      ];
+    });
+    await f.repository.mutate(second.runId, run => {
+      run.status = 'succeeded';
+      run.artifacts = [{ id: 'artifact_long', taskId: 'work', title: '说明', content: 'x'.repeat(2500), evidenceRefs: [], hash: 'c'.repeat(64), createdAt: run.createdAt }];
+    });
+    const seen = await f.fresh(entry.id);
+    const reply = (runId: string) => seen.messages.find((message: any) => message.execution?.runId === runId)?.reply;
+    expect(reply(first.runId)).toEqual({ text: '1. 按期上线\n2. 风险收敛', artifactId: 'artifact_titles' });
+    expect(reply(second.runId)).toMatchObject({ artifactId: 'artifact_long', truncated: true });
+    expect(reply(second.runId).text).toHaveLength(2001);
+    expect(reply(pending.runId)).toBeUndefined();
+    expect(seen.tasks.every((task: any) => !('reply' in task))).toBe(true);
+    expect(await f.store.get(entry.id, scope)).not.toHaveProperty('messages.0.reply');
+    const agent = await f.app.inject({ method: 'GET', url: `/api/conversations/${entry.id}`, headers: { authorization: 'Bearer agent' } });
+    expect(agent.statusCode).toBe(403);
+    expect(agent.body).not.toContain('按期上线');
+  });
   it('accepts one practice sentence for this person and carries it only on that person\'s next Run', async () => {
     const brain = new GovernedBrain();
     const f = await fixture(brain);

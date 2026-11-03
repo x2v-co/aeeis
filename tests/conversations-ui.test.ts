@@ -549,6 +549,34 @@ describe('single-entry conversation workbench', () => {
     expect(drop.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/revise-plan'))).toBe(false);
   });
 
+  it('says a finished answer in the chat and keeps routing and receipts under 详情', async () => {
+    const answered = () => {
+      const view = fixture();
+      view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId,
+        execution: { steps: [{ title: '想标题', state: 'done' }], evidence: ['标题'] } } as any;
+      view.messages.push({ id: 'asked', role: 'user', text: '帮我想三个周报标题', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
+        reply: { text: '1. 按期上线\n2. 风险收敛', artifactId: 'artifact_titles', truncated: true } } as any);
+      return view;
+    };
+    const h = harness(answered()); start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('#conversation-messages li[data-message-id="asked"]');
+    await vi.waitFor(() => expect(row()?.querySelector('.bot-reply')).not.toBeNull());
+    const reply = row()!.querySelector<HTMLElement>('.bot-reply')!;
+    expect(reply.dataset.replyRun).toBe(runId);
+    expect(reply.querySelector('.bot-reply-text')!.textContent).toBe('1. 按期上线\n2. 风险收敛');
+    expect(row()!.querySelector('.plan-card')).toBeNull();
+    // The receipt is still there for whoever opens 详情, but it is not what the chat shows.
+    const details = row()!.querySelector<HTMLDetailsElement>('details.message-details')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('路由：new-task');
+    expect(details.textContent).toContain(`执行请求：completed · ${runId}`);
+    expect(details.querySelector('button')!.textContent).toBe('回复这条消息');
+    expect(reply.querySelector<HTMLButtonElement>(`[data-reply-open="${runId}"]`)!.textContent).toBe('看完整结果 ↗');
+    reply.querySelector<HTMLButtonElement>(`[data-reply-open="${runId}"]`)!.click();
+    await vi.waitFor(() => expect(h.fetch.mock.calls.some(([url]) => String(url).startsWith(`/api/runs/${runId}`))).toBe(true));
+    expect(h.posts).toHaveLength(0);
+  });
+
   it('asks for one action decision in the transcript: approve once, deny, why, and always or block under more', async () => {
     const waitingView = () => {
       const view = fixture();
@@ -684,8 +712,14 @@ describe('single-entry conversation workbench', () => {
 
   it('keeps every setting on one Settings page and opens it from the old links', async () => {
     const h = harness(); start(h.fetch); await ready();
-    expect([...doc().querySelectorAll('#gb-computer .gb-pane')].map(pane => (pane as HTMLElement).dataset.pane)).toEqual(['run', 'setup', 'status']);
-    expect([...doc().querySelectorAll('#gb-computer [data-computer-tab]')].map(button => button.textContent)).toEqual(['设置', '状态']);
+    expect([...doc().querySelectorAll('#gb-computer .gb-pane')].map(pane => (pane as HTMLElement).dataset.pane)).toEqual(['about', 'run', 'setup', 'status']);
+    expect([...doc().querySelectorAll('#gb-computer [data-computer-tab]')].map(button => button.textContent)).toEqual(['关于它', '设置', '状态']);
+    // The Bot's own settings sit in 关于它, out of the chat column.
+    const about = doc().querySelector<HTMLElement>('#gb-computer .gb-pane[data-pane="about"]')!;
+    for (const id of ['bot-note', 'standing-instruction', 'routines', 'last-delivery', 'accepted-practice', 'task-settings']) {
+      expect(about.contains(el(id)), id).toBe(true);
+      expect(doc().querySelector('.conversation-discussion')!.contains(el(id)), id).toBe(false);
+    }
     expect(doc().querySelectorAll('[data-computer-tab="goals"], [data-computer-tab="govern"]')).toHaveLength(0);
     const setup = doc().querySelector<HTMLElement>('#gb-computer .gb-pane[data-pane="setup"]')!;
     const order = ['new-run-panel', 'access-panel', 'goals-panel', 'reminders-panel', 'rsi-panel', 'collaboration-panel'].map(id => {

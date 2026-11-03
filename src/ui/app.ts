@@ -89,11 +89,14 @@ type ProjectPulseArtifact = {
   unknowns: ProjectPulseItem[];
 };
 interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationReply { text: string; artifactId: string; truncated?: true }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[];
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
+  /** The answer of the Run this message started, once it succeeded. */
+  reply?: ConversationReply;
   source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
 }
 interface RoutineView {
@@ -430,11 +433,11 @@ function setupMinimalSections(): void {
   for (const selector of secondarySelectors) document.querySelector(selector)?.closest('section')?.classList.add('run-secondary');
 }
 setupMinimalSections();
-type ComputerTab = 'run' | 'setup' | 'status';
+type ComputerTab = 'run' | 'setup' | 'status' | 'about';
 let computerOpen = false;
 let computerTab: ComputerTab = 'setup';
 const COMPUTER_TITLES: Record<ComputerTab, string> = {
-  run: '这次运行', setup: '设置', status: '运行状态',
+  run: '这次运行', setup: '设置', status: '运行状态', about: '关于它',
 };
 function presenceOf(status?: string): { state: string; label: string } {
   if (!status) return { state: 'idle', label: '空闲' };
@@ -1291,7 +1294,11 @@ function updateConversationControls(): void {
   $<HTMLButtonElement>('conversation-note').disabled = locked || !conversation || conversationNeedsRefresh || correcting;
   restoreExecutionReview();
   syncEntryDefaults();
-  $('conversation-execution-note').textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : rosterView() !== 'entry' ? '这位 Bot 不会单独执行，发送只记下来。要它做事，回到 AEEIS 说。' : executionReviewNote();
+  const executionNote = $('conversation-execution-note');
+  executionNote.textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : rosterView() !== 'entry' ? '这位 Bot 不会单独执行，发送只记下来。要它做事，回到 AEEIS 说。' : executionReviewNote();
+  // The usual review explanation lives on the review menu; only a note that changes what Send does stays in view.
+  executionNote.dataset.routine = String(executionNote.textContent === executionReviewNote());
+  $('execution-review').title = executionReviewNote();
   for (const id of ['conversation-new', 'conversation-select', 'conversation-clear-focus']) ($<HTMLButtonElement | HTMLSelectElement>(id)).disabled = locked;
   for (const id of ['conversation-refresh', 'conversation-sync']) $<HTMLButtonElement>(id).disabled = conversationBusy || conversationRefreshing || !conversation;
   $<HTMLButtonElement>('conversation-clear-focus').disabled ||= !conversation?.focusTaskId;
@@ -3101,7 +3108,10 @@ function syncEntrySurface(): void {
   const panel = $('group-panel');
   if (messages) messages.hidden = !life;
   if (earlier) earlier.hidden = !life || !conversation?.hasEarlierMessages;
-  if (empty) empty.hidden = !life || Boolean(conversation?.messages.length);
+  if (empty) {
+    empty.hidden = !life || Boolean(conversation?.messages.length);
+    empty.textContent = view === 'bot' ? '这位 Bot 只记下讨论，不会自己做。要它做事，回到 AEEIS 说。' : '今天要我做什么？';
+  }
   if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
   if (note) note.hidden = view !== 'bot';
   if (placement) placement.hidden = view !== 'bot' && view !== 'direct';
@@ -4241,6 +4251,22 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
   }
   return card;
 }
+/** A finished task's answer, said by the Bot in the transcript. The whole result, evidence and steps stay in the workbench. */
+function conversationBotReply(answer: ConversationReply, runId: string, title: string): HTMLElement {
+  const person = lifePersonId();
+  const reply = element('section', '', 'bot-reply');
+  reply.dataset.replyRun = runId;
+  reply.setAttribute('aria-label', `「${title}」的回答`);
+  reply.append(element('small', person ? participantLabel(person) : 'AEEIS', 'message-meta'), element('div', answer.text, 'bot-reply-text'));
+  const actions = element('div', '', 'bot-reply-actions');
+  const copy = button('复制', async () => { await navigator.clipboard?.writeText(answer.text); copy.textContent = '已复制'; });
+  copy.type = 'button';
+  const open = button(answer.truncated ? '看完整结果 ↗' : '详情 ↗', async () => openConversationRun(runId));
+  open.type = 'button'; open.dataset.replyOpen = runId;
+  actions.append(copy, open);
+  reply.append(actions);
+  return reply;
+}
 /** What the Run is waiting on from you, shown under its plan: one external action to decide, or one question to answer. */
 function conversationDecisionCard(task: ConversationTaskView, answerDraft = ''): HTMLElement | undefined {
   const action = task.runId && task.status === 'needs_approval' ? task.pendingAction : undefined;
@@ -4464,6 +4490,8 @@ function renderConversation(): void {
       row.append(rank, name, status, actions); taskBody?.append(row);
     });
     $('conversation-tasks').hidden = ordered.length === 0;
+    const waiting = ordered.filter(task => ['needs_approval', 'needs_input', 'unknown', 'failed'].includes(task.status)).length;
+    $('conversation-task-count').textContent = ordered.length ? `${ordered.length} 件${waiting ? ` · ${waiting} 件等你` : ''}` : '';
     const messages = $('conversation-messages');
     const planDrafts = new Map<string, string>();
     messages.querySelectorAll<HTMLTextAreaElement>('textarea[data-plan-feedback]').forEach(field => {
@@ -4480,17 +4508,21 @@ function renderConversation(): void {
     for (const item of conversation?.messages ?? []) {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
-      row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`), element('p', item.text));
-      if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`));
+      row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`, 'message-meta'), element('p', item.text, 'message-text'));
+      if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
+      // Routing, execution receipts and the message's own actions stay one click away, so the transcript reads as a conversation.
+      const details = element('details', '', 'message-details');
+      details.append(element('summary', '详情'));
+      row.append(details);
       const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
-      if (corrected) row.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
-      if (item.correctsMessageId) row.append(element('small', `归属纠正记录：${item.correctsMessageId}；原始路由和已有执行记录不变。`));
+      if (corrected) details.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
+      if (item.correctsMessageId) details.append(element('small', `归属纠正记录：${item.correctsMessageId}；原始路由和已有执行记录不变。`));
       const routeLabel = item.route.status === 'clarify' ? '待澄清：未执行，请明确选择任务' : item.route.status === 'general' ? '一般讨论：已记录，未调用模型' : `${corrected ? '原始关联任务（审计）' : '关联任务'}：${item.route.taskIds.map(conversationTaskName).join('、')}`;
-      row.append(element('small', `${routeLabel} · 路由：${item.route.reason} · ${item.route.focusEffect === 'switch' && item.route.status === 'routed' ? '已切换讨论焦点' : '保持讨论焦点'}`));
-      if (item.execution?.state === 'cancelled') row.append(element('small', '这次执行没有创建，请重新发送。'));
-      else if (item.execution) row.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
-      else if (item.role === 'user' && item.route.status === 'routed') row.append(element('small', '已记录讨论，未调用模型。'));
-      const reply = button('回复这条消息', async () => prepareConversationReply(item)); reply.type = 'button'; row.append(reply);
+      details.append(element('small', `${routeLabel} · 路由：${item.route.reason} · ${item.route.focusEffect === 'switch' && item.route.status === 'routed' ? '已切换讨论焦点' : '保持讨论焦点'}`));
+      if (item.execution?.state === 'cancelled') details.append(element('small', '这次执行没有创建，请重新发送。'));
+      else if (item.execution) details.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
+      else if (item.role === 'user' && item.route.status === 'routed') details.append(element('small', '已记录讨论，未调用模型。'));
+      const reply = button('回复这条消息', async () => prepareConversationReply(item)); reply.type = 'button'; details.append(reply);
       if (item.role === 'user' && !item.execution && !item.correctsMessageId) {
         const correct = button('纠正归属', async () => {
           if (conversationBusy || conversationAttempt) return;
@@ -4500,7 +4532,7 @@ function renderConversation(): void {
           $<HTMLTextAreaElement>('conversation-text').value = '纠正这条讨论的任务归属';
           $('conversation-correction-label').textContent = `纠正归属：${item.text.slice(0, 160)}`;
           updateConversationControls(); openConversationRoute(); $<HTMLSelectElement>('conversation-target').focus();
-        }); correct.type = 'button'; row.append(correct);
+        }); correct.type = 'button'; details.append(correct);
       }
       if (item.route.status === 'clarify' && !corrected) {
         for (const id of item.route.candidateTaskIds) {
@@ -4513,13 +4545,14 @@ function renderConversation(): void {
         }
       }
       const runId = item.notificationRunId ?? item.execution?.runId;
-      if (runId) { const view = button('查看此次运行', async () => openConversationRun(runId)); view.type = 'button'; row.append(view); }
+      if (runId) { const view = button('查看此次运行', async () => openConversationRun(runId)); view.type = 'button'; details.append(view); }
       const planTask = item.execution && planMessage.get(item.execution.taskId) === item.id ? conversation?.tasks.find(task => task.id === item.execution!.taskId) : undefined;
       if (planTask && (planTask.runId === item.execution!.runId || planTask.status === 'preparing')) {
-        row.append(conversationPlanCard(planTask, planDrafts.get(planTask.id)));
+        if (!(item.reply && planTask.status === 'succeeded')) row.append(conversationPlanCard(planTask, planDrafts.get(planTask.id)));
         const decision = conversationDecisionCard(planTask, questionDrafts.get(planTask.id));
         if (decision) row.append(decision);
       }
+      if (item.reply && item.execution) row.append(conversationBotReply(item.reply, item.execution.runId, conversationTaskName(item.execution.taskId)));
       messages.append(row);
     }
     $('conversation-earlier').hidden = !conversation?.hasEarlierMessages;
@@ -4539,9 +4572,10 @@ function rememberLifeSummary(view: ConversationView): void {
 }
 function acceptConversation(view: ConversationView): void {
   if (conversation?.id === view.id && conversation.revision > view.revision) return;
-  // A task that finishes while you watch opens its results in the workbench. A first load or another conversation never does.
+  // A task that finishes while you watch opens its results in the workbench, unless its answer is already in the chat.
+  // A first load or another conversation never does.
   const before = conversation?.id === view.id ? new Map(conversation.tasks.map(task => [task.id, task.status])) : undefined;
-  const finished = before ? view.tasks.find(task => task.status === 'succeeded' && task.runId && before.has(task.id) && !['succeeded', 'failed', 'cancelled', 'discussion', 'unreadable'].includes(before.get(task.id)!)) : undefined;
+  const finished = before ? view.tasks.find(task => task.status === 'succeeded' && task.runId && !view.messages.some(message => message.execution?.runId === task.runId && message.reply) && before.has(task.id) && !['succeeded', 'failed', 'cancelled', 'discussion', 'unreadable'].includes(before.get(task.id)!)) : undefined;
   conversation = view;
   if (finished?.runId && rosterView() === 'entry') void revealFinishedRun(finished.runId).catch(() => undefined);
   rememberLifeSummary(view);
@@ -5096,7 +5130,7 @@ $('conversation-new').addEventListener('click', async () => {
     const view = await api<ConversationView>('/conversations', {});
     if (epoch !== conversationEpoch) return;
     conversationReplyId = undefined; conversationCorrectionId = undefined; conversationNeedsRefresh = false; $<HTMLFormElement>('conversation-composer').reset();
-    $('conversation-status').textContent = '新对话已建立。普通发送只记录讨论。'; $('conversation-error').textContent = ''; acceptConversation(view);
+    $('conversation-status').textContent = '新对话已建立。'; $('conversation-error').textContent = ''; acceptConversation(view);
   } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
   finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 });
@@ -8679,6 +8713,13 @@ $('answer-form').onsubmit = event => {
     .catch(error => message(errorMessage(error)))
     .finally(() => { submit.disabled = false; submit.classList.remove('is-busy'); submit.removeAttribute('aria-busy'); });
 };
+// The composer starts as one box and Send; who is speaking and which task a message goes to open from 更多.
+$('conversation-more').addEventListener('click', () => {
+  const form = $('conversation-composer');
+  const open = form.dataset.more !== 'true';
+  form.dataset.more = String(open);
+  $('conversation-more').setAttribute('aria-expanded', String(open));
+});
 $('connect').onclick = () => {
   const token = cleanToken($<HTMLInputElement>('token').value);
   if (token === undefined) { badTokenNotice = false; message(BAD_TOKEN); $<HTMLInputElement>('token').focus(); return; }

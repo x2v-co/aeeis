@@ -190,6 +190,16 @@ function executionView(run: AgentRun | undefined): { steps: Array<{ title: strin
   const evidence = [...new Set(run.artifacts.map(item => clipTitle(item.title)).filter(Boolean))].slice(0, 6);
   return evidence.length ? { steps, evidence } : { steps };
 }
+/** The answer of a succeeded Run, shown to its owner as the Bot's reply in the chat: the last artifact's text, clipped. The full artifact stays on the Run. */
+const REPLY_LIMIT = 2000;
+const REPLY_RUNS = 20;
+function runReply(run: AgentRun | undefined): { text: string; artifactId: string; truncated?: true } | undefined {
+  if (run?.status !== 'succeeded') return;
+  const artifact = run.artifacts.at(-1);
+  const text = artifact?.content.trim();
+  if (!artifact || !text) return;
+  return text.length > REPLY_LIMIT ? { text: `${text.slice(0, REPLY_LIMIT).trimEnd()}…`, artifactId: artifact.id, truncated: true } : { text, artifactId: artifact.id };
+}
 /** The one external action waiting for the owner. Its arguments stay on the Run; the key ties a decision to exactly this call. */
 function pendingAction(run: AgentRun | undefined): { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string } | undefined {
   const action = run?.actionApproval;
@@ -411,6 +421,7 @@ export class ConversationService implements LifeThreadInbox {
     return Boolean(actor && actor.id === scope.owner && actor.tenantId === scope.tenantId && actor.roles.includes('owner'));
   }
   private async view(conversation: Conversation, scope: Ownership, actor?: Principal) {
+    const owner = this.ownerActor(actor, scope);
     const loaded = await Promise.all(conversation.tasks.map(async task => {
       let run: AgentRun | undefined;
       if (task.latestRunId) {
@@ -432,12 +443,13 @@ export class ConversationService implements LifeThreadInbox {
       return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
+    const replies = owner ? await this.messageReplies(conversation, scope, loaded.map(item => item.run)) : new Map<string, NonNullable<ReturnType<typeof runReply>>>();
     const lastDelivery = this.latestDelivery(loaded);
     const acceptedPractice = this.ownerActor(actor, scope) ? await this.readPractice(conversation, scope, actor) : undefined;
     const storedSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
     const comparisons = this.ownerActor(actor, scope) ? await this.readTaskComparisons(conversation, scope, actor, storedSettings) : undefined;
     const taskSettings = storedSettings || comparisons?.length ? { skills: storedSettings?.skills ?? [], models: storedSettings?.models ?? [], ...(comparisons?.length ? { comparisons } : {}) } : undefined;
-    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: conversation.messages.slice(-100).map(message => ({ ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message) })), hasEarlierMessages: conversation.messages.length > 100 });
+    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: conversation.messages.slice(-100).map(message => { const reply = message.execution ? replies.get(message.execution.runId) : undefined; return { ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message), ...(reply ? { reply } : {}) }; }), hasEarlierMessages: conversation.messages.length > 100 });
   }
   /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
   private async readPractice(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ claimId: string; text: string; runId: string; evidenceRefs: string[] } | undefined> {
@@ -485,6 +497,22 @@ export class ConversationService implements LifeThreadInbox {
     const summary = latest.run.plans.at(-1)?.summary.trim().slice(0, 240);
     const artifactTitles = [...new Set(latest.run.artifacts.map(item => item.title.trim()).filter(Boolean))].slice(0, 8).map(title => title.length > 80 ? `${title.slice(0, 79)}…` : title);
     return { taskId: latest.task.id, taskTitle: latest.task.title, runId: latest.run.id, ...(summary ? { planSummary: summary } : {}), ...(artifactTitles.length ? { artifactTitles } : {}) };
+  }
+  /** The answers of the latest Runs this conversation started, keyed by Run id, so each shows under the message that asked for it. */
+  private async messageReplies(conversation: Conversation, scope: Ownership, known: Array<AgentRun | undefined>) {
+    const replies = new Map<string, NonNullable<ReturnType<typeof runReply>>>();
+    const byId = new Map(known.flatMap(run => run ? [[run.id, run] as const] : []));
+    const runIds = [...new Set(conversation.messages.slice(-100).flatMap(message => message.execution?.state === 'completed' ? [message.execution.runId] : []))].slice(-REPLY_RUNS);
+    await Promise.all(runIds.map(async runId => {
+      let run = byId.get(runId);
+      if (!run) {
+        try { run = await this.runs.get(runId, scope); }
+        catch { return; }
+      }
+      const reply = runReply(run);
+      if (reply) replies.set(runId, reply);
+    }));
+    return replies;
   }
   private messageView(message: ConversationMessage) {
     const { keyHash: _key, requestHash: _hash, execution, ...view } = message;
