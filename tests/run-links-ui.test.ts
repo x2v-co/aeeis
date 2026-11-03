@@ -42,6 +42,43 @@ function start(path: string, fetch: any, intervals?: Array<() => void>, setup?: 
   dom.window.eval(source);
 }
 const response = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
+describe('access token', () => {
+  // Browsers refuse a header value outside Latin-1 before sending anything; mimic that.
+  const strictFetch = (run: AgentRun) => vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+    for (const value of Object.values(init?.headers ?? {})) if (/[^\x00-\xFF]/.test(value)) throw new TypeError("Failed to execute 'fetch' on 'Window': String contains non ISO-8859-1 code point.");
+    if (url === `/api/runs/${run.id}`) return response(run);
+    if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+    if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+    if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+    return response([]);
+  });
+  it('cleans what copying adds to a token and refuses characters a header cannot carry', async () => {
+    const run = fixture(), fetch = strictFetch(run);
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document, input = doc.getElementById('token') as HTMLInputElement;
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(run.goal));
+    input.value = ' Bearer “abc-123”\u200B ';
+    doc.getElementById('connect')!.click();
+    await vi.waitFor(() => expect(dom.window.sessionStorage.getItem('aeeis.token')).toBe('abc-123'));
+    expect(input.value).toBe('abc-123');
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.headers?.authorization === 'Bearer abc-123')).toBe(true));
+    await vi.waitFor(() => expect((doc.getElementById('connect') as HTMLButtonElement).disabled).toBe(false));
+    input.value = '令牌abc';
+    doc.getElementById('connect')!.click();
+    expect(doc.getElementById('error')?.textContent).toContain('不能放进请求头');
+    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBe('abc-123');
+    expect(doc.getElementById('error')?.textContent).not.toContain('ISO-8859-1');
+  });
+  it('drops a saved token that a header cannot carry', async () => {
+    const run = fixture(), fetch = strictFetch(run);
+    start(`/runs/${run.id}`, fetch, undefined, window => window.sessionStorage.setItem('aeeis.token', '中文令牌'));
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(run.goal));
+    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBeNull();
+    expect((doc.getElementById('token') as HTMLInputElement).value).toBe('');
+    expect(doc.getElementById('error')?.textContent).not.toContain('ISO-8859-1');
+  });
+});
 describe('group chat', () => {
   it('opens a draft from the roster and refuses a group that is only AEEIS', async () => {
     const run = fixture();

@@ -1119,6 +1119,12 @@ window.addEventListener('keydown', event => {
     }
   }
 });
+/** A token goes in the authorization header, which only carries Latin-1: drop what copying tends to add, and refuse the rest. */
+function cleanToken(raw: string): string | undefined {
+  const token = raw.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').trim().replace(/^bearer\s+/i, '').replace(/^(["'“‘「])(.*)(["'”’」])$/, '$2').trim();
+  return /^[\x21-\x7E]*$/.test(token) ? token : undefined;
+}
+const BAD_TOKEN = '令牌里有不能放进请求头的字符（比如中文、全角符号或空格）。请重新复制令牌，只保留令牌本身。';
 class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
@@ -8654,7 +8660,9 @@ $('answer-form').onsubmit = event => {
     .finally(() => { submit.disabled = false; submit.classList.remove('is-busy'); submit.removeAttribute('aria-busy'); });
 };
 $('connect').onclick = () => {
-  const token = $<HTMLInputElement>('token').value;
+  const token = cleanToken($<HTMLInputElement>('token').value);
+  if (token === undefined) { message(BAD_TOKEN); $<HTMLInputElement>('token').focus(); return; }
+  $<HTMLInputElement>('token').value = token;
   if (token !== (sessionStorage.getItem('aeeis.token') ?? '')) {
     resetConversation(); conversationScope = '';
     stopRunEventStream(); current = undefined; currentId = ''; pendingFollowup = undefined;
@@ -8827,7 +8835,14 @@ async function copyRunLink(url: string): Promise<void> { await navigator.clipboa
   } catch (error) { message(errorMessage(error)); }
   finally { button.disabled = false; }
 });
-if (!readOnlyShare) $<HTMLInputElement>('token').value = sessionStorage.getItem('aeeis.token') ?? '';
+if (!readOnlyShare) {
+  // A token saved before cleanToken existed may still carry characters fetch refuses; clean it or drop it.
+  const saved = sessionStorage.getItem('aeeis.token');
+  const token = saved === null ? '' : cleanToken(saved);
+  if (token) sessionStorage.setItem('aeeis.token', token); else sessionStorage.removeItem('aeeis.token');
+  if (saved && token === undefined) message(BAD_TOKEN);
+  $<HTMLInputElement>('token').value = token ?? '';
+}
 void initialize();
 setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh(true).catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {
