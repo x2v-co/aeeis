@@ -1,3 +1,4 @@
+import { channelNoiseSettingsSchema } from '../channel-noise.js';
 import { ChangeAuditConflict, changeReasonSchema, verifyChain, type ChangeAuditApi } from '../change-audit.js';
 import { activeShare, hashShareToken, newRunShare, shareTtlConfig } from './run-shares.js';
 import { newThreadShare, sharedThreadView } from './thread-shares.js';
@@ -1026,17 +1027,46 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     return options.domain.getSessionContextManifest(request.params.id, request.params.manifestId, principal.id, principal.tenantId);
   });
-  app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string; before?: string; latest?: string } }>('/api/rooms/:id/session-events', async request => {
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string; before?: string; latest?: string; includeQueued?: string } }>('/api/rooms/:id/session-events', async request => {
     if (!options.sessionEvents) throw new Conflict('Shared Session event service is not configured');
     const principal = principalOf(request);
-    const limit = z.object({ limit: z.coerce.number().int().min(1).max(200).optional(), cursor: z.string().min(1).max(1000).optional(), before: z.string().min(1).max(40).optional(), latest: z.enum(['1', 'true']).optional() }).strict().parse(request.query).limit ?? 50;
+    const limit = z.object({ limit: z.coerce.number().int().min(1).max(200).optional(), cursor: z.string().min(1).max(1000).optional(), before: z.string().min(1).max(40).optional(), latest: z.enum(['1', 'true']).optional(), includeQueued: z.enum(['1', 'true']).optional() }).strict().parse(request.query).limit ?? 50;
+    const timeline = async (read: ReturnType<SessionEventService['page']>) => {
+      const page = await read;
+      if (request.query.includeQueued) return page;
+      const items = page.items.filter(event => event.botDelivery?.mode !== 'digest');
+      const last = page.items.at(-1);
+      // Cursors refer to raw sequence allocation, including queued facts, so an empty page still advances.
+      return { ...page, items, ...(!page.nextCursor && last?.botDelivery?.mode === 'digest' ? { nextCursor: String(last.sequence) } : {}) };
+    };
     if (request.query.before !== undefined || request.query.latest !== undefined) {
       if (request.query.cursor !== undefined) throw new RangeError('Use either cursor or before, not both');
       const beforeSequence = request.query.before === undefined ? undefined : z.coerce.number().int().positive().parse(request.query.before);
-      return options.sessionEvents.pageBefore(request.params.id, principal.id, principal.tenantId, limit, beforeSequence);
+      return timeline(options.sessionEvents.pageBefore(request.params.id, principal.id, principal.tenantId, limit, beforeSequence));
     }
     const afterSequence = request.query.cursor === undefined ? 0 : z.coerce.number().int().nonnegative().parse(request.query.cursor);
-    return options.sessionEvents.page(request.params.id, principal.id, principal.tenantId, limit, afterSequence);
+    return timeline(options.sessionEvents.page(request.params.id, principal.id, principal.tenantId, limit, afterSequence));
+  });
+  app.get<{ Params: { id: string } }>('/api/rooms/:id/noise-settings', async request => {
+    if (!options.domain || !options.sessionEvents) throw new Conflict('Shared Session service is not configured');
+    const principal = principalOf(request);
+    const room = await options.domain.getRoomForPrincipal(request.params.id, principal.id, principal.tenantId);
+    return { ...await options.sessionEvents.noise.get({ roomId: room.id, owner: room.owner ?? 'owner', tenantId: principal.tenantId }), canEdit: (room.owner ?? 'owner') === principal.id };
+  });
+  app.put<{ Params: { id: string } }>('/api/rooms/:id/noise-settings', async request => {
+    if (!options.domain || !options.sessionEvents) throw new Conflict('Shared Session service is not configured');
+    const principal = principalOf(request);
+    const room = await options.domain.getRoomForPrincipal(request.params.id, principal.id, principal.tenantId);
+    if ((room.owner ?? 'owner') !== principal.id) throw new AeeisConflict('只有群主可以修改频道防噪设置');
+    const settings = channelNoiseSettingsSchema.parse(request.body);
+    return { ...await options.sessionEvents.noise.put({ roomId: room.id, owner: principal.id, tenantId: principal.tenantId }, settings), canEdit: true };
+  });
+  app.get<{ Params: { id: string; eventId: string } }>('/api/rooms/:id/session-events/:eventId', async request => {
+    if (!options.sessionEvents) throw new Conflict('Shared Session service is not configured');
+    const principal = principalOf(request);
+    const event = await options.sessionEvents.get(request.params.eventId, principal.id, principal.tenantId);
+    if (event.roomId !== request.params.id) throw new NotFound('Unknown session event');
+    return event;
   });
   app.get<{ Params: { id: string } }>('/api/rooms/:id/board', async request => {
     const principal = principalOf(request);
@@ -1134,13 +1164,13 @@ export function buildApp(options: Options) {
     const clip = (text: string, length: number) => { const flat = text.replace(/\s+/g, ' ').trim(); return flat.length > length ? `${flat.slice(0, length)}…` : flat; };
     const runs = (await options.repository.list(scope, 200)).filter(run => run.status === 'needs_approval' || run.status === 'needs_input');
     const messages: PushMessage[] = runs.map(run => ({
-      key: `run:${run.id}:${run.status}`, url: `/runs/${run.id}`,
+      kind: run.status === 'needs_approval' ? 'approval' : 'question', key: `run:${run.id}:${run.status}`, url: `/runs/${run.id}`,
       title: `${run.status === 'needs_approval' ? '等你批准' : '等你回答'}：${clip(run.goal, 60)}`,
       body: clip(run.status === 'needs_input' ? run.question?.text ?? 'Bot 需要一条补充信息才能继续。' : run.plans.at(-1)?.summary ?? '计划等你批准后才会执行。', 160),
     }));
     if (channelBoard) for (const hold of await channelBoard.holdings(scope.owner, scope.tenantId)) {
       if (!hold.blocked) continue;
-      messages.push({ key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, url: `/#room=${encodeURIComponent(hold.roomId)}`, title: `阻塞：${clip(hold.title ?? '频道里的事', 60)}`, body: clip(`${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, 160) });
+      messages.push({ kind: 'blocked', roomId: hold.roomId, key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, url: `/#room=${encodeURIComponent(hold.roomId)}`, title: `阻塞：${clip(hold.title ?? '频道里的事', 60)}`, body: clip(`${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, 160) });
     }
     return messages;
   };
@@ -1195,7 +1225,7 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     const event = await options.sessionEvents.create(request.params.id, { ...(body.goalId === undefined ? {} : { goalId: body.goalId }), type: body.type, content: body.content, contextManifestId: body.contextManifestId, ...(body.evidenceRefs === undefined ? {} : { evidenceRefs: body.evidenceRefs }), idempotencyKey: body.idempotencyKey, ...(body.actor === undefined ? {} : { actor: body.actor }) }, principal.id, principal.tenantId);
     // A person's message gets its reply after this request returns.
-    if (botTeam && event.type === 'message' && event.actorType === 'principal') botTeam.enqueue(() => botTeam.respond(event));
+    if (botTeam && event.type === 'message' && (event.actorType === 'principal' || event.actorType === 'agent')) botTeam.enqueue(() => botTeam.respond(event));
     return event;
   });
   app.post<{ Params: { id: string; eventId: string } }>('/api/rooms/:id/session-events/:eventId/revise', async request => {

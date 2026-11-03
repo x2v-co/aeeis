@@ -61,7 +61,7 @@ describe('push routes', () => {
     const run = await f.engine.create({ goal: '整理上线说明' }, 'alice', 'team-a');
     await f.engine.advance(run.id);
     expect((await f.repository.get(run.id)).status).toBe('needs_approval');
-    expect(await f.server.aeeisPushMessages!({ owner: 'alice', tenantId: 'team-a' })).toEqual([{ key: `run:${run.id}:needs_approval`, url: `/runs/${run.id}`, title: '等你批准：整理上线说明', body: '先查数据再写说明' }]);
+    expect(await f.server.aeeisPushMessages!({ owner: 'alice', tenantId: 'team-a' })).toEqual([{ kind: 'approval', key: `run:${run.id}:needs_approval`, url: `/runs/${run.id}`, title: '等你批准：整理上线说明', body: '先查数据再写说明' }]);
     expect(await f.server.aeeisPushMessages!({ owner: 'bob', tenantId: 'team-a' })).toEqual([]);
   });
 });

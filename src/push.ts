@@ -1,3 +1,4 @@
+import { channelAttention, inChannelQuietHours, type ChannelNoiseSettings } from './channel-noise.js';
 import { createCipheriv, createECDH, createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { connect } from 'node:http2';
 import { mkdir, readFile, rename, open, unlink } from 'node:fs/promises';
@@ -163,7 +164,11 @@ export class PostgresPushStore implements PushStore {
 }
 
 /** One S1 item as it is pushed. The url opens it in AEEIS: a Run page, or a group by its hash. */
-export interface PushMessage { key: string; title: string; body: string; url: string }
+export interface PushMessage { key: string; title: string; body: string; url: string; roomId?: string; kind?: string }
+/** Legacy push messages are S1. Ordinary notifications must explicitly declare their kind and channel. */
+export function channelPushAllowed(message: PushMessage, settings: ChannelNoiseSettings, at = Date.now()): boolean {
+  return channelAttention({ kind: message.kind ?? 'approval' }) === 'decision' || !inChannelQuietHours(settings, at);
+}
 export type PushOutcome = { ok: true } | { ok: false; gone: boolean; error: string };
 export interface PushSender { send(subscription: PushSubscription, message: PushMessage): Promise<PushOutcome> }
 
@@ -306,7 +311,7 @@ export class FcmSender implements PushSender {
  */
 export class PushPump {
   private running: Promise<void> | undefined;
-  constructor(private readonly store: PushStore, private readonly senders: Partial<Record<PushChannel, PushSender>>, private readonly collect: (scope: Ownership) => Promise<PushMessage[]>, private readonly log: (message: string) => void = () => {}) {}
+  constructor(private readonly store: PushStore, private readonly senders: Partial<Record<PushChannel, PushSender>>, private readonly collect: (scope: Ownership) => Promise<PushMessage[]>, private readonly log: (message: string) => void = () => {}, private readonly allow: (message: PushMessage, scope: Ownership) => Promise<boolean> = async () => true) {}
   tick(): Promise<void> {
     this.running ??= this.scan().finally(() => { this.running = undefined; });
     return this.running;
@@ -322,7 +327,10 @@ export class PushPump {
     const seen = await this.store.seen(scope);
     await this.store.setSeen(scope, waiting.map(item => item.key));
     if (!seen) return;
-    const fresh = waiting.filter(item => !seen.includes(item.key)).slice(0, 3);
+    const fresh: PushMessage[] = [];
+    for (const message of waiting) if (!seen.includes(message.key) && await this.allow(message, scope)) {
+      fresh.push(message); if (fresh.length === 3) break;
+    }
     if (!fresh.length) return;
     for (const subscription of await this.store.list(scope)) {
       const sender = this.senders[subscription.channel];

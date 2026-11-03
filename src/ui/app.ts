@@ -15,12 +15,15 @@ interface RoomSummary { id: string; title: string; description?: string; status:
 interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string; displayName?: string }
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
-  sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system';
+  sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system' | 'digest';
   actorId: string; actorType: 'principal' | 'agent' | 'system'; recordedBy?: { id: string; type: 'principal' | 'agent' | 'system' }; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
   audienceSnapshot: { digest: string; members: Array<{ principalId: string; role: string; status: string }> };
   content: string; contentHash: string; evidenceRefs: string[]; idempotencyKey: string; createdAt: string;
+  botDelivery?: { mode: 'immediate' | 'digest'; at: string };
+  digest?: { eventIds: string[]; minutes: number };
   taskAction?: { kind: string; conversationId: string; taskId: string; agentId?: string; reason?: string };
 }
+interface ChannelNoiseSettings { mode: 'quiet' | 'lively'; digestMinutes: number; quietHours: { start: string; end: string; timeZone: string } | null; canEdit: boolean }
 interface SessionEventPage { items: SessionEventSummary[]; nextCursor?: string; previousCursor?: string }
 interface GoalSummary { id: string; title: string; status: string; createdAt: string; roomId?: string }
 interface MemoryView { id: string; goalId?: string; kind: string; scope: string; classification?: string; content: string; source: string; confidence: number; version?: number; state?: string; evidenceRefs?: string[]; evidenceRunId?: string; supersedesId?: string; retractionReason?: string; updatedAt: string }
@@ -1145,7 +1148,7 @@ function clearToken(): void {
   try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* storage may be unavailable */ }
 }
 class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
-async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
+async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : getToken();
   const response = await fetch(`/api${path}`, {
@@ -1899,6 +1902,7 @@ function automaticRecord(event: SessionEventSummary): boolean {
   return event.actorType === 'principal' && /^(bot-|handoff-)/.test(event.idempotencyKey ?? '');
 }
 function eventAuthor(event: SessionEventSummary): string {
+  if (event.type === 'digest') return 'AEEIS · 摘要';
   if (automaticRecord(event)) return '自动记录';
   if (event.type === 'system') {
     const writer = eventWriter(event);
@@ -2060,7 +2064,7 @@ function channelLog(): SessionEventSummary[] {
   return [...groupEvents, ...laterChannelEvents, ...liveChannelEvents];
 }
 function channelReadableEvents(): SessionEventSummary[] {
-  return channelLog().filter(event => event.operation !== 'retract');
+  return channelLog().filter(event => event.operation !== 'retract' && event.botDelivery?.mode !== 'digest');
 }
 function earlierChannelCount(): number {
   return Math.max(0, channelReadableEvents().length - channelHistoryPages * CHANNEL_TRANSCRIPT_PAGE);
@@ -3030,6 +3034,7 @@ function commitGroupCap(commitInvalid: boolean): void {
 }
 
 function hideChannelSurfaces(): void {
+  const noise = $('channel-noise'); if (noise) noise.hidden = true;
   hideChannelArtifact();
   hideChannelBoard();
   stopStudioPlay();
@@ -3861,6 +3866,32 @@ function renderGroupTranscript(): void {
     heading.append(element('strong', eventAuthor(event)), element('small', formatTime(event.createdAt)));
     if (event.actorType === 'agent' && event.idempotencyKey?.startsWith('bot-reply:')) { heading.append(element('small', '自动回复', 'bot-auto')); item.dataset.auto = 'true'; }
     item.append(heading, element('p', event.content));
+    if (event.digest) {
+      item.dataset.kind = 'digest';
+      const originals = new Map<string, Promise<SessionEventSummary>>();
+      const readOriginal = (id: string) => {
+        if (!originals.has(id)) originals.set(id, api<SessionEventSummary>(`/rooms/${encodeURIComponent(event.roomId)}/session-events/${encodeURIComponent(id)}`));
+        return originals.get(id)!;
+      };
+      const preview = element('ul');
+      void Promise.all(event.digest.eventIds.slice(0, 3).map(id => readOriginal(id)
+        .then(original => element('li', `${eventAuthor(original)}：${original.content.slice(0, 160)}${original.content.length > 160 ? '…' : ''}`))
+        .catch(() => element('li', '这条记录当前不可读')))).then(rows => preview.replaceChildren(...rows));
+      const details = element('details') as HTMLDetailsElement;
+      const summary = element('summary', `展开完整列表 · ${event.digest.minutes} 分钟摘要`);
+      summary.setAttribute('aria-expanded', 'false'); details.append(summary);
+      const body = element('div'); details.append(body);
+      let loaded = false;
+      details.addEventListener('toggle', () => {
+        summary.setAttribute('aria-expanded', String(details.open));
+        if (!details.open || loaded) return;
+        loaded = true;
+        void Promise.all(event.digest!.eventIds.map(id => readOriginal(id)
+          .then(original => element('p', `${eventAuthor(original)} · ${formatTime(original.createdAt)}：${original.content}`))
+          .catch(() => element('p', '这条记录当前不可读')))).then(rows => body.replaceChildren(...rows));
+      });
+      item.append(preview, details);
+    }
     const cite = handoffCitation(event);
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts }, !cite || latestCite.get(`${cite.conversationId}:${cite.taskId}`) === event.id);
     list.append(item);
@@ -8936,3 +8967,35 @@ function correctionForm(run: RunView, artifact: RunView['artifacts'][number]): H
   };
   details.append(form); return details;
 }
+
+
+$('channel-noise-open')?.addEventListener('click', () => {
+  const roomId = openGroupId;
+  if (!roomId) return;
+  void api<ChannelNoiseSettings>(`/rooms/${encodeURIComponent(roomId)}/noise-settings`).then(settings => {
+    if (openGroupId !== roomId) return;
+    $<HTMLSelectElement>('channel-noise-mode')!.value = settings.mode;
+    $<HTMLInputElement>('channel-noise-minutes')!.value = String(settings.digestMinutes);
+    $<HTMLInputElement>('channel-noise-hours')!.checked = Boolean(settings.quietHours);
+    $<HTMLInputElement>('channel-noise-start')!.value = settings.quietHours?.start ?? '22:00';
+    $<HTMLInputElement>('channel-noise-end')!.value = settings.quietHours?.end ?? '08:00';
+    $<HTMLInputElement>('channel-noise-zone')!.value = settings.quietHours?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('#channel-noise-form input, #channel-noise-form select, #channel-noise-form button').forEach(input => { input.disabled = !settings.canEdit; });
+    $('channel-noise-note')!.textContent = settings.canEdit ? '' : '只有群主可以修改。';
+    $('channel-noise')!.hidden = false;
+  }).catch(error => message(errorMessage(error)));
+});
+$('channel-noise-close')?.addEventListener('click', () => { $('channel-noise')!.hidden = true; });
+$('channel-noise-form')?.addEventListener('submit', event => {
+  event.preventDefault();
+  const roomId = openGroupId;
+  if (!roomId) return;
+  const value = (id: string) => $<HTMLInputElement>(id)!.value;
+  const save = $<HTMLButtonElement>('channel-noise-save')!;
+  save.disabled = true;
+  void api(`/rooms/${encodeURIComponent(roomId)}/noise-settings`, {
+    mode: value('channel-noise-mode'), digestMinutes: Number(value('channel-noise-minutes')),
+    quietHours: $<HTMLInputElement>('channel-noise-hours')!.checked ? { start: value('channel-noise-start'), end: value('channel-noise-end'), timeZone: value('channel-noise-zone') } : null,
+  }, 'PUT').then(() => { if (roomId === openGroupId) $('channel-noise-note')!.textContent = '已保存'; })
+    .catch(error => message(errorMessage(error))).finally(() => { save.disabled = false; });
+});

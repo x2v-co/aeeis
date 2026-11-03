@@ -59,7 +59,7 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
     await app.aeeisBots!.drain();
     return response.json() as { id: string };
   };
-  const events = async () => (await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/session-events?limit=200`, headers })).json().items as Array<{ id: string; type: string; actorId: string; actorType: string; content: string; evidenceRefs: string[]; idempotencyKey: string; taskAction?: { kind: string } }>;
+  const events = async () => (await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/session-events?limit=200&includeQueued=1`, headers })).json().items as Array<{ id: string; type: string; actorId: string; actorType: string; content: string; evidenceRefs: string[]; idempotencyKey: string; botDelivery?: { mode: string }; taskAction?: { kind: string } }>;
   const board = async () => (await app.inject({ method: 'GET', url: `/api/rooms/${roomId}/board`, headers })).json() as { cards: Array<{ conversationId: string; taskId: string; title?: string; status: string; ownerId: string; decision: { assigneeId?: string; proposedBy?: string; offer?: { to: string }; blockedNote?: string } }> };
   const room = () => domain.getRoomForPrincipal(roomId, 'alice', 'team-a');
   return { app, domain, conversations, repository, engine, notify, calls, researcher, writer, roomId, goalId, manifestId, say, events, board, room };
@@ -90,6 +90,24 @@ describe('Bots that act on their own', () => {
     const last = f.calls.filter(call => call.system.includes('回复一条消息')).at(-1)!.input as any;
     expect(last.transcript_untrusted.at(-1)).toEqual({ speaker: '主人', text: '@阿研 风险点有哪些？' });
     expect(last.you).toMatchObject({ name: '阿研', role: '研究', frontDoor: false });
+  });
+
+  it('频道热闹允许 Bot 接话，安静恢复一个声音；热闹也只有六条主动消息', async () => {
+    const f = await team({ reply: input => ({ reply: `${input.you.name}补充意见` }) });
+    const url = `/api/rooms/${f.roomId}/noise-settings`;
+    expect((await f.app.inject({ method: 'GET', url, headers })).json()).toMatchObject({ mode: 'quiet', digestMinutes: 15, canEdit: true });
+    expect((await f.app.inject({ method: 'PUT', url, headers, payload: { mode: 'lively' } })).statusCode).toBe(200);
+    await f.say('请一起看看');
+    const first = (await f.events()).filter(item => item.actorType === 'agent');
+    expect(first.map(item => item.actorId)).toEqual(['aeeis', f.researcher.id]);
+    for (let i = 0; i < 4; i++) await f.say(`接着聊 ${i}`);
+    const messages = (await f.events()).filter(item => item.actorType === 'agent');
+    expect(messages.filter(item => item.botDelivery?.mode === 'immediate')).toHaveLength(6);
+    expect(messages.filter(item => item.botDelivery?.mode === 'digest').length).toBeGreaterThan(0);
+    await f.app.inject({ method: 'PUT', url, headers, payload: { mode: 'quiet' } });
+    const before = (await f.events()).length;
+    await f.say('Bot 的一句话', { type: 'agent', id: f.writer.id });
+    expect((await f.events()).length).toBe(before + 1);
   });
 
   it('keeps a quiet Bot silent and writes a failure note instead of retrying a bad reply', async () => {

@@ -49,6 +49,7 @@ export async function prepareDatabaseSecurity(env: NodeJS.ProcessEnv = process.e
     async finalize() {
       const split = migrationPoolFor(pool) !== pool;
       const appRole = split ? pool.appRole : undefined;
+      // TENANT_POLICIES in postgres-pool.ts includes channel noise settings; queued digest content stays in session events.
       let secured: string[] = [];
       await withPostgresMigrationLock(pool, 'row-level-security', async client => { secured = (await applyRowLevelSecurity(client, appRole)).secured; });
       const problems = appRoleProblems(await inspectAppRole(pool));

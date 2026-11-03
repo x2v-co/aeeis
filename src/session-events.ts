@@ -1,3 +1,5 @@
+import { ChannelDigestDelivery } from './channel-digest.js';
+import { InMemoryChannelNoiseStore, type ChannelNoiseStore, type ChannelScope } from './channel-noise.js';
 import { mkdir, open, readFile, rename, unlink, type FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import pg from 'pg';
@@ -18,7 +20,7 @@ const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const isoDate = z.string().datetime({ offset: true });
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 
-export const sessionEventTypeSchema = z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system']);
+export const sessionEventTypeSchema = z.enum(['message', 'canonical_response', 'decision', 'task_update', 'system', 'digest']);
 export type SessionEventType = z.infer<typeof sessionEventTypeSchema>;
 export const sessionEventActorTypeSchema = z.enum(['principal', 'agent', 'system']);
 export type SessionEventActorType = z.infer<typeof sessionEventActorTypeSchema>;
@@ -53,6 +55,9 @@ export const sessionEventSchema = z.object({
   recordedBy: z.object({ id: z.string().min(1).max(200), type: sessionEventActorTypeSchema }).strict().optional(),
   /** Structured channel task action. The board reads this, never `content`. */
   taskAction: channelTaskActionSchema.optional(),
+  notificationKind: z.enum(['approval', 'question', 'blocked', 'failure', 'escalation', 'channel-upgrade', 'progress', 'message']).optional(),
+  botDelivery: z.object({ mode: z.enum(['immediate', 'digest']), at: isoDate }).strict().optional(),
+  digest: z.object({ eventIds: z.array(id).min(1), minutes: z.number().int().min(15).max(30) }).strict().optional(),
   createdAt: isoDate,
 }).strict().superRefine((event, ctx) => {
   if (event.taskAction && event.operation !== 'publish') ctx.addIssue({ code: 'custom', message: 'A task action cannot be revised or retracted' });
@@ -85,6 +90,9 @@ export interface SessionEventDraft {
   idempotencyKey: string;
   recordedBy?: { id: string; type: SessionEventActorType };
   taskAction?: ChannelTaskAction;
+  notificationKind?: 'approval' | 'question' | 'blocked' | 'failure' | 'escalation' | 'channel-upgrade' | 'progress' | 'message';
+  botDelivery?: { mode: 'immediate' | 'digest'; at: string };
+  digest?: { eventIds: string[]; minutes: number };
   createdAt: string;
 }
 
@@ -95,6 +103,7 @@ export interface SessionEventScope { tenantId: string; owner?: string }
  * allocation, so two writers cannot both pass it. Throw to refuse. */
 export type TaskActionGuard = (events: SessionEvent[]) => void;
 export interface SessionEventRepository {
+  pendingDigestRooms?(): Promise<ChannelScope[]>;
   init?(): Promise<void>;
   append(draft: SessionEventDraft): Promise<SessionEvent>;
   /** Append a task action after `guard` accepts the events that already
@@ -160,6 +169,7 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
     return newestPage(this.events.filter(event => event.roomId === roomId && matchesScope(event, scope)), limit, beforeSequence);
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> { return structuredClone(this.events.filter(event => event.roomId === roomId && event.targetEventId === targetEventId && matchesScope(event, scope))); }
+  async pendingDigestRooms(): Promise<ChannelScope[]> { return pendingRooms(this.events); }
   async close(): Promise<void> {}
 }
 
@@ -243,6 +253,7 @@ export class JsonSessionEventRepository implements SessionEventRepository {
     return { items: structuredClone(visible), ...(items.length > limit && visible.length ? { nextCursor: String(visible.at(-1)!.sequence) } : {}) };
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> { this.assertOpen(); return structuredClone(this.events.filter(event => event.roomId === roomId && event.targetEventId === targetEventId && matchesScope(event, scope))); }
+  async pendingDigestRooms(): Promise<ChannelScope[]> { this.assertOpen(); return pendingRooms(this.events); }
   async close(): Promise<void> { this.loaded = false; await this.lock?.close().catch(() => undefined); this.lock = undefined; try { await unlink(`${this.filePath}.lock`); } catch {} }
 
   private assertOpen(): void { if (!this.loaded || !this.lock) throw new Error('Session event store is not open'); }
@@ -259,7 +270,7 @@ export class JsonSessionEventRepository implements SessionEventRepository {
 /** SQL reads the room, sequence, citations and the cited task; content and reasons are sealed. */
 function eventPlain(event: SessionEvent): Record<string, unknown> {
   return {
-    ...pick(event, ['schemaVersion', 'id', 'roomId', 'goalId', 'owner', 'sequence', 'type', 'operation', 'targetEventId', 'revision', 'evidenceRefs', 'createdAt']),
+    ...pick(event, ['schemaVersion', 'id', 'roomId', 'goalId', 'owner', 'sequence', 'type', 'operation', 'targetEventId', 'revision', 'evidenceRefs', 'createdAt', 'botDelivery', 'digest']),
     ...(event.taskAction ? { taskAction: pick(event.taskAction, ['kind', 'taskId']) } : {}),
   };
 }
@@ -273,6 +284,12 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
   constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'session-events', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_session_events (id text PRIMARY KEY, room_id text NOT NULL, goal_id text, owner text NOT NULL, tenant_id text NOT NULL, sequence integer NOT NULL, idempotency_key text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, UNIQUE(room_id, owner, tenant_id, idempotency_key), UNIQUE(room_id, owner, tenant_id, sequence)); ALTER TABLE aeeis_session_events ALTER COLUMN goal_id DROP NOT NULL; CREATE INDEX IF NOT EXISTS aeeis_session_events_room_idx ON aeeis_session_events(room_id, owner, tenant_id, sequence)`); });
+  }
+  async pendingDigestRooms(): Promise<ChannelScope[]> {
+    const result = await this.pool.query<{ room_id: string; owner: string; tenant_id: string }>(`SELECT DISTINCT p.room_id,p.owner,p.tenant_id FROM aeeis_session_events p
+      WHERE p.state->'botDelivery'->>'mode'='digest' AND NOT EXISTS (
+        SELECT 1 FROM aeeis_session_events d WHERE d.room_id=p.room_id AND d.owner=p.owner AND d.tenant_id=p.tenant_id AND d.state->'digest'->'eventIds' ? p.id)`);
+    return result.rows.map(row => ({ roomId: row.room_id, owner: row.owner, tenantId: row.tenant_id }));
   }
   async append(input: SessionEventDraft): Promise<SessionEvent> {
     const client = await this.pool.connect();
@@ -359,6 +376,8 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
 }
 
 export interface CreateSessionEventInput {
+  /** Server-only notification intent; HTTP clients cannot elevate their message. */
+  notificationKind?: SessionEventDraft['notificationKind'];
   goalId?: Id;
   type: SessionEventType;
   content: string;
@@ -380,10 +399,13 @@ export interface ReviseSessionEventInput {
  * separate append-only fact source so Debate/Projection transports cannot
  * become the canonical response. */
 export class SessionEventService {
-  constructor(private readonly repository: SessionEventRepository, private readonly domain: AeeisService) {}
+  readonly delivery: ChannelDigestDelivery;
+  constructor(private readonly repository: SessionEventRepository, private readonly domain: AeeisService, readonly noise: ChannelNoiseStore = new InMemoryChannelNoiseStore(), now: () => number = Date.now) {
+    this.delivery = new ChannelDigestDelivery(repository, noise, now);
+  }
 
   async create(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
-    return this.repository.append(await this.draft(roomId, input, actorId, tenantId, actorType));
+    return this.delivery.write(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
   }
 
   /** Writes a channel task action. The repository runs `guard` on the events
@@ -392,7 +414,7 @@ export class SessionEventService {
   async createTaskAction(roomId: Id, input: Omit<CreateSessionEventInput, 'type' | 'actor'> & { taskAction: ChannelTaskAction; type?: 'task_update' | 'system' }, actorId: string, tenantId: string, guard: TaskActionGuard): Promise<SessionEvent> {
     const action = channelTaskActionSchema.parse(input.taskAction);
     const draft = await this.draft(roomId, { ...input, type: input.type ?? 'task_update' }, actorId, tenantId, 'principal', action);
-    return this.repository.appendGuarded(draft, action.taskId, guard);
+    return this.delivery.write(draft, item => this.repository.appendGuarded(item, action.taskId, guard));
   }
 
   private async draft(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType, taskAction?: ChannelTaskAction): Promise<SessionEventDraft> {
@@ -428,8 +450,8 @@ export class SessionEventService {
     }
     const evidenceRefs = [...new Set(input.evidenceRefs ?? [])];
     const contextManifestHash = contextManifestBindingHash(manifest);
-    const contentHash = digestProtocol({ type: input.type, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest, ...(taskAction ? { taskAction } : {}) });
-    return { roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, recordedBy: { id: actorId, type: actorType }, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, ...(taskAction ? { taskAction } : {}), createdAt: new Date().toISOString() };
+    const contentHash = digestProtocol({ type: input.type, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest, ...(taskAction ? { taskAction } : {}), ...(input.notificationKind ? { notificationKind: input.notificationKind } : {}) });
+    return { ...(input.notificationKind ? { notificationKind: input.notificationKind } : {}), roomId, ...(input.goalId === undefined ? {} : { goalId: input.goalId }), owner: room.owner ?? 'owner', tenantId, type: input.type, actorId: eventActorId, actorType: eventActorType, recordedBy: { id: actorId, type: actorType }, operation: 'publish', revision: 1, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, ...(taskAction ? { taskAction } : {}), createdAt: new Date().toISOString() };
   }
 
   async revise(roomId: Id, eventId: Id, input: ReviseSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
@@ -450,7 +472,7 @@ export class SessionEventService {
     const revision = target.revision + 1;
     const contentHash = digestProtocol({ type: target.type, operation: 'revise', targetEventId: target.id, revision, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
     const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'revise' as const, targetEventId: target.id, revision, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() };
-    return this.repository.appendLinear ? this.repository.appendLinear(draft, target.id, target.revision) : this.repository.append(draft);
+    return this.delivery.write(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
   }
 
   async retract(roomId: Id, eventId: Id, reason: string, idempotencyKey: string, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
@@ -470,7 +492,7 @@ export class SessionEventService {
     const content = `Retracted: ${reason.trim()}`;
     const contentHash = digestProtocol({ type: target.type, operation: 'retract', targetEventId: target.id, content, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
     const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'retract' as const, targetEventId: target.id, revision: target.revision, retractionReason: reason.trim(), classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs: target.evidenceRefs, idempotencyKey, createdAt: new Date().toISOString() };
-    return this.repository.appendLinear ? this.repository.appendLinear(draft, target.id, target.revision) : this.repository.append(draft);
+    return this.delivery.write(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
   }
 
   async page(roomId: Id, actorId: string, tenantId: string, limit = 50, afterSequence = 0): Promise<SessionEventPage> {
@@ -568,3 +590,13 @@ function manifestClassification(manifest: ContextManifest): SessionEventClassifi
   return 'public';
 }
 function cryptoRandomId(): string { return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`; }
+
+function pendingRooms(events: SessionEvent[]): ChannelScope[] {
+  const done = new Set(events.flatMap(event => event.digest?.eventIds ?? []));
+  const rooms = new Map<string, ChannelScope>();
+  for (const event of events) if (event.botDelivery?.mode === 'digest' && !done.has(event.id)) {
+    const scope = { roomId: event.roomId, owner: event.owner, tenantId: event.tenantId };
+    rooms.set(JSON.stringify(scope), scope);
+  }
+  return [...rooms.values()];
+}

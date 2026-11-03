@@ -434,11 +434,26 @@
 <button id="channel-digest-open" type="button" class="quiet-button">复盘</button>
 <button id="channel-teach-open" type="button" class="quiet-button">带教</button>
 <button id="channel-inbox" type="button" class="quiet-button">收件箱</button>
+<button id="channel-noise-open" type="button" class="quiet-button">频道设置</button>
 <button id="group-rename" type="button" class="quiet-button">改名</button>
 <button id="chat-archive" type="button" class="quiet-button">归档</button>
 </span>
 </div>
 <p id="chat-note" class="muted"></p>
+<section id="channel-noise" hidden>
+<div class="group-head"><h3>频道设置</h3><button id="channel-noise-close" type="button" class="quiet-button">收起</button></div>
+<p class="muted">安静时由一位 Bot 接话；热闹允许其他 Bot 接话。普通进展合并为摘要，每 10 分钟最多 6 条主动消息。审批、提问、升级和阻塞照常提醒。</p>
+<form id="channel-noise-form">
+<label>发言方式<select id="channel-noise-mode"><option value="quiet">安静 · 一个声音</option><option value="lively">热闹 · 允许 Bot 接话</option></select></label>
+<label>摘要间隔（分钟）<input id="channel-noise-minutes" type="number" min="15" max="30" step="1" value="15" required></label>
+<label><input id="channel-noise-hours" type="checkbox">开启安静时段</label>
+<label>开始<input id="channel-noise-start" type="time" value="22:00" required></label>
+<label>结束<input id="channel-noise-end" type="time" value="08:00" required></label>
+<label>时区<input id="channel-noise-zone" type="text" value="Asia/Shanghai" maxlength="100" required></label>
+<p class="muted">安静时段可跨午夜。普通消息只在频道和收件箱累积；需要你决定的事仍会推送。全频道共用，仅群主可修改。</p>
+<button id="channel-noise-save" type="submit">保存设置</button><p id="channel-noise-note" role="status" class="muted"></p>
+</form>
+</section>
 <section id="channel-artifact" hidden>
 <div class="group-head">
 <h3>产物</h3>

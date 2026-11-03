@@ -112,12 +112,14 @@ export class BotTeam {
 
   // ---------------------------------------------------------------- replies
 
-  /** Who answers a person's message: the named members, or the front door. Bots never trigger replies. */
+  /** Named members or the front door answer a person. In lively rooms, another Bot may answer a Bot. */
   async responders(event: SessionEvent, room: Room, roster: Speaker[]): Promise<Speaker[]> {
-    if (event.type !== 'message' || event.operation !== 'publish' || event.actorType !== 'principal') return [];
+    if (event.type !== 'message' || event.operation !== 'publish' || event.botDelivery?.mode === 'digest') return [];
+    if (event.actorType !== 'principal' && (event.actorType !== 'agent' || (await this.options.events.noise.get({ roomId: room.id, owner: event.owner, tenantId: event.tenantId })).mode !== 'lively')) return [];
     if (room.status !== 'active' || room.description === SIDE_THREAD) return [];
     const speaking = roster.filter(item => item.autonomy !== 'quiet');
     if (room.chat === 'direct') return speaking.filter(item => item.id !== FRONT_DOOR || roster.length === 1).slice(0, 1);
+    if (event.actorType === 'agent') return speaking.filter(item => item.id !== event.actorId).slice(0, 1);
     const front = roster.find(item => item.id === FRONT_DOOR)!;
     const named = speaking.filter(item => item.id !== FRONT_DOOR && mentions(event.content, item.name)).slice(0, MAX_NAMED);
     const askedFront = mentions(event.content, 'AEEIS');
@@ -167,7 +169,11 @@ export class BotTeam {
     const parsed = replySchema.safeParse(raw);
     if (!parsed.success) throw new Error('回复格式不对');
     const out = parsed.data;
-    await this.say(room, event.goalId, scope, speaker, out.reply, `bot-reply:${event.id}:${speaker.id}`, [event.id]);
+    const reply = await this.say(room, event.goalId, scope, speaker, out.reply, `bot-reply:${event.id}:${speaker.id}`, [event.id]);
+    // A lively room permits one response to a Bot's line. Replays use the same keys; replies to that
+    // response do not start another chain, and deferred messages never trigger hidden model chatter.
+    if (event.actorType === 'principal' && reply.botDelivery?.mode !== 'digest' && room.chat === 'group'
+      && (await this.options.events.noise.get({ roomId: room.id, ...scope })).mode === 'lively') this.enqueue(() => this.respond(reply));
     const tasks = out.tasks ?? (out.proposeTask ? [out.proposeTask] : []);
     const asked = `${this.nameIn(roster, event.actorId, event.actorType)}在群里说：「${event.content}」`;
     const front = speaker.id === FRONT_DOOR;
@@ -302,7 +308,7 @@ export class BotTeam {
   private async escalate(room: Room, scope: Ownership, goalId: string | undefined, card: BoardCard, from: Speaker, to: Speaker, reason: string, offerId: string): Promise<void> {
     await this.record(room, scope, { kind: 'decline', conversationId: card.conversationId, taskId: card.taskId, agentId: to.id, reason }, `handoff-end:${offerId}`, goalId).catch(() => undefined);
     await this.record(room, scope, { kind: 'block', conversationId: card.conversationId, taskId: card.taskId, reason: `${reason}。${from.name}想交给${to.name}，需要你决定。` }, `handoff-block:${offerId}`, goalId).catch(() => undefined);
-    await this.say(room, goalId, scope, undefined, `「${card.title ?? '这件事'}」${from.name}和${to.name}没谈定，需要你决定。`, `handoff-line:${offerId}`);
+    await this.say(room, goalId, scope, undefined, `「${card.title ?? '这件事'}」${from.name}和${to.name}没谈定，需要你决定。`, `handoff-line:${offerId}`, [], undefined, 'escalation');
   }
 
   // ---------------------------------------------------------------- failures
@@ -409,11 +415,11 @@ export class BotTeam {
   }
 
   /** The room owner writes for a Bot (or as the system when `speaker` is undefined). */
-  private async say(room: Room, goalId: string | undefined, scope: Ownership, speaker: Speaker | undefined, text: string, key: string, refs: string[] = [], manifestId?: string): Promise<SessionEvent> {
+  private async say(room: Room, goalId: string | undefined, scope: Ownership, speaker: Speaker | undefined, text: string, key: string, refs: string[] = [], manifestId?: string, notificationKind?: 'escalation'): Promise<SessionEvent> {
     if (speaker) await this.ensureMember(room, speaker.id, scope);
     const manifest = manifestId ?? await this.manifest(room, goalId, scope);
     return this.options.events.create(room.id, {
-      ...(goalId ? { goalId } : {}), type: speaker ? 'message' : 'system', content: text, contextManifestId: manifest,
+      ...(goalId ? { goalId } : {}), ...(notificationKind ? { notificationKind } : {}), type: speaker ? 'message' : 'system', content: text, contextManifestId: manifest,
       ...(refs.length ? { evidenceRefs: refs } : {}), idempotencyKey: key, ...(speaker ? { actor: { type: 'agent' as const, id: speaker.id } } : {}),
     }, scope.owner, scope.tenantId);
   }

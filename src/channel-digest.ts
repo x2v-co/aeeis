@@ -1,3 +1,6 @@
+import type { SessionEvent, SessionEventDraft, SessionEventRepository } from './session-events.js';
+import { channelAttention, type ChannelNoiseStore, type ChannelScope } from './channel-noise.js';
+import { digestProtocol } from './protocol.js';
 import type { AgentRun } from './runtime/contracts.js';
 import { taskActionLine, type ChannelBoard } from './channel-task-action.js';
 import { quantile, runExecutionSpan } from './channel-metrics.js';
@@ -124,4 +127,78 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
     }
   }
   return entries.sort((left, right) => left.at.localeCompare(right.at) || left.order - right.order).map(({ order: _order, ...entry }) => entry);
+}
+
+/** §5.4: queued originals remain append-only session facts. A digest acknowledges their IDs, so a crash
+ * between publishing and the next pump cannot duplicate or lose a batch. The room lock also covers the rate gate. */
+export class ChannelDigestDelivery {
+  constructor(private readonly repository: SessionEventRepository, readonly settings: ChannelNoiseStore, private readonly now: () => number = Date.now) {}
+  private async history(scope: ChannelScope): Promise<SessionEvent[]> {
+    const events: SessionEvent[] = [];
+    let cursor = 0;
+    for (;;) {
+      const page = await this.repository.page(scope.roomId, scope, 200, cursor);
+      events.push(...page.items);
+      if (!page.nextCursor) return events;
+      cursor = Number(page.nextCursor);
+    }
+  }
+  async write(input: SessionEventDraft, append: (draft: SessionEventDraft) => Promise<SessionEvent>): Promise<SessionEvent> {
+    const attention = channelAttention({ ...input, kind: input.notificationKind });
+    if (attention === 'human' || attention === 'decision' || input.operation === 'retract') return append(input);
+    return this.settings.withRoom(input, async () => {
+      const events = await this.history(input);
+      const now = this.now();
+      const mode = attention === 'progress' || !channelRateAvailable(events, now) ? 'digest' : 'immediate';
+      return append({ ...input, botDelivery: { mode, at: new Date(now).toISOString() } });
+    });
+  }
+  private running: Promise<number> | undefined;
+  pump(): Promise<number> {
+    this.running ??= this.flush().finally(() => { this.running = undefined; });
+    return this.running;
+  }
+  private async flush(): Promise<number> {
+    let sent = 0;
+    for (const scope of await this.repository.pendingDigestRooms?.() ?? []) {
+      sent += await this.settings.withRoom(scope, async settings => {
+        const events = await this.history(scope);
+        const now = this.now();
+        if (!channelRateAvailable(events, now)) return 0;
+        const done = new Set(events.flatMap(event => event.digest?.eventIds ?? []));
+        const pending = events.filter(event => event.botDelivery?.mode === 'digest' && !done.has(event.id));
+        const first = pending[0];
+        if (!first) return 0;
+        const lastDigest = events.filter(event => event.digest).at(-1);
+        const since = Math.max(Date.parse(first.botDelivery!.at), lastDigest ? Date.parse(lastDigest.createdAt) : 0);
+        if (now - since < settings.digestMinutes * 60_000) return 0;
+        // Never merge private and room-wide audiences. Each original keeps its own context binding.
+        const batch = pending.filter(event => event.classification === first.classification && event.audienceSnapshot.digest === first.audienceSnapshot.digest);
+        const content = `已合并 ${batch.length} 条`;
+        const eventIds = batch.map(event => event.id);
+        const digest = { eventIds, minutes: settings.digestMinutes };
+        const draft: SessionEventDraft = {
+          roomId: first.roomId, ...(first.goalId ? { goalId: first.goalId } : {}), owner: first.owner, tenantId: first.tenantId,
+          type: 'digest', actorId: 'aeeis', actorType: 'system', operation: 'publish', revision: 1,
+          classification: first.classification, contextManifestId: first.contextManifestId, contextManifestHash: first.contextManifestHash,
+          audienceSnapshot: first.audienceSnapshot, content, contentHash: digestProtocol({ content, digest, contextManifestHash: first.contextManifestHash }),
+          evidenceRefs: [], idempotencyKey: `channel-digest:${first.id}`, createdAt: new Date(now).toISOString(),
+          botDelivery: { mode: 'immediate', at: new Date(now).toISOString() }, digest,
+        };
+        await this.repository.append(draft);
+        return 1;
+      });
+    }
+    return sent;
+  }
+}
+
+export function channelRateAvailable(events: readonly SessionEvent[], now: number): boolean {
+  return events.filter(event => {
+    // Messages published before this rule was installed still occupy their part of the current window.
+    const legacy = !event.botDelivery && event.operation !== 'retract' && ['message', 'progress'].includes(channelAttention({ ...event, kind: event.notificationKind }));
+    if (event.botDelivery?.mode !== 'immediate' && !legacy) return false;
+    const at = Date.parse(event.botDelivery?.at ?? event.createdAt);
+    return at > now - 10 * 60_000 && at <= now;
+  }).length < 6;
 }
