@@ -152,6 +152,10 @@ const shareToken = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{43})
 const linkedRunId = window.location.pathname.match(/^\/runs\/(run_[a-f0-9-]{36})\/?$/)?.[1];
 const linkedThreadId = window.location.pathname.match(/^\/threads\/(thread_[a-f0-9-]{36})\/?$/)?.[1];
 const readOnlyShare = Boolean(shareToken);
+// Declared before anything at load can call api() or message(), which read them.
+const TOKEN_KEY = 'aeeis.token';
+/** Set while the saved token was dropped as unusable: the 401 that follows must not replace that explanation. */
+let badTokenNotice = false;
 document.body.classList.toggle('shared-run', readOnlyShare);
 let currentId = linkedRunId ?? (readOnlyShare || linkedThreadId ? '' : localStorage.getItem('aeeis.run') ?? '');
 let entryEpoch = 0;
@@ -1125,17 +1129,32 @@ function cleanToken(raw: string): string | undefined {
   return /^[\x21-\x7E]*$/.test(token) ? token : undefined;
 }
 const BAD_TOKEN = '令牌里有不能放进请求头的字符（比如中文、全角符号或空格）。请重新复制令牌，只保留令牌本身。';
+/** The access token lives under one key. It is remembered in localStorage so a new tab or the installed
+ * home-screen app connects without re-entering it; sessionStorage is still read once so a token saved by an
+ * older build carries over. "忘记令牌" (and connecting with an empty field) clears both. */
+function getToken(): string | null {
+  try { return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+function setToken(token: string): void {
+  if (!token) { clearToken(); return; }
+  try { localStorage.setItem(TOKEN_KEY, token); sessionStorage.removeItem(TOKEN_KEY); }
+  catch { try { sessionStorage.setItem(TOKEN_KEY, token); } catch { /* storage may be unavailable */ } }
+}
+function clearToken(): void {
+  try { localStorage.removeItem(TOKEN_KEY); } catch { /* storage may be unavailable */ }
+  try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* storage may be unavailable */ }
+}
 class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
-  const token = readOnlyShare ? null : sessionStorage.getItem('aeeis.token');
+  const token = readOnlyShare ? null : getToken();
   const response = await fetch(`/api${path}`, {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
     headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const raw = await response.text();
-  if (!readOnlyShare && token !== sessionStorage.getItem('aeeis.token')) throw new Error('身份已更改，请重新连接');
+  if (!readOnlyShare && token !== getToken()) throw new Error('身份已更改，请重新连接');
   let value: (T & { error?: string; retrySameRequest?: unknown }) | undefined;
   if (raw.trim()) {
     try { value = JSON.parse(raw) as T & { error?: string; retrySameRequest?: unknown }; }
@@ -1169,6 +1188,7 @@ const REVIEW_VERDICT_LABELS: Record<string, string> = { accepted: '通过', revi
 function reviewVerdictLabel(verdict: string): string { const label = REVIEW_VERDICT_LABELS[verdict]; return !label ? verdict : verdict === 'accepted' ? label : `${label}（${verdict}）`; }
 let errorToastTimer: number | undefined;
 function message(text: string): void {
+  if (badTokenNotice && text === SERVER_ERROR_LABELS['Local access token required']) text = BAD_TOKEN;
   $('error').textContent = text;
   const toast = $('error-toast');
   const toastMessage = $('error-toast-message');
@@ -6760,7 +6780,7 @@ async function consumeRunEventStream(runId: string, generation: number): Promise
     const params = new URLSearchParams({ limit: '100', waitMs: '25000', heartbeatMs: '10000' });
     if (eventStreamCursor) params.set('cursor', eventStreamCursor);
     try {
-      const token = sessionStorage.getItem('aeeis.token');
+      const token = getToken();
       const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/events/stream?${params}`, { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       if (!response.body) throw new Error('Run event stream has no response body');
@@ -7976,7 +7996,7 @@ function renderWorkingMemory(run: RunView): void {
   if (revealMemory) delete content.dataset.signature;
   if (!revealMemory && content.dataset.signature === signature) return;
   content.dataset.signature = signature; content.replaceChildren();
-  const epoch = conversationEpoch, token = sessionStorage.getItem('aeeis.token');
+  const epoch = conversationEpoch, token = getToken();
   let sequence = 0;
   const task = element('select'); task.id = 'working-memory-task';
   const label = element('label', 'Run 计划节点'); label.htmlFor = task.id;
@@ -7984,7 +8004,7 @@ function renderWorkingMemory(run: RunView): void {
   const query = element('input'); query.id = 'working-memory-query'; query.maxLength = 200; query.placeholder = '搜索原文，输入 * 列出全部';
   const queryLabel = element('label', '搜索工作记忆'); queryLabel.htmlFor = query.id;
   const output = element('div'), original = element('div'), status = element('p'); status.setAttribute('role', 'status');
-  const valid = (request: number) => request === sequence && currentId === run.id && content.dataset.signature === signature && epoch === conversationEpoch && token === sessionStorage.getItem('aeeis.token');
+  const valid = (request: number) => request === sequence && currentId === run.id && content.dataset.signature === signature && epoch === conversationEpoch && token === getToken();
   const path = (suffix: string, params: Record<string, string>) => `/runs/${encodeURIComponent(run.id)}/working-memory${suffix}?${new URLSearchParams({ taskId: task.value, ...params })}`;
   const showOriginal = async (entryId: string, offset = 0) => {
     const request = ++sequence; status.textContent = '正在读取原文…'; original.replaceChildren();
@@ -8217,7 +8237,7 @@ function render(run: RunView): void {
   for (const artifact of run.artifacts) {
     const box = element('details'); box.open = true;
     const actions = element('div', '', 'artifact-actions');
-    if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
+    if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken, onError: message }));
     box.append(element('summary', `${artifact.title}${artifact.artifactType ? ` · ${artifact.artifactType}` : ''}`), actions, renderArtifactMarkdown(artifact.content));
     if (isProjectPulseArtifact(artifact.structured)) appendProjectPulse(box, artifact.structured, run);
     else if (isFillablePdfArtifact(artifact.structured)) box.append(renderFillablePdf(artifact.structured, ref => evidenceDetail(run, ref)));
@@ -8460,7 +8480,7 @@ function renderDeliveryArtifact(run: RunView): void {
   });
   open.className = 'quiet-button delivery-artifact-open';
   const actions = element('div', '', 'artifact-actions');
-  if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken: () => sessionStorage.getItem('aeeis.token'), onError: message }));
+  if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken, onError: message }));
   actions.append(open);
   box.insertBefore(actions, content);
 }
@@ -8661,20 +8681,26 @@ $('answer-form').onsubmit = event => {
 };
 $('connect').onclick = () => {
   const token = cleanToken($<HTMLInputElement>('token').value);
-  if (token === undefined) { message(BAD_TOKEN); $<HTMLInputElement>('token').focus(); return; }
+  if (token === undefined) { badTokenNotice = false; message(BAD_TOKEN); $<HTMLInputElement>('token').focus(); return; }
+  badTokenNotice = false;
   $<HTMLInputElement>('token').value = token;
-  if (token !== (sessionStorage.getItem('aeeis.token') ?? '')) {
+  if (token !== (getToken() ?? '')) {
     resetConversation(); conversationScope = '';
     stopRunEventStream(); current = undefined; currentId = ''; pendingFollowup = undefined;
     localStorage.removeItem('aeeis.run'); $('detail').hidden = true; $('thread-panel').hidden = true;
     $('run-share-result').replaceChildren(); $('thread-share-result').replaceChildren();
   }
-  if (token) sessionStorage.setItem('aeeis.token', token); else sessionStorage.removeItem('aeeis.token');
+  setToken(token);
   const connect = $('connect') as HTMLButtonElement;
   connect.disabled = true;
   connect.classList.add('is-busy');
   setSystemSignal('loading');
   void initialize().finally(() => { connect.disabled = false; connect.classList.remove('is-busy'); });
+};
+$('forget-token').onclick = () => {
+  clearToken();
+  $<HTMLInputElement>('token').value = '';
+  $('connect').click();
 };
 async function initialize(): Promise<void> {
   if (linkedThreadId) { await refresh().catch(error => message(errorMessage(error))); return; }
@@ -8837,10 +8863,11 @@ async function copyRunLink(url: string): Promise<void> { await navigator.clipboa
 });
 if (!readOnlyShare) {
   // A token saved before cleanToken existed may still carry characters fetch refuses; clean it or drop it.
-  const saved = sessionStorage.getItem('aeeis.token');
+  // A token only an older build kept in sessionStorage moves to localStorage here.
+  const saved = getToken();
   const token = saved === null ? '' : cleanToken(saved);
-  if (token) sessionStorage.setItem('aeeis.token', token); else sessionStorage.removeItem('aeeis.token');
-  if (saved && token === undefined) message(BAD_TOKEN);
+  setToken(token ?? '');
+  if (saved && token === undefined) { badTokenNotice = true; message(BAD_TOKEN); }
   $<HTMLInputElement>('token').value = token ?? '';
 }
 void initialize();
