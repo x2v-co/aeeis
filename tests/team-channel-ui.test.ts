@@ -75,4 +75,41 @@ describe('multi-bot channel sample', () => {
 
     dom.window.close();
   });
+
+  it('opens a Bot direct message from its profile and from the sidebar', async () => {
+    const [html, source] = await Promise.all([
+      readFile('public/team/index.html', 'utf8'),
+      readFile('public/team/app.js', 'utf8'),
+    ]);
+    const dom = new JSDOM(html, { url: 'http://localhost/team/', runScripts: 'outside-only', pretendToBeVisual: true });
+    dom.window.innerWidth = 1280;
+    dom.window.eval(source);
+    const doc = dom.window.document;
+    const text = () => doc.body.textContent ?? '';
+    const title = () => doc.querySelector('#channelHead h1')?.textContent;
+
+    doc.querySelector<HTMLButtonElement>('[data-action="open-bot"][data-bot="yan"]')!.click();
+    const direct = doc.querySelector<HTMLButtonElement>('#drawer [data-action="open-direct"]');
+    expect(direct?.textContent).toBe('私聊');
+    direct!.click();
+    expect(title()).toBe('阿研');
+    expect(text()).toContain('只有你和 阿研');
+    expect(doc.querySelector<HTMLTextAreaElement>('#composerInput')!.placeholder).toBe('给阿研发私信…');
+    expect(doc.querySelector('#composerRoute')?.textContent).toBe('只发给阿研');
+    expect(doc.querySelector('[data-action="open-direct"][data-bot="yan"][aria-current="page"]')).not.toBeNull();
+
+    doc.querySelector<HTMLTextAreaElement>('#composerInput')!.value = '帮我查一下供应商的发布窗口';
+    doc.querySelector<HTMLFormElement>('#composerForm')!.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(text()).toContain('我自己来做');
+    expect(doc.querySelectorAll('#stream .handoff')).toHaveLength(0);
+
+    doc.querySelector<HTMLButtonElement>('[data-action="switch-channel"][data-channel="launch"]')!.click();
+    expect(title()).toBe('发布协作');
+    expect(text()).not.toContain('帮我查一下供应商的发布窗口');
+    doc.querySelector<HTMLButtonElement>('[data-action="open-direct"][data-bot="an"]')!.click();
+    expect(title()).toBe('小安');
+
+    dom.window.close();
+  });
 });

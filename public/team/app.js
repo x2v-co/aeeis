@@ -397,6 +397,22 @@ const nowTime = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', 
 const channelById = id => CHANNELS.find(c => c.id === id);
 const currentChannel = () => channelById(state.channel) || CHANNELS[0];
 
+// A direct message is a channel with only you and one Bot (interaction design §4): same messages, tasks and rail.
+function directChannel(botId) {
+  const id = `dm-${botId}`;
+  let ch = channelById(id);
+  if (!ch) {
+    const bot = BOTS[botId];
+    ch = {
+      id, direct: botId, name: bot.name, goal: `只有你和 ${bot.name}`, status: '私聊', unread: false,
+      members: [botId], botStates: {}, tasks: [], files: [],
+      messages: [{ type: 'system', text: `这是你和 ${bot.name} 的私聊，频道里的其他人看不到`, time: nowTime() }]
+    };
+    CHANNELS.push(ch);
+  }
+  return ch;
+}
+
 function botState(id, ch = currentChannel()) {
   const override = ch.botStates && ch.botStates[id];
   const base = BOTS[id];
@@ -478,6 +494,11 @@ function needsFor(ch) {
 
 /* ── Sidebar ───────────────────────────────────────────────── */
 
+// 小安 is the front door, so its direct message is always listed; others appear once opened.
+function directBots() {
+  return ['an', ...CHANNELS.filter(ch => ch.direct && ch.direct !== 'an').map(ch => ch.direct)];
+}
+
 function renderSidebar() {
   const inboxCount = activeInbox().length;
   const nav = `
@@ -489,7 +510,7 @@ function renderSidebar() {
     </div>
     <div class="sidebar-section">
       <div class="section-head"><span>频道</span></div>
-      ${CHANNELS.map(ch => {
+      ${CHANNELS.filter(ch => !ch.direct).map(ch => {
         const needs = needsFor(ch);
         const active = ch.id === state.channel;
         const meta = needs
@@ -504,11 +525,14 @@ function renderSidebar() {
     </div>
     <div class="sidebar-section">
       <div class="section-head"><span>直接消息</span></div>
-      <button class="channel-item" type="button" data-action="direct-an">
-        ${avatar('an', 'avatar-xs')}
-        <span class="channel-name">小安</span>
-        <span class="channel-meta"><span class="roster-role">PM</span></span>
-      </button>
+      ${directBots().map(id => {
+        const active = state.channel === `dm-${id}`;
+        return `<button class="channel-item ${active ? 'active' : ''}" type="button" data-action="open-direct" data-bot="${id}" ${active ? 'aria-current="page"' : ''}>
+          ${avatar(id, 'avatar-xs')}
+          <span class="channel-name">${esc(BOTS[id].name)}</span>
+          <span class="channel-meta"><span class="roster-role">${esc(BOTS[id].role)}</span></span>
+        </button>`;
+      }).join('')}
     </div>
   `;
   $('#sidebarNav').innerHTML = nav;
@@ -533,13 +557,13 @@ function renderHeader() {
   $('#channelHead').innerHTML = `
     <div class="head-left">
       <button class="icon-btn mobile-only" type="button" data-action="toggle-sidebar" aria-label="打开频道列表">${icon('menu')}</button>
-      <span class="channel-box" aria-hidden="true">#</span>
+      ${ch.direct ? avatar(ch.direct) : '<span class="channel-box" aria-hidden="true">#</span>'}
       <div class="channel-title">
         <div class="channel-name-row">
           <h1>${esc(ch.name)}</h1>
           <span class="head-status"><i></i>${esc(ch.status)}</span>
         </div>
-        <p class="channel-goal">目标：${esc(ch.goal)}</p>
+        <p class="channel-goal">${ch.direct ? esc(ch.goal) : `目标：${esc(ch.goal)}`}</p>
       </div>
     </div>
     <div class="head-right">
@@ -561,8 +585,9 @@ function renderHeader() {
 
 function renderStream() {
   const ch = currentChannel();
-  const thinking = state.thinking && state.thinking.channel === ch.id
-    ? `<article class="msg bot">${avatar('an', 'msg-avatar')}<div class="msg-content"><div class="msg-head"><span class="msg-who">小安</span><span class="msg-role">PM</span><span class="bot-tag">Bot</span><span class="msg-time">正在处理</span></div><div class="thinking-dots" aria-label="小安正在处理"><i></i><i></i><i></i></div></div></article>`
+  const thinker = state.thinking && state.thinking.channel === ch.id ? state.thinking.bot : null;
+  const thinking = thinker
+    ? `<article class="msg bot">${avatar(thinker, 'msg-avatar')}<div class="msg-content"><div class="msg-head"><span class="msg-who">${esc(BOTS[thinker].name)}</span><span class="msg-role">${esc(BOTS[thinker].role)}</span><span class="bot-tag">Bot</span><span class="msg-time">正在处理</span></div><div class="thinking-dots" aria-label="${esc(BOTS[thinker].name)}正在处理"><i></i><i></i><i></i></div></div></article>`
     : '';
   $('#stream').innerHTML = `<div class="stream-inner">${ch.messages.map(renderMessage).join('')}${thinking}</div>`;
   if (!state.pendingFocus) {
@@ -1158,7 +1183,8 @@ function renderBotDrawer(id) {
     </div>
     <div class="drawer-foot">
       <button class="btn" type="button" data-action="close-drawer">关闭</button>
-      <button class="btn btn-primary" type="button" data-action="mention-bot" data-bot="${id}">在频道中提及</button>
+      <button class="btn" type="button" data-action="mention-bot" data-bot="${id}">在频道中提及</button>
+      <button class="btn btn-primary" type="button" data-action="open-direct" data-bot="${id}">私聊</button>
     </div>`;
 }
 
@@ -1322,6 +1348,7 @@ function commands() {
     { id: 'c-studio', group: '动作', label: '切换工作室', hint: '只读视图', run: () => toggleStudio() },
     { id: 'c-bot-yan', group: 'Bot', label: '查看 阿研 的档案', hint: '研究', run: () => openDrawer('bot', 'yan') },
     { id: 'c-bot-an', group: 'Bot', label: '查看 小安 的档案', hint: 'PM', run: () => openDrawer('bot', 'an') },
+    { id: 'c-direct-an', group: 'Bot', label: '和 小安 私聊', hint: '直接消息', run: () => openDirect('an') },
     { id: 'c-task-risk', group: '任务', label: '打开「评估发布风险」', hint: '进行中', run: () => openDrawer('task', 'risk') }
   ];
 }
@@ -1389,6 +1416,13 @@ function switchChannel(id) {
   closeSidebar();
   renderAll();
   announce(`已进入 ${channelById(id).name}`);
+}
+
+function openDirect(botId) {
+  if (!BOTS[botId]) return;
+  closeDrawer();
+  switchChannel(directChannel(botId).id);
+  $('#composerInput')?.focus();
 }
 
 function toggleStudio() {
@@ -1579,7 +1613,8 @@ function sendMessage() {
   ch.messages.push({ type: 'human', text, time: nowTime() });
   input.value = '';
   input.style.height = 'auto';
-  state.thinking = { channel: ch.id, bot: 'an' };
+  const replier = ch.direct || 'an';
+  state.thinking = { channel: ch.id, bot: replier };
   renderStream();
   scrollToBottom();
   announce('消息已发送');
@@ -1589,8 +1624,10 @@ function sendMessage() {
     state.thinking = null;
     const risk = /风险|发布|回滚/.test(text);
     ch.messages.push({
-      type: 'bot', bot: 'an',
-      text: risk
+      type: 'bot', bot: replier,
+      text: ch.direct && ch.direct !== 'an'
+        ? '收到。我自己来做，进度会回到这里。预计 10 分钟。'
+        : risk
         ? '收到。我让阿研核对变更记录，阿写同步整理发布说明。两件事，预计 15 分钟。'
         : '收到。我先确认目标和资料，再分给对应的 Bot。预计 10 分钟。',
       time: nowTime()
@@ -1599,13 +1636,13 @@ function sendMessage() {
       id: `t${Date.now()}`,
       title: text.length > 16 ? `${text.slice(0, 16)}…` : text,
       status: 'working',
-      owner: risk ? 'yan' : 'an',
+      owner: ch.direct || (risk ? 'yan' : 'an'),
       progress: 8,
       budget: '6k',
       used: '0',
       evidence: 0,
       deps: '—',
-      note: '从频道消息创建；front-door 已确认范围，等待第一个 Bot 接手。',
+      note: ch.direct ? `从私聊创建；${BOTS[ch.direct].name}直接负责。` : '从频道消息创建；front-door 已确认范围，等待第一个 Bot 接手。',
       steps: [
         { label: '确认目标与范围', done: false, current: true },
         { label: '分派给合适的 Bot', done: false },
@@ -1613,14 +1650,14 @@ function sendMessage() {
       ]
     };
     ch.tasks.push(task);
-    if (task.owner !== 'an') {
+    if (!ch.direct && task.owner !== 'an') {
       ch.messages.push({ type: 'handoff', id: `ho-${task.id}`, from: 'an', to: task.owner, task: task.id, time: nowTime() });
     }
     ch.messages.push({ type: 'task', task: task.id, time: nowTime() });
     if (state.channel === ch.id) {
       renderAll();
       scrollToBottom();
-      announce('小安已拆解并创建任务');
+      announce(ch.direct ? `${BOTS[replier].name}已创建任务` : '小安已拆解并创建任务');
     }
   }, 950);
 }
@@ -1628,6 +1665,9 @@ function sendMessage() {
 /* ── Render all ────────────────────────────────────────────── */
 
 function renderAll() {
+  const ch = currentChannel();
+  $('#composerInput').placeholder = ch.direct ? `给${BOTS[ch.direct].name}发私信…` : '给小安或团队发消息…';
+  $('#composerRoute').textContent = ch.direct ? `只发给${BOTS[ch.direct].name}` : '直接发送由小安拆解';
   renderSidebar();
   renderHeader();
   renderStream();
@@ -1664,9 +1704,8 @@ document.addEventListener('click', event => {
     case 'switch-channel':
       switchChannel(target.dataset.channel);
       break;
-    case 'direct-an':
-      switchChannel('launch');
-      openDrawer('bot', 'an');
+    case 'open-direct':
+      openDirect(target.dataset.bot);
       break;
     case 'open-inbox':
       openDrawer('inbox');
