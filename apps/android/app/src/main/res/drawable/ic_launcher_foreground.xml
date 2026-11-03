@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The "A" of the web favicon, inside the adaptive icon's 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <group android:translateX="22" android:translateY="22" android:scaleX="1" android:scaleY="1">
+        <path android:fillColor="#FFFFFF" android:pathData="M32,14L37,14L50,50L44,50L32,20.5ZM27,14L32,14L32,20.5L20,50L14,50ZM22.5,37L41.5,37L43.3,42L20.7,42Z" />
+    </group>
+</vector>
