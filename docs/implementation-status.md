@@ -474,6 +474,4 @@ AEEIS 现在支持 Web、CLI、桌面或移动端共享同一 Principal 的设�
 
 验证覆盖滑动窗口第 6/7 条、并发、窗口恢复、摘要间隔与空队列、频率范围、JSON 与 PostgreSQL 重启、多个进程并发 pump、受众分组、跨午夜/时区/DST、三个推送通道的非紧急抑制和审批豁免、群主/成员/跨租户权限、热闹限流、前端保存设置与展开摘要。PostgreSQL 使用非表主应用角色验证新表的租户隔离。
 
-验证环境修正：部署自测用临时目录作为 `XDG_RUNTIME_DIR`，以 `systemd-analyze --user verify` 离线检查 unit，避免非 root 测试进程尝试创建宿主 `/run/systemd/`。保留原有 unit 语法、依赖和命令路径检查，没有跳过这项验收。
-
 最终验证：`npm run verify` 通过（2798 passed / 144 skipped）；按指定本机数据库运行 `AEEIS_VERIFY_POSTGRES=1 AEEIS_TEST_DATABASE_URL=postgresql://aeeis@127.0.0.1:55434/aeeis npm run verify` 通过（串行 2932 passed / 10 skipped，PostgreSQL 专项 33 个文件、138 个测试通过）。两次的 typecheck 与 build 均通过，`git diff --check` 通过。
