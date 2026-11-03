@@ -600,6 +600,8 @@ describe('AEEIS runtime', () => {
     expect(taken.resumeStatus).toBe('running');
     expect(taken.takeover?.by).toBe('owner');
     expect(explainRun(taken).attention).toMatchObject({ kind: 'hand_back', blockers: [{ kind: 'taken_over' }] });
+    expect(explainRun(taken).attention?.nextAction).not.toContain('工作区');
+    expect(explainRun({ ...taken, approvedTools: [{ id: 'shell', version: '3', capabilities: ['execute'] }] }).attention?.nextAction).toContain('Bot 的工作区');
     await expect(engine.command(run.id, 'takeover', {})).rejects.toThrow('already taken over');
     await expect(engine.command(run.id, 'resume', {})).rejects.toThrow('hand it back');
     await expect(engine.command(run.id, 'handback', { note: '  ' })).rejects.toThrow();
