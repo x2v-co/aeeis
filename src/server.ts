@@ -1,3 +1,4 @@
+import { JsonChannelNoiseStore, PostgresChannelNoiseStore, type ChannelNoiseStore } from './channel-noise.js';
 import pg from 'pg';
 import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
 import { LocalToolGateway, CombinedToolGateway } from './local-tools.js';
@@ -76,7 +77,7 @@ import { loadFileEnvironment } from './config-secrets.js';
 import { prepareDatabaseSecurity } from './database-security.js';
 import { JsonDeviceSessionRepository, PostgresDeviceSessionRepository, type DeviceSessionRepository } from './device-sessions.js';
 import { JsonUiEventCountStore, PostgresUiEventCountStore, type UiEventCountStore } from './ui-event-counts.js';
-import { ApnsSender, FcmSender, JsonPushStore, PostgresPushStore, PushPump, WebPushSender, loadVapidKeys, type PushChannel, type PushSender, type PushStore } from './push.js';
+import { ApnsSender, FcmSender, JsonPushStore, PostgresPushStore, PushPump, WebPushSender, loadVapidKeys, channelPushAllowed, type PushChannel, type PushSender, type PushStore } from './push.js';
 import { readFile } from 'node:fs/promises';
 import { FileResourceRegistry, type ResourceRegistry } from './runtime/resources.js';
 import { createPostgresPool, withTenantScope } from './adapters/postgres-pool.js';
@@ -258,7 +259,11 @@ const sessionEventRepository: SessionEventRepository = process.env.DATABASE_URL
   ? new PostgresSessionEventRepository(process.env.DATABASE_URL)
   : new JsonSessionEventRepository(process.env.AEEIS_SESSION_EVENTS_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/session-events.json`);
 await sessionEventRepository.init?.();
-const sessionEvents = new SessionEventService(sessionEventRepository, domain);
+const channelNoise: ChannelNoiseStore = process.env.DATABASE_URL
+  ? new PostgresChannelNoiseStore(process.env.DATABASE_URL)
+  : new JsonChannelNoiseStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/channel-noise.json`);
+await channelNoise.init?.();
+const sessionEvents = new SessionEventService(sessionEventRepository, domain, channelNoise);
 const deviceSessions: DeviceSessionRepository = process.env.DATABASE_URL
   ? new PostgresDeviceSessionRepository(process.env.DATABASE_URL)
   : new JsonDeviceSessionRepository(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/device-sessions.json`);
@@ -780,7 +785,13 @@ try {
   sandboxReaper?.unref();
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
-  const pushPump = new PushPump(pushStore, pushSenders, scope => withTenantScope(scope.tenantId, () => app.aeeisPushMessages!(scope)), message => console.error(`AEEIS push: ${message}`));
+  const digestTimer = setInterval(() => { if (!closing) trackBackground(sessionEvents.delivery.pump()); }, 15_000);
+  digestTimer.unref();
+  const pushPump = new PushPump(pushStore, pushSenders, scope => withTenantScope(scope.tenantId, () => app.aeeisPushMessages!(scope)), message => console.error(`AEEIS push: ${message}`), async (message, scope) => {
+    if (!message.roomId) return true;
+    const room = await domain.getRoomForPrincipal(message.roomId, scope.owner, scope.tenantId);
+    return channelPushAllowed(message, await channelNoise.get({ roomId: room.id, owner: room.owner ?? 'owner', tenantId: scope.tenantId }));
+  });
   const pushIntervalMs = Number(process.env.AEEIS_PUSH_INTERVAL_MS ?? 15_000);
   const pushTimer = Object.keys(pushSenders).length && pushIntervalMs > 0 ? setInterval(() => { if (!closing) trackBackground(pushPump.tick()); }, pushIntervalMs) : undefined;
   pushTimer?.unref();
@@ -942,11 +953,11 @@ try {
     // persist before the process exits (compose stop_grace_period covers it).
     const drainMs = Number(process.env.AEEIS_SHUTDOWN_DRAIN_MS ?? 240_000);
     if (engine && !(await engine.drain(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 240_000))) console.error('AEEIS: shutdown drain timed out; in-flight runs will be recovered on boot');
-    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(pushTimer); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
+    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(digestTimer); clearInterval(pushTimer); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
+} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }

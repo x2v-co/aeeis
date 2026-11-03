@@ -462,3 +462,18 @@ AEEIS 现在支持 Web、CLI、桌面或移动端共享同一 Principal 的设�
 新增生成脚本 `scripts/generate-fillable-pdf.mjs`、`fixtures/fillable-pdf/` 中的八字段 PDF 与 TXT/MD/CSV/JSON 来源，以及 [fillable PDF retest set](fillable-pdf-retest-set.md) 的五个手工验收用例。回归覆盖五类字段、空值/未知字段、无效字段名和选项、readOnly、证据边界、finish 修复、Reviewer 上下文、HTTP fixture model、文件仓库重启、下载权限/完整性、预算边界及工作台展示。XFA、加密 PDF、按钮/签名字段和不可用字体字形采用拒绝的保守默认；更大文件、自定义字体及 flatten 属于后续产品选择。真实模型的来源语义判断和冲突处理仍需手工 retest，fixture 的 accepted review 仅验证协议闭环。
 
 验证结果（Node 22）：`npm run typecheck`、`npm run build`、`git diff --check` 通过；`npm test` 为 129 个测试文件、1,850 个测试通过，26 个文件 / 126 个测试按既有环境条件跳过（包括 PostgreSQL 与 sandbox）。本次新增 70 个领域/工作台回归。仓库未配置 lint 脚本；没有 commit 或 push。
+
+
+### 2026-11-03：频道防噪、合并摘要与安静时段
+
+沿用 `BotTeam` 的默认单一回复、侧线程协商，以及既有任务卡和收件箱投影，在 `SessionEventService` 的自动消息写入处统一接入 `ChannelDigestDelivery`。非紧急进展进入持久化待摘要，其他 Bot 主动消息按频道滑动 10 分钟最多 6 条；摘要本身占一条，超限继续等。待摘要标记和原文都在现有 `aeeis_session_events`，摘要以原事件 ID 确认一批，崩溃重启后既不丢项也不重复发。默认每 15 分钟摘要，可调到 30 分钟，服务端每 15 秒检查，空队列不发；同一受众和隐私级别的待合并记录进入同一张摘要，不同受众和隐私级别不混在一起。频道时间线默认不逐条展示待摘要原文，完整记录、任务板和收件箱继续读事实源。
+
+新增 `src/channel-noise.ts`，集中定义需要人决定的分类、安静时段判断和设置存储（内存、JSON、PostgreSQL）。每日安静时段支持跨午夜与 IANA 时区；Web Push / APNs / FCM 在统一 pump 上判断，普通通知不推送，需要人的审批、提问、升级、阻塞和上报失败照常。现有推送和浏览器通知只发送 S1，这次没有扩大提醒种类。群聊设置按频道共用，与设计的防噪规则一致；成员可读、群主可写，`GET/PUT /api/rooms/:id/noise-settings` 使用严格 schema 校验。热闹允许另一位 Bot 接一轮话，仍受同一限流，避免自动无限互答；默认安静不改原来的发言路由。
+
+新增正式 migration `src/adapters/migrations/006-channel-noise.sql` 和 `aeeis_channel_noise_settings`，按现有 migration lock 在适配器初始化时执行同内容的幂等 DDL。新表当场启用 RLS，并列入 `postgres-pool.ts` 的 `TENANT_POLICIES`，由 `database-security.ts` 最终统一加固。当前分支的租户 RLS 清单基线为 33 项，这次为 34 项；实际启动时只对已创建的表应用。任务描述中的 32 与当前清单不一致，以代码清单和测试为准。摘要原文继续使用已有会话事件的内容加密。
+
+验证覆盖滑动窗口第 6/7 条、并发、窗口恢复、摘要间隔与空队列、频率范围、JSON 与 PostgreSQL 重启、多个进程并发 pump、受众分组、跨午夜/时区/DST、三个推送通道的非紧急抑制和审批豁免、群主/成员/跨租户权限、热闹限流、前端保存设置与展开摘要。PostgreSQL 使用非表主应用角色验证新表的租户隔离。
+
+验证环境修正：部署自测用临时目录作为 `XDG_RUNTIME_DIR`，以 `systemd-analyze --user verify` 离线检查 unit，避免非 root 测试进程尝试创建宿主 `/run/systemd/`。保留原有 unit 语法、依赖和命令路径检查，没有跳过这项验收。
+
+最终验证：`npm run verify` 通过（2798 passed / 144 skipped）；按指定本机数据库运行 `AEEIS_VERIFY_POSTGRES=1 AEEIS_TEST_DATABASE_URL=postgresql://aeeis@127.0.0.1:55434/aeeis npm run verify` 通过（串行 2932 passed / 10 skipped，PostgreSQL 专项 33 个文件、138 个测试通过）。两次的 typecheck 与 build 均通过，`git diff --check` 通过。

@@ -1,3 +1,4 @@
+import { PostgresChannelNoiseStore } from '../src/channel-noise.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -70,7 +71,15 @@ describe('PostgreSQL row-level security and content encryption', () => {
     const conversations = new PostgresConversationStore(appUrl); await conversations.init();
     const domain = new PostgresAeeisStore(appUrl); await domain.init();
     cleanup.push(async () => { await runs.close(); await conversations.close(); await domain.close(); });
+    const noise = new PostgresChannelNoiseStore(appUrl); await noise.init();
+    cleanup.push(() => noise.close());
     const { secured } = await security.finalize();
+    expect(secured).toContain('aeeis_channel_noise_settings');
+    const channel = { roomId: 'room.noise', owner: 'alice', tenantId: 'team-a' };
+    await withTenantScope('team-a', () => noise.put(channel, { mode: 'lively', digestMinutes: 25 }));
+    expect(await withTenantScope('team-a', () => noise.get(channel))).toMatchObject({ mode: 'lively', digestMinutes: 25 });
+    expect(await withTenantScope('team-b', () => noise.get(channel))).toMatchObject({ mode: 'quiet', digestMinutes: 15 });
+    await expect(withTenantScope('team-b', () => noise.put(channel, { mode: 'quiet' }))).rejects.toThrow(/row-level security/);
     expect(secured).toEqual(expect.arrayContaining(['aeeis_runs', 'aeeis_conversations', 'aeeis_memories', 'aeeis_run_events', 'aeeis_goals', 'aeeis_threads']));
 
     // Tenant A's content goes in through the normal paths.

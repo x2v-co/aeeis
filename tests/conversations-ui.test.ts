@@ -4232,3 +4232,47 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('分工：AEEIS 担任 PM'));
   });
 });
+
+
+describe('频道防噪设置和摘要卡', () => {
+  it('读取和保存频道设置，隐藏待摘要原文，展开摘要再读完整列表', async () => {
+    const room = { id: 'room_noise', title: '安静协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const original = { audienceSnapshot: { digest: 'audience', members: [] }, id: 'evt_original', roomId: room.id, sequence: 1, operation: 'publish', actorType: 'agent', actorId: 'demo.release', type: 'message', content: `进展预览${'详细记录'.repeat(60)}原文末尾`, evidenceRefs: [], createdAt: date, botDelivery: { mode: 'digest' } };
+    const digest = { audienceSnapshot: { digest: 'audience', members: [] }, id: 'evt_digest', roomId: room.id, sequence: 2, operation: 'publish', actorType: 'system', actorId: 'aeeis', type: 'digest', content: '已合并 1 条', evidenceRefs: [], createdAt: date, digest: { eventIds: [original.id], minutes: 15 } };
+    let saved: unknown;
+    const settings = { mode: 'quiet', digestMinutes: 15, quietHours: null, canEdit: true };
+    const h = harness(undefined, { handler: (url, request) => {
+      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms/room_noise/noise-settings') {
+        if (request.method === 'PUT') { saved = JSON.parse(request.body); return response({ ...saved as object, canEdit: true }); }
+        return response(settings);
+      }
+      if (url.endsWith('/session-events/evt_original')) return response(original);
+      if (url.includes('/rooms/room_noise/session-events')) return response({ items: [original, digest] });
+      if (url.endsWith('/members')) return response([]);
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(el('groups').textContent).toContain('安静协作'));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('安静协作'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已合并 1 条'));
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('进展预览'));
+    expect(doc().querySelectorAll('#group-transcript .group-message')).toHaveLength(1);
+    expect(el('group-transcript').textContent).not.toContain('原文末尾');
+    const details = doc().querySelector<HTMLDetailsElement>('#group-transcript details')!;
+    details.open = true; details.dispatchEvent(new dom.window.Event('toggle'));
+    await vi.waitFor(() => expect(details.textContent).toContain('原文末尾'));
+    el('channel-noise-open').click();
+    await vi.waitFor(() => expect(el('channel-noise').hidden).toBe(false));
+    expect(el<HTMLSelectElement>('channel-noise-mode').value).toBe('quiet');
+    el<HTMLSelectElement>('channel-noise-mode').value = 'lively';
+    el<HTMLInputElement>('channel-noise-minutes').value = '25';
+    el<HTMLInputElement>('channel-noise-hours').checked = true;
+    el<HTMLInputElement>('channel-noise-start').value = '23:00';
+    el<HTMLInputElement>('channel-noise-end').value = '07:00';
+    el<HTMLInputElement>('channel-noise-zone').value = 'Asia/Singapore';
+    el<HTMLFormElement>('channel-noise-form').requestSubmit();
+    await vi.waitFor(() => expect(el('channel-noise-note').textContent).toBe('已保存'));
+    expect(saved).toEqual({ mode: 'lively', digestMinutes: 25, quietHours: { start: '23:00', end: '07:00', timeZone: 'Asia/Singapore' } });
+  });
+});
