@@ -50,7 +50,7 @@ interface RunGraphsView {
 interface RunView extends RunSummary {
   workingMemoryEnabled?: boolean;
   canEdit?: boolean;
-  takeover?: { by: string; at: string };
+  takeover?: { by: string; at: string; actions?: TakeoverActionView[] };
   actionApproval?: { status: 'pending' | 'approved' | 'denied'; kind: 'tool' | 'agent'; ref: string; taskId: string; idempotencyKey: string; reason: string; decision?: string };
   evolution?: Array<{ target: string; version: string }>;
   corrections?: Array<{ id: string; text: string; candidateId: string; sourceRefs: string[]; createdAt: string }>;
@@ -338,7 +338,7 @@ function eventLabel(type: string): string {
     'external.usage.recorded': '外部用量已记录', 'external.usage_recorded': '外部用量已记录', 'external.budget_stopped': '外部预算已停止',
     'model.usage_recorded': '模型用量已记录',
     'input.requested': '等待补充信息', 'input.received': '已收到补充信息', 'review.requested': '开始独立审核', 'review.completed': '审核完成',
-    'plan.repair_requested': '计划格式修复中', 'plan.revision_requested': '已请求修改计划', 'run.paused': '运行已暂停', 'run.resumed': '运行已继续', 'run.taken_over': '人已接管', 'run.handed_back': '人已交还，Bot 接着做',
+    'plan.repair_requested': '计划格式修复中', 'plan.revision_requested': '已请求修改计划', 'run.paused': '运行已暂停', 'run.resumed': '运行已继续', 'run.taken_over': '人已接管', 'takeover.tool': '人在 Bot 的工作区里做了一步', 'run.handed_back': '人已交还，Bot 接着做',
     'run.retry_requested': '已请求重试', 'run.reconciled': '状态已对齐', 'run.interrupted': '运行中断', 'run.cancel.workflow_failed': '取消后台任务失败',
     'run.cancelled_reconcile_requested': '已请求核查取消前的调用', 'run.cancelled_reconcile_failed': '取消前的调用核查失败', 'artifact.created': '产物已生成',
     'model.unknown': '模型结果待核查', 'model.reconciled': '模型结果已核查', 'model.validation_failed': '模型输出校验失败', 'model.budget_stopped': '模型预算已停止',
@@ -7563,6 +7563,132 @@ async function takeOverRun(run: RunView): Promise<void> {
   if (!window.confirm(`接管「${runTitle(run)}」？Bot 会停下，由你来做。做完后写一句说明交还，Bot 从你做到的地方接着做。接管不绕过审批。`)) return;
   await command('takeover');
 }
+interface TakeoverActionView { at: string; toolId: string; summary: string; status: string; receiptId: string }
+interface TakeoverToolResponse { status: string; output?: unknown; actions: TakeoverActionView[] }
+const takeoverToolLabels: Record<string, string> = { shell: '命令', python: 'Python', read: '打开', write: '保存', diff: '对比', glob: '列文件', grep: '搜索', process: '后台进程' };
+/** Built once per taken-over Run so a refresh never wipes what the person is typing; only the log is redrawn. */
+let takeoverWorkspace: { runId: string; log: HTMLOListElement } | undefined;
+function renderTakeoverActions(log: HTMLOListElement, actions: TakeoverActionView[]): void {
+  log.replaceChildren(...actions.map(action => {
+    const row = element('li', '', 'takeover-action');
+    row.dataset.status = action.status;
+    row.append(element('time', formatTime(action.at)), element('strong', takeoverToolLabels[action.toolId] ?? action.toolId), element('span', action.summary || '—'), element('small', runStatusLabel(action.status)));
+    return row;
+  }));
+  if (!actions.length) log.append(element('li', '还没有在工作区里做事。', 'muted'));
+}
+function takeoverOutputText(output: unknown): string {
+  if (output && typeof output === 'object') {
+    const value = output as { stdout?: string; stderr?: string; exitCode?: number; error?: string; paths?: string[]; matches?: Array<{ path: string; line: number; text?: string; excerpt?: string }> };
+    if (typeof value.error === 'string') return value.error;
+    if (value.paths) return value.paths.join('\n') || '（没有文件）';
+    if (value.matches) return value.matches.map(match => `${match.path}:${match.line} ${match.excerpt ?? match.text ?? ''}`).join('\n') || '（没有找到）';
+    if ('stdout' in value || 'stderr' in value) return [value.stdout ?? '', value.stderr ? `[stderr]\n${value.stderr}` : '', value.exitCode === undefined ? '' : `[退出码 ${value.exitCode}]`].filter(Boolean).join('\n');
+  }
+  return typeof output === 'string' ? output : JSON.stringify(output, null, 2);
+}
+function renderTakeoverWorkspace(run: RunView): void {
+  const root = $<HTMLElement>('takeover-workspace');
+  if (!root) return;
+  const active = Boolean(run.takeover) && run.status === 'paused' && run.canEdit !== false && !readOnlyShare;
+  if (!active) { root.hidden = true; root.replaceChildren(); takeoverWorkspace = undefined; return; }
+  root.hidden = false;
+  if (takeoverWorkspace?.runId === run.id) { renderTakeoverActions(takeoverWorkspace.log, run.takeover?.actions ?? []); return; }
+  root.replaceChildren();
+  const tools = new Set((run.approvedTools ?? []).map(tool => tool.id).filter(toolId => toolId in takeoverToolLabels));
+  root.append(element('h3', 'Bot 的工作区'));
+  if (!tools.size) {
+    root.append(element('p', '这件 Run 没有用到 Bot 的工作区。在 AEEIS 外面做完，回来写一句说明交还。', 'muted'));
+    takeoverWorkspace = { runId: run.id, log: document.createElement('ol') };
+    return;
+  }
+  root.append(element('p', '这是 Bot 做这件事用的那台机器，文件、装好的东西和后台进程都还在。你在这里做的每一步都会记下来，交还时连同说明一起交给 Bot。', 'muted'));
+  const output = element('pre', '', 'takeover-output');
+  output.setAttribute('role', 'status'); output.setAttribute('aria-live', 'polite'); output.hidden = true;
+  const log = element('ol', '', 'takeover-log');
+  const runTool = async (toolId: string, input: Record<string, unknown>): Promise<TakeoverToolResponse | undefined> => {
+    const runId = run.id;
+    try {
+      const result = await api<TakeoverToolResponse>(`/runs/${runId}/takeover-tool`, { toolId, input });
+      if (takeoverWorkspace?.runId === runId) renderTakeoverActions(takeoverWorkspace.log, result.actions);
+      return result;
+    } catch (error) { message(error instanceof Error ? error.message : '工作区操作失败'); return undefined; }
+  };
+  const show = (text: string) => { output.hidden = false; output.textContent = text; };
+  if (tools.has('read') || tools.has('glob')) {
+    const files = element('div', '', 'takeover-files');
+    const path = document.createElement('input');
+    path.id = 'takeover-path'; path.placeholder = '文件路径，例如 artifacts/report.md'; path.setAttribute('aria-label', '文件路径'); path.maxLength = 1000;
+    const editor = document.createElement('textarea');
+    editor.id = 'takeover-editor'; editor.rows = 10; editor.hidden = true; editor.setAttribute('aria-label', '文件内容');
+    let openHash = '';
+    const openFile = async (name: string) => {
+      const result = await runTool('read', { path: name, maxLines: 500 });
+      if (!result) return;
+      const value = result.output as { content?: string; sha256?: string; truncated?: boolean; error?: string } | undefined;
+      if (result.status !== 'completed' || typeof value?.content !== 'string') { show(takeoverOutputText(result.output)); return; }
+      path.value = name; openHash = value.sha256 ?? '';
+      editor.value = value.content.split('\n').map(line => line.replace(/^\d+: /, '')).join('\n');
+      editor.hidden = false; editor.readOnly = Boolean(value.truncated) || !tools.has('write');
+      show(value.truncated ? '文件超过 500 行，这里只读。要改请用命令。' : tools.has('write') ? `已打开 ${name}。改完点「保存」。` : `已打开 ${name}（这件 Run 不能写文件，只读）。`);
+    };
+    const row = element('div', '', 'takeover-row');
+    row.append(path);
+    if (tools.has('read')) row.append(button('打开', async () => { if (path.value.trim()) await openFile(path.value.trim()); else path.focus(); }));
+    if (tools.has('write')) row.append(button('保存', async () => {
+      if (editor.hidden || editor.readOnly) { show('先打开一个能改的文件。'); return; }
+      const result = await runTool('write', { path: path.value.trim(), content: editor.value, ...(openHash ? { expectedHash: openHash } : {}) });
+      if (!result) return;
+      const value = result.output as { sha256?: string } | undefined;
+      if (result.status === 'completed' && value?.sha256) { openHash = value.sha256; show(`已保存 ${path.value.trim()}。`); }
+      else show(takeoverOutputText(result.output));
+    }));
+    if (tools.has('glob')) {
+      const list = element('ul', '', 'takeover-file-list');
+      row.append(button('列文件', async () => {
+        const result = await runTool('glob', { pattern: '**/*', limit: 200 });
+        if (!result) return;
+        const paths = (result.output as { paths?: string[] } | undefined)?.paths;
+        if (result.status !== 'completed' || !paths) { show(takeoverOutputText(result.output)); return; }
+        list.replaceChildren(...paths.map(name => {
+          const item = element('li');
+          if (tools.has('read')) item.append(button(name, () => openFile(name))); else item.textContent = name;
+          return item;
+        }));
+        if (!paths.length) list.append(element('li', '工作区里还没有文件。', 'muted'));
+      }));
+      files.append(row, list, editor);
+    } else files.append(row, editor);
+    root.append(files);
+  }
+  const commandTool = tools.has('shell') ? 'shell' : tools.has('python') ? 'python' : '';
+  if (commandTool) {
+    const row = element('form', '', 'takeover-row takeover-command');
+    const input = document.createElement('input');
+    input.id = 'takeover-command'; input.maxLength = 100_000;
+    input.placeholder = commandTool === 'shell' ? '在 /workspace 里运行一条命令' : '运行一段 Python';
+    input.setAttribute('aria-label', commandTool === 'shell' ? '命令' : 'Python 代码');
+    const submit = element('button', '运行'); submit.type = 'submit';
+    row.onsubmit = async event => {
+      event.preventDefault();
+      const text = input.value.trim(); if (!text) { input.focus(); return; }
+      submit.disabled = true; show('运行中…');
+      const result = await runTool(commandTool, commandTool === 'shell' ? { command: text } : { code: text });
+      submit.disabled = false;
+      if (result) show(takeoverOutputText(result.output));
+    };
+    row.append(input, submit);
+    root.append(row);
+  }
+  if (tools.has('process')) {
+    const row = element('div', '', 'takeover-row');
+    row.append(button('看后台进程', async () => { const result = await runTool('process', { action: 'list' }); if (result) show(takeoverOutputText(result.output)); }));
+    root.append(row);
+  }
+  root.append(output, element('h4', '你在工作区做过的'), log);
+  takeoverWorkspace = { runId: run.id, log };
+  renderTakeoverActions(log, run.takeover?.actions ?? []);
+}
 function handbackControls(): HTMLElement {
   const box = element('div', '', 'handback');
   const note = document.createElement('textarea');
@@ -7974,6 +8100,7 @@ function render(run: RunView): void {
   if (run.status === 'paused' && !run.takeover) controls.append(button('继续', () => command('resume')));
   if (canTakeOver(run)) controls.append(button('接管', () => takeOverRun(run)));
   if (run.takeover && run.status === 'paused') controls.append(handbackControls());
+  renderTakeoverWorkspace(run);
   if (run.status === 'waiting_external') controls.append(button('核查外部 Agent 结果', async () => { openInputPanel('reconcile'); }));
   if (run.status === 'needs_input' || run.status === 'unknown') controls.append(button(run.status === 'unknown' ? '填写核查说明' : '填写补充信息', async () => {
     openInputPanel(run.status === 'unknown' ? 'reconcile' : 'answer');

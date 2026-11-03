@@ -98,6 +98,15 @@ describe('task timeline', () => {
     expect(taskTimeline({ board, conversationId: 'conv_a', taskId: 'task_a', nameOf: () => '阿写' }).map(entry => entry.text)).toEqual(['转交给 阿写', '阿写接下了']);
   });
 
+  it('shows what the person did in the Bot workspace during a takeover', () => {
+    const board = { schemaVersion: 'channel-board/1', roomId: 'room_a', cursor: 0, wip: [], cards: [card('task_a', 'bot_two', 'run_a')], citations: [], actions: [] } as unknown as ChannelBoard;
+    const run = { id: 'run_a', status: 'paused', plans: [], answers: [], events: [
+      { id: 'e1', seq: 1, type: 'run.taken_over', at: at(1), data: {} },
+      { id: 'e2', seq: 2, type: 'takeover.tool', at: at(2), data: { toolId: 'shell', summary: 'npm test', status: 'completed' } },
+    ] } as unknown as AgentRun;
+    expect(taskTimeline({ board, conversationId: 'conv_a', taskId: 'task_a', run, nameOf: () => '阿写' }).map(entry => `${entry.who}：${entry.text}`)).toEqual(['你：接手做了一段', '你：在 Bot 的工作区里用 shell：npm test']);
+  });
+
   it('keeps only the room part when the reader cannot open the Run', () => {
     const board = { schemaVersion: 'channel-board/1', roomId: 'room_a', cursor: 1, wip: [], cards: [card('task_a', 'bot_two', 'run_a')], citations: [cite('task_a', 1, { content: '已交给阿写' })], actions: [] } as unknown as ChannelBoard;
     expect(taskTimeline({ board, conversationId: 'conv_a', taskId: 'task_a', nameOf: id => id })).toEqual([{ at: at(1), who: '你', text: '已交给阿写', source: 'room', human: true }]);
