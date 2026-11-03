@@ -691,7 +691,7 @@ export function buildApp(options: Options) {
     return reply.type('text/plain; version=0.0.4; charset=utf-8').send(lines.join('\n') + '\n');
   });
   const assets: Record<string, [string, string]> = {
-    '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'],
+    '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/theme.css': ['theme.css', 'text/css; charset=utf-8'],
   };
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
