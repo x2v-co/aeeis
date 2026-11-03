@@ -180,6 +180,7 @@
 </div>
 <span id="instance-mode" class="badge" data-state="loading">正在读取认证模式…</span>
 <a id="gb-alt-ui" href="/team/">多 Bot 频道</a>
+<button id="gb-about" type="button" data-computer-tab="about" aria-pressed="false">关于它</button>
 <button id="gb-computer-toggle" type="button" aria-pressed="false">打开它的工作台</button>
 </header>
 <div class="gb-transcript">
@@ -201,8 +202,9 @@
 </div>
 <div class="conversation-layout">
 <aside class="conversation-task-pane" aria-labelledby="conversation-tasks-title">
-<h3 id="conversation-tasks-title">正在做的事</h3>
-<p class="muted">这是当前这个人正在做的事。做完以后人还在。机器跟着这件工作走，批准后用到工作区才会出现，做完就收掉。看一眼不会启动它。这一行列出这份冻结计划里的步骤，和已经交出的证据标题。看一眼只是读。调整顺序不会启动、暂停、回答、重试或切换讨论焦点；几个任务都能推进时，排在前面的先走一步。待批准可以在这一行批准，待补充可以直接回答，失败可以重试。</p>
+<details id="conversation-tasks-strip">
+<summary><span id="conversation-tasks-title">正在做的事</span> <span id="conversation-task-count" class="muted"></span></summary>
+<p class="muted task-pane-note">这是当前这个人正在做的事。做完以后人还在。机器跟着这件工作走，批准后用到工作区才会出现，做完就收掉。看一眼不会启动它。这一行列出这份冻结计划里的步骤，和已经交出的证据标题。看一眼只是读。调整顺序不会启动、暂停、回答、重试或切换讨论焦点；几个任务都能推进时，排在前面的先走一步。待批准可以在这一行批准，待补充可以直接回答，失败可以重试。</p>
 <div class="task-dashboard">
 <table id="conversation-tasks" class="task-dashboard-table">
 <caption class="sr-only">这个人正在做的事、执行状态和优先级</caption>
@@ -211,6 +213,7 @@
 </table>
 </div>
 <p id="conversation-tasks-empty" class="muted">还没有正在做的事。人还在。可先讨论，或明确新建一件事。</p>
+</details>
 </aside>
 <div class="conversation-discussion">
 <header class="entry-bar">
@@ -224,106 +227,7 @@
 </header>
 <p id="conversation-earlier" class="muted" hidden>仅显示最近 100 条消息；更早的记录仍保存在服务端。</p>
 <ol id="conversation-messages" class="conversation-messages" aria-label="讨论记录"></ol>
-<p id="conversation-empty" class="muted">这是这个人的对话。普通发送只记录讨论，不会调用模型，也不会自己回复。</p>
-<section id="bot-note" hidden>
-<h3 id="bot-note-title">AEEIS</h3>
-<p id="bot-profile-role" class="muted"></p>
-<div id="bot-profile-actions" hidden>
-<button id="bot-profile-edit" type="button">修改</button>
-<button id="bot-profile-remove" type="button" class="quiet-button">移除</button>
-</div>
-<p id="bot-status" class="muted"></p>
-<p id="bot-profile-boundary" class="muted">边界：它不会自己回复，也不会执行。点名和交接只记成讨论。批准、登录和密钥留在和 AEEIS 的对话里。</p>
-<div id="bot-autonomy-row" class="bot-autonomy" hidden>
-<label for="bot-autonomy">自己做多少</label>
-<select id="bot-autonomy"></select>
-</div>
-<details id="bot-side-threads" hidden>
-<summary>侧线程</summary>
-<p class="muted">这位和其他 Bot 谈交接的记录。只读，不进群。</p>
-<ul id="bot-side-thread-list"></ul>
-</details>
-<p id="bot-note-copy"></p>
-</section>
-<section id="standing-instruction" hidden>
-<h3>这个人记得</h3>
-<p id="standing-note">这句话留在这个人身上。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。</p>
-<form id="standing-form">
-<textarea id="standing-text" maxlength="500" placeholder="空着表示这个人还没有长期嘱咐" aria-label="这个人记得的一句话"></textarea>
-<div class="standing-actions">
-<button id="standing-save" type="submit">记住这句</button>
-<button id="standing-clear" type="button" class="quiet-button">忘掉</button>
-</div>
-</form>
-</section>
-<details id="routines" hidden>
-<summary>例程 <span id="routine-count"></span></summary>
-<p id="routine-note">例程按时间表，或在收到 Webhook 时，用你写好的这句话在这个人这里开一件新任务并创建 Run，仍要按审批档位走。Webhook 内容只放进资料，标明不可信，改不了这句话。例程和 Webhook 开始的 Run 遇到写操作：required 和 auto 先问你，yolo 直接拒绝。服务停了几次，回来只补一次，并告诉模型迟到了多久。</p>
-<ul id="routine-list"></ul>
-<p id="routine-secret" class="routine-secret" hidden></p>
-<form id="routine-form">
-<input id="routine-name" maxlength="80" placeholder="例程名字，例如早报" aria-label="例程名字" required>
-<textarea id="routine-prompt" maxlength="4000" placeholder="每次要做的事，只有你能改" aria-label="例程要做的事" required></textarea>
-<div class="standing-actions">
-<select id="routine-kind" aria-label="什么时候开始">
-<option value="daily">每天</option>
-<option value="weekly">每周</option>
-<option value="webhook">收到 Webhook</option>
-</select>
-<select id="routine-weekday" aria-label="星期几" hidden>
-<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
-</select>
-<input id="routine-time" type="time" value="09:00" aria-label="几点">
-<select id="routine-review" aria-label="审批档位">
-<option value="required">每一步都问我</option>
-<option value="auto">自动判断</option>
-<option value="yolo">放手</option>
-</select>
-<button id="routine-add" type="submit">添加例程</button>
-</div>
-<p id="routine-error" class="muted" role="alert"></p>
-</form>
-</details>
-<section id="last-delivery" hidden>
-<h3>上次做成</h3>
-<p id="last-delivery-note">这是这个人上一件做成的事。下一件工作不会自动带上它。要让下次执行看见，可以放进上面的嘱咐再记住，也可以在下面收下你写的一句，并引用这次做成的证据。</p>
-<p id="last-delivery-copy"></p>
-<button id="last-delivery-pin" type="button" class="quiet-button">放进嘱咐</button>
-<textarea id="practice-text" maxlength="500" placeholder="改成你要收下的做法" aria-label="收下的做法"></textarea>
-<button id="practice-accept" type="button">收下这句做法</button>
-</section>
-<section id="accepted-practice" hidden>
-<h3>这个人收下的做法</h3>
-<p id="accepted-practice-note">这句话由你收下，并引用上次做成时已经有的证据。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。另一个人不会带上它。</p>
-<p id="accepted-practice-copy"></p>
-<button id="accepted-practice-retract" type="button" class="quiet-button">撤回这句</button>
-</section>
-<section id="task-settings" hidden>
-<h3>任务设定</h3>
-<p id="task-settings-note">技能档案和模型都跟着任务种类走。同一个人做另一种任务，可以用另一份档案、另一个模型。晋升只引用这次做成里已经有的技能版本。回滚回到上一版，并写下原因。讨论不会晋升，也不会改模型。选定的模型要当前运行时本来就能用，才会冻进下一次这种任务的 Run。它不能加工具、抬高预算或批准计划。技能版本和档案不同时，可以送去评测。那一次只建立 proposed 候选，后面还有评估、批准和晋升。留下档案写在这个人身上。模型选择留在任务种类上。</p>
-<p id="task-runtime-model"></p>
-<label for="task-kind">任务种类</label>
-<input id="task-kind" maxlength="40" placeholder="例如周报" aria-label="任务种类">
-<p id="skill-profile-copy">这个人还没有按任务种类留下技能档案。</p>
-<p id="task-kind-compare" hidden></p>
-<div class="standing-actions">
-<button id="skill-promote" type="button">晋升这次技能</button>
-<button id="task-kind-keep" type="button" class="quiet-button">留下这份档案</button>
-<button id="task-kind-propose" type="button" class="quiet-button">送去评测</button>
-<input id="skill-rollback-reason" maxlength="200" placeholder="回滚原因" aria-label="回滚原因">
-<button id="skill-rollback" type="button" class="quiet-button">回滚上一版</button>
-<button id="skill-retract" type="button" class="quiet-button">撤回这份档案</button>
-</div>
-<p id="task-model-copy">还没有哪个种类单独选了模型。</p>
-<label for="task-model">这种任务用的模型</label>
-<input id="task-model" maxlength="120" placeholder="留空表示沿用当前运行时" aria-label="这种任务用的模型">
-<label for="task-model-provider">提供方，可空</label>
-<input id="task-model-provider" maxlength="120" placeholder="目录里要区分提供方时再写" aria-label="模型提供方">
-<div class="standing-actions">
-<button id="task-model-save" type="button">记下这个模型</button>
-<button id="task-model-clear" type="button" class="quiet-button">改回默认</button>
-</div>
-</section>
+<p id="conversation-empty" class="conversation-welcome">今天要我做什么？</p>
 <form id="conversation-composer">
 <div id="conversation-reply" class="conversation-reply" hidden>
 <span id="conversation-reply-label"></span>
@@ -366,6 +270,7 @@
 <option value="yolo">YOLO</option>
 </select>
 <button id="conversation-note" type="button" class="quiet-button">只记下来</button>
+<button id="conversation-more" type="button" class="quiet-button" aria-expanded="false" aria-controls="conversation-route">更多</button>
 <p id="conversation-execution-note" class="muted"></p>
 </div>
 </form>
@@ -808,9 +713,111 @@
 <button id="gb-computer-close" type="button">关闭</button>
 </div>
 <nav class="gb-computer-nav" aria-label="工作台分页">
+<button type="button" data-computer-tab="about">关于它</button>
 <button type="button" data-computer-tab="setup">设置</button>
 <button type="button" data-computer-tab="status">状态</button>
 </nav>
+<div class="gb-pane" data-pane="about" aria-label="关于它">
+<section id="bot-note" hidden>
+<h3 id="bot-note-title">AEEIS</h3>
+<p id="bot-profile-role" class="muted"></p>
+<div id="bot-profile-actions" hidden>
+<button id="bot-profile-edit" type="button">修改</button>
+<button id="bot-profile-remove" type="button" class="quiet-button">移除</button>
+</div>
+<p id="bot-status" class="muted"></p>
+<p id="bot-profile-boundary" class="muted">边界：它不会自己回复，也不会执行。点名和交接只记成讨论。批准、登录和密钥留在和 AEEIS 的对话里。</p>
+<div id="bot-autonomy-row" class="bot-autonomy" hidden>
+<label for="bot-autonomy">自己做多少</label>
+<select id="bot-autonomy"></select>
+</div>
+<details id="bot-side-threads" hidden>
+<summary>侧线程</summary>
+<p class="muted">这位和其他 Bot 谈交接的记录。只读，不进群。</p>
+<ul id="bot-side-thread-list"></ul>
+</details>
+<p id="bot-note-copy"></p>
+</section>
+<section id="standing-instruction" hidden>
+<h3>这个人记得</h3>
+<p id="standing-note">这句话留在这个人身上。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。</p>
+<form id="standing-form">
+<textarea id="standing-text" maxlength="500" placeholder="空着表示这个人还没有长期嘱咐" aria-label="这个人记得的一句话"></textarea>
+<div class="standing-actions">
+<button id="standing-save" type="submit">记住这句</button>
+<button id="standing-clear" type="button" class="quiet-button">忘掉</button>
+</div>
+</form>
+</section>
+<details id="routines" hidden>
+<summary>例程 <span id="routine-count"></span></summary>
+<p id="routine-note">例程按时间表，或在收到 Webhook 时，用你写好的这句话在这个人这里开一件新任务并创建 Run，仍要按审批档位走。Webhook 内容只放进资料，标明不可信，改不了这句话。例程和 Webhook 开始的 Run 遇到写操作：required 和 auto 先问你，yolo 直接拒绝。服务停了几次，回来只补一次，并告诉模型迟到了多久。</p>
+<ul id="routine-list"></ul>
+<p id="routine-secret" class="routine-secret" hidden></p>
+<form id="routine-form">
+<input id="routine-name" maxlength="80" placeholder="例程名字，例如早报" aria-label="例程名字" required>
+<textarea id="routine-prompt" maxlength="4000" placeholder="每次要做的事，只有你能改" aria-label="例程要做的事" required></textarea>
+<div class="standing-actions">
+<select id="routine-kind" aria-label="什么时候开始">
+<option value="daily">每天</option>
+<option value="weekly">每周</option>
+<option value="webhook">收到 Webhook</option>
+</select>
+<select id="routine-weekday" aria-label="星期几" hidden>
+<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
+</select>
+<input id="routine-time" type="time" value="09:00" aria-label="几点">
+<select id="routine-review" aria-label="审批档位">
+<option value="required">每一步都问我</option>
+<option value="auto">自动判断</option>
+<option value="yolo">放手</option>
+</select>
+<button id="routine-add" type="submit">添加例程</button>
+</div>
+<p id="routine-error" class="muted" role="alert"></p>
+</form>
+</details>
+<section id="last-delivery" hidden>
+<h3>上次做成</h3>
+<p id="last-delivery-note">这是这个人上一件做成的事。下一件工作不会自动带上它。要让下次执行看见，可以放进上面的嘱咐再记住，也可以在下面收下你写的一句，并引用这次做成的证据。</p>
+<p id="last-delivery-copy"></p>
+<button id="last-delivery-pin" type="button" class="quiet-button">放进嘱咐</button>
+<textarea id="practice-text" maxlength="500" placeholder="改成你要收下的做法" aria-label="收下的做法"></textarea>
+<button id="practice-accept" type="button">收下这句做法</button>
+</section>
+<section id="accepted-practice" hidden>
+<h3>这个人收下的做法</h3>
+<p id="accepted-practice-note">这句话由你收下，并引用上次做成时已经有的证据。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。另一个人不会带上它。</p>
+<p id="accepted-practice-copy"></p>
+<button id="accepted-practice-retract" type="button" class="quiet-button">撤回这句</button>
+</section>
+<section id="task-settings" hidden>
+<h3>任务设定</h3>
+<p id="task-settings-note">技能档案和模型都跟着任务种类走。同一个人做另一种任务，可以用另一份档案、另一个模型。晋升只引用这次做成里已经有的技能版本。回滚回到上一版，并写下原因。讨论不会晋升，也不会改模型。选定的模型要当前运行时本来就能用，才会冻进下一次这种任务的 Run。它不能加工具、抬高预算或批准计划。技能版本和档案不同时，可以送去评测。那一次只建立 proposed 候选，后面还有评估、批准和晋升。留下档案写在这个人身上。模型选择留在任务种类上。</p>
+<p id="task-runtime-model"></p>
+<label for="task-kind">任务种类</label>
+<input id="task-kind" maxlength="40" placeholder="例如周报" aria-label="任务种类">
+<p id="skill-profile-copy">这个人还没有按任务种类留下技能档案。</p>
+<p id="task-kind-compare" hidden></p>
+<div class="standing-actions">
+<button id="skill-promote" type="button">晋升这次技能</button>
+<button id="task-kind-keep" type="button" class="quiet-button">留下这份档案</button>
+<button id="task-kind-propose" type="button" class="quiet-button">送去评测</button>
+<input id="skill-rollback-reason" maxlength="200" placeholder="回滚原因" aria-label="回滚原因">
+<button id="skill-rollback" type="button" class="quiet-button">回滚上一版</button>
+<button id="skill-retract" type="button" class="quiet-button">撤回这份档案</button>
+</div>
+<p id="task-model-copy">还没有哪个种类单独选了模型。</p>
+<label for="task-model">这种任务用的模型</label>
+<input id="task-model" maxlength="120" placeholder="留空表示沿用当前运行时" aria-label="这种任务用的模型">
+<label for="task-model-provider">提供方，可空</label>
+<input id="task-model-provider" maxlength="120" placeholder="目录里要区分提供方时再写" aria-label="模型提供方">
+<div class="standing-actions">
+<button id="task-model-save" type="button">记下这个模型</button>
+<button id="task-model-clear" type="button" class="quiet-button">改回默认</button>
+</div>
+</section>
+</div>
 <div class="gb-pane" data-pane="run">
 <nav class="workbench-nav" aria-label="工作区导航">
 <a href="#new-run-panel">开始任务</a>
