@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -612,6 +613,46 @@ describe('AEEIS runtime', () => {
     expect(back.answers.every(answer => answer.answer === '我已经把第一段写好了，接着写第二段')).toBe(true);
     expect(back.events.map(event => event.type)).toEqual(expect.arrayContaining(['run.taken_over', 'run.handed_back']));
     await expect(engine.command(run.id, 'handback', { note: '再交一次' })).rejects.toThrow('not taken over');
+    await repo.close();
+  });
+
+  it('hands the Bot\'s own workspace to the person who took over, logs each step and gives the log to the Bot', async () => {
+    const repo = await repository();
+    const calls: ToolInvocation[] = [];
+    const tools: ToolGateway = {
+      listTools: async () => [],
+      invoke: async request => {
+        calls.push(request);
+        const receipt = { schemaVersion: 'receipt/1' as const, receiptId: `receipt_${randomUUID()}`, provider: 'fixture', operation: request.toolId, requestHash: 'a'.repeat(64), inputRefs: [], outputRefs: [], capabilitiesUsed: [], startedAt: new Date().toISOString(), status: request.toolId === 'python' ? 'failed' as const : 'completed' as const };
+        return request.toolId === 'shell' ? { status: 'completed', output: { stdout: 'ok\n', stderr: '', exitCode: 0 }, receipt } : { status: receipt.status, output: { error: 'boom' }, receipt };
+      },
+    };
+    const engine = new AgentEngine(repo, { model: new PlanningFixture(), tools });
+    const run = await engine.create({ goal: 'Hand over the workspace' });
+    await engine.advance(run.id);
+    await repo.mutate(run.id, current => {
+      current.approval = { planHash: current.plans[0]!.hash, approved: true, actor: 'owner', at: new Date().toISOString() };
+      current.status = 'running';
+      current.approvedTools = [{ id: 'shell', version: '3', capabilities: ['execute'] }, { id: 'python', version: '3', capabilities: ['execute'] }];
+    });
+    const owner = { owner: 'owner', tenantId: 'local' };
+    await expect(engine.takeoverTool(run.id, { toolId: 'shell', input: { command: 'ls' } }, owner)).rejects.toThrow('not taken over');
+    await engine.command(run.id, 'takeover', {}, owner);
+    await expect(engine.takeoverTool(run.id, { toolId: 'shell', input: { command: 'ls' } }, { owner: 'someone', tenantId: 'local' })).rejects.toThrow('Unknown run');
+    await expect(engine.takeoverTool(run.id, { toolId: 'read', input: { path: 'a.md' } }, owner)).rejects.toThrow('not approved');
+    await expect(engine.takeoverTool(run.id, { toolId: 'web-fetch', input: {} }, owner)).rejects.toThrow();
+    const done = await engine.takeoverTool(run.id, { toolId: 'shell', input: { command: 'npm   test' } }, owner);
+    expect(done).toMatchObject({ status: 'completed', output: { stdout: 'ok\n' } });
+    expect(calls[0]).toMatchObject({ toolId: 'shell', toolVersion: '3', capabilityGrant: `run:${run.id}:shell`, purpose: 'Takeover by owner' });
+    expect(calls[0]!.idempotencyKey.startsWith(`${run.id}:takeover:`)).toBe(true);
+    expect((await engine.takeoverTool(run.id, { toolId: 'python', input: { code: 'print(1)' } }, owner)).status).toBe('failed');
+    const taken = await repo.get(run.id);
+    expect(taken.takeover?.actions?.map(action => [action.toolId, action.summary, action.status])).toEqual([['shell', 'npm test', 'completed'], ['python', 'print(1)', 'failed']]);
+    expect(taken.events.filter(event => event.type === 'takeover.tool')).toHaveLength(2);
+    expect(taken.toolReceipts).toEqual([]);
+    const back = await engine.command(run.id, 'handback', { note: '测试我跑过了' }, owner);
+    expect(back.answers.at(-1)?.answer).toBe('测试我跑过了\n\nWhat they did in your workspace, oldest first:\n- shell npm test → completed\n- python print(1) → failed');
+    expect(back.events.at(-1)).toMatchObject({ type: 'run.handed_back', data: { actions: 2 } });
     await repo.close();
   });
 

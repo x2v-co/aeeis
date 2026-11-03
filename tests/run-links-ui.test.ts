@@ -28,14 +28,14 @@ function fixture(): AgentRun {
     calls: [], answers: [], toolReceipts: [], allowedTools: [], allowedAgents: [], privacy: 'internal', brainMaxItems: 1, knowledgeMaxItems: 1, memoryMaxItems: 1,
     review: { verdict: 'needs_revision', summary: 'Missing data', issues: ['Missing structured output'] }, error: 'Model failed' };
 }
-function start(path: string, fetch: any) {
+function start(path: string, fetch: any, intervals?: Array<() => void>) {
   dom = new JSDOM(html, { url: `http://localhost${path}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   dom.window.localStorage.setItem('aeeis.run', `run_${randomUUID()}`);
   dom.window.localStorage.setItem('aeeis.demo-roster', '1');
   dom.window.sessionStorage.setItem('aeeis.token', 'saved-auth-secret');
   dom.window.fetch = fetch;
-  dom.window.setInterval = (() => 1) as any;
+  dom.window.setInterval = ((callback: () => void) => { intervals?.push(callback); return 1; }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
   dom.window.eval(source);
@@ -525,5 +525,65 @@ describe('workbench takeover', () => {
     expect(posts[1]).toEqual({ url: `/api/runs/${run.id}/handback`, body: { note: '第一段我写好了' } });
     await vi.waitFor(() => expect(doc.getElementById('handback-note')).toBeNull());
     expect(control('暂停')).toBeTruthy();
+  });
+
+  it('gives the person the Bot workspace while taken over: list, open, save, run, and a log that survives refresh', async () => {
+    const run = fixture();
+    Object.assign(run, { status: 'paused', resumeStatus: 'running', review: undefined, error: undefined, events: [], takeover: { by: 'owner', at: new Date().toISOString(), actions: [] } });
+    run.approvedTools = ['read', 'write', 'glob', 'shell'].map(id => ({ id, version: '3', capabilities: ['read'] }));
+    run.steps = [{ taskId: 'task', status: 'pending', attempts: 0, observations: [] }];
+    const posts: Array<{ toolId: string; input: Record<string, unknown> }> = [];
+    const outputs: Record<string, unknown> = {
+      glob: { paths: ['notes.md', 'artifacts/report.md'], truncated: false },
+      read: { path: 'notes.md', sha256: 'b'.repeat(64), totalLines: 2, startLine: 1, content: '1: 第一行\n2: 第二行', truncated: false },
+      write: { path: 'notes.md', bytes: 10, sha256: 'c'.repeat(64), created: false },
+      shell: { stdout: 'all good\n', stderr: '', exitCode: 0 },
+    };
+    const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST' && url === `/api/runs/${run.id}/takeover-tool`) {
+        const body = JSON.parse(init.body ?? '{}') as { toolId: string; input: Record<string, unknown> };
+        posts.push(body);
+        const actions = (run.takeover!.actions ??= []);
+        actions.push({ at: new Date().toISOString(), toolId: body.toolId, summary: String(body.input.command ?? body.input.path ?? body.input.pattern ?? ''), status: 'completed', receiptId: `receipt_${actions.length}` });
+        return response({ status: 'completed', output: outputs[body.toolId], actions });
+      }
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/runs/page')) return response({ items: [run] });
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    const intervals: Array<() => void> = [];
+    start(`/runs/${run.id}`, fetch, intervals);
+    const doc = dom.window.document;
+    const workspace = () => doc.getElementById('takeover-workspace')!;
+    const press = (text: string) => [...workspace().querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === text)!.click();
+    await vi.waitFor(() => expect(workspace().hidden).toBe(false));
+    expect(workspace().textContent).toContain('Bot 的工作区');
+    press('列文件');
+    await vi.waitFor(() => expect(workspace().querySelector('.takeover-file-list')?.textContent).toContain('artifacts/report.md'));
+    press('notes.md');
+    const editor = doc.getElementById('takeover-editor') as HTMLTextAreaElement;
+    await vi.waitFor(() => expect(editor.hidden).toBe(false));
+    expect(editor.value).toBe('第一行\n第二行');
+    editor.value = '第一行\n改好的第二行';
+    press('保存');
+    await vi.waitFor(() => expect(posts.at(-1)?.toolId).toBe('write'));
+    expect(posts.at(-1)?.input).toEqual({ path: 'notes.md', content: '第一行\n改好的第二行', expectedHash: 'b'.repeat(64) });
+    (doc.getElementById('takeover-command') as HTMLInputElement).value = 'npm test';
+    workspace().querySelector<HTMLFormElement>('.takeover-command')!.requestSubmit();
+    await vi.waitFor(() => expect(workspace().querySelector('.takeover-output')?.textContent).toContain('all good'));
+    expect(posts.map(post => post.toolId)).toEqual(['glob', 'read', 'write', 'shell']);
+    expect(workspace().querySelectorAll('.takeover-log li')).toHaveLength(4);
+    // A refresh redraws the log but keeps what the person typed.
+    editor.value = '还没保存的改动';
+    run.revision += 1; run.takeover!.actions!.push({ at: new Date().toISOString(), toolId: 'shell', summary: 'ls', status: 'failed', receiptId: 'receipt_x' });
+    const fetched = fetch.mock.calls.length;
+    for (const tick of intervals) tick();
+    await vi.waitFor(() => expect(workspace().querySelectorAll('.takeover-log li')).toHaveLength(5));
+    expect(fetch.mock.calls.length).toBeGreaterThan(fetched);
+    expect((doc.getElementById('takeover-editor') as HTMLTextAreaElement).value).toBe('还没保存的改动');
   });
 });

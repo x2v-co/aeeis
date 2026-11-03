@@ -2191,6 +2191,14 @@ export function buildApp(options: Options) {
     }
     return { dry_run: body.dry_run, scanned: results.length, results };
   });
+  // §7.6: the person who took over a Run works in the Bot's own workspace through the Run's own tool grant.
+  app.post<{ Params: { id: string } }>('/api/runs/:id/takeover-tool', async (request, reply) => {
+    if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
+    const principal = principalOf(request); await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    const { status, output, run } = await options.engine.takeoverTool(request.params.id, request.body, { owner: principal.id, tenantId: principal.tenantId });
+    await notify(run.id);
+    return { status, output, actions: run.takeover?.actions ?? [] };
+  });
   app.post<{ Params: { id: string; action: string } }>('/api/runs/:id/:action', async (request, reply) => {
     const { id, action } = request.params;
     if (action === 'reconcile' && (request.body as { source?: unknown } | null)?.source === 'temporal') {

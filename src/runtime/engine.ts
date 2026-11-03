@@ -71,6 +71,27 @@ export function taskRunIdFor(owner: string, tenantId: string, task: { domainPlan
 }
 const runnable = new Set<RunStatus>(['queued', 'planning', 'running', 'reviewing']);
 const HANDBACK_QUESTION = 'A person took over this work and handed it back with this note. Continue from what they did; do not redo it.';
+/** The Bot's workspace tools a person can use during a takeover. Network fetches stay with the person's own browser. */
+const TAKEOVER_TOOLS = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process'] as const;
+const MAX_TAKEOVER_ACTIONS = 200;
+const clipLine = (text: string, length = 160) => { const flat = text.replace(/\s+/g, ' ').trim(); return flat.length > length ? `${flat.slice(0, length)}…` : flat; };
+function takeoverSummary(toolId: string, input: Record<string, unknown>): string {
+  const text = (key: string) => typeof input[key] === 'string' ? input[key] as string : '';
+  if (toolId === 'shell') return clipLine(text('command'));
+  if (toolId === 'python') return clipLine(text('code'));
+  if (toolId === 'glob') return clipLine(text('pattern') || '**/*');
+  if (toolId === 'grep') return clipLine(text('pattern'));
+  if (toolId === 'process') return clipLine([text('action'), text('command') || text('processId')].filter(Boolean).join(' '));
+  return clipLine(text('path'));
+}
+/** The handback note, followed by what the person did in the Bot's workspace so the Bot does not redo or undo it. */
+export function handbackAnswer(note: string, actions: ReadonlyArray<{ toolId: string; summary: string; status: string }>): string {
+  if (!actions.length) return note;
+  const shown = actions.slice(-40);
+  const lines = shown.map(action => `- ${action.toolId} ${action.summary} → ${action.status}`);
+  const skipped = actions.length - shown.length;
+  return `${note}\n\nWhat they did in your workspace, oldest first${skipped ? ` (${skipped} earlier actions not shown)` : ''}:\n${lines.join('\n')}`;
+}
 const terminalRunStatuses = new Set<RunStatus>(['succeeded', 'failed', 'cancelled']);
 /**
  * Read-only, idempotent tools whose interrupted invocation can be re-issued
@@ -1384,6 +1405,37 @@ export class AgentEngine {
       }
       await this.projectPulseNextActions(run.id);
   }
+  /**
+   * Interaction-design §7.6: while a person has a Run taken over they work in the Bot's own tool session, the Run
+   * machine with its files, shell and background processes. Each call goes through the same gateway and grant the
+   * Bot uses, is logged on the takeover, and the log reaches the Bot with the handback note.
+   */
+  async takeoverTool(runId: string, body: unknown, scope?: Ownership): Promise<{ status: ToolResult['status']; output: unknown; run: AgentRun }> {
+    const input = z.object({ toolId: z.enum(TAKEOVER_TOOLS), input: z.record(z.string(), z.unknown()) }).strict().parse(body);
+    const run = await this.repository.get(runId, scope);
+    if (run.status !== 'paused' || !run.takeover) throw new Conflict('Run is not taken over');
+    if (scope && run.takeover.by !== scope.owner) throw new Conflict('Only the person who took over this Run can use its workspace');
+    if (!this.tools) throw new Conflict('This AEEIS has no tool gateway, so there is no Bot workspace to hand over');
+    const tool = run.approvedTools?.find(item => item.id === input.toolId);
+    if (!tool) throw new Conflict(`This Run was not approved to use ${input.toolId}`);
+    if ((run.takeover.actions?.length ?? 0) >= MAX_TAKEOVER_ACTIONS) throw new Conflict('This takeover reached its action limit; hand it back with a note');
+    const step = run.steps.find(item => item.status !== 'succeeded') ?? run.steps.at(-1)!;
+    const request: ToolInvocation = {
+      toolId: tool.id, toolVersion: tool.version, taskId: step.taskId, purpose: `Takeover by ${run.takeover.by}`, input: input.input,
+      capabilityGrant: `run:${run.id}:${tool.id}`, idempotencyKey: `${run.id}:takeover:${randomUUID()}:${tool.id}`, timeoutMs: 120_000,
+    };
+    let result: ToolResult;
+    try { result = await this.tools.invoke(request); }
+    catch (error) { result = { status: 'unknown', output: { error: error instanceof Error ? error.message : 'Tool call failed' }, receipt: { schemaVersion: 'receipt/1', receiptId: id('receipt'), provider: 'aeeis-runtime', operation: tool.id, requestHash: digest(request), inputRefs: [step.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: now(), status: 'unknown', errorCode: 'transport_or_protocol' } }; }
+    const action = { at: now(), toolId: tool.id, summary: takeoverSummary(tool.id, input.input), status: result.status, receiptId: result.receipt.receiptId };
+    const updated = await this.repository.mutate(runId, current => {
+      // A handback or cancel that landed while the tool ran ends the log; the call itself is still on the record.
+      if (current.takeover?.by === run.takeover!.by && current.takeover.at === run.takeover!.at) (current.takeover.actions ??= []).push(action);
+      event(current, 'takeover.tool', { toolId: action.toolId, summary: action.summary, status: action.status, receiptId: action.receiptId, by: run.takeover!.by });
+    });
+    return { status: result.status, output: result.output, run: updated };
+  }
+
   async command(runId: string, action: string, body: unknown, scope?: Ownership): Promise<AgentRun> {
     const result = await this.repository.mutate(runId, async run => {
       if (action === 'approve') {
@@ -1480,9 +1532,11 @@ export class AgentEngine {
         if (run.status !== 'paused' || !run.takeover) throw new Conflict('Run is not taken over');
         // The note reaches the model the way an answer does: on every unfinished step, or the last one when only review is left.
         const open = run.steps.filter(step => step.status !== 'succeeded');
-        for (const step of open.length ? open : run.steps.slice(-1)) run.answers.push({ taskId: step.taskId, question: HANDBACK_QUESTION, answer: note });
+        const answer = handbackAnswer(note, run.takeover.actions ?? []);
+        for (const step of open.length ? open : run.steps.slice(-1)) run.answers.push({ taskId: step.taskId, question: HANDBACK_QUESTION, answer });
+        const actions = run.takeover.actions?.length ?? 0;
         run.status = run.resumeStatus ?? 'running'; delete run.resumeStatus; delete run.takeover;
-        event(run, 'run.handed_back', { steps: open.length || 1 });
+        event(run, 'run.handed_back', { steps: open.length || 1, actions });
       } else if (action === 'cancel') {
         if (['succeeded', 'cancelled'].includes(run.status)) throw new Conflict('Run already finished');
         run.status = 'cancelled'; delete run.takeover; event(run, 'run.cancelled');
