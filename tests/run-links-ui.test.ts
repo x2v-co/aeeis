@@ -59,14 +59,15 @@ describe('access token', () => {
     await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(run.goal));
     input.value = ' Bearer “abc-123”\u200B ';
     doc.getElementById('connect')!.click();
-    await vi.waitFor(() => expect(dom.window.sessionStorage.getItem('aeeis.token')).toBe('abc-123'));
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.token')).toBe('abc-123'));
+    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBeNull();
     expect(input.value).toBe('abc-123');
     await vi.waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.headers?.authorization === 'Bearer abc-123')).toBe(true));
     await vi.waitFor(() => expect((doc.getElementById('connect') as HTMLButtonElement).disabled).toBe(false));
     input.value = '令牌abc';
     doc.getElementById('connect')!.click();
     expect(doc.getElementById('error')?.textContent).toContain('不能放进请求头');
-    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBe('abc-123');
+    expect(dom.window.localStorage.getItem('aeeis.token')).toBe('abc-123');
     expect(doc.getElementById('error')?.textContent).not.toContain('ISO-8859-1');
   });
   it('drops a saved token that a header cannot carry', async () => {
@@ -75,8 +76,51 @@ describe('access token', () => {
     const doc = dom.window.document;
     await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(run.goal));
     expect(dom.window.sessionStorage.getItem('aeeis.token')).toBeNull();
+    expect(dom.window.localStorage.getItem('aeeis.token')).toBeNull();
     expect((doc.getElementById('token') as HTMLInputElement).value).toBe('');
     expect(doc.getElementById('error')?.textContent).not.toContain('ISO-8859-1');
+  });
+  // The server answers the tokenless request that follows with 401; that must not hide why the token was dropped.
+  it('keeps the bad-token explanation when the next request is refused for a missing token', async () => {
+    const fetch = vi.fn(async (_url: string, init?: { headers?: Record<string, string> }) => {
+      if (init?.headers?.authorization) return response([]);
+      return { ok: false, status: 401, text: async () => JSON.stringify({ error: 'Local access token required' }) };
+    });
+    start('/', fetch, undefined, window => { window.sessionStorage.removeItem('aeeis.token'); window.localStorage.setItem('aeeis.token', '中文令牌'); });
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(doc.getElementById('error')?.textContent).toContain('不能放进请求头');
+    expect(doc.getElementById('error')?.textContent).not.toContain('需要访问令牌');
+  });
+  it('shows a distinct message for a wrong token', async () => {
+    const fetch = vi.fn(async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ error: 'Invalid local access token' }) }));
+    start('/', fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('error')?.textContent).toContain('访问令牌无效'));
+  });
+  it('remembers the token across tabs, carries an older tab-only token over, and forgets both on request', async () => {
+    const run = fixture(), fetch = strictFetch(run);
+    // start() seeds sessionStorage the way an older build stored the token.
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('run-title')?.textContent).toBe(run.goal));
+    expect(dom.window.localStorage.getItem('aeeis.token')).toBe('saved-auth-secret');
+    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBeNull();
+    expect(fetch.mock.calls.some(([, init]) => init?.headers?.authorization === 'Bearer saved-auth-secret')).toBe(true);
+    const local = dom.window.localStorage.getItem('aeeis.token');
+    dom.window.close();
+    // A new tab or the home-screen app starts with empty sessionStorage but the same localStorage.
+    const fresh = strictFetch(run);
+    start(`/runs/${run.id}`, fresh, undefined, window => { window.sessionStorage.clear(); window.localStorage.setItem('aeeis.token', local!); });
+    const next = dom.window.document;
+    await vi.waitFor(() => expect(next.getElementById('run-title')?.textContent).toBe(run.goal));
+    expect((next.getElementById('token') as HTMLInputElement).value).toBe('saved-auth-secret');
+    expect(fresh.mock.calls.some(([, init]) => init?.headers?.authorization === 'Bearer saved-auth-secret')).toBe(true);
+    next.getElementById('forget-token')!.click();
+    expect(dom.window.localStorage.getItem('aeeis.token')).toBeNull();
+    expect(dom.window.sessionStorage.getItem('aeeis.token')).toBeNull();
+    expect((next.getElementById('token') as HTMLInputElement).value).toBe('');
   });
 });
 describe('group chat', () => {

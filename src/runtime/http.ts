@@ -86,6 +86,12 @@ function matches(expected: string | undefined, received: string | undefined): bo
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
   return a.length === b.length && timingSafeEqual(a, b);
 }
+/** Why a request fails the local access token, or undefined when it passes. Telling "no header" apart from
+ * "wrong token" reveals only whether the caller sent a header; the comparison itself stays in `matches`. */
+function localTokenFailure(expected: string, received: string | undefined): string | undefined {
+  if (matches(expected, received)) return undefined;
+  return received ? 'Invalid local access token' : 'Local access token required';
+}
 
 /** Parse an optional bounded collection size at the HTTP edge. Keeping the
  * limit optional preserves the API's existing full-list behavior for callers
@@ -469,15 +475,17 @@ export function buildApp(options: Options) {
     if (request.headers['sec-fetch-site'] === 'cross-site' && !runLinkNavigation) return reply.code(403).send({ error: 'Cross-site access denied' });
     if (route.startsWith('/internal/')) {
       if (!matches(options.workerToken, request.headers.authorization)) return reply.code(401).send({ error: 'Worker authentication required' });
-    } else if (route.startsWith('/api/') && !shareReadRoute && options.token && !matches(options.token, request.headers.authorization)) {
-      return reply.code(401).send({ error: 'Local access token required' });
+    } else if (route.startsWith('/api/') && !shareReadRoute && options.token) {
+      const failure = localTokenFailure(options.token, request.headers.authorization);
+      if (failure) return reply.code(401).send({ error: failure });
     }
     // /health and /readyz are liveness/readiness probes (the container
     // healthcheck and Tailscale Serve call them without credentials): they must
     // stay reachable when an access token is configured. Only /api/ routes and
     // /metrics resolve a principal.
     if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
-      if (options.token && !matches(options.token, request.headers.authorization)) return reply.code(401).send({ error: 'Local access token required' });
+      const tokenFailure = options.token ? localTokenFailure(options.token, request.headers.authorization) : undefined;
+      if (tokenFailure) return reply.code(401).send({ error: tokenFailure });
       const principal = await resolvePrincipal(request.headers.authorization);
       if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
       request.aeeisPrincipal = principal;

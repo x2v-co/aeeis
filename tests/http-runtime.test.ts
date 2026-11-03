@@ -38,10 +38,21 @@ describe('AEEIS HTTP boundary', () => {
     try {
       const missing = await app.inject({ method: 'GET', url: '/api/runs' });
       expect(missing.statusCode).toBe(401);
-      expect(missing.json().error).toContain('Local access token');
+      expect(missing.json().error).toBe('Local access token required');
       const wrong = await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer wrong-token' } });
       expect(wrong.statusCode).toBe(401);
-      expect(wrong.json().error).toContain('Local access token');
+      expect(wrong.json().error).toBe('Invalid local access token');
+      for (const authorization of ['secret-token', 'Bearer ', 'Bearer secret-token-longer']) {
+        const malformed = await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization } });
+        expect(malformed.statusCode).toBe(401);
+        expect(malformed.json().error).toBe('Invalid local access token');
+      }
+      const metricsMissing = await app.inject({ method: 'GET', url: '/metrics' });
+      expect(metricsMissing.statusCode).toBe(401);
+      expect(metricsMissing.json().error).toBe('Local access token required');
+      const metricsWrong = await app.inject({ method: 'GET', url: '/metrics', headers: { authorization: 'Bearer wrong-token' } });
+      expect(metricsWrong.statusCode).toBe(401);
+      expect(metricsWrong.json().error).toBe('Invalid local access token');
       const authorized = await app.inject({ method: 'GET', url: '/api/runs', headers: { authorization: 'Bearer secret-token' } });
       expect(authorized.statusCode).toBe(200);
       expect(authorized.json()).toEqual([]);
