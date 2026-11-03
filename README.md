@@ -288,6 +288,17 @@ OAuth 仅支持机器间 client-credentials。每个 Agent ID 配置 `tokenUrl`�
 
 开发环境可以使用 loopback HTTP；非 loopback endpoint 必须使用 HTTPS。模型调用不会自动重试，传输结果不明会进入 `unknown`，需要显式核查后才能再次调用。每次模型调用都会生成稳定的 `model:<runId>:<callId>` provider 幂等键；reconcile 会复用原调用记录和同一个 key，避免把一次不明结果变成重复计费或重复请求。外部 Agent 返回异步 `accepted` 时，Run 会进入持久化的 `waiting_external`，保留 delegation receipt，只有显式 reconcile 收到最终 Result Envelope 后才继续。服务重启发现未完成的 Tool/Agent 调用时，会恢复为带 Receipt 的 `unknown`，强制走 provider reconcile，不会直接再次发送副作用请求。
 
+## 推送（Web Push / APNs / FCM）
+
+收件箱里要你决定的事（等批准、等回答、群里的阻塞）可以在页面关着时推到设备上。每台设备在设置里单独打开，默认关闭。
+
+- **Web Push**：浏览器和装到主屏幕的网页应用。默认开启，不用配置。VAPID 私钥第一次启动时生成在 `$AEEIS_DATA_DIR/push-vapid.json`，多实例部署时用 `AEEIS_VAPID_PRIVATE_JWK` 给每个实例同一把。`AEEIS_PUSH_SUBJECT` 是推送服务联系你的地址（默认 `mailto:aeeis@localhost`）。`AEEIS_WEB_PUSH=0` 关掉。
+- **APNs**（iPhone 应用）：`AEEIS_APNS_KEY_FILE`（`.p8`）、`AEEIS_APNS_KEY_ID`、`AEEIS_APNS_TEAM_ID`、`AEEIS_APNS_BUNDLE_ID`。
+- **FCM**（Android 应用）：`AEEIS_FCM_SERVICE_ACCOUNT_FILE`，指向 Firebase 服务账号 JSON。
+- **扫描间隔**：`AEEIS_PUSH_INTERVAL_MS`，默认 15000，设为 0 关掉扫描。
+
+APNs 和 FCM 的推送标题和摘要会经过 Apple 和 Google 的服务器；Web Push 的内容是端到端加密的。
+
 ## 主模型预算
 
 创建 Run、Goal Run 或领域任务 Run 时，可传入 `modelBudget: { "tokens": 50000, "moneyUsd": 2 }`，两个字段至少填一个；工作台也提供对应输入。该预算覆盖 Planner、Executor、Reviewer 的模型调用，随 Run 固定保存，调用回执和汇总用量一起落盘。

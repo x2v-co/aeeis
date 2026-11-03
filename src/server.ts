@@ -76,8 +76,10 @@ import { loadFileEnvironment } from './config-secrets.js';
 import { prepareDatabaseSecurity } from './database-security.js';
 import { JsonDeviceSessionRepository, PostgresDeviceSessionRepository, type DeviceSessionRepository } from './device-sessions.js';
 import { JsonUiEventCountStore, PostgresUiEventCountStore, type UiEventCountStore } from './ui-event-counts.js';
+import { ApnsSender, FcmSender, JsonPushStore, PostgresPushStore, PushPump, WebPushSender, loadVapidKeys, type PushChannel, type PushSender, type PushStore } from './push.js';
+import { readFile } from 'node:fs/promises';
 import { FileResourceRegistry, type ResourceRegistry } from './runtime/resources.js';
-import { createPostgresPool } from './adapters/postgres-pool.js';
+import { createPostgresPool, withTenantScope } from './adapters/postgres-pool.js';
 
 // Validate credentials before opening stores and acquiring writer locks.
 loadFileEnvironment();
@@ -265,6 +267,24 @@ const uiEvents: UiEventCountStore = process.env.DATABASE_URL
   ? new PostgresUiEventCountStore(process.env.DATABASE_URL)
   : new JsonUiEventCountStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/ui-event-counts.json`);
 await uiEvents.init?.();
+// §9.4 push to installed web apps and the phone apps. Web Push works with no setup (the VAPID key is generated into the
+// data directory); APNs and FCM turn on only when their credentials are configured.
+const pushStore: PushStore = process.env.DATABASE_URL
+  ? new PostgresPushStore(process.env.DATABASE_URL)
+  : new JsonPushStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/push-subscriptions.json`);
+await pushStore.init?.();
+const pushSenders: Partial<Record<PushChannel, PushSender>> = {};
+let webPushPublicKey: string | undefined;
+if (process.env.AEEIS_WEB_PUSH !== '0') {
+  const vapid = await loadVapidKeys(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/push-vapid.json`, process.env.AEEIS_VAPID_PRIVATE_JWK || undefined);
+  webPushPublicKey = vapid.publicKey;
+  pushSenders.web = new WebPushSender(vapid, process.env.AEEIS_PUSH_SUBJECT ?? 'mailto:aeeis@localhost');
+}
+if (process.env.AEEIS_APNS_KEY_FILE) {
+  const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`${name} is required with AEEIS_APNS_KEY_FILE`); return value; };
+  pushSenders.apns = new ApnsSender({ keyPem: await readFile(process.env.AEEIS_APNS_KEY_FILE, 'utf8'), keyId: required('AEEIS_APNS_KEY_ID'), teamId: required('AEEIS_APNS_TEAM_ID'), bundleId: required('AEEIS_APNS_BUNDLE_ID') });
+}
+if (process.env.AEEIS_FCM_SERVICE_ACCOUNT_FILE) pushSenders.fcm = new FcmSender(JSON.parse(await readFile(process.env.AEEIS_FCM_SERVICE_ACCOUNT_FILE, 'utf8')));
 const taskDispatchRepository = process.env.DATABASE_URL
   ? new PostgresTaskDispatchRepository(process.env.DATABASE_URL)
   : new FileTaskDispatchRepository(process.env.AEEIS_TASK_DISPATCH_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/task-dispatch.json`);
@@ -589,6 +609,7 @@ try {
     sessionEvents,
     deviceSessions,
     uiEvents,
+    push: { store: pushStore, channels: Object.keys(pushSenders) as PushChannel[], ...(webPushPublicKey ? { webPublicKey: webPushPublicKey } : {}) },
     ownedBots,
     actionPolicies,
     routines: routineStore,
@@ -759,6 +780,10 @@ try {
   sandboxReaper?.unref();
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
+  const pushPump = new PushPump(pushStore, pushSenders, scope => withTenantScope(scope.tenantId, () => app.aeeisPushMessages!(scope)), message => console.error(`AEEIS push: ${message}`));
+  const pushIntervalMs = Number(process.env.AEEIS_PUSH_INTERVAL_MS ?? 15_000);
+  const pushTimer = Object.keys(pushSenders).length && pushIntervalMs > 0 ? setInterval(() => { if (!closing) trackBackground(pushPump.tick()); }, pushIntervalMs) : undefined;
+  pushTimer?.unref();
   // Run repositories may provide a low-latency change hint (PostgreSQL
   // LISTEN/NOTIFY or the local in-process adapter). It never advances a
   // cursor and never carries business state: the replayable scanners remain
@@ -917,11 +942,11 @@ try {
     // persist before the process exits (compose stop_grace_period covers it).
     const drainMs = Number(process.env.AEEIS_SHUTDOWN_DRAIN_MS ?? 240_000);
     if (engine && !(await engine.drain(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 240_000))) console.error('AEEIS: shutdown drain timed out; in-flight runs will be recovered on boot');
-    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
+    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(pushTimer); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
+} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
