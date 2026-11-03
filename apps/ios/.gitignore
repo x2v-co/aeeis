@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+AEEIS.xcodeproj/
+DerivedData/
