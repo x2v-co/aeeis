@@ -1,7 +1,7 @@
 ---
 title: 主页与多 Bot 工作室的统一数据流
 date: 2026-11-04
-status: PR2 已实施，其他 PR 待实现（详见第 11 节）
+status: PR1、PR2 已实现；PR3–PR4 待实施（PR2 详见第 11 节）
 relates:
   - 2026-10-21-aeeis-interaction-design.md
   - 2026-10-29-bots-that-act.md
@@ -15,7 +15,7 @@ relates:
 
 产品原则是：**主页是精简界面，工作室是专业界面。用户从主页就能与每个 Bot 对接；需要任务细节、团队协作、操作和审批时进入工作室。两处共用对话、任务、Run 和审批，只是视图不同。** 同一条指令不能因为切换页面而再开一次 Run，同一个批准也不能因为换入口而放宽权限。
 
-核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。本文是设计，不代表功能已完成；本步只新增文档和工作区摘要，没有修改业务代码、创建 migration 或执行数据库变更。
+核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。PR1 已实现 Bot 页直接执行：有效 OwnedBot 与 AEEIS 共用 Conversation → Thread / Run → dispatcher，背景由服务端按 tenant / owner / agentId 读取，审批沿用既有规则；未新增 migration。PR2 已实现（见第 11 节），PR3–PR4 待实施。第 3 节保留基线核查证据，PR1 当前行为见其第 0 项末段。
 
 ## 2. 先区分当前的三个界面
 
@@ -31,7 +31,7 @@ relates:
 
 ### 0. Bot 页不能直接下命令
 
-**现象成立，主要阻断在前端。** `src/ui/app.ts:1260` 的 `conversationSendIntent()` 在 `rosterView() !== 'entry'` 时固定返回 `discuss`；`:5030` 再检查一次这个结果，表单在 `:5077` 使用它。因此普通 Bot 对话即使模型已就绪也只记录讨论。`:1301` 的提示和 `:3118` 的空态直接要求回 AEEIS。
+**基线现象成立，主要阻断在前端（PR1 已修复）。** `src/ui/app.ts:1260` 的 `conversationSendIntent()` 在 `rosterView() !== 'entry'` 时固定返回 `discuss`；`:5030` 再检查一次这个结果，表单在 `:5077` 使用它。因此普通 Bot 对话即使模型已就绪也只记录讨论。`:1301` 的提示和 `:3118` 的空态直接要求回 AEEIS。
 
 其他需一起清理的入口约束：
 
@@ -46,6 +46,8 @@ relates:
 普通用户的明确命令沿用现有用户来源与 `executionReview`；Bot 自主开的 Run 仍为 `origin: agent`，保留现有审批限制。quiet 表示不自主回复，不阻止主人明确派活。代别人发言、只记下、归属纠正、模型不可用、已有活跃 Run 等保护仍保留。材料容量校验应把背景也计入现有最多 20 槽限制，并对服务端保留的来源去重；重试沿用第一次落盘的请求快照。
 
 Bot 页就地显示并操作计划、动作审批和补充问题：复用 `src/ui/app.ts:4229` 的计划卡、`:4262` 的开始/修改/取消按钮、`:4310` 的动作决策与 `:4350` 的批准接口；不是再写一套审批。后台回执不抢焦点；是否自动展开发送后的工作台是展示决策，审批卡不能依赖展开工作台才可用。
+
+**PR1 实施结果：** 有效 OwnedBot 页直接发送与入口页共用执行链；服务端通过 `OwnedBotStore.list(scope)` 后按 agentId 精确匹配，并复核 owner / tenant / retiredAt，演示、外部、缺失和退役身份不能新开本地 Run。名字、角色、背景合成一份 `owned-bot:<id>/profile` 不可信材料。浏览器材料中的 `owned-bot:` 与 `conversation:` 来源空间由服务端保留，先移除冒用项，再注入真实材料并检查总计 20 槽；重试仍使用首次落盘快照。计划、动作与问题卡直接复用，默认执行选项也在 Bot 页可见。交付后自动展开工作台的 entry 限制保留，避免后台完成抢占 Bot 页；Bot 页仍可手动查看运行与结果。不涉及 Room 绑定或数据库变更。
 
 ### 1. 团队页任务板无法拖动改变状态
 
@@ -364,11 +366,11 @@ COMMIT;
 
 ## 8. PR 拆分、依赖、测试与验收
 
-以下是后续实施 PR 的范围，本次只交付文档，不开始 PR1 业务修改。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
+PR1、PR2 已实现，PR3–PR4 待实施。以下保留各 PR 的范围与验收边界。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
 
 ### PR1：设计文档 + Bot 页直接执行（方案 A）
 
-- **文件：** 本文；`src/ui/app.ts`、必要时 `public/index.html`；`src/application/conversation-service.ts`、`src/runtime/http.ts`（注入 Bot 查询依赖）、`src/owned-bots.ts`（只在需要查询接口扩展时）；测试 `tests/conversations-ui.test.ts`、`tests/conversations.test.ts`、`tests/bot-team.test.ts`。不引入 migration，不接 `/team/` 模拟数据。
+- **文件：** 本文；`src/ui/app.ts`、必要时 `public/index.html`；`src/application/conversation-service.ts`、`src/runtime/http.ts`（注入 Bot 查询依赖）、`src/owned-bots.ts`（只在需要查询接口扩展时）；测试 `tests/conversations-ui.test.ts`、`tests/conversations.test.ts`、`tests/bot-team.test.ts`，补 `tests/postgres-bot-conversation-execution.test.ts`；`tests/routines.test.ts`、`tests/run-machine-use.test.ts` 的执行夹具改为真实 OwnedBot，保留例程 / Webhook 来源与机器审批规则。不引入 migration，不接 `/team/` 模拟数据。
 - **内容：** Bot 页发送可开 Run；服务端背景与常驻嘱咐一并注入；默认执行选项可见；审批/问题卡可直接处理；清理互相冲突的文案与旧 quick composer 限制。复用已有路由，不另建 Bot 专用执行引擎。
 - **依赖：** 无，先独立修复最明显的工作阻断。PR2 必须保持这个接口与执行语义；不要在 PR1 偷做 Room 绑定。
 - **测试：** 非 AEEIS Bot 发送 execute 返回同一 Bot 的 Run；模型实际输入含背景/常驻嘱咐且无其他 Bot 内容；旧 runOptions 材料与服务端来源冲突、槽位满、退役/外部 Bot、quiet 明确派活；只记录/纠正/代言不执行；活跃 Run 不重复；未知结果用同一键恢复一次；切换 Bot 不串卡；Bot 页计划与动作批准、拒绝、回答沿用原权限，跨 tenant 拒绝。
@@ -408,7 +410,7 @@ COMMIT;
 
 `.github/workflows/verify.yml:12` 的 quality 运行 `npm run verify`；`:24` 的 postgres 在 PostgreSQL 17 下同样运行 verify，开启 Postgres 阶段。`scripts/verify.mjs:6`–`:16` 包含 typecheck、串行全测、build，并按开关加入 `npm run test:postgres`；`scripts/test-postgres.mjs:8`–`:11` 自动发现 `tests/postgres-*.test.ts`。新增 Postgres 测试必须符合命名，不能本地 skip 就称数据库验证通过。
 
-每个 PR 必须 quality + postgres 都绿；数据库迁移 PR 还要在测试中验证 fresh schema、现有 006 状态升级、重复/并发启动和所述回滚后的兼容行为。本次纯文档检查不代替这些未来门槛，也不宣称已在本步跑过未来测试。
+每个 PR 必须 quality + postgres 都绿；数据库迁移 PR 还要在测试中验证 fresh schema、现有 006 状态升级、重复/并发启动和所述回滚后的兼容行为。PR1 已运行本地 `npm run verify`；当前沙箱拒绝本地端口监听（`listen EPERM 127.0.0.1`）、部分子进程启动和系统目录写入，既有集成测试因此阻断，全量验证未通过，详见实施报告。本机无 PostgreSQL 服务，数据库验证由 PostgreSQL 17 CI 执行。PR2–PR4 仍须各自通过对应门槛。
 
 ## 9. 风险与未决问题
 
@@ -424,7 +426,7 @@ COMMIT;
 
 ## 10. 本步交付与后续完成标准
 
-本步交付此设计与 `/workspace/aeeis-unified/doc-summary.md`，不执行 PR1 业务变更。后续完成统一的标准是：同一 Bot 从两个界面发/读消息引用相同 messageId，任务指向相同 taskId / runId，审批操作落在同一个 Run；重启、重试、迁移与手动拖动后仍满足这个不变量。
+PR1 已实现此设计中的 Bot 页直接执行及对应测试，实施与验证报告见 `/workspace/aeeis-unified/report-pr1.md`。未引入 migration，未绑定 Room；PR2 已实现（见第 11 节），PR3–PR4 待实施。后续完成统一的标准是：同一 Bot 从两个界面发/读消息引用相同 messageId，任务指向相同 taskId / runId，审批操作落在同一个 Run；重启、重试、迁移与手动拖动后仍满足这个不变量。
 
 ## 11. PR2 实施记录（2026-11-04）
 
