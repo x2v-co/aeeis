@@ -42,7 +42,7 @@ export async function dialogueFixture(options: { file?: string; url?: string; st
     dispatcher: { notify: async id => { notified.push(id); }, close: async () => undefined }, principalTokens: {
       alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] }, elsewhere: { id: 'alice', tenantId: 'team-b', roles: ['owner'] }, viewer: { id: 'alice', tenantId: 'team-a', roles: ['agent'] },
     } });
-  const conversations = new ConversationService(aggregates, runs, new ThreadService(runs, engine));
+  const conversations = new ConversationService(aggregates, runs, new ThreadService(runs, engine), undefined, undefined, undefined, bots);
   const service = new BotDialogueService(storage, conversations, aggregates, domain, events, bots);
   conversations.writeGate = (id, scope, work) => service.conversationWrite(id, scope, work);
   const request = async (url: string, body?: object, key?: string, identity = 'alice') => app.inject({ method: body === undefined ? 'GET' : 'POST', url: `/api${url}`, headers: { authorization: `Bearer ${identity}`, ...(key ? { 'idempotency-key': key } : {}) }, ...(body ? { payload: body } : {}) });
