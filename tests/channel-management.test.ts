@@ -172,6 +172,7 @@ it('keeps an archived group history and task board readable while rejecting task
   await domain.updateRoom(room.id, { status: 'archived', expectedRevision: 0 });
   await expect(board.act(room.id, { kind: 'block', conversationId: 'conv_example', taskId: 'task_example', contextManifestId: manifest.id, reason: '停止', idempotencyKey: 'blocked' }, 'owner', 'local')).rejects.toThrow(/归档/);
   await expect(events.create(room.id, { type: 'message', content: '新消息', contextManifestId: manifest.id, idempotencyKey: 'new' }, 'owner', 'local')).rejects.toThrow(/归档/);
-  expect((await board.board(room.id, 'owner', 'local')).cards).toEqual(before.cards);
+  // 归档后卡片仍可读，但 PR3 的 canMove 随归档关闭（不能拖动改列）。
+  expect((await board.board(room.id, 'owner', 'local')).cards).toEqual(before.cards.map(card => ({ ...card, canMove: false })));
   expect(await events.history(room.id, 'owner', 'local')).toHaveLength(1);
 });
