@@ -97,6 +97,37 @@ describe('durable collaboration triggers', () => {
     } finally { await triggerStore.close(); await collaborationRepository.close(); }
   });
 
+  it('lets an event narrow but never widen the policy execution boundary', async () => {
+    const collaborationRepository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-trigger-boundary-collab-')));
+    const triggerStore = new FileCollaborationTriggerStore(await mkdtemp(join(tmpdir(), 'aeeis-trigger-boundary-store-')));
+    await collaborationRepository.init(); await triggerStore.init();
+    try {
+      const collaboration = new CollaborationService(collaborationRepository);
+      const runCompetition = vi.fn(async () => {});
+      const triggers = new CollaborationTriggerService(triggerStore, collaboration, { runCompetition, runDebate: async () => {} });
+      await triggers.createPolicy({
+        id: 'policy.boundary', name: 'Bounded review', enabled: true, eventTypes: ['review.completed'],
+        action: { type: 'competition', participantAgentIds: ['agent.one', 'agent.two'], evaluatorAgentId: 'agent.evaluator', expectedResultType: 'plan/1', maxRounds: 1, maxCost: 0.5, blindEvaluation: true, dispatch: 'create' },
+      }, scope);
+
+      // Agents the event lists beyond the policy grant nothing.
+      const [created] = await triggers.evaluate({ ...event, eventId: 'review:boundary:wide', allowedAgentIds: ['agent.one', 'agent.two', 'agent.three'] }, scope);
+      expect(created!.decision.state).toBe('triggered');
+      const [competition] = await collaboration.listCompetitions(scope);
+      expect(competition!.brief).toMatchObject({ participantAgentIds: ['agent.one', 'agent.two'], maxRounds: 1, maxCost: 0.5, blindEvaluation: true });
+      expect(runCompetition).not.toHaveBeenCalled();
+
+      // Admitting fewer agents than the policy names matches nothing.
+      expect(await triggers.evaluate({ ...event, eventId: 'review:boundary:narrow', allowedAgentIds: ['agent.one'] }, scope)).toEqual([]);
+
+      // Execution settings belong to the policy and are rejected on the event.
+      for (const [field, value] of Object.entries({ participantAgentIds: ['agent.three'], evaluatorAgentId: 'agent.three', dispatch: 'run', maxRounds: 12, maxCost: 100, blindEvaluation: false, cwd: '/', actionPolicy: { allow: ['shell'] }, modelBudget: { tokens: 1 } })) {
+        await expect(triggers.evaluate({ ...event, eventId: `review:boundary:${field}`, [field]: value }, scope)).rejects.toThrow();
+      }
+      expect(await collaboration.listCompetitions(scope)).toHaveLength(1);
+    } finally { await triggerStore.close(); await collaborationRepository.close(); }
+  });
+
   it('does not cross tenant boundaries and ignores events that do not meet policy conditions', async () => {
     const collaborationRepository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-trigger-scope-collab-')));
     const triggerStore = new FileCollaborationTriggerStore(await mkdtemp(join(tmpdir(), 'aeeis-trigger-scope-store-')));

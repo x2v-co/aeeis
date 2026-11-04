@@ -366,6 +366,8 @@ export class CollaborationTriggerService {
     return results;
   }
 
+  /** Events only narrow a policy. Participants, limits, blind evaluation and
+   * dispatch always come from the policy; the strict event schema rejects them. */
   private matches(policy: CollaborationTriggerPolicy, event: CollaborationTriggerEvent): boolean {
     if (!policy.enabled || !policy.eventTypes.includes(event.eventType) || (policy.sources && !policy.sources.includes(event.source))) return false;
     if (policy.riskAtLeast && (!event.risk || riskRank(event.risk) < riskRank(policy.riskAtLeast))) return false;

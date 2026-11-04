@@ -27,6 +27,13 @@ agent-autoloop 是本机运行的事件调度中台：规则把事件派给命�
 
 **完成标准。** `tests/collaboration-triggers.test.ts` 覆盖"事件不能放宽 policy"；一个 Feishu `external.message` 的端到端测试断言其文本只以 material 形式出现在参与者上下文中。
 
+**核实结果（2026-11-04）。**
+
+- 已固定：`tests/collaboration-triggers.test.ts` 的"lets an event narrow but never widen the policy execution boundary"断言参与者、`maxRounds`、`maxCost`、`blindEvaluation`、`dispatch` 都来自 policy；事件携带这些字段或 `cwd`、`actionPolicy`、`modelBudget` 时被 `.strict()` schema 拒绝。第 3 步不需要另写拒绝列表。
+- 修订第 1 步：`allowedAgentIds` 中多出的 ID 保持忽略。参与者只取自 policy，多出的 ID 不授予任何东西；拒绝匹配没有安全收益。
+- `context.classification` 来自事件，但三个来源都不能借此降级：pump 用 `run.privacy ?? 'private'`，Feishu / Hermes ingress 用 Room 冻结的 classification（缺省 `private`），HTTP 调用方必须就是事件 owner。
+- **未解决：** Feishu / Hermes 的 `external.message` 把原始消息正文直接放进新 Competition / Debate 的 `goal`，不可信标记只是 `redactions` 里的一句话。目前参与者都是 `ModelPoolCandidateRunner` / `ModelPoolDebateOrchestrator` 的纯模型调用，没有工具，系统提示要求把 brief 当数据，所以影响有限；但一旦协作接入带工具或外部 Agent（第 6 项），这就是指令注入入口。可选做法：brief 增加 `goalSource: 'policy' | 'event' | 'external'` 并在参与者提示中区分，或把外部正文移到单独的不可信输入字段、`goal` 改用 Room 的目标。需要先决定 Feishu 发起辩论的产品语义。
+
 ## 2. 自动派生链的跳数熔断（P0）
 
 **它的做法。** Agent 回执中产生的事件可以继续派发 Agent，跳数单调递增，跨人工问答和定时跟进都不重置，Agent 无法清零。超过 8 跳时内核记录事件、停止派发、发通知卡。
