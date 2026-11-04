@@ -1,3 +1,6 @@
+import { taskBoardFixture, scope } from './support/task-board.js';
+import { InMemoryTaskBoardStore } from '../src/adapters/task-board-store.js';
+import { InMemorySessionEventRepository } from '../src/session-events.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -114,6 +117,16 @@ describe('channel upgrade projection', () => {
     expect(channelUpgradeCards([open], { manager: false, roomRunIds: new Set(), affectedChannels: 0, now })[0]).toEqual({ kind: 'summary', id: open.id, target: 'skill', version: 's/2', status: 'shadowing', updatedAt: open.updatedAt });
   });
 
+  it('keeps upgrade provenance on the current Run while a board is manually organized',async () => {
+    const f = await taskBoardFixture(new InMemorySessionEventRepository(),new InMemoryTaskBoardStore());
+    try {
+      const candidate = base({ proposalSignalId: `rsi-signal:${f.task.runId}:evt_1` });
+      const project = async () => channelUpgradeCards([candidate],{ manager: true,roomRunIds: new Set((await f.get()).cards.flatMap(card => card.runId ? [card.runId] : [])),affectedChannels: 1,now });
+      expect((await project())[0]).toMatchObject({ fromThisChannel: true,active: false });
+      await f.move('blocked'); expect((await project())[0]).toMatchObject({ fromThisChannel: true,active: false });
+      f.task.latestRunId = 'run_retry'; expect((await project())[0]).toMatchObject({ fromThisChannel: false,active: false });
+    } finally { await f.close(); }
+  });
   it('reads the source Run from the signal id', () => {
     expect(upgradeSourceRunId({ proposalSignalId: 'rsi-signal:run_abc:evt_1' })).toBe('run_abc');
     expect(upgradeSourceRunId({ proposalSignalId: 'manual' })).toBeUndefined();

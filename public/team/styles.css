@@ -27,3 +27,4 @@ textarea { display: block; width: 100%; resize: vertical; border: 1px solid var(
 #taskDetail { border-top: 1px solid var(--line, #ddd); padding-top: 20px; }
 .skip-link { position: absolute; left: -10000px; } .skip-link:focus { left: 12px; top: 8px; }
 @media (max-width: 700px) { .team-shell { grid-template-columns: 1fr; } .team-sidebar { padding: 18px; border-bottom: 1px solid #ddd; } .team-sidebar nav { grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); } .team-main { padding: 20px; } }
+.task-card{display:flex;flex-wrap:wrap;gap:.4rem;padding:.6rem 0;border-bottom:1px solid #ddd}.task-card>[data-task]{width:100%;text-align:left}.task-drag-handle{touch-action:none;cursor:grab;min-width:44px;min-height:44px}.task-card select{max-width:100%;min-height:44px}.board-column{min-height:10rem}.task-card [draggable=true]{cursor:grab}

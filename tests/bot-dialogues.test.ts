@@ -13,7 +13,7 @@ describe('Bot dialogue canonical dataflow', () => {
   it('007 SQL matches init, includes three RLS policies and documented rollback', async () => {
     expect(await readFile('src/adapters/migrations/007-bot-dialogues.sql', 'utf8')).toBe(botDialoguesMigration);
     expect(botDialoguesMigration.match(/WITH CHECK/g)).toHaveLength(3);
-    expect(TENANT_POLICIES).toHaveLength(37);
+    expect(TENANT_POLICIES).toHaveLength(39);
     expect(botDialoguesMigration).toContain('DROP TABLE IF EXISTS aeeis_bot_dialogues');
   });
   it.each(['memory', 'file'])('%s: both views keep message/task/run identity and one Run for the same key', async kind => {

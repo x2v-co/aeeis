@@ -4,6 +4,7 @@
   const $ = id => document.getElementById(id);
   const element = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
   const button = (text, work) => { const node = element('button', text); node.type = 'button'; node.onclick = () => perform(work); return node; };
+  let dragging, boardAttempt, boardReason = '', boardSignature = '';
   let status, bots = [], rooms = [], selected, view, board, busy = false, pending, epoch = 0, refreshing = false;
   const tasks = new Map();
   const columns = { capture: '收下', ready: '待领取', doing: '进行中', blocked: '等你决定 / 阻塞', review: '待验收', done: '完成', failed: '失败 / 取消 / 不可读' };
@@ -64,7 +65,7 @@
     const current = await api('/status');
     const [roster, roomList] = await Promise.all([api('/bots'), api('/rooms')]);
     // A changed principal discards the previous view and unresolved local request.
-    if (status && (status.principal !== current.principal || status.tenantId !== current.tenantId)) { selected = undefined; view = undefined; pending = undefined; $('stream').replaceChildren(); }
+    if (status && (status.principal !== current.principal || status.tenantId !== current.tenantId)) { selected = undefined; view = undefined; pending = undefined; boardAttempt = undefined; $('board').hidden = true; $('taskDetail').hidden = true; $('stream').replaceChildren(); }
     status = current;
     bots = [{ id: 'aeeis', name: 'AEEIS' }, ...roster.filter(bot => !bot.retiredAt)]; rooms = roomList;
     $('connection').textContent = `已连接 · ${status.principal} · ${status.tenantId}${status.modelConfigured ? '' : ' · 模型未配置'}`;
@@ -84,7 +85,7 @@
     if (selected) await refresh();
   }
   function select(room) {
-    epoch++; selected = room; view = undefined; board = undefined; tasks.clear();
+    epoch++; boardSignature = ''; boardReason = ''; boardAttempt = undefined; selected = room; view = undefined; board = undefined; tasks.clear();
     $('channelHead').replaceChildren(element('h1', room.title), element('small', room.direct ? '只有你与这位 Bot · 与主页共用对话' : '真实频道 · 服务端消息'));
     $('stream').replaceChildren(element('p', '正在读取…')); $('board').hidden = true; $('artifacts').hidden = true; $('taskDetail').hidden = true;
     $('content').hidden = false; $('composerInput').value = ''; navigation(); controls();
@@ -112,7 +113,10 @@
       if (loaded.bindingPhase && loaded.bindingPhase !== 'ready') { await readLegacy(current, version); return; }
       if (epoch !== version) return;
       selected.legacyReadOnly = false; view = loaded; selected.botId = loaded.agentId; renderMessages(loaded.messages);
-      tasks.clear(); for (const task of loaded.tasks) tasks.set(task.id, { ...task, conversationId: loaded.id });
+      const loadedBoard = await api(`/rooms/${encodeURIComponent(current.id)}/board`);
+      if (epoch !== version) return;
+      board = loadedBoard;
+      tasks.clear(); for (const task of loadedBoard.cards) tasks.set(`${task.conversationId}:${task.taskId}`, { ...task, id: task.taskId });
     } else {
       const [events, loadedBoard] = await Promise.all([api(`/rooms/${encodeURIComponent(current.id)}/session-events?limit=100&latest=true`), api(`/rooms/${encodeURIComponent(current.id)}/board`)]);
       if (epoch !== version) return;
@@ -121,7 +125,11 @@
     }
     navigation();
     if (!$('board').hidden) renderBoard();
-    if (!$('taskDetail').hidden && $('taskDetail').dataset.run) await showRun($('taskDetail').dataset.run);
+    if (!$('taskDetail').hidden) {
+      const currentTask = tasks.get($('taskDetail').dataset.taskKey);
+      if (currentTask && (currentTask.runId || currentTask.latestRunId || '') !== $('taskDetail').dataset.run) await openTask(currentTask);
+      else if ($('taskDetail').dataset.run) await showRun($('taskDetail').dataset.run);
+    }
     controls();
   }
   async function readLegacy(current, version) {
@@ -184,19 +192,86 @@
       throw error;
     }
   }
+  async function moveTask(task, toColumn, reason, clear = false) {
+    const roomId = selected.id, version = epoch, oldColumn = task.column;
+    const attempt = boardAttempt || { roomId, principal: status.principal, tenantId: status.tenantId, body: {
+      kind: clear ? 'clear_override' : 'move', conversationId: task.conversationId, taskId: task.id,
+      toColumn: clear ? null : toColumn, expectedVersion: task.version,
+      expectedRunId: task.runId || null, expectedRunRevision: task.runRevision ?? null,
+      reason: reason.trim() || '主人整理任务板', source: 'team', idempotencyKey: crypto.randomUUID(),
+    } };
+    if (task.column === 'done' && toColumn === 'review' && !reason.trim()) throw new Error('撤销验收请填写原因。');
+    boardAttempt = attempt; sessionStorage.setItem('aeeis.team.board-pending', JSON.stringify(attempt));
+    task.column = toColumn || task.autoColumn; renderBoard();
+    try {
+      await api(`/rooms/${encodeURIComponent(attempt.roomId)}/board-controls`, attempt.body);
+      boardAttempt = undefined; sessionStorage.removeItem('aeeis.team.board-pending');
+      if (epoch === version) await refresh();
+    } catch (error) {
+      task.column = oldColumn;
+      if (error.status && error.status < 500) { boardAttempt = undefined; sessionStorage.removeItem('aeeis.team.board-pending'); }
+      if (epoch === version) { renderBoard(); await refresh().catch(() => undefined); }
+      throw new Error(`移动未确认，已恢复服务端位置：${error.message}`);
+    }
+  }
   function renderBoard() {
+    if (!boardAttempt) {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem('aeeis.team.board-pending') || 'null');
+        if (saved && saved.roomId === selected.id && saved.principal === status.principal && saved.tenantId === status.tenantId) boardAttempt = saved;
+      } catch { sessionStorage.removeItem('aeeis.team.board-pending'); }
+    }
+    const signature = JSON.stringify({ tasks: [...tasks.values()], attempt: boardAttempt, selected: selected.id });
+    if (signature === boardSignature) return;
+    boardSignature = signature;
     const container = element('div', undefined, 'board-columns');
+    const reason = element('input'); reason.setAttribute('aria-label', '移动原因'); reason.placeholder = '移动原因（撤销验收必填）'; reason.maxLength = 4000; reason.value = boardReason; reason.oninput = () => { boardReason = reason.value; };
+    const move = (task, column, clear = false) => perform(() => moveTask(task, column, reason.value, clear));
     for (const [column, label] of Object.entries(columns)) {
-      const section = element('section', undefined, 'board-column'); section.append(element('h3', label));
+      const section = element('section', undefined, 'board-column'); section.dataset.column = column; section.append(element('h3', label));
+      section.ondragover = event => { event.preventDefault(); };
+      section.ondrop = event => { event.preventDefault(); if (dragging) { const task = dragging; dragging = undefined; void move(task, column); } };
       for (const task of tasks.values()) if (task.column === column) {
-        const card = button(`${task.title} · ${task.status}`, () => openTask(task)); card.dataset.task = task.id; section.append(card);
+        const wrapper = element('article', undefined, 'task-card');
+        const card = button(`${task.title || '不可读任务'} · ${task.status}${task.override ? ' · 手动整理' : ''}`, () => { return openTask(task); }); card.dataset.task = task.id;
+        wrapper.append(card);
+        if (task.canMove && status.roles?.includes('owner') && !selected.legacyReadOnly && selected.status !== 'archived') {
+          card.draggable = true;
+          card.ondragstart = event => { dragging = task; event.dataTransfer?.setData('text/plain', task.id); };
+          card.ondragend = () => { dragging = undefined; };
+          // A separate touch handle leaves card taps and vertical scrolling intact.
+          const handle = element('button', '⠿'); handle.type = 'button'; handle.className = 'task-drag-handle'; handle.setAttribute('aria-label', `拖动 ${task.title}`);
+          let start;
+          handle.onpointerdown = event => { if (event.pointerType === 'mouse') return; start = { x: event.clientX, y: event.clientY }; handle.setPointerCapture?.(event.pointerId); };
+          handle.onpointerup = event => {
+            if (!start) return;
+            const distance = Math.hypot(event.clientX - start.x, event.clientY - start.y); start = undefined;
+            if (distance < 8) return;
+            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-column]');
+            if (target) void move(task, target.dataset.column);
+          };
+          handle.onpointercancel = () => { start = undefined; };
+          const menu = element('select'); menu.setAttribute('aria-label', `移动到 · ${task.title}`); menu.dataset.moveTask = task.id;
+          menu.append(new Option('移动到…', ''));
+          for (const [target, title] of Object.entries(columns)) if (target !== column) menu.append(new Option(title, target));
+          menu.onchange = () => { if (menu.value) void move(task, menu.value); };
+          wrapper.append(handle, menu);
+          if (task.override) wrapper.append(button('恢复自动列', () => moveTask(task, task.autoColumn, reason.value, true)));
+          if (!task.runId && task.column === 'doing') wrapper.append(element('small', '手动进行中 · 尚未执行'));
+        }
+        section.append(wrapper);
       }
       container.append(section);
     }
-    $('board').replaceChildren(element('h2', '任务看板'), element('p', '只读展示服务端自动列。拖动将在后续版本开放。', 'muted'), container);
+    const nodes = [element('h2', '任务看板'), element('p', '拖动或用“移动到”整理；移动不会执行、暂停或批准 Run。', 'muted'), reason];
+    if (boardAttempt) nodes.push(button('用原请求确认上次移动', async () => {
+      await api(`/rooms/${encodeURIComponent(boardAttempt.roomId)}/board-controls`, boardAttempt.body);
+      boardAttempt = undefined; sessionStorage.removeItem('aeeis.team.board-pending'); await refresh();
+    }));
+    $('board').replaceChildren(...nodes, container);
   }
   async function openTask(task) {
-    const panel = $('taskDetail'); panel.hidden = false;
+    const panel = $('taskDetail'); panel.hidden = false; panel.dataset.taskKey = `${task.conversationId}:${task.id}`;
     panel.replaceChildren(element('h2', task.title), element('p', `${task.status} · ${task.id}`));
     const runId = task.runId || task.latestRunId;
     panel.dataset.run = runId || ''; delete panel.dataset.version;

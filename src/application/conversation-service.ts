@@ -1,3 +1,4 @@
+import { runBoardBoundary } from '../task-board-controls.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { visibleConversationMessages, conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
@@ -440,7 +441,7 @@ export class ConversationService implements LifeThreadInbox {
       if (task.latestRunId) {
         try { run = await this.runs.get(task.latestRunId, scope); }
         catch (error) {
-          if (!(error instanceof NotFound)) return { run: undefined, task: { ...task, status: 'unreadable' } };
+          return { run: undefined, task: { ...task, status: 'unreadable' } };
         }
       }
       const memory = taskMemory(run);
@@ -453,7 +454,7 @@ export class ConversationService implements LifeThreadInbox {
         catch { machine = { state: 'unknown', ready: false }; }
       }
       const execution = executionView(run);
-      return { run, task: { ...task, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
+      return { run, task: { ...task, sourceId: conversation.messages.find(message => message.route.taskIds.includes(task.id))?.id ?? task.id, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id, runRevision: run.revision, runBoundary: runBoardBoundary(run) } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const replies = owner ? await this.messageReplies(conversation, scope, loaded.map(item => item.run)) : new Map<string, NonNullable<ReturnType<typeof runReply>>>();

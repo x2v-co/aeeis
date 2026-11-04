@@ -79,6 +79,8 @@ export interface Conversation extends Ownership {
   messages: ConversationMessage[];
 }
 export interface ConversationStore {
+  /** System recovery keyset page; never load every Bot aggregate at once. */
+  scanPage?(after?: string, limit?: number): Promise<{ items: Conversation[]; next?: string }>;
   init(): Promise<void>;
   close(): Promise<void>;
   create(value: Conversation): Promise<void>;

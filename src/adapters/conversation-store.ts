@@ -181,6 +181,11 @@ export class InMemoryConversationStore implements ConversationStore {
     if (!value || !owned(value, scope)) throw new NotFound('Unknown conversation');
     return structuredClone(value);
   }
+  async scanPage(after?: string, limit = 25): Promise<{ items: Conversation[]; next?: string }> {
+    assertScanLimit(limit);
+    const rows = [...this.records.values()].filter(row => !after || row.id > after).sort((a,b) => a.id < b.id ? -1 : 1);
+    const items = structuredClone(rows.slice(0,limit)); return { items,...(rows.length > limit ? { next: items.at(-1)!.id } : {}) };
+  }
   async list(scope: Ownership): Promise<Conversation[]> {
     return [...this.records.values()].filter(value => owned(value, scope)).sort(recentFirst).map(value => structuredClone(value));
   }
@@ -322,6 +327,15 @@ export class FileConversationStore implements ConversationStore {
     const owner = { ...scope };
     return this.operation(() => this.read(id, owner));
   }
+  scanPage(after?: string, limit = 25): Promise<{ items: Conversation[]; next?: string }> {
+    assertScanLimit(limit);
+    return this.operation(async () => {
+      const ids = (await this.ids()).filter(id => !after || id > after).sort();
+      const items: Conversation[] = [];
+      for (const id of ids.slice(0,limit)) items.push(await this.read(id));
+      return { items,...(ids.length > limit ? { next: items.at(-1)!.id } : {}) };
+    });
+  }
   list(scope: Ownership): Promise<Conversation[]> {
     const owner = { ...scope };
     return this.operation(async () => {
@@ -431,6 +445,12 @@ export class PostgresConversationStore implements ConversationStore {
     if (!result.rows[0]) throw new NotFound('Unknown conversation');
     return openConversation(result.rows[0].state);
   }
+  async scanPage(after?: string, limit = 25): Promise<{ items: Conversation[]; next?: string }> {
+    assertScanLimit(limit);
+    const result = await this.pool.query<{ state: Conversation }>('SELECT state FROM aeeis_conversations WHERE id>$1 ORDER BY id LIMIT $2',[after ?? '',limit+1]);
+    const items = await Promise.all(result.rows.slice(0,limit).map(row => openConversation(row.state)));
+    return { items,...(result.rows.length > limit ? { next: items.at(-1)!.id } : {}) };
+  }
   async list(scope: Ownership): Promise<Conversation[]> {
     const owner = { ...scope }, result: Conversation[] = [];
     // The interface returns a full list; keyset pages bound individual SQL
@@ -475,3 +495,5 @@ export class PostgresConversationStore implements ConversationStore {
     }
   }
 }
+
+function assertScanLimit(limit: number): void { if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Invalid conversation scan limit'); }

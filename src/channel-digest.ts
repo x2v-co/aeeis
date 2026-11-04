@@ -86,7 +86,7 @@ export function taskTimeline(input: { board: ChannelBoard; conversationId: strin
   for (const action of input.board.actions) {
     if (taskKey(action) !== key || !action.at) continue;
     const byBot = Boolean(action.automatic);
-    const line = taskActionLine({ schemaVersion: 'channel-task-action/1', kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}) }, action.agentId ? name(action.agentId) : undefined);
+    const line = action.kind === 'move' || action.kind === 'clear_override' ? action.content ?? action.kind : taskActionLine({ schemaVersion: 'channel-task-action/1', kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}) }, action.agentId ? name(action.agentId) : undefined);
     entries.push({ order: action.sequence ?? 0, at: action.at, who: byBot ? '自动记录' : OWNER, text: line, source: 'room', human: !byBot });
   }
   const run = input.run;

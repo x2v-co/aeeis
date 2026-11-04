@@ -1,3 +1,4 @@
+import { InMemoryTaskBoardStore, FileTaskBoardStore, PostgresTaskBoardStore } from '../../src/adapters/task-board-store.js';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { InMemoryBotDialogueStore, FileBotDialogueStore, PostgresBotDialogueStore, type BotDialogueStore } from '../../src/bot-dialogues.js';
@@ -20,6 +21,7 @@ import { BotDialogueService } from '../../src/application/bot-dialogue-service.j
 export const dialogueScope = { owner: 'alice', tenantId: 'team-a' };
 export const dialogueHeaders = { authorization: 'Bearer alice' };
 export async function dialogueFixture(options: { file?: string; url?: string; storage?: BotDialogueStore; replies?: boolean } = {}) {
+  const boardControls = options.url ? new PostgresTaskBoardStore(options.url) : options.file ? new FileTaskBoardStore(join(options.file,'board-relations.json')) : new InMemoryTaskBoardStore(); await boardControls.init();
   const storage = options.storage ?? (options.url ? new PostgresBotDialogueStore(options.url) : options.file ? new FileBotDialogueStore(join(options.file, 'dialogues.json')) : new InMemoryBotDialogueStore());
   const aggregates = options.url ? new PostgresConversationStore(options.url) : options.file ? new FileConversationStore(join(options.file, 'conversations')) : new InMemoryConversationStore();
   const domainStore = options.url ? new PostgresAeeisStore(options.url) : options.file ? new JsonFileStore(join(options.file, 'domain.json')) : new InMemoryStore();
@@ -38,7 +40,7 @@ export async function dialogueFixture(options: { file?: string; url?: string; st
     if (request.system.includes('只讨论，不执行')) return { value: { reply: '这是服务端的真实回复。' } };
     return { value: { summary: '执行计划', nodes: [{ id: 'work', title: '核对', instruction: '核对公开资料', dependsOn: [] }] } };
   } });
-  const app = buildApp({ repository: runs, conversationStore: aggregates, botDialogues: storage, domain, sessionEvents: events, ownedBots: bots, engine,
+  const app = buildApp({ repository: runs, conversationStore: aggregates, botDialogues: storage, taskBoardControls: boardControls, domain, sessionEvents: events, ownedBots: bots, engine,
     dispatcher: { notify: async id => { notified.push(id); }, close: async () => undefined }, principalTokens: {
       alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] }, elsewhere: { id: 'alice', tenantId: 'team-b', roles: ['owner'] }, viewer: { id: 'alice', tenantId: 'team-a', roles: ['agent'] },
     } });
@@ -55,6 +57,6 @@ export async function dialogueFixture(options: { file?: string; url?: string; st
     const say = (content: string, type: 'message' | 'canonical_response' = 'message', actor?: { type: 'agent'; id: string }, refs?: string[]) => events.create(room.id, { goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: randomUUID(), ...(actor ? { actor } : {}), ...(refs ? { evidenceRefs: refs } : {}) }, dialogueScope.owner, dialogueScope.tenantId);
     return { room, goal, manifest, say };
   };
-  return { storage, aggregates, domainStore, memberships, eventStore, bots, bot, domain, events, runs, engine, calls, notified, app, service, conversations, request, ensure, legacy,
-    async close() { await app.aeeisBots?.drain(); await app.close(); await Promise.all([storage.close(), aggregates.close(), domainStore.close(), memberships.close(), eventStore.close(), bots.close(), runs.close()]); } };
+  return { storage, boardControls, aggregates, domainStore, memberships, eventStore, bots, bot, domain, events, runs, engine, calls, notified, app, service, conversations, request, ensure, legacy,
+    async close() { await app.aeeisBots?.drain(); await app.close(); await Promise.all([storage.close(), boardControls.close(), aggregates.close(), domainStore.close(), memberships.close(), eventStore.close(), bots.close(), runs.close()]); } };
 }

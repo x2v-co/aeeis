@@ -141,7 +141,7 @@ describe('频道防噪和持久化摘要', () => {
 
   it('正式 migration 与适配器一致，RLS 清单包含频道设置与私聊绑定', async () => {
     expect(await readFile('src/adapters/migrations/006-channel-noise.sql', 'utf8')).toBe(channelNoiseMigration);
-    expect(TENANT_POLICIES).toHaveLength(37);
+    expect(TENANT_POLICIES).toHaveLength(39);
     expect(TENANT_POLICIES.map(item => item.table)).toContain('aeeis_channel_noise_settings');
   });
 });

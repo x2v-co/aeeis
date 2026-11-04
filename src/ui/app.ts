@@ -91,7 +91,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
 interface ConversationReply { text: string; artifactId: string; truncated?: true }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
@@ -2073,7 +2073,7 @@ const BOARD_COLUMNS: Array<{ id: BoardColumn; title: string }> = [
   { id: 'done', title: '完成' },
 ];
 interface BoardDecision { assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[]; proposedBy?: string; proposalReason?: string; adopted?: boolean; offer?: { to: string; note?: string } }
-interface ChannelBoardCardView { conversationId: string; taskId: string; agentId?: string; ownerId: string; movedFrom?: string; title?: string; status: string; runId?: string; column: string; decision: BoardDecision; chain: string[] }
+interface ChannelBoardCardView { version?: number; runRevision?: number; canMove?: boolean; override?: boolean; autoColumn?: string; conversationId: string; taskId: string; agentId?: string; ownerId: string; movedFrom?: string; title?: string; status: string; runId?: string; column: string; decision: BoardDecision; chain: string[] }
 interface ChannelBoardView {
   cursor: number;
   cards: ChannelBoardCardView[];
@@ -2221,7 +2221,7 @@ function channelLogMark(): string {
   return `${log.length}\u0000${log.at(-1)?.id ?? ''}`;
 }
 function boardBehind(): boolean {
-  return !boardState() || channelLogMark() !== channelBoardSeen;
+  return channelBoardOpen || !boardState() || channelLogMark() !== channelBoardSeen;
 }
 function taskRunId(task: ConversationTaskView): string | undefined {
   return task.runId ?? task.latestRunId;
@@ -2342,7 +2342,7 @@ function renderChannelBoard(): void {
     const owner = decision.released ? '待领取' : (botById(ownerId)?.name ?? (ownerId || '这个人'));
     return [{ view, task, owner, ownerId, decision }];
   });
-  const placed = cards.map(card => ({ ...card, column: boardColumn(card.task.status, card.decision, taskRunId(card.task)) }));
+  const placed = cards.map(card => ({ ...card, column: boardCardFor(card.view.id, card.task.id)?.column ?? boardColumn(card.task.status, card.decision, taskRunId(card.task)) }));
   const failed = placed.filter(card => card.column === 'failed');
   failures.replaceChildren();
   failures.append(document.createTextNode(failed.length ? `有 ${failed.length} 件失败或读不到` : '没有失败或读不到的事'));
@@ -2354,14 +2354,18 @@ function renderChannelBoard(): void {
     current.count += 1;
     loads.set(card.ownerId, current);
   }
-  const wip = [...loads.values()].filter(item => item.count > 3).map(item => `${item.name}进行中已有 ${item.count} 件。先完成或转交。`);
+  const wip = (boardState()?.wip.map(item => ({ name: participantLabel(item.agentId),count: item.count })) ?? [...loads.values()]).filter(item => item.count > 3).map(item => `${item.name}进行中已有 ${item.count} 件。先完成或转交。`);
   if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip].filter(Boolean).join(' ');
   const moreButton = $('channel-board-more');
   if (moreButton) moreButton.hidden = true;
   columns.replaceChildren();
+  const pending = pendingBoardMove();
+  if (pending) columns.append(dashboardButton('用原请求确认上次移动', () => submitBoardMove(pending)));
   for (const column of BOARD_COLUMNS) {
     const section = element('section', '', 'channel-board-column');
     section.dataset.column = column.id;
+    section.addEventListener('dragover', event => event.preventDefault());
+    section.addEventListener('drop', event => { event.preventDefault(); const card = draggedBoardCard; draggedBoardCard = undefined; if (card) void moveChannelCard(card, column.id).catch(error => message(errorMessage(error))); });
     const items = placed.filter(card => card.column === column.id);
     section.append(element('h3', `${column.title} ${items.length}`));
     if (!items.length) section.append(element('small', '这一列还空着'));
@@ -2370,7 +2374,31 @@ function renderChannelBoard(): void {
   }
   if (!cards.length) columns.append(element('p', '这个频道还没有记下的事。'));
 }
-function boardCard(view: ConversationView, task: ConversationTaskView, owner: string, className: string, decision: BoardDecision): HTMLButtonElement {
+let draggedBoardCard: ChannelBoardCardView | undefined;
+const BOARD_MOVE_PENDING = 'aeeis.board.pending';
+interface BoardMoveAttempt { roomId: string; scope: string; body: string }
+function pendingBoardMove(): BoardMoveAttempt | undefined {
+  try { const saved = JSON.parse(sessionStorage.getItem(BOARD_MOVE_PENDING) ?? 'null') as BoardMoveAttempt | null; return saved?.scope === conversationScope && saved.roomId === openGroupId && typeof saved.body === 'string' ? saved : undefined; }
+  catch { sessionStorage.removeItem(BOARD_MOVE_PENDING); return undefined; }
+}
+async function submitBoardMove(attempt: BoardMoveAttempt): Promise<void> {
+  try { await api(`/rooms/${encodeURIComponent(attempt.roomId)}/board-controls`, JSON.parse(attempt.body)); sessionStorage.removeItem(BOARD_MOVE_PENDING); }
+  catch (error) { if (error instanceof ApiError && error.status < 500) sessionStorage.removeItem(BOARD_MOVE_PENDING); throw error; }
+  finally { await loadChannelBoardState(attempt.roomId); renderChannelBoard(); }
+}
+async function moveChannelCard(card: ChannelBoardCardView, toColumn: string | null): Promise<void> {
+  const existing = pendingBoardMove();
+  if (existing) { await submitBoardMove(existing); return; }
+  const roomId = openGroupId;
+  const reason = window.prompt('移动原因（移动不会执行、暂停或批准 Run）', '主人整理任务板');
+  if (!reason?.trim()) return;
+  const attempt = { roomId,scope: conversationScope,body: JSON.stringify({ kind: toColumn === null ? 'clear_override' : 'move',conversationId: card.conversationId,taskId: card.taskId,toColumn,expectedVersion: card.version,expectedRunId: card.runId ?? null,expectedRunRevision: card.runRevision ?? null,reason,source: 'home',idempotencyKey: crypto.randomUUID() }) };
+  sessionStorage.setItem(BOARD_MOVE_PENDING,JSON.stringify(attempt));
+  const oldColumn = card.column; card.column = toColumn ?? card.autoColumn ?? oldColumn; renderChannelBoard();
+  try { await submitBoardMove(attempt); }
+  catch (error) { card.column = oldColumn; renderChannelBoard(); message('移动未确认，已重新读取任务板；可用原请求确认结果。'); throw error; }
+}
+function boardCard(view: ConversationView, task: ConversationTaskView, owner: string, className: string, decision: BoardDecision): HTMLElement {
   const button = element('button', '', className) as HTMLButtonElement;
   button.type = 'button';
   button.dataset.boardTask = task.id;
@@ -2391,7 +2419,30 @@ function boardCard(view: ConversationView, task: ConversationTaskView, owner: st
   const age = taskAgeLabel(task.createdAt);
   if (age) button.append(element('small', age));
   button.addEventListener('click', () => openChannelTask(view, task, owner));
-  return button;
+  const card = boardCardFor(view.id, task.id);
+  if (!card?.canMove) return button;
+  button.draggable = true;
+  button.addEventListener('dragstart', event => { draggedBoardCard = card; event.dataTransfer?.setData('text/plain', task.id); });
+  button.addEventListener('dragend', () => { draggedBoardCard = undefined; });
+  const wrap = element('div', '', 'channel-board-control');
+  const menu = element('select', '') as HTMLSelectElement; menu.setAttribute('aria-label', `移动到 · ${task.title}`);
+  menu.append(new Option('移动到…', ''));
+  for (const column of BOARD_COLUMNS) if (column.id !== card.column) menu.append(new Option(column.title, column.id));
+  menu.addEventListener('change', () => { if (menu.value) void moveChannelCard(card, menu.value).catch(error => message(errorMessage(error))); });
+  const handle = element('button', '⠿', 'board-touch-handle') as HTMLButtonElement; handle.type = 'button'; handle.setAttribute('aria-label', `拖动 ${task.title}`);
+  let start: { x: number; y: number } | undefined;
+  handle.addEventListener('pointerdown', event => { if (event.pointerType !== 'mouse') { start = { x: event.clientX, y: event.clientY }; handle.setPointerCapture?.(event.pointerId); } });
+  handle.addEventListener('pointercancel', () => { start = undefined; });
+  handle.addEventListener('pointerup', event => {
+    if (!start) return;
+    const distance = Math.hypot(event.clientX-start.x, event.clientY-start.y); start = undefined;
+    if (distance < 8) return;
+    const target = document.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>('[data-column]');
+    if (target?.dataset.column) void moveChannelCard(card,target.dataset.column).catch(error => message(errorMessage(error)));
+  });
+  wrap.append(button, handle, menu);
+  if (card.override) wrap.append(dashboardButton('恢复自动列', () => moveChannelCard(card, null)));
+  return wrap;
 }
 function channelOwnerName(view: ConversationView, task: ConversationTaskView): string {
   const cite = channelCitations().find(item => item.conversationId === view.id && item.taskId === task.id);
@@ -4494,6 +4545,7 @@ function renderConversation(): void {
       if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
       const status = document.createElement('td');
       status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
+      if (task.column) status.append(element('small', ({ capture: '收下', ready: '待领取', doing: '进行中', blocked: '阻塞', review: '待验收', done: '已验收', failed: '失败 / 取消' } as Record<string,string>)[task.column] ?? task.column));
       const actions = document.createElement('td');
       const raise = dashboardButton('提高优先级', () => changeConversationPriority(task.id, 'higher'));
       raise.dataset.priority = 'higher'; raise.dataset.boundary = String(index === 0); raise.title = index === 0 ? '已经是最高优先级' : '把这项任务提前一位';

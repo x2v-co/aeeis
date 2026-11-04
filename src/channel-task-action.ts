@@ -1,3 +1,4 @@
+import type { RunStatus } from './runtime/contracts.js';
 import { z } from 'zod';
 
 const citationId = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
@@ -7,15 +8,31 @@ const citationId = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
  * wrote the same meaning as a text prefix; `legacyTaskAction` reads those so
  * existing channels keep their state, but new writes always carry this. */
 export const channelTaskActionKindSchema = z.enum(['claim', 'assign', 'transfer', 'refuse', 'release', 'accept', 'request_changes', 'block', 'unblock', 'cancel', 'restore', 'hand_up', 'propose', 'adopt', 'offer', 'decline']);
-export type ChannelTaskActionKind = z.infer<typeof channelTaskActionKindSchema>;
-export const channelTaskActionSchema = z.object({
+export type ChannelTaskActionKind = z.infer<typeof channelTaskActionKindSchema> | 'move' | 'clear_override';
+const legacyActionSchema = z.object({
   schemaVersion: z.literal('channel-task-action/1'),
   kind: channelTaskActionKindSchema,
   conversationId: citationId,
   taskId: citationId,
   agentId: citationId.optional(),
+  acceptedRunId: z.string().optional(),
+  acceptedRunBoundary: z.number().int().nonnegative().optional(),
+  boardVersion: z.number().int().positive().optional(),
+  observedRunId: z.string().optional(), observedRunRevision: z.number().int().nonnegative().optional(),
   reason: z.string().trim().min(1).max(4000).optional(),
 }).strict();
+export const boardColumnSchema = z.enum(['capture', 'ready', 'doing', 'blocked', 'review', 'done', 'failed']);
+export const boardControlActionSchema = z.object({
+  schemaVersion: z.literal('channel-task-action/2'),
+  kind: z.enum(['move', 'clear_override']), conversationId: citationId, taskId: citationId,
+  toColumn: boardColumnSchema.nullable(), fromColumn: boardColumnSchema, autoColumn: boardColumnSchema,
+  expectedVersion: z.number().int().nonnegative(), version: z.number().int().positive(),
+  expectedRunId: z.string().nullable(), expectedRunRevision: z.number().int().nonnegative().nullable(),
+  runBoundary: z.number().int().nonnegative(), source: z.enum(['home', 'team', 'system']),
+  reason: z.string().trim().min(1).max(4000),
+  agentId: citationId.optional(),
+}).strict();
+export const channelTaskActionSchema = z.union([legacyActionSchema, boardControlActionSchema]);
 export type ChannelTaskAction = z.infer<typeof channelTaskActionSchema>;
 
 /** Kinds a person can write through the task-actions endpoint. `hand_up`,
@@ -31,6 +48,8 @@ export function taskActionLine(action: ChannelTaskAction, agentName?: string): s
   const name = agentName ?? action.agentId ?? '';
   const reason = action.reason ?? '';
   switch (action.kind) {
+    case 'move': return `移动到 ${'toColumn' in action ? action.toColumn : ''}：${reason}`;
+    case 'clear_override': return `恢复自动列：${reason}`;
     case 'claim': return `领取：${name}`;
     case 'assign': return `分派给 ${name}`;
     case 'transfer': return `转交给 ${name}`;
@@ -68,12 +87,12 @@ export interface BoardEvent {
   createdAt?: string | undefined;
 }
 
-export interface BoardTaskView { id: string; title: string; status: string; runId?: string; latestRunId?: string; createdAt?: string }
+export interface BoardTaskView { id: string; title: string; status: string; runId?: string; latestRunId?: string; createdAt?: string; sourceId?: string; runRevision?: number; runBoundary?: number }
 export interface BoardConversationView { id: string; agentId?: string; tasks: BoardTaskView[] }
 
 export type BoardColumn = 'capture' | 'ready' | 'doing' | 'blocked' | 'review' | 'done' | 'failed';
 export interface BoardDecision {
-  assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[];
+  acceptedRunId?: string; acceptedRunBoundary?: number; assigneeId?: string; conflicts: string[]; accepted: boolean; revision?: string; blockedNote?: string; cancelReason?: string; cancelled: boolean; released: boolean; handedUp: boolean; lines: string[];
   /** A Bot proposed this task; it waits for a person until adopted or cancelled. */
   proposedBy?: string; proposalReason?: string; adopted?: boolean;
   /** Handed to someone who has not taken it yet. The task stays with its holder. */
@@ -82,7 +101,7 @@ export interface BoardDecision {
 /** `automatic`: the server wrote this receipt for a Bot (a proposal or a handoff line), not the person. */
 export interface BoardCitation { eventId: string; sequence?: number; conversationId: string; taskId: string; agentId?: string; actorId: string; actorType: string; at?: string; content: string; automatic?: boolean }
 /** `automatic`: the server wrote this action for a Bot (a proposal, a handoff and its outcome), not the person. */
-export interface BoardActionMark { eventId: string; sequence?: number; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string; automatic?: boolean }
+export interface BoardActionMark { content?: string; eventId: string; sequence?: number; kind: ChannelTaskActionKind; conversationId: string; taskId: string; agentId?: string; at?: string; automatic?: boolean }
 /** Records the server writes for the Bots: replies, proposals, handoffs and reassignment. */
 export function automaticKey(key: string | undefined): boolean {
   return /^(bot-|handoff-)/.test(key ?? '');
@@ -99,6 +118,7 @@ export interface BoardCard {
   status: string;
   runId?: string;
   column: BoardColumn;
+  autoColumn?: BoardColumn; version?: number; runRevision?: number; runBoundary?: number; canMove?: boolean; override?: boolean;
   decision: BoardDecision;
   chain: string[];
 }
@@ -107,6 +127,7 @@ export interface ChannelBoard {
   roomId: string;
   /** Sequence of the last event this projection read. */
   cursor: number;
+  version?: string;
   cards: BoardCard[];
   citations: BoardCitation[];
   actions: BoardActionMark[];
@@ -115,7 +136,7 @@ export interface ChannelBoard {
 
 export const WIP_LIMIT = 3;
 const CITATION = /^[a-z][a-z0-9_.-]{1,127}$/;
-const STARTED = new Set(['planning', 'running', 'reviewing']);
+export const RUN_BOARD_COLUMNS = { queued: 'ready', planning: 'doing', running: 'doing', reviewing: 'doing', needs_approval: 'blocked', needs_input: 'blocked', waiting_external: 'blocked', paused: 'blocked', unknown: 'blocked', succeeded: 'review', failed: 'failed', cancelled: 'failed' } as const satisfies Record<RunStatus, BoardColumn>;
 
 export function roomOwnerWrote(event: BoardEvent): boolean {
   const writer = event.recordedBy ?? { id: event.actorId, type: event.actorType };
@@ -154,7 +175,7 @@ export function legacyTaskAction(event: BoardEvent): ChannelTaskAction | undefin
   const agentId = refs.find(id => id !== conversationId && id !== taskId && CITATION.test(id));
   const base = { schemaVersion: 'channel-task-action/1' as const, conversationId, taskId };
   const after = (prefix: string) => content.slice(prefix.length).trim() || undefined;
-  const withReason = (kind: ChannelTaskActionKind, prefix: string): ChannelTaskAction => {
+  const withReason = (kind: z.infer<typeof channelTaskActionKindSchema>, prefix: string): ChannelTaskAction => {
     const reason = after(prefix);
     return { ...base, kind, ...(reason ? { reason } : {}) };
   };
@@ -174,7 +195,7 @@ export function legacyTaskAction(event: BoardEvent): ChannelTaskAction | undefin
 
 /** The action an event carries, if the room owner wrote it. */
 export function eventTaskAction(event: BoardEvent): ChannelTaskAction | undefined {
-  if (event.operation === 'retract' || !roomOwnerWrote(event)) return;
+  if (event.operation === 'retract' || (!roomOwnerWrote(event) && !(event.actorType === 'system' && event.taskAction?.schemaVersion === 'channel-task-action/2' && event.taskAction.source === 'system' && event.taskAction.kind === 'clear_override'))) return;
   return event.taskAction ?? legacyTaskAction(event);
 }
 
@@ -225,6 +246,7 @@ export function applyTaskAction(decision: BoardDecision, action: ChannelTaskActi
       break;
     case 'accept':
       decision.accepted = true;
+      if ('acceptedRunId' in action && action.acceptedRunId) { decision.acceptedRunId = action.acceptedRunId; decision.acceptedRunBoundary = action.acceptedRunBoundary ?? 0; }
       break;
     case 'request_changes':
       decision.revision = action.reason ?? '';
@@ -268,7 +290,7 @@ export function projectDecisions(events: readonly BoardEvent[]): Map<string, Boa
   return decisions;
 }
 
-export function taskRunId(task: BoardTaskView): string | undefined { return task.runId ?? task.latestRunId; }
+export function taskRunId(task: BoardTaskView): string | undefined { return task.latestRunId ?? task.runId; }
 
 export function blockNoteCurrent(status: string, decision: BoardDecision): string | undefined {
   if (!decision.blockedNote) return;
@@ -283,10 +305,9 @@ export function boardColumn(status: string, decision?: BoardDecision, runId?: st
   if (decision?.released && !decision.assigneeId && !runId && (status === 'discussion' || status === 'preparing' || status === 'queued')) return 'ready';
   if (status === 'discussion') return 'capture';
   if (status === 'preparing' || status === 'queued') return 'ready';
-  if (STARTED.has(status)) return 'doing';
-  if (status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused' || status === 'unknown') return 'blocked';
-  if (status === 'succeeded') return decision?.accepted ? 'done' : 'review';
-  return 'capture';
+
+  if (status === 'succeeded') return decision?.accepted && (!runId || decision.acceptedRunId === runId) ? 'done' : 'review';
+  return RUN_BOARD_COLUMNS[status as RunStatus] ?? 'capture';
 }
 
 /** The whole board from the room's events and the conversations they cite.
@@ -320,7 +341,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       if (line) chains.set(key, [...(chains.get(key) ?? []), line]);
       if ((action.kind === 'claim' || action.kind === 'assign' || action.kind === 'transfer') && action.agentId) holders.set(key, action.agentId);
     }
-    if (action) actions.push({ eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}), ...(automaticKey(event.idempotencyKey) ? { automatic: true } : {}) });
+    if (action) actions.push({ content: event.content, eventId: event.id, ...(event.sequence !== undefined ? { sequence: event.sequence } : {}), kind: action.kind, conversationId: action.conversationId, taskId: action.taskId, ...(action.agentId ? { agentId: action.agentId } : {}), ...(event.createdAt ? { at: event.createdAt } : {}), ...(automaticKey(event.idempotencyKey) ? { automatic: true } : {}) });
   }
   const cards: BoardCard[] = [];
   for (const [key, cite] of firstCite) {
@@ -329,7 +350,8 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
     const view = conversations.get(cite.conversationId);
     const task = view?.tasks.find(item => item.id === cite.taskId);
     const status = task?.status ?? 'unreadable';
-    const runId = task ? taskRunId(task) : undefined;
+    const runId = task && status !== 'unreadable' ? taskRunId(task) : undefined;
+    if (runId && (decision.acceptedRunId !== runId || (decision.acceptedRunBoundary ?? 0) !== (task?.runBoundary ?? 0))) { decision.accepted = false; delete decision.acceptedRunId; }
     const home = view?.agentId ?? cite.agentId ?? '';
     const ownerId = decision.released ? '' : (decision.assigneeId ?? cite.agentId ?? view?.agentId ?? '');
     cards.push({
@@ -342,6 +364,8 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       status,
       ...(runId ? { runId } : {}),
       column: boardColumn(status, decision, runId),
+      ...(task?.runRevision !== undefined ? { runRevision: task.runRevision } : {}),
+      ...(task?.runBoundary !== undefined ? { runBoundary: task.runBoundary } : {}),
       decision,
       chain: chains.get(key) ?? [],
     });
