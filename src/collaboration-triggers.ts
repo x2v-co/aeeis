@@ -9,6 +9,7 @@ import { CollaborationService } from './collaboration-service.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import { digestProtocol } from './protocol.js';
+import { externalInputSchema } from './collaboration.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
@@ -35,6 +36,7 @@ export const collaborationTriggerEventSchema = z.object({
   risk: risk.optional(), reviewConfidence: z.number().min(0).max(1).optional(),
   requiredDiversity: z.number().int().min(1).max(12).optional(),
   allowedAgentIds: z.array(id).max(12).optional(), context: triggerContextSchema.optional(),
+  externalInput: externalInputSchema.optional(),
   evidenceRefs: z.array(id).max(100).default([]), occurredAt: isoDate,
 }).strict();
 export type CollaborationTriggerEvent = z.infer<typeof collaborationTriggerEventSchema>;
@@ -333,6 +335,7 @@ export class CollaborationTriggerService {
   async evaluate(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     const event = collaborationTriggerEventSchema.parse(input);
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');
+    if (event.externalInput && event.eventType !== 'external.message') throw new Error('Only external.message events may carry external input');
     const eventScope = { owner: event.owner, tenantId: event.tenantId };
     const policies = await this.store.listPolicies(eventScope); const results: CollaborationTriggerResult[] = [];
     for (const policy of policies) {
@@ -344,8 +347,8 @@ export class CollaborationTriggerService {
       if (!claimed.claimed) { results.push({ policyId: policy.id, decision: claimed.decision, created: false }); continue; }
       try {
         const resource = policy.action.type === 'competition'
-          ? await this.collaboration.createCompetition({ schemaVersion: 'competition-brief/1', taskId: event.taskId, contextVersion: event.contextVersion, goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation, ...(event.context ? { context: event.context } : {}) }, eventScope)
-          : await this.collaboration.createDebate({ taskId: event.taskId, contextVersion: event.contextVersion, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }), ...(event.context ? { context: event.context } : {}) }, eventScope);
+          ? await this.collaboration.createCompetition({ schemaVersion: 'competition-brief/1', taskId: event.taskId, contextVersion: event.contextVersion, goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation, ...(event.context ? { context: event.context } : {}), ...(event.externalInput ? { externalInput: event.externalInput } : {}) }, eventScope)
+          : await this.collaboration.createDebate({ taskId: event.taskId, contextVersion: event.contextVersion, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }), ...(event.context ? { context: event.context } : {}), ...(event.externalInput ? { externalInput: event.externalInput } : {}) }, eventScope);
         let decision = await this.store.updateDecision(decisionId, current => ({ ...current, state: 'triggered', resourceId: resource.id, dispatchState: policy.action.dispatch === 'run' ? 'started' : 'not_requested', completedAt: new Date().toISOString(), reason: `Created ${policy.action.type} from ${event.eventType}` }));
         if (policy.action.dispatch === 'run') {
           try {

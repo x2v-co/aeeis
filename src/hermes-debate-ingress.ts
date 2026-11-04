@@ -155,14 +155,15 @@ export class HermesDebateIngress {
       tenantId: route.tenantId,
       taskId: debate.room.taskId,
       contextVersion: debate.room.contextVersion,
-      goal: message.content,
+      ...(debate.room.goal === undefined ? {} : { goal: debate.room.goal }),
       allowedAgentIds: debate.room.participantAgentIds,
       context: {
         classification: debate.room.context?.classification ?? 'private',
         claims: debate.room.context?.claims ?? [],
         artifactRefs: debate.room.context?.artifactRefs ?? [],
-        redactions: [...(debate.room.context?.redactions ?? []), 'External Hermes message is untrusted input'],
+        redactions: debate.room.context?.redactions ?? [],
       },
+      externalInput: { channel: 'hermes', messageId: message.messageId, senderAgentId: message.speakerAgentId, text: message.content, receivedAt: message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString() },
       evidenceRefs: [],
       occurredAt: message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString(),
     });

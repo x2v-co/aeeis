@@ -40,7 +40,7 @@ describe('Feishu Debate ingress', () => {
     const repository = new FileCollaborationRepository(directory); await repository.init();
     const triggerStore = new FileCollaborationTriggerStore(join(directory, 'triggers')); await triggerStore.init();
     const collaboration = new CollaborationService(repository);
-    const debate = await collaboration.createDebate({ taskId: 'task.feishu.trigger', contextVersion: 'ctx.feishu.trigger', participantAgentIds: ['agent.human'], maxRounds: 2, maxMessagesPerAgent: 2 });
+    const debate = await collaboration.createDebate({ taskId: 'task.feishu.trigger', contextVersion: 'ctx.feishu.trigger', goal: 'Decide the release window', participantAgentIds: ['agent.human'], maxRounds: 2, maxMessagesPerAgent: 2 });
     const scope = { owner: 'owner', tenantId: 'local' };
     const triggers = new CollaborationTriggerService(triggerStore, collaboration);
     await triggers.createPolicy({ id: 'policy.feishu.message', name: 'Message review', enabled: true, eventTypes: ['external.message'], sources: ['feishu'], action: { type: 'debate', participantAgentIds: ['agent.human'], maxRounds: 1, maxMessagesPerAgent: 1 } }, scope);
@@ -50,9 +50,14 @@ describe('Feishu Debate ingress', () => {
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'encrypt-key-123'))).status).toBe('accepted');
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'encrypt-key-123'))).status).toBe('duplicate');
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ eventType: 'external.message', source: 'feishu', eventId: events[1] && (events[1] as { eventId: string }).eventId, taskId: 'task.feishu.trigger', goal: 'Trigger a governed review.' });
-    expect(events[0]).toMatchObject({ allowedAgentIds: ['agent.human'], context: { classification: 'private', redactions: ['External Feishu message is untrusted input'] } });
-    expect(await collaboration.listDebates(scope)).toHaveLength(2);
+    expect(events[0]).toMatchObject({ eventType: 'external.message', source: 'feishu', eventId: events[1] && (events[1] as { eventId: string }).eventId, taskId: 'task.feishu.trigger', goal: 'Decide the release window' });
+    expect(events[0]).toMatchObject({ allowedAgentIds: ['agent.human'], context: { classification: 'private', redactions: [] }, externalInput: { channel: 'feishu', senderAgentId: 'agent.human', text: 'Trigger a governed review.' } });
+    const debates = await collaboration.listDebates(scope);
+    expect(debates).toHaveLength(2);
+    // The message never becomes the new Debate's goal; it stays untrusted input.
+    const triggered = debates.find(item => item.id !== debate.id)!;
+    expect(triggered.room.goal).toBe('Decide the release window');
+    expect(triggered.room.externalInput).toMatchObject({ channel: 'feishu', text: 'Trigger a governed review.' });
     await triggerStore.close();
     await repository.close();
   });

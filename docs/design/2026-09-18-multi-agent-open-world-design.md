@@ -98,9 +98,11 @@ Reviewer 可以返回可选的 `confidence`（0 到 1）。它在 `review.comple
 
 ## Debate Workflow 与飞书群入口
 
+> 2026-11-04 修订：Debate 的目标设计改为参与者用各自知识和工具反馈补齐信息差、达成共识；证据来源扩展到 AEEIS 记录的工具回执。见 [Debate：用各自知识和工具反馈达成共识](2026-11-04-debate-consensus-with-tools.md)。本节描述的是当前实现。
+
 Hermes 的飞书群辩论可以作为交互入口，但群聊只是投影，正式事实来自结构化 Debate Event Log。
 
-入站事件在签名、时间窗、群路由和发送者映射通过后，先以带 provenance 的 Debate message 持久化，再通过受控的 `external.message` Trigger Event 回调 Trigger Service。回调使用 `feishu:<chat/event hash>` 作为稳定 event ID，因此 Feishu 重试只会重放幂等决策；消息正文作为不可信 goal/context 输入，不能自行获得 AEEIS 权限或 evidence claim。Trigger 失败时 webhook 保持失败，让 Feishu 重试，Debate message 和 Trigger Decision 各自通过幂等键收敛。
+入站事件在签名、时间窗、群路由和发送者映射通过后，先以带 provenance 的 Debate message 持久化，再通过受控的 `external.message` Trigger Event 回调 Trigger Service。回调使用 `feishu:<chat/event hash>` 作为稳定 event ID，因此 Feishu 重试只会重放幂等决策；消息正文只作为单独的不可信 `externalInput` 传入，新协作的 goal 取自 Room 目标，正文不能自行获得 AEEIS 权限或 evidence claim。Trigger 失败时 webhook 保持失败，让 Feishu 重试，Debate message 和 Trigger Decision 各自通过幂等键收敛。
 
 Debate Room 包含：
 

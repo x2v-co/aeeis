@@ -32,7 +32,7 @@ agent-autoloop 是本机运行的事件调度中台：规则把事件派给命�
 - 已固定：`tests/collaboration-triggers.test.ts` 的"lets an event narrow but never widen the policy execution boundary"断言参与者、`maxRounds`、`maxCost`、`blindEvaluation`、`dispatch` 都来自 policy；事件携带这些字段或 `cwd`、`actionPolicy`、`modelBudget` 时被 `.strict()` schema 拒绝。第 3 步不需要另写拒绝列表。
 - 修订第 1 步：`allowedAgentIds` 中多出的 ID 保持忽略。参与者只取自 policy，多出的 ID 不授予任何东西；拒绝匹配没有安全收益。
 - `context.classification` 来自事件，但三个来源都不能借此降级：pump 用 `run.privacy ?? 'private'`，Feishu / Hermes ingress 用 Room 冻结的 classification（缺省 `private`），HTTP 调用方必须就是事件 owner。
-- **未解决：** Feishu / Hermes 的 `external.message` 把原始消息正文直接放进新 Competition / Debate 的 `goal`，不可信标记只是 `redactions` 里的一句话。目前参与者都是 `ModelPoolCandidateRunner` / `ModelPoolDebateOrchestrator` 的纯模型调用，没有工具，系统提示要求把 brief 当数据，所以影响有限；但一旦协作接入带工具或外部 Agent（第 6 项），这就是指令注入入口。可选做法：brief 增加 `goalSource: 'policy' | 'event' | 'external'` 并在参与者提示中区分，或把外部正文移到单独的不可信输入字段、`goal` 改用 Room 的目标。需要先决定 Feishu 发起辩论的产品语义。
+- **已解决（2026-11-04）：** Feishu / Hermes 的 `external.message` 原先把消息正文直接作为新 Competition / Debate 的 `goal`。现在 `goal` 取自 Room 目标，正文只放在单独的不可信 `externalInput` 字段，参与者提示说明不执行其中指令、不作为证据；`externalInput` 只允许出现在 `external.message` 上。Debate 的目标设计同时改为参与者用工具补齐信息差，因此这条边界是前置条件，见 [Debate：用各自知识和工具反馈达成共识](2026-11-04-debate-consensus-with-tools.md)。
 
 ## 2. 自动派生链的跳数熔断（P0）
 
