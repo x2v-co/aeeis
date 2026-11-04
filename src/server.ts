@@ -392,7 +392,7 @@ try {
   if (process.env.AEEIS_FEISHU_EVENT_ENCRYPT_KEY) {
     const routes = process.env.AEEIS_FEISHU_DEBATE_ROUTES ? z.array(feishuDebateRouteSchema).max(100).parse(JSON.parse(process.env.AEEIS_FEISHU_DEBATE_ROUTES)) : [];
     const senderAgentIds = process.env.AEEIS_FEISHU_SENDER_AGENTS ? z.record(z.string().min(1).max(500), z.string().min(1).max(128)).parse(JSON.parse(process.env.AEEIS_FEISHU_SENDER_AGENTS)) : {};
-    feishuDebateIngress = new FeishuDebateIngress({ collaboration, routes, senderAgentIds, ...(channelIdentityResolver ? { channelIdentityResolver } : {}), encryptKey: process.env.AEEIS_FEISHU_EVENT_ENCRYPT_KEY, onTrigger: event => collaborationTriggers.evaluate(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined), ...(process.env.AEEIS_FEISHU_VERIFICATION_TOKEN ? { verificationToken: process.env.AEEIS_FEISHU_VERIFICATION_TOKEN } : {}) });
+    feishuDebateIngress = new FeishuDebateIngress({ collaboration, routes, senderAgentIds, ...(channelIdentityResolver ? { channelIdentityResolver } : {}), encryptKey: process.env.AEEIS_FEISHU_EVENT_ENCRYPT_KEY, onTrigger: event => collaborationTriggers.evaluateExternalMessage(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined), ...(process.env.AEEIS_FEISHU_VERIFICATION_TOKEN ? { verificationToken: process.env.AEEIS_FEISHU_VERIFICATION_TOKEN } : {}) });
   }
   if (process.env.AEEIS_FEISHU_LIFE_ROUTES) {
     if (!process.env.AEEIS_FEISHU_EVENT_ENCRYPT_KEY) throw new Error('AEEIS_FEISHU_LIFE_ROUTES requires AEEIS_FEISHU_EVENT_ENCRYPT_KEY');
@@ -403,7 +403,7 @@ try {
     const routes = process.env.AEEIS_HERMES_DEBATE_ROUTES ? z.array(hermesDebateRouteSchema).max(100).parse(JSON.parse(process.env.AEEIS_HERMES_DEBATE_ROUTES)) : [];
     const senderAgentIds = process.env.AEEIS_HERMES_SENDER_AGENTS ? z.record(z.string().min(1).max(500), z.string().min(1).max(128)).parse(JSON.parse(process.env.AEEIS_HERMES_SENDER_AGENTS)) : {};
     const signingKeys = z.record(z.string().min(1).max(128), z.string().min(16).max(1000)).parse(JSON.parse(process.env.AEEIS_HERMES_SIGNING_KEYS));
-    hermesDebateIngress = new HermesDebateIngress({ collaboration, routes, senderAgentIds, ...(channelIdentityResolver ? { channelIdentityResolver } : {}), signingKeys, onTrigger: event => collaborationTriggers.evaluate(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined) });
+    hermesDebateIngress = new HermesDebateIngress({ collaboration, routes, senderAgentIds, ...(channelIdentityResolver ? { channelIdentityResolver } : {}), signingKeys, onTrigger: event => collaborationTriggers.evaluateExternalMessage(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined) });
   }
   let signingKeys: Record<string, string> = {};
   if (process.env.AEEIS_AGENT_SIGNING_KEYS) {

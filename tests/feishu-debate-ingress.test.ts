@@ -45,7 +45,7 @@ describe('Feishu Debate ingress', () => {
     const triggers = new CollaborationTriggerService(triggerStore, collaboration);
     await triggers.createPolicy({ id: 'policy.feishu.message', name: 'Message review', enabled: true, eventTypes: ['external.message'], sources: ['feishu'], action: { type: 'debate', participantAgentIds: ['agent.human'], maxRounds: 1, maxMessagesPerAgent: 1 } }, scope);
     const events: unknown[] = [];
-    const ingress = new FeishuDebateIngress({ collaboration, routes: [{ chatId: 'oc.trigger', debateId: debate.id }], senderAgentIds: { ou_sender: 'agent.human' }, encryptKey: 'encrypt-key-123', onTrigger: async event => { events.push(event); await triggers.evaluate(event, scope); }, now: () => 1_700_000_000 });
+    const ingress = new FeishuDebateIngress({ collaboration, routes: [{ chatId: 'oc.trigger', debateId: debate.id }], senderAgentIds: { ou_sender: 'agent.human' }, encryptKey: 'encrypt-key-123', onTrigger: async event => { events.push(event); await triggers.evaluateExternalMessage(event, scope); }, now: () => 1_700_000_000 });
     const body = JSON.stringify({ header: { event_type: 'im.message.receive_v1', event_id: 'evt.trigger.1' }, event: { message: { chat_id: 'oc.trigger', message_id: 'om.trigger.1', content: JSON.stringify({ text: 'Trigger a governed review.' }) }, sender: { sender_id: { open_id: 'ou_sender' } } } });
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'encrypt-key-123'))).status).toBe('accepted');
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'encrypt-key-123'))).status).toBe('duplicate');
@@ -71,9 +71,12 @@ describe('Feishu Debate ingress', () => {
     const scope = { owner: 'owner', tenantId: 'local' };
     const triggers = new CollaborationTriggerService(triggerStore, collaboration);
     await triggers.createPolicy({ id: 'policy.feishu.unauthorized', name: 'Must be rejected', enabled: true, eventTypes: ['external.message'], sources: ['feishu'], action: { type: 'debate', participantAgentIds: ['agent.admitted', 'agent.unauthorized'], maxRounds: 1, maxMessagesPerAgent: 1 } }, scope);
-    const ingress = new FeishuDebateIngress({ collaboration, routes: [{ chatId: 'oc.admission', debateId: debate.id }], senderAgentIds: { ou_sender: 'agent.admitted' }, encryptKey: 'encrypt-key-123', onTrigger: async event => { await triggers.evaluate(event, scope); }, now: () => 1_700_000_000 });
+    const events: unknown[] = [];
+    const ingress = new FeishuDebateIngress({ collaboration, routes: [{ chatId: 'oc.admission', debateId: debate.id }], senderAgentIds: { ou_sender: 'agent.admitted' }, encryptKey: 'encrypt-key-123', onTrigger: async event => { events.push(event); await triggers.evaluateExternalMessage(event, scope); }, now: () => 1_700_000_000 });
     const body = JSON.stringify({ header: { event_type: 'im.message.receive_v1', event_id: 'evt.admission.1' }, event: { message: { chat_id: 'oc.admission', message_id: 'om.admission.1', content: JSON.stringify({ text: 'Do not widen admission.' }) }, sender: { sender_id: { open_id: 'ou_sender' } } } });
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-admission', 'encrypt-key-123'))).status).toBe('accepted');
+    // The Room has no goal, so the event carries a fixed one rather than the message text.
+    expect(events).toMatchObject([{ goal: `Respond to the external Feishu message in ${debate.id}`, externalInput: { text: 'Do not widen admission.' } }]);
     expect(await collaboration.listDebates(scope)).toHaveLength(1);
     await triggerStore.close();
     await repository.close();
