@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -73,7 +74,11 @@ describe('durable collaboration service', () => {
       expect(senders).toEqual(['external.sender', 'external.sender', 'external.sender']);
       expect((await service.getEvaluationView(created.id)).brief.externalInput!.senderAgentId).toBe('external.sender');
       // The stored record keeps the real sender for audit.
-      expect((await service.getCompetition(created.id)).brief.externalInput!.senderAgentId).toBe('agent.one');
+      const stored = await service.getCompetition(created.id);
+      expect(stored.brief.externalInput!.senderAgentId).toBe('agent.one');
+      // Attempt hashes describe the brief the candidate actually received.
+      const sentBrief = { ...stored.brief, externalInput: { ...stored.brief.externalInput!, senderAgentId: 'external.sender' } };
+      for (const attempt of stored.attempts) expect(attempt.inputHash).toBe(createHash('sha256').update(JSON.stringify({ brief: sentBrief, participantAgentId: attempt.participantAgentId })).digest('hex'));
     } finally { await repository.close(); }
   });
 

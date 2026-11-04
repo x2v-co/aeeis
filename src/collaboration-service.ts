@@ -655,7 +655,9 @@ export class CollaborationService {
         if (before.attempts.some(item => ['started', 'unknown'].includes(item.state))) return before;
         if (existing?.state === 'failed' || existing?.state === 'reconciled') continue;
         const attemptId = `attempt_${randomUUID()}`;
-        const inputHash = createHash('sha256').update(JSON.stringify({ brief: before.brief, participantAgentId })).digest('hex');
+        // Hash what the candidate actually receives, as the evaluator attempt does.
+        const candidateBrief = withAnonymousSender(before.brief);
+        const inputHash = createHash('sha256').update(JSON.stringify({ brief: candidateBrief, participantAgentId })).digest('hex');
         const startedAt = new Date().toISOString();
         assertCollaborationBudget(before.brief.modelBudget, competitionCalls(before), true);
         const global = await this.reserveGlobal('competition', idValue, `participant:${participantAgentId}`, scope, startedAt);
@@ -678,7 +680,7 @@ export class CollaborationService {
         }, scope);
         if (!reserved) return this.repository.getCompetition(idValue, scope);
         try {
-          const candidate = resultEnvelopeSchema.parse(await runner.run(withAnonymousSender(before.brief), { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
+          const candidate = resultEnvelopeSchema.parse(await runner.run(candidateBrief, { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
           if (candidate.agentId !== participantAgentId || candidate.taskId !== before.brief.taskId || candidate.contextVersion !== before.brief.contextVersion || candidate.resultType !== before.brief.expectedResultType) throw new Error('Candidate result is not bound to the competition brief');
           await this.repository.mutateCompetition(idValue, record => {
             const attempt = record.attempts.find(item => item.id === attemptId);
