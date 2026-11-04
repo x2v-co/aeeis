@@ -70,7 +70,7 @@ export const TENANT_POLICIES: ReadonlyArray<{ table: string; using: string }> = 
   ...['aeeis_conversations', 'aeeis_session_events', 'aeeis_run_events', 'aeeis_threads', 'aeeis_routines', 'aeeis_routine_deliveries', 'aeeis_reminders',
     'aeeis_action_policies', 'aeeis_owned_bots', 'aeeis_device_sessions', 'aeeis_ui_event_counts', 'aeeis_push_subscriptions', 'aeeis_push_seen', 'aeeis_room_memberships', 'aeeis_task_dispatches', 'aeeis_projection_events',
     'aeeis_competitions', 'aeeis_debates', 'aeeis_collaboration_trigger_policies', 'aeeis_collaboration_trigger_decisions', 'aeeis_global_budget_accounts',
-    'aeeis_project_source_checkpoints', 'aeeis_channel_noise_settings'].map(table => ({ table, using: visible('tenant_id') })),
+    'aeeis_project_source_checkpoints', 'aeeis_channel_noise_settings', 'aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations'].map(table => ({ table, using: visible('tenant_id') })),
   ...['aeeis_rooms', 'aeeis_memories', 'aeeis_context_manifests'].map(table => ({ table, using: visible("COALESCE(tenant_id, 'local')") })),
   ...['aeeis_runs', 'aeeis_goals'].map(table => ({ table, using: visible("COALESCE(state->>'tenantId', 'local')") })),
   // Knowledge without a tenant is shared by the installation.

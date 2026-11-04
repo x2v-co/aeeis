@@ -4310,3 +4310,22 @@ describe('频道防噪设置和摘要卡', () => {
     expect(saved).toEqual({ mode: 'lively', digestMinutes: 25, quietHours: { start: '23:00', end: '07:00', timeZone: 'Asia/Singapore' } });
   });
 });
+
+
+describe('canonical Bot dialogue gateway', () => {
+  it('resolves the homepage Bot through the same Room binding and preserves canonical message/task/run ids', async () => {
+    const view = { ...fixture(), agentId: 'aeeis', messages: [{ id: 'same-message', role: 'user', text: '工作室留下的消息', createdAt: date, route: { status: 'general', reason: 'unassigned', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } }] };
+    const h = harness(view as any, { handler: url => {
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true, botDialogueRouting: true });
+      if (url === '/api/bots/aeeis/dialogue') return response({ roomId: 'room_same', conversationId: view.id, revision: view.revision, bindingVersion: 2 });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/bots/aeeis/dialogue')).toBe(true));
+    expect(el('conversation-messages').textContent).toContain('工作室留下的消息');
+    expect(h.posts.filter(post => post.url === '/api/conversations')).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.includes('/session-events'))).toHaveLength(0);
+    expect(view.tasks[1]!.runId).toBe(runId);
+  });
+});

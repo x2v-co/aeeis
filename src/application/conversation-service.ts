@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
+import { visibleConversationMessages, conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
 import { BrainAccessDenied, brainClaimInputSchema, type BrainClaim, type GovernedBrain } from '../brain.js';
 import type { Ownership, Principal } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
@@ -364,6 +364,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 }
 
 export class ConversationService implements LifeThreadInbox {
+  writeGate?: <T>(id: string, scope: Ownership, work: () => Promise<T>) => Promise<T>;
   constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
@@ -415,7 +416,18 @@ export class ConversationService implements LifeThreadInbox {
       return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}), ...(standingInstruction ? { hasStandingInstruction: true } : {}) };
     }));
   }
-  async get(id: string, scope: Ownership, actor?: Principal) { return this.view(await this.store.get(id, scope), scope, actor); }
+  async get(id: string, scope: Ownership, actor?: Principal, before?: string) {
+    const conversation = await this.store.get(id, scope);
+    if (before) {
+      const index = conversation.messages.findIndex(message => message.id === before);
+      if (index < 0) throw new NotFound('Unknown message cursor');
+      // Revisions are applied before pagination so an older page cannot expose retracted text.
+      const visible = visibleConversationMessages(conversation.messages);
+      const boundary = visible.findIndex(message => message.id === before);
+      conversation.messages = visible.slice(0, boundary < 0 ? index : boundary);
+    }
+    return this.view(conversation, scope, actor);
+  }
 
   private ownerActor(actor: Principal | undefined, scope: Ownership): actor is Principal {
     return Boolean(actor && actor.id === scope.owner && actor.tenantId === scope.tenantId && actor.roles.includes('owner'));
@@ -449,7 +461,7 @@ export class ConversationService implements LifeThreadInbox {
     const storedSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
     const comparisons = this.ownerActor(actor, scope) ? await this.readTaskComparisons(conversation, scope, actor, storedSettings) : undefined;
     const taskSettings = storedSettings || comparisons?.length ? { skills: storedSettings?.skills ?? [], models: storedSettings?.models ?? [], ...(comparisons?.length ? { comparisons } : {}) } : undefined;
-    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: conversation.messages.slice(-100).map(message => { const reply = message.execution ? replies.get(message.execution.runId) : undefined; return { ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message), ...(reply ? { reply } : {}) }; }), hasEarlierMessages: conversation.messages.length > 100 });
+    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: visibleConversationMessages(conversation.messages).slice(-100).map(message => { const reply = message.execution ? replies.get(message.execution.runId) : undefined; return { ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message), ...(reply ? { reply } : {}) }; }), hasEarlierMessages: visibleConversationMessages(conversation.messages).length > 100 });
   }
   /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
   private async readPractice(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ claimId: string; text: string; runId: string; evidenceRefs: string[] } | undefined> {
@@ -906,6 +918,10 @@ export class ConversationService implements LifeThreadInbox {
   }
 
   async post(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean, actor?: Principal, source?: ConversationMessageSource) {
+    const write = () => this.postUnchecked(id, input, scope, keyInput, canExecute, actor, source);
+    return this.writeGate ? this.writeGate(id, scope, write) : write();
+  }
+  private async postUnchecked(id: string, input: unknown, scope: Ownership, keyInput: unknown, canExecute: boolean, actor?: Principal, source?: ConversationMessageSource) {
     const body = messageSchema.parse(input), key = idempotencyKeySchema.parse(keyInput);
     if (body.intent !== 'execute' && body.runOptions) throw new Conflict('Run options require an explicit execution request');
     const keyHash = followupHash(key), requestHash = followupHash(body);
@@ -939,12 +955,12 @@ export class ConversationService implements LifeThreadInbox {
       if (newTask) { current.tasks.push(newTask); route.taskIds = [newTask.id]; }
       const task = current.tasks.find(task => task.id === route.taskIds[0]);
       const speaker = resolveSpeaker(body.speaker, scope);
-      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', speaker, text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route, ...(source ? { source } : {}) };
+      const message: ConversationMessage = { id: messageId, keyHash, requestHash, role: 'user', intent: body.intent, speaker, text: body.text, createdAt: at, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), route, ...(source ? { source } : {}) };
       if (body.intent === 'execute' && route.status === 'routed' && task) {
         if (task.pendingMessageId) throw new Conflict('Task execution is already being prepared');
         if (!newTask && (task.id !== selected?.id || task.latestRunId !== parent?.id)) throw new Conflict('Task changed while routing; refresh before execution');
         const person = privatePerson(current);
-        const notes = current.messages.filter(item => item.role === 'user' && !item.execution && !item.correctsMessageId && effectiveTasks(current, item).includes(task.id)).slice(-8).map(item => {
+        const notes = visibleConversationMessages(current.messages).filter(item => !(item.source?.kind === 'room' && (item.source.referenceOnly || item.source.operation === 'retract')) && item.role === 'user' && !item.execution && !item.correctsMessageId && effectiveTasks(current, item).includes(task.id)).slice(-8).map(item => {
           const voice = spoken(item, current.owner);
           return { id: item.id, role: voice.role, speakerId: voice.id, ...(person ? { privateWith: { role: 'agent' as const, id: person } } : {}), text: item.text };
         }).reverse();

@@ -1,3 +1,4 @@
+import type { Ownership } from '../security/principal.js';
 import type { ChangeContext } from '../change-audit.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, recentFirst, validateCollectionLimit } from '../adapters/collection-query.js';
 import { randomUUID } from "node:crypto";
@@ -46,6 +47,12 @@ export interface ProjectionIntentSink {
 }
 
 export class AeeisService {
+  roomMutationGate?: <T>(roomId: string, actor: string, tenantId: string, work: () => Promise<T>) => Promise<T>;
+  async ensureDialogueRoomMember(roomId: string, botId: string, scope: Ownership): Promise<void> {
+    if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
+    await this.getRoom(roomId, scope.owner, scope.tenantId);
+    await this.memberships.add(roomId, botId, scope.tenantId, 'agent', scope.owner, new Date().toISOString());
+  }
   get changeAudit() {
     if (!this.store.changeAudit) throw new Error('Memory change audit is not configured');
     return this.store.changeAudit;
@@ -57,6 +64,16 @@ export class AeeisService {
     if (!input.title.trim()) throw new Error('Room title is required');
     const chat = input.description === '私聊' ? 'direct' as const : input.description === '群聊' ? 'group' as const : undefined;
     const room: Room = { id: `room_${randomUUID()}`, owner, tenantId, title: input.title.trim(), ...(input.description === undefined ? {} : { description: input.description }), ...(chat ? { chat } : {}), status: 'active', createdAt: now, updatedAt: now };
+    await this.store.commitRoomCreation(room, this.buildRoomProjectionIntents(room));
+    return room;
+  }
+
+  /** Recoverable internal creation: caller persists this stable address before entering. */
+  async ensureDialogueRoom(id: string, title: string, owner: string, tenantId: string): Promise<Room> {
+    const existing = await this.store.getRoom(id);
+    if (existing) return this.getRoom(id, owner, tenantId);
+    const at = new Date().toISOString();
+    const room: Room = { id, title, owner, tenantId, description: '私聊', chat: 'direct', status: 'active', createdAt: at, updatedAt: at };
     await this.store.commitRoomCreation(room, this.buildRoomProjectionIntents(room));
     return room;
   }
@@ -163,6 +180,10 @@ export class AeeisService {
   }
 
   async addRoomMember(roomId: Id, principalId: string, role: Exclude<RoomMemberRole, 'owner'>, invitedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
+    const write = () => this.addRoomMemberUnchecked(roomId, principalId, role, invitedBy, tenantId, now);
+    return this.roomMutationGate ? this.roomMutationGate(roomId, invitedBy, tenantId, write) : write();
+  }
+  private async addRoomMemberUnchecked(roomId: Id, principalId: string, role: Exclude<RoomMemberRole, 'owner'>, invitedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
     if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
     const room = await this.getRoomForPrincipal(roomId, invitedBy, tenantId);
     const inviterRole = await this.roomRole(room, invitedBy, tenantId);
@@ -220,6 +241,10 @@ export class AeeisService {
   }
 
   async revokeRoomMember(roomId: Id, principalId: string, revokedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
+    const write = () => this.revokeRoomMemberUnchecked(roomId, principalId, revokedBy, tenantId, now);
+    return this.roomMutationGate ? this.roomMutationGate(roomId, revokedBy, tenantId, write) : write();
+  }
+  private async revokeRoomMemberUnchecked(roomId: Id, principalId: string, revokedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
     if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
     const room = await this.getRoomForPrincipal(roomId, revokedBy, tenantId);
     const revokerRole = await this.roomRole(room, revokedBy, tenantId);

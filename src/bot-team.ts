@@ -37,6 +37,8 @@ export interface BotTeamOptions {
   /** One budgeted model call; returns the parsed JSON value. */
   complete(request: { system: string; input: unknown; idempotencyKey: string; maxTokens?: number }, scope: Ownership): Promise<unknown>;
   canExecute: boolean;
+  dialogueRoom?: (room: Room, scope: Ownership) => Promise<boolean>;
+  dialogueSweep?: (room: Room, scope: Ownership) => Promise<void>;
   notifyRun(runId: string, scope: Ownership): Promise<void>;
   handoffMaxTurns?: number;
   now?: () => number;
@@ -131,6 +133,7 @@ export class BotTeam {
   async respond(event: SessionEvent): Promise<void> {
     const scope = { owner: event.owner, tenantId: event.tenantId };
     const room = await this.options.domain.getRoomForPrincipal(event.roomId, event.owner, event.tenantId);
+    if (await this.options.dialogueRoom?.(room, scope)) return;
     const roster = await this.roster(room, scope);
     const responders = await this.responders(event, room, roster);
     if (!responders.length) return;
@@ -353,6 +356,7 @@ export class BotTeam {
 
   /** Catches up after a restart: recent messages with neither a reply nor a failure note, and offers left open. */
   async sweep(room: Room, scope: Ownership): Promise<void> {
+    if (await this.options.dialogueRoom?.(room, scope)) { await this.options.dialogueSweep?.(room, scope); return; }
     if (room.status !== 'active' || room.description === SIDE_THREAD) return;
     const recent = (await this.options.events.pageBefore(room.id, scope.owner, scope.tenantId, 50)).items;
     const cutoff = this.now() - RECENT_MS;

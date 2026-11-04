@@ -1,6 +1,6 @@
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
-import { conversationTaskOrder } from '../conversations.js';
+import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
@@ -11,7 +11,7 @@ interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?:
 interface ThreadRun extends RunSummary { threadSequence: number; privacy?: string; outputExcerpt?: string }
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
-interface RoomSummary { id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
+interface RoomSummary { chat?: 'direct' | 'group'; id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
 interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string; displayName?: string }
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
@@ -100,7 +100,7 @@ interface ConversationMessageView {
   execution?: { runId: string; taskId: string; state: string };
   /** The answer of the Run this message started, once it succeeded. */
   reply?: ConversationReply;
-  source?: { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string } | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
+  source?: ConversationMessageSource;
 }
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
@@ -137,6 +137,7 @@ interface RuntimeStatus {
   projectionSinkHealth?: { ready: boolean; detail?: string } | null;
   routinesConfigured?: boolean; feishuLifeConfigured?: boolean;
   botTeamConfigured?: boolean;
+  botDialogueRouting?: boolean;
   taskSchedulerConfigured: boolean; agentGatewayConfigured: boolean; agentRegistryConfigured: boolean; mode: string; principal?: string; tenantId?: string; roles?: string[];
 }
 interface RunPage { items: RunSummary[]; nextCursor?: string }
@@ -172,6 +173,7 @@ let threadRuns: ThreadRun[] = [];
 let pendingFollowup: { key: string; body: unknown; signature: string } | undefined;
 let followupSubmitting = false;
 let conversationEnabled = false;
+let botDialogueRouting = false;
 let conversationScope = '';
 let conversationEpoch = 0;
 let conversation: ConversationView | undefined;
@@ -1928,6 +1930,8 @@ function lifePersonId(): string {
 }
 function messageSource(item: ConversationMessageView): string {
   if (item.source?.kind === 'channel') return item.source.channel === 'feishu' ? ' · 来自飞书' : ` · 来自 ${item.source.channel}`;
+  if (item.source?.kind === 'room') return ` · 旧私聊历史${item.source.operation === 'retract' ? '（已撤回）' : ''}`;
+  if (item.source?.kind === 'artifact') return ` · 产物草稿：${item.source.title}`;
   if (item.source?.kind === 'routine') return item.source.trigger === 'webhook' ? ' · 例程（Webhook）' : ' · 例程（定时）';
   return '';
 }
@@ -3357,7 +3361,11 @@ async function openLifeThread(agentId: string): Promise<void> {
   try {
     let summary = lifeSummary(agentId);
     let view: ConversationView;
-    if (!summary) view = await api<ConversationView>('/conversations', { title: bot.name, agentId });
+    if (botDialogueRouting && (agentId === 'aeeis' || agentId.startsWith('bot_'))) {
+      const binding = await api<{ conversationId: string }>(`/bots/${encodeURIComponent(agentId)}/dialogue`, {});
+      view = await api<ConversationView>(`/conversations/${encodeURIComponent(binding.conversationId)}`);
+    }
+    else if (!summary) view = await api<ConversationView>('/conversations', { title: bot.name, agentId });
     else if (agentId === 'aeeis' && !summary.agentId) view = await api<ConversationView>('/conversations', { title: 'AEEIS', agentId: 'aeeis', claimId: summary.id });
     else if (conversation && conversation.id === summary.id) view = conversation;
     else view = await api<ConversationView>(`/conversations/${encodeURIComponent(summary.id)}`);
@@ -3593,7 +3601,19 @@ function renderGroups(all: RoomSummary[]): void {
   syncEntrySurface();
 }
 async function openGroup(id: string): Promise<void> {
-  const room = roomSummaries.find(item => item.id === id);
+  let room = roomSummaries.find(item => item.id === id);
+  if (!room && botDialogueRouting) {
+    room = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`);
+    roomSummaries.push(room);
+  }
+  if (botDialogueRouting && room && (room.chat === 'direct' || !room.chat && room.description === '私聊')) {
+    const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`);
+    const bot = members.find(member => member.status === 'active' && (member.principalId === 'aeeis' || member.principalId.startsWith('bot_')));
+    if (bot) {
+      const linked = await api<ConversationView>(`/rooms/${encodeURIComponent(id)}/dialogue`);
+      if (linked.agentId) { await openLifeThread(linked.agentId); return; }
+    }
+  }
   if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
   if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); clearChannelUpgrades(); trackUi('ui.channel.open', id); }
   openGroupId = id;
@@ -3991,6 +4011,7 @@ async function recordRosterHandoff(
   receipt: (title: string) => string,
   mode: 'intake' | 'entry' | 'handoff',
   announce = true,
+  sourceEventId?: string,
 ): Promise<string> {
   const kind = room?.description === '私聊' ? '私聊' : '群聊';
   const roomTitle = room?.title || kind;
@@ -4009,24 +4030,31 @@ async function recordRosterHandoff(
   let handoffError = '';
   let recorded = false;
   try {
-    let target = known;
-    if (!target) {
-      const created = await api<ConversationView>('/conversations', { title: bot.name, agentId: bot.id });
-      if (epoch !== conversationEpoch) return '';
-      rememberLifeSummary(created);
-      target = created;
-    }
-    conversationId = target.id;
-    const expectedRevision = conversation?.id === conversationId ? conversation.revision : target.revision;
     const opensTask = mode !== 'intake';
-    const result = await api<ConversationPost>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
-      text: clipEntryText(`来自${kind}「${roomTitle}」：${text}`, 7000),
-      expectedRevision,
-      ...(opensTask ? { newTask: { title } } : { unassigned: true as const }),
-      focus: 'keep',
-      intent: 'discuss',
-      ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
-    }, 'POST', groupIdempotencyKey());
+    let result: ConversationPost;
+    if (botDialogueRouting) {
+      if (!room?.id || !sourceEventId) throw new Error('缺少频道消息来源，请刷新后重试');
+      result = await api<ConversationPost>(`/rooms/${encodeURIComponent(room.id)}/session-events/${encodeURIComponent(sourceEventId)}/deliver`, { botId: bot.id, kind: mode });
+      conversationId = result.conversation.id;
+    } else {
+      let target = known;
+      if (!target) {
+        const created = await api<ConversationView>('/conversations', { title: bot.name, agentId: bot.id });
+        if (epoch !== conversationEpoch) return '';
+        rememberLifeSummary(created);
+        target = created;
+      }
+      conversationId = target.id;
+      const expectedRevision = conversation?.id === conversationId ? conversation.revision : target.revision;
+      result = await api<ConversationPost>(`/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        text: clipEntryText(`来自${kind}「${roomTitle}」：${text}`, 7000),
+        expectedRevision,
+        ...(opensTask ? { newTask: { title } } : { unassigned: true as const }),
+        focus: 'keep',
+        intent: 'discuss',
+        ...(spoken?.type === 'agent' ? { speaker: { role: 'agent' as const, id: spoken.id } } : {}),
+      }, 'POST', groupIdempotencyKey());
+    }
     taskId = opensTask ? (result.message.route.taskIds.find(item => CITATION_ID.test(item)) ?? '') : '';
     if (epoch === conversationEpoch && result.conversation?.id === conversationId) {
       handoffViews.set(conversationId, result.conversation);
@@ -4072,12 +4100,12 @@ async function submitGroupMessage(event: Event): Promise<void> {
     ...(type === 'message' && spoken ? { actor: spoken } : {}),
     ...(evidenceRefs?.length ? { evidenceRefs } : {}),
   });
-  await postSession('message', text);
+  const sourceEvent = await postSession('message', text) as { id: string };
   if (input) input.value = '';
   let handoffError = '';
   const chosen = selectedHandoffBot();
   const inGroup = room?.description !== '私聊';
-  const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff', announce = true) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode, announce);
+  const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff', announce = true) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode, announce, sourceEvent.id);
   const home = botById('aeeis');
   if (!inGroup) {
     if (mentionsAeeis(text) && home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`, 'entry');
@@ -4607,6 +4635,10 @@ function acceptConversation(view: ConversationView): void {
   // A first load or another conversation never does.
   const before = conversation?.id === view.id ? new Map(conversation.tasks.map(task => [task.id, task.status])) : undefined;
   const finished = before ? view.tasks.find(task => task.status === 'succeeded' && task.runId && !view.messages.some(message => message.execution?.runId === task.runId && message.reply) && before.has(task.id) && !['succeeded', 'failed', 'cancelled', 'discussion', 'unreadable'].includes(before.get(task.id)!)) : undefined;
+  if (conversation?.id === view.id && conversation.revision === view.revision && conversation.messages.length > view.messages.length) {
+    const ids = new Set(view.messages.map(message => message.id));
+    view = { ...view, messages: [...conversation.messages.filter(message => !ids.has(message.id)), ...view.messages], ...(conversation.hasEarlierMessages === undefined ? {} : { hasEarlierMessages: conversation.hasEarlierMessages }) };
+  }
   conversation = view;
   if (finished?.runId && rosterView() === 'entry') void revealFinishedRun(finished.runId).catch(() => undefined);
   rememberLifeSummary(view);
@@ -4614,6 +4646,7 @@ function acceptConversation(view: ConversationView): void {
   renderConversation();
 }
 async function initializeConversations(status: RuntimeStatus): Promise<void> {
+  botDialogueRouting = status.botDialogueRouting === true;
   conversationEnabled = status.conversationRouting === true && !linkedRunId && !linkedThreadId && !readOnlyShare;
   if (!conversationEnabled) { renderConversation(); return; }
   const scope = JSON.stringify([status.mode, status.tenantId ?? '', status.principal ?? '']);
@@ -4627,7 +4660,11 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
     const selectedId = conversation?.id ?? localStorage.getItem(CONVERSATION_SELECTION);
     const selected = list.find(item => item.id === selectedId) ?? list[0];
     if (selected) {
-      const view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
+      let view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
+      if (botDialogueRouting && (view.agentId === 'aeeis' || view.agentId?.startsWith('bot_'))) {
+        const binding = await api<{ conversationId: string }>(`/bots/${encodeURIComponent(view.agentId)}/dialogue`, {});
+        view = await api<ConversationView>(`/conversations/${encodeURIComponent(binding.conversationId)}`);
+      }
       if (epoch !== conversationEpoch) return;
       acceptConversation(view);
       rememberAeeisHome(conversationList, view);
@@ -8727,6 +8764,17 @@ $('new-run').onsubmit = event => {
     })
     .catch(error => { quickRunOutcome = '启动失败，请检查输入'; message(errorMessage(error)); })
     .finally(() => { submit.disabled = false; submit.classList.remove('is-busy'); submit.removeAttribute('aria-busy'); setQuickRunBusy(false, quickRunOutcome); });
+};
+$('conversation-earlier').onclick = () => {
+  if (!conversation?.messages[0] || conversationBusy) return;
+  const id = conversation.id, first = conversation.messages[0].id, epoch = conversationEpoch;
+  conversationBusy = true; updateConversationControls();
+  void api<ConversationView>(`/conversations/${encodeURIComponent(id)}?before=${encodeURIComponent(first)}`).then(page => {
+    if (conversationEpoch !== epoch || conversation?.id !== id) return;
+    if (page.revision !== conversation.revision) throw new Error('对话已更新，请刷新后再读取更早消息');
+    conversation = { ...conversation, messages: [...page.messages, ...conversation.messages], hasEarlierMessages: page.hasEarlierMessages ?? false };
+    renderConversation();
+  }).catch(error => { $('conversation-error').textContent = errorMessage(error); }).finally(() => { if (conversationEpoch === epoch) { conversationBusy = false; updateConversationControls(); } });
 };
 $('answer-form').onsubmit = event => {
   event.preventDefault();

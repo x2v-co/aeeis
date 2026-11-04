@@ -1,7 +1,7 @@
 ---
 title: 主页与多 Bot 工作室的统一数据流
 date: 2026-11-04
-status: 待实现（代码核查与设计）
+status: PR2 已实施，其他 PR 待实现（详见第 11 节）
 relates:
   - 2026-10-21-aeeis-interaction-design.md
   - 2026-10-29-bots-that-act.md
@@ -425,3 +425,18 @@ COMMIT;
 ## 10. 本步交付与后续完成标准
 
 本步交付此设计与 `/workspace/aeeis-unified/doc-summary.md`，不执行 PR1 业务变更。后续完成统一的标准是：同一 Bot 从两个界面发/读消息引用相同 messageId，任务指向相同 taskId / runId，审批操作落在同一个 Run；重启、重试、迁移与手动拖动后仍满足这个不变量。
+
+## 11. PR2 实施记录（2026-11-04）
+
+本分支实现 PR2；PR1 的执行意图闸门、PR3 的拖动与任务控制、PR4 的频道管理不在此处实现。
+
+- `BotDialogueService` 按真实 Bot id 和登录身份解析唯一 Conversation / direct Room。主页通过状态能力 `botDialogueRouting` 使用该绑定，旧 Bot Room 链接按成员身份解析；未部署绑定服务的旧服务仍沿用原 Conversation 协议。`/team/` 已替换为正式 API 界面，不再提供内存业务样例或失败时的演示数据回退。
+- 007 的三表与本文草案一致；存储 init 内嵌同一 SQL，启动在 RLS finalize 之前初始化。当前 `TENANT_POLICIES` 为 **37** 项。关系表只保存 id、阶段、高水位、哈希和恢复元数据，不保存聊天、背景或错误正文。Postgres 使用独立连接池上的 owner 范围 advisory lock；跨适配器副作用前后的 checkpoint 分别持久提交，不能依赖外层锁事务回滚已经落盘的 Conversation。
+- 回填是按 Bot 首次解析触发的受控惰性操作。扫描不使用前端 Room 列表上限，SessionEvent 分页为 200；只接受同 tenant / owner、唯一有效 Bot 对方、无额外历史成员且所有历史 audience 恰为主人与该 Bot 的真实私聊。显式 `chat=group` 优先于可编辑 description。受众冲突置为 `conflict`，保留旧 Room 并阻止目标 Conversation 的新消息，不以名字、文本相似度或静态演示身份推断归属。多个未认领 AEEIS 历史也拒绝猜测。主人可以用 `GET /api/bot-dialogues` 检查仅含 id、数量和冲突类型的整理清单。
+- 迁移只调用聚合 import，不调用 post、模型、审批或 dispatcher。源事件 id/hash/actor/time、reply 与追加的 revise/retract 来源保存在 canonical Conversation，原 SessionEvent 审计不变。视图和后续执行上下文应用撤回；原任务动作、决策及 Run 引用按历史引用卡保留，不重新执行。引用卡不会凭历史文本生成新的任务或批准。
+- binding ready 以前有 owner 范围写屏障；主页发送、专业私聊发送、旧 Room 写入和 Bot 后台写入共享屏障。绑定后旧 SessionEvent 普通消息、修订/撤回和成员更改返回明确冲突；原历史可读。绑定、别名、导入与投递映射在 memory / File / Postgres 有相同恢复合同。File 单写者锁及 fsync 原子快照遵循现有适配器约定。导入沿用现有 Conversation 的 **1000 条原始消息 / 100 项任务 / 8 MiB** 上限；超过容量保留 checkpoint 和原历史，需要后续分段存储方案，不能丢弃或截断历史来强行切换。
+- 核查发现 FileConversationStore 原先直接 JSON 读写，并未像 Postgres 使用已有 `openAggregate` / `sealConversation`；PR2 同步补齐这两个路径，兼容未加密旧文件。新增 `room` 来源与追加修订元数据，禁止通过第二份 SessionEvent 正文编辑 canonical 私聊。频道投递在服务端按原事件 / Bot / deliveryKind 去重，来源材料是讨论而非执行授权。
+- 讨论回复写回同一 Conversation，保留 agent speaker、replyTo 与确定性触发键；只有明确 `discuss` 的新消息参与后台补漏，历史导入、频道材料和 `execute` 不触发该回复链。后台 sweep 跳过旧私聊 SessionEvent。专业发送可明确开 Run，沿用原有 canExecute、task/newTask、revision 与 Idempotency-Key 规则，没有改变主页 PR1 闸门。
+- `/team/` 复用 `aeeis.token` 的请求头认证，token 不进 URL。真实 roster、所有可读 Room、消息分页、任务详情、Run 审批/拒绝/修改计划/回答问题及 Run 产物读取均调用已有权限接口；直聊任务自动列由服务端输出，群聊使用既有 Board DTO。产物的基础写入是 **Conversation 内追加的主人编辑草稿**（支持后续版本与 CAS），不覆盖 Run 的证据产物。未知发送结果保留原 body / key（sessionStorage 按身份恢复），刷新或重试不重造执行请求。频道管理与拖动只显示后续版本说明。
+
+007 回滚仍按第 7.2 节 SQL：先停止专业新入口和后台新协议写入、备份三表及 canonical Conversation，再 `BEGIN; DROP TABLE IF EXISTS aeeis_bot_dialogue_operations; DROP TABLE IF EXISTS aeeis_bot_dialogue_room_aliases; DROP TABLE IF EXISTS aeeis_bot_dialogues; COMMIT;`。应同时回退 init / RLS 清单，避免重建；保留能读取新增消息来源、修订与草稿的兼容版本。DDL 回滚不会把切换后的新消息复制回旧 SessionEvent，不能恢复旧双写行为。007 SQL 注释也列出了该回滚语句。
