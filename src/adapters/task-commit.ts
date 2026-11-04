@@ -1,3 +1,4 @@
+import { channelRoom } from '../channel-metadata.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { MemoryEntry, Plan, Room, RunReceipt } from '../contracts.js';
 
@@ -13,7 +14,7 @@ export function assertMemoryCommit(current: MemoryEntry | undefined, expected: M
 }
 
 export function assertRoomCommit(current: Room | undefined, expected: Room, next: Room): void {
-  if (!current || !isDeepStrictEqual(current, expected)) throw new RoomWriteConflict('Room changed during update');
+  if (!current || !isDeepStrictEqual(channelRoom(current), channelRoom(expected))) throw new RoomWriteConflict('Room changed during update');
   if (next.id !== expected.id || next.owner !== expected.owner || next.tenantId !== expected.tenantId || next.createdAt !== expected.createdAt) {
     throw new Error('Room update must preserve identity');
   }

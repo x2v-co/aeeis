@@ -1366,7 +1366,7 @@ describe('entry bots and group chats', () => {
       if (url === '/api/conversations' && request.method !== 'POST') {
         return response([fixture(), { id: 'conv_research', title: '研究', revision: 1, agentId: 'demo.research', taskCount: 1, presence: { state: 'idle', label: '空闲' } }]);
       }
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'member_research', roomId: 'room_team', principalId: 'demo.research', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
       if (url === '/api/board-holdings') return response({ items: [{ roomId: 'room_team', roomTitle: '发布协作', conversationId: 'conv_research', taskId: 'task_s', holderId: 'demo.research', fromId: 'demo.research', title: '公开资料', status: 'discussion', blocked: '交接谈不拢：需要你决定', blockedAt: date }] });
@@ -1397,7 +1397,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler(url, request) {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
@@ -1475,7 +1475,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler(url, request) {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
@@ -1543,7 +1543,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler(url, request) {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
@@ -1610,7 +1610,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler(url, request) {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
@@ -1640,7 +1640,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler(url, request) {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [cite] });
@@ -1679,7 +1679,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') return response({ id: 'member_direct', roomId: rooms[0]?.id, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
       if (String(url).endsWith('/members')) return response([]);
       if (String(url).includes('/session-events')) return response({ items: [] });
@@ -1963,7 +1963,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const roomId = roomIdOf(String(url));
         const member = { id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
@@ -2065,7 +2065,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: 'member_1', roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -2202,7 +2202,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -2459,7 +2459,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${roomId}_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -2541,7 +2541,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -2614,7 +2614,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -2751,7 +2751,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -3249,7 +3249,7 @@ describe('entry bots and group chats', () => {
       { id: 'task_real', title: '真实交接', threadId: 'thread_real', status: 'discussion' },
     ], messages: [] as any[], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_forged/members')) return response([{ id: 'member_editor', roomId: 'room_forged', principalId: 'member.editor', role: 'editor', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_forged/session-events')) return response({ items: events });
       if (url === '/api/conversations/conv_release') return response(release);
@@ -3285,7 +3285,7 @@ describe('entry bots and group chats', () => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).endsWith('/goals') && method === 'GET') return response([]);
@@ -3337,7 +3337,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
-      if (url === '/api/rooms?limit=50') return response([room, side]);
+      if (url === '/api/rooms') return response([room, side]);
       if (url === '/api/bots' && method === 'GET') return response([bot]);
       if (url === `/api/bots/${bot.id}` && method === 'PATCH') { const body = JSON.parse(request.body); patches.push(body); Object.assign(bot, body); return response(bot); }
       if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
@@ -3394,7 +3394,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const member = { id: `member_${(membersByRoom.get(roomId) ?? []).length}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
         membersByRoom.set(roomId, [...(membersByRoom.get(roomId) ?? []), member]);
@@ -3569,7 +3569,7 @@ describe('entry bots and group chats', () => {
     const room = { id: 'room_page', title: '翻页', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_later', title: '后面才记下', threadId: 'thread_later', status: 'discussion', createdAt: date }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_page/members')) return response([{ id: 'member_release', roomId: 'room_page', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_page/session-events')) {
         if (String(url).includes('cursor=')) return response({ items: [later] });
@@ -3599,12 +3599,12 @@ describe('entry bots and group chats', () => {
   it('keeps the roster after going back from an open group, through the next refresh', async () => {
     const room = { id: 'room_back', title: '回到名册', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_back/members')) return response([{ id: 'member_release', roomId: 'room_back', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_back/session-events')) return response({ items: [] });
       return undefined;
     } });
-    const roomReads = () => h.fetch.mock.calls.filter(call => String(call[0]) === '/api/rooms?limit=50').length;
+    const roomReads = () => h.fetch.mock.calls.filter(call => String(call[0]) === '/api/rooms').length;
     start(h.fetch);
     await ready();
     [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
@@ -3626,7 +3626,7 @@ describe('entry bots and group chats', () => {
     const events = [cite('evt_first', 1, '交给发布'), cite('evt_second', 2, '发布提议这件事'), cite('evt_third', 3, '发布接下了')];
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_once', title: '写发布说明', threadId: 'thread_once', status: 'needs_approval', runId: 'run_once', pendingApproval: { planVersion: 1, planHash: 'hash_once', summary: '两步' }, createdAt: date }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_once/members')) return response([{ id: 'member_release', roomId: 'room_once', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_once/session-events')) return response({ items: String(url).includes('limit=20') ? [] : events });
       if (url === '/api/conversations/conv_release') return response(release);
@@ -3672,7 +3672,7 @@ describe('entry bots and group chats', () => {
     const room = { id: 'room_keep', title: '翻页保持', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_later', title: '后面才记下', threadId: 'thread_later', status: 'discussion', createdAt: date }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_keep/members')) return response([{ id: 'member_release', roomId: 'room_keep', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_keep/session-events')) {
         if (String(url).includes('limit=20')) return response({ items: [] });
@@ -3712,7 +3712,7 @@ describe('entry bots and group chats', () => {
     const room = { id: 'room_accept', title: '稍后验收', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_accept/members')) return response([{ id: 'member_release', roomId: 'room_accept', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_accept/session-events')) {
         if (String(url).includes('cursor=')) return response({ items: [accepted] });
@@ -3741,7 +3741,7 @@ describe('entry bots and group chats', () => {
     const events = [handoff];
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_still/members')) return response([{ id: 'member_release', roomId: 'room_still', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).endsWith('/goals') && method === 'GET') return response([]);
       if (url === '/api/goals' && method === 'POST') return response({ id: 'goal_still', title: '按钮还在', status: 'active', createdAt: date, roomId: 'room_still' });
@@ -3786,7 +3786,7 @@ describe('entry bots and group chats', () => {
     const members = ['demo.release', 'demo.research'].map(principalId => ({ id: `member_${principalId}`, roomId: 'room_race', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }));
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_race/members')) return response(members);
       if (String(url).endsWith('/goals') && method === 'GET') return response([{ id: 'goal_race', title: '抢先领取', status: 'active', createdAt: date, roomId: 'room_race' }]);
       if (String(url).includes('/context-manifests')) return response({ id: 'ctx_race' });
@@ -3822,7 +3822,7 @@ describe('entry bots and group chats', () => {
     const message = (sequence: number) => ({ id: `evt_${sequence}`, operation: 'publish', sequence, actorType: 'principal', actorId: 'owner', type: 'message', content: `消息 ${sequence}`, evidenceRefs: [], createdAt: date });
     const all = Array.from({ length: 1_200 }, (_, index) => message(index + 1));
     const h = harness(undefined, { handler: url => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_long/members')) return response([]);
       if (String(url).includes('/rooms/room_long/session-events')) {
         const query = new URL(String(url), 'http://localhost').searchParams;
@@ -3877,7 +3877,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_marks/members')) return response([{ id: 'member_release', roomId: 'room_marks', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).endsWith('/goals') && method === 'GET') return response(goals);
       if (url === '/api/goals' && method === 'POST') {
@@ -3981,7 +3981,7 @@ describe('entry bots and group chats', () => {
     const member = (principalId: string) => ({ id: `member_${principalId}`, roomId: 'room_same', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
     const h = harness(undefined, { handler: (url) => {
       if (url === '/api/agents?limit=50') return response([agent('bot.one'), agent('bot.two')]);
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_same/members')) return response([member('bot.one'), member('bot.two')]);
       if (String(url).includes('/rooms/room_same/session-events')) {
         if (String(url).includes('limit=20')) return response({ items: [] });
@@ -4015,7 +4015,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_mem/members')) return response([]);
       if (String(url).includes('/rooms/room_mem/session-events')) return response({ items: [] });
       if (String(url).endsWith('/goals') && method === 'GET') return response(goals);
@@ -4062,7 +4062,7 @@ describe('entry bots and group chats', () => {
     const research = { id: 'conv_research', title: '研究', revision: 0, agentId: 'demo.research', tasks: [{ id: 'task_risk', title: '风险摘要', threadId: 'thread_risk', status: 'discussion', createdAt: now }], messages: [], hasEarlierMessages: false };
     const member = (principalId: string) => ({ id: `member_${principalId}`, roomId: 'room_hops', principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_hops/members')) return response([member('demo.research'), member('demo.release')]);
       if (String(url).includes('/rooms/room_hops/session-events')) return response({ items: String(url).includes('limit=20') ? [] : events });
       if (url === '/api/conversations/conv_research') return response(research);
@@ -4086,7 +4086,7 @@ describe('entry bots and group chats', () => {
     const room = { id: 'room_studio', title: '工作室房间', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_run', title: '正在核对', threadId: 'thread_run', status: 'running', createdAt: now, runId: 'run_pause', latestRunId: 'run_pause' }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_studio/members')) return response([{ id: 'member_release', roomId: 'room_studio', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_studio/session-events')) {
         if (String(url).includes('limit=20')) return response({ items: [] });
@@ -4170,7 +4170,7 @@ describe('entry bots and group chats', () => {
     const h = harness(undefined, { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       const body = request?.body ? JSON.parse(request.body) : undefined;
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (String(url).includes('/rooms/room_digest/members')) return response([{ id: 'member_release', roomId: 'room_digest', principalId: 'demo.release', role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
       if (String(url).includes('/rooms/room_digest/session-events')) {
         if (String(url).includes('limit=20')) return response({ items: [] });
@@ -4251,7 +4251,7 @@ describe('entry bots and group chats', () => {
         rooms.unshift(room);
         return response(room);
       }
-      if (url === '/api/rooms?limit=50') return response(rooms);
+      if (url === '/api/rooms') return response(rooms);
       if (String(url).endsWith('/members') && method === 'POST') {
         const roomId = roomIdOf(String(url));
         const member = { id: `member_${membersByRoom.get(roomId)?.length ?? 0}`, roomId, principalId: body.principalId, role: body.role, status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date };
@@ -4320,7 +4320,7 @@ describe('频道防噪设置和摘要卡', () => {
     let saved: unknown;
     const settings = { mode: 'quiet', digestMinutes: 15, quietHours: null, canEdit: true };
     const h = harness(undefined, { handler: (url, request) => {
-      if (url === '/api/rooms?limit=50') return response([room]);
+      if (url === '/api/rooms') return response([room]);
       if (url === '/api/rooms/room_noise/noise-settings') {
         if (request.method === 'PUT') { saved = JSON.parse(request.body); return response({ ...saved as object, canEdit: true }); }
         return response(settings);
@@ -4383,7 +4383,7 @@ it('uses the authoritative Board column, sends versioned keyboard moves and refr
   const decision = { accepted: false,conflicts: [],cancelled: false,released: false,handedUp: false,lines: [] };
   const serverBoard = () => ({ schemaVersion: 'channel-board/1',roomId: room.id,cursor: 1,cards: [{ conversationId: view.id,taskId: 'task_live',title: '联动任务',ownerId: 'demo.release',status: 'running',runId,runRevision: 7,version,canMove: true,column,autoColumn: 'doing',override: true,decision,chain: [] }],citations: [{ ...cite,eventId: cite.id,conversationId: view.id,taskId: 'task_live',agentId: 'demo.release' }],actions: [],wip: [] });
   const h = harness(undefined,{ handler: (url,request) => {
-    if (url === '/api/rooms?limit=50') return response([room]);
+    if (url === '/api/rooms') return response([room]);
     if (url.includes('/rooms/room_controls/members')) return response([{ id: 'member_release',roomId: room.id,principalId: 'demo.release',role: 'agent',status: 'active',invitedBy: 'owner',createdAt: date,updatedAt: date }]);
     if (url.includes('/rooms/room_controls/session-events')) return response({ items: url.includes('limit=20') ? [] : [cite] });
     if (url === '/api/conversations/conv_release') return response(view);

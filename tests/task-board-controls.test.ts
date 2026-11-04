@@ -18,7 +18,7 @@ const columns: BoardColumn[] = ['capture','ready','doing','blocked','review','do
 describe('task board controls', () => {
   it('keeps migration and embedded SQL identical and installs exactly 39 RLS policies',async () => {
     expect(await readFile('src/adapters/migrations/008-task-board-controls.sql','utf8')).toBe(taskBoardMigration);
-    expect(TENANT_POLICIES).toHaveLength(39);
+    expect(TENANT_POLICIES).toHaveLength(40);
     expect(TENANT_POLICIES.map(item => item.table)).toEqual(expect.arrayContaining(['aeeis_room_tasks','aeeis_task_board_controls']));
   });
   for (const [status,auto] of Object.entries(mappings)) {

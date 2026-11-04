@@ -165,6 +165,7 @@
 <nav id="groups" aria-label="群聊列表">
 </nav>
 <p id="groups-empty" class="muted">还没有群聊。</p>
+<details><summary>频道管理 / 归档</summary><div id="channel-manager"></div></details>
 </section>
 <nav class="gb-roster-foot" aria-label="工作台">
 <button type="button" data-computer-tab="setup">设置</button>
@@ -309,6 +310,8 @@
 <form id="group-create">
 <label for="group-title">名称</label>
 <input id="group-title" required="" maxlength="80" placeholder="例如：发布协作">
+<label for="group-category">分类</label><select id="group-category"><option value="general">通用</option><option value="product">产品</option><option value="topic">主题</option></select>
+<label for="group-topic">主题说明</label><input id="group-topic" maxlength="500">
 <label for="group-cap">最多人数</label>
 <input id="group-cap" type="number" min="2" max="30" step="1" value="10" inputmode="numeric" aria-describedby="group-count-live">
 <p id="group-count-live" class="muted">1 / 10 · AEEIS</p>

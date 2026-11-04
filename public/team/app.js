@@ -5,7 +5,7 @@
   const element = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
   const button = (text, work) => { const node = element('button', text); node.type = 'button'; node.onclick = () => perform(work); return node; };
   let dragging, boardAttempt, boardReason = '', boardSignature = '';
-  let status, bots = [], rooms = [], selected, view, board, busy = false, pending, epoch = 0, refreshing = false;
+  let status, bots = [], rooms = [], selected, view, board, busy = false, pending, epoch = 0, refreshing = false, editingRoom;
   const tasks = new Map();
   const columns = { capture: '收下', ready: '待领取', doing: '进行中', blocked: '等你决定 / 阻塞', review: '待验收', done: '完成', failed: '失败 / 取消 / 不可读' };
   const pendingKey = 'aeeis.team.pending';
@@ -19,12 +19,12 @@
     if (!/^[\x21-\x7E]*$/.test(clean)) throw new Error('登录令牌格式无效，请回主页重新连接。');
     return clean;
   }
-  async function api(path, body, key) {
+  async function api(path, body, key, method) {
     const headers = { Accept: 'application/json' }, access = token();
     if (access) headers.Authorization = `Bearer ${access}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (key) headers['Idempotency-Key'] = key;
-    const response = await fetch(`/api${path}`, { method: body === undefined ? 'GET' : 'POST', headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const response = await fetch(`/api${path}`, { method: method || (body === undefined ? 'GET' : 'POST'), headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const data = await response.json();
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) { $('connection').textContent = '未连接或无权访问，请回主页确认登录与权限。'; }
@@ -40,7 +40,7 @@
     finally { busy = false; controls(); }
   }
   function controls() {
-    const active = Boolean(status && selected && view && !selected.legacyReadOnly && selected.status !== 'archived');
+    const active = Boolean(status && selected && view && !selected.legacyReadOnly && selected.status !== 'archived' && selected.canWrite !== false);
     $('send').disabled = busy || !active || Boolean(pending);
     $('composerInput').disabled = busy || !active || Boolean(pending);
     $('intent').disabled = busy || !selected?.direct;
@@ -48,17 +48,19 @@
     $('retry').hidden = !pending;
     for (const id of ['openBoard', 'refresh', 'openArtifacts']) $(id).disabled = busy || !selected;
     $('openArtifacts').disabled = busy || !selected || Boolean(selected.legacyReadOnly);
+    $('newChannel').disabled = busy || !status || !status.roles?.includes('owner');
+    for (const node of $('channelEditor').querySelectorAll('button')) node.disabled = busy;
   }
   function navigation() {
     $('bots').replaceChildren(...bots.map(bot => {
       const node = button(bot.name, () => openBot(bot.id)); node.dataset.bot = bot.id;
       if (selected?.botId === bot.id) node.setAttribute('aria-current', 'page'); return node;
     }));
-    $('rooms').replaceChildren(...rooms.map(room => {
+    $('rooms').replaceChildren(...rooms.filter(room => room.description !== '侧线程').filter(room => (room.status === 'archived') === $('showArchived').checked).map(room => {
       const node = button(`${room.chat === 'direct' ? '私聊 · ' : '# '}${room.title}${room.status === 'archived' ? '（归档）' : ''}`, () => openRoom(room));
       node.dataset.room = room.id; if (selected?.id === room.id) node.setAttribute('aria-current', 'page'); return node;
     }));
-    if (!rooms.length) $('rooms').append(element('p', '还没有频道。', 'muted'));
+    if (!$('rooms').children.length) $('rooms').append(element('p', $('showArchived').checked ? '没有归档频道。' : '还没有频道，点击新建频道开始。', 'muted'));
   }
   async function connect() {
     $('connection').textContent = '正在连接…';
@@ -88,6 +90,7 @@
     epoch++; boardSignature = ''; boardReason = ''; boardAttempt = undefined; selected = room; view = undefined; board = undefined; tasks.clear();
     $('channelHead').replaceChildren(element('h1', room.title), element('small', room.direct ? '只有你与这位 Bot · 与主页共用对话' : '真实频道 · 服务端消息'));
     $('stream').replaceChildren(element('p', '正在读取…')); $('board').hidden = true; $('artifacts').hidden = true; $('taskDetail').hidden = true;
+    renderManagement();
     $('content').hidden = false; $('composerInput').value = ''; navigation(); controls();
   }
   async function openBot(botId) {
@@ -104,8 +107,15 @@
     select({ ...room, direct }); await refresh();
   }
   async function refresh() {
-    if (!selected) return;
+    rooms = await api('/rooms'); navigation();
+    if (!selected) { controls(); return; }
     const current = selected, version = epoch;
+    const latest = rooms.find(room => room.id === current.id);
+    if (!latest) { selected = undefined; view = undefined; tasks.clear(); $('stream').replaceChildren(element('p', '此频道已不可访问，请检查成员权限。')); $('channelManagement').replaceChildren(); $('channelEditor').hidden = true; editingRoom = undefined; controls(); return; }
+    if (epoch !== version) return;
+    selected = { ...selected, ...latest };
+    rooms = rooms.map(room => room.id === latest.id ? latest : room);
+    renderManagement();
     if (current.direct) {
       let loaded;
       try { loaded = await api(`/rooms/${encodeURIComponent(current.id)}/dialogue`); }
@@ -318,6 +328,7 @@
     }
     if (!selected.direct) { panel.append(element('p', '频道产物通过各任务的 Run 读取；编辑稿请在对应 Bot 私聊保存。')); return; }
     const drafts = await api(`/rooms/${encodeURIComponent(selected.id)}/dialogue/artifacts`);
+    if (selected.status === 'archived' || selected.canWrite === false) { for (const draft of drafts.items) panel.append(artifactNode(draft)); panel.append(element('p', '只读：当前频道已归档或没有写入权限。')); return; }
     const title = element('input'); title.placeholder = '产物标题'; title.setAttribute('aria-label', '产物标题'); title.maxLength = 200;
     const content = element('textarea'); content.setAttribute('aria-label', '产物正文'); content.rows = 6; content.maxLength = 30000;
     let artifactId;
@@ -330,6 +341,65 @@
       await refresh(); await showArtifacts();
     }));
   }
+  function renderManagement() {
+    const room = selected, panel = $('channelManagement');
+    if (!room) { panel.replaceChildren(); return; }
+    const role = { owner: '群主', editor: '编辑者', viewer: '只读成员', agent: 'Agent' }[room.memberRole] || room.memberRole || '成员';
+    panel.replaceChildren(element('p', `${role} (${room.memberRole || ''}) · ${{ general: '通用', product: '产品', topic: '主题' }[room.category] || '通用'}${room.topicRef ? ` · ${room.topicRef}` : ''}${room.status === 'archived' ? ' · 已归档，只读；已有 Run 继续运行' : ''}`));
+    if (room.canEdit) panel.append(button('改名 / 分类', () => editChannel(room)));
+    if (room.canArchive) panel.append(button(room.status === 'archived' ? '恢复频道' : '归档频道', async () => {
+      await updateChannel(room, { status: room.status === 'archived' ? 'active' : 'archived' });
+    }));
+    panel.append(button('成员与权限', async () => {
+      const members = await api(`/rooms/${encodeURIComponent(room.id)}/members`);
+      const list = element('div'); list.append(element('p', `群主：${room.owner} · owner`));
+      for (const member of members.filter(member => member.status === 'active')) list.append(element('p', `${member.displayName || member.principalId} · ${member.role}`));
+      panel.append(list);
+    }));
+  }
+  async function updateChannel(room, changes) {
+    try {
+      const updated = await api(`/rooms/${encodeURIComponent(room.id)}`, { ...changes, expectedRevision: room.revision ?? 0 }, undefined, 'PATCH');
+      rooms = rooms.map(item => item.id === updated.id ? updated : item);
+      if (selected?.id === updated.id) selected = { ...selected, ...updated };
+      navigation(); renderManagement(); controls();
+    } catch (error) {
+      if (error.status === 409) { await refresh(); throw new Error(`${error.message}；已读取最新频道，请核对后重试。`); }
+      throw error;
+    }
+  }
+  function editChannel(room) {
+    editingRoom = room;
+    $('channelEditor').hidden = false;
+    $('editorTitle').textContent = room ? '改名 / 分类' : '新建频道';
+    $('channelTitle').value = room?.title || '';
+    $('channelCategory').value = room?.category || 'general';
+    $('channelTopic').value = room?.topicRef || '';
+    $('channelMembers').value = ''; $('channelMemberLabel').hidden = Boolean(room);
+    $('channelTitle').focus();
+  }
+  async function saveChannel() {
+    const changes = { title: $('channelTitle').value.trim(), category: $('channelCategory').value, topicRef: $('channelTopic').value.trim() };
+    if (editingRoom) await updateChannel(editingRoom, changes);
+    else {
+      const room = await api('/rooms', { ...changes, chat: 'group' });
+      try {
+        for (const id of [...new Set($('channelMembers').value.split(/[,，]/).map(id => id.trim()).filter(Boolean))]) {
+          await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: id, role: bots.some(bot => bot.id === id) ? 'agent' : 'editor' });
+        }
+      } catch (error) {
+        await api(`/rooms/${encodeURIComponent(room.id)}`, { expectedRevision: room.revision, status: 'archived' }, undefined, 'PATCH');
+        rooms = await api('/rooms'); navigation();
+        throw new Error(`成员添加失败，频道已归档，可从归档列表恢复：${error.message}`);
+      }
+      rooms = await api('/rooms'); await openRoom(rooms.find(item => item.id === room.id));
+    }
+    $('channelEditor').hidden = true; editingRoom = undefined; navigation();
+  }
+  $('newChannel').onclick = () => perform(async () => editChannel());
+  $('showArchived').onchange = navigation;
+  $('cancelChannelEdit').onclick = () => { $('channelEditor').hidden = true; editingRoom = undefined; };
+  $('channelEditor').onsubmit = event => { event.preventDefault(); void perform(saveChannel); };
   $('composerForm').onsubmit = event => { event.preventDefault(); void perform(sendMessage); };
   $('retry').onclick = () => perform(retryMessage);
   $('reconnect').onclick = () => perform(connect);
@@ -340,7 +410,7 @@
   window.addEventListener('online', () => { void perform(connect); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void perform(refresh); });
   const timer = setInterval(async () => {
-    if (!status || !selected || busy || refreshing || document.hidden || pending) return;
+    if (!status || busy || refreshing || document.hidden || pending) return;
     refreshing = true;
     try { await refresh(); } catch (error) { $('error').textContent = `连接中断：${error.message}。记录未在本地模拟更新。`; }
     finally { refreshing = false; }

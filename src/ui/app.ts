@@ -1,3 +1,4 @@
+import { renderChannelManager } from './channel-management.js';
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
@@ -11,7 +12,7 @@ interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?:
 interface ThreadRun extends RunSummary { threadSequence: number; privacy?: string; outputExcerpt?: string }
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
-interface RoomSummary { chat?: 'direct' | 'group'; id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
+interface RoomSummary { chat?: 'direct' | 'group' | 'unclassified'; category?: string; topicRef?: string; revision?: number; memberRole?: string; canEdit?: boolean; canArchive?: boolean; canWrite?: boolean; id: string; title: string; description?: string; status: string; createdAt: string; updatedAt: string }
 interface RoomMemberSummary { id: string; roomId: string; principalId: string; role: 'editor' | 'viewer' | 'agent' | 'owner'; status: 'active' | 'revoked'; invitedBy: string; createdAt: string; updatedAt: string; displayName?: string }
 interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
@@ -174,6 +175,12 @@ let pendingFollowup: { key: string; body: unknown; signature: string } | undefin
 let followupSubmitting = false;
 let conversationEnabled = false;
 let botDialogueRouting = false;
+let canCreateChannels = false;
+const dialogueRoomIds = new Map<string, string>();
+function archivedDialogue(): boolean {
+  const id = conversation ? dialogueRoomIds.get(conversation.id) : undefined;
+  return Boolean(id && roomSummaries.find(room => room.id === id)?.status === 'archived');
+}
 let conversationScope = '';
 let conversationEpoch = 0;
 let conversation: ConversationView | undefined;
@@ -1330,6 +1337,10 @@ function updateConversationControls(): void {
       $('conversation-execution-note').textContent = '这间私聊只保留会话记录。执行回到这个人的对话里，明确创建 Run。它不会自己回复。';
     }
   }
+  if (archivedDialogue()) {
+    $('conversation-composer').querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>('input, button, select, textarea').forEach(control => { control.disabled = true; });
+    $('conversation-execution-note').textContent = '此私聊已归档，只读。已有 Run 继续运行，可从频道管理恢复。';
+  }
   syncEntrySurface();
   syncStandingInstruction();
 }
@@ -1339,7 +1350,7 @@ function syncStandingInstruction(): void {
   const life = rosterView() === 'entry' || rosterView() === 'bot';
   section.hidden = !life;
   const field = $<HTMLTextAreaElement>('standing-text');
-  const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life;
+  const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life || archivedDialogue();
   const nextId = conversation?.id ?? '';
   if (field) {
     const focused = document.activeElement === field;
@@ -1791,21 +1802,22 @@ function activeBotId(): string {
 function chatRoom(): RoomSummary | undefined {
   return roomSummaries.find(room => room.id === openGroupId);
 }
+function roomChat(room: RoomSummary | undefined): string | undefined { return room?.chat ?? (room?.description === '私聊' ? 'direct' : room?.description === '群聊' ? 'group' : undefined); }
 function isManagedChat(room: RoomSummary): boolean {
-  return room.status === 'active' && (room.description === '私聊' || room.description === '群聊');
+  return room.chat === 'direct' || room.chat === 'group' || room.chat === 'unclassified' || (!room.chat && (room.description === '私聊' || room.description === '群聊'));
 }
 function rosterView(): 'entry' | 'bot' | 'group' | 'draft' | 'direct' {
   if (groupDraftOpen) return 'draft';
   const room = chatRoom();
-  if (room?.description === '私聊') return 'direct';
-  if (room?.description === '群聊' || openGroupId) return openGroupId ? 'group' : 'entry';
+  if (roomChat(room) === 'direct') return 'direct';
+  if (roomChat(room) === 'group' || openGroupId) return openGroupId ? 'group' : 'entry';
   return activeBotId() === 'aeeis' ? 'entry' : 'bot';
 }
 function directRoomId(principalId: string): string {
   for (const [roomId, memberId] of directMembers) {
     if (memberId !== principalId) continue;
     const room = roomSummaries.find(item => item.id === roomId);
-    if (room && isManagedChat(room) && room.description === '私聊') return roomId;
+    if (room && isManagedChat(room) && roomChat(room) === 'direct') return roomId;
   }
   return '';
 }
@@ -2489,7 +2501,7 @@ async function roomWriteContext(roomId: string): Promise<{ goalId: string; manif
   const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
-  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
+  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: roomChat(room) === 'direct' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
   return { goalId: goal.id, manifestId: manifest.id };
 }
 type TaskActionKind = 'claim' | 'assign' | 'transfer' | 'refuse' | 'release' | 'accept' | 'request_changes' | 'block' | 'unblock' | 'cancel' | 'restore' | 'adopt' | 'offer';
@@ -3225,7 +3237,12 @@ function syncEntrySurface(): void {
     : '这是群聊。每句话都留在这间房里。没有点名时，这句话送到其他成员的对话。写了常驻要求的成员会被提醒看一下，其余成员留一个 👍 表示收到。回执合成一条，只写这次送到的人。@某一位时，这一位和 AEEIS 同时接收；写了常驻要求的其他成员会再被提醒。没有收到这句话的成员不留表情。说话人不会再收到自己的这句话。@所有人同样按没点名送达。选一位说话人，只是标明这句话是谁说的。选「交给」会请那一位回应，AEEIS 同时收下。这些接收不调用模型，也不另外创建 Run。频道里可以批准或拒绝已经摆出来的计划，也可以阅读已经写下的产物。归档后从群聊列表撤下。';
   if (botsActive && view !== 'direct' && chatNote) chatNote.textContent = '这是群聊。没有点名时 AEEIS 回复；@某一位时这一位自己回复。回复只是讨论，要做的事会作为提议出现在任务板上，交接在两位 Bot 的侧线程里谈，对方接受才转过去。';
   if (botsActive && view === 'direct' && chatNote) chatNote.textContent = '这间私聊里，对方会自己回复。回复只是讨论；要做的事会作为提议出现在任务板上。';
-  if (rename) rename.hidden = view === 'direct';
+  if (rename) rename.hidden = room?.canEdit === false || view === 'direct';
+  const archiveButton = $<HTMLButtonElement>('chat-archive');
+  if (archiveButton) archiveButton.hidden = room?.canArchive === false || room?.status === 'archived';
+  if (send) send.disabled = room?.canWrite === false || room?.status === 'archived';
+  if (groupText) groupText.disabled = room?.canWrite === false || room?.status === 'archived';
+  if (room && chatNote && (room.memberRole || room.status === 'archived')) chatNote.textContent = `${room.memberRole ?? ''} · ${room.status === 'archived' ? '已归档，只读。已有 Run 继续运行；可从频道管理恢复。' : room.canWrite === false ? '只有阅读权限。' : '按频道成员权限协作。'}`;
   if (send) send.textContent = view === 'direct' ? '发给这位' : '发到群里';
   if (groupText) groupText.placeholder = view === 'direct' ? '写给这一位。@AEEIS 会记到 AEEIS 的对话里，不执行，也不调用模型。' : '写到这间群里。没有点名时，成员用 👍 表示收到；写了常驻要求的成员会被提醒。@某一位或 @AEEIS 时，这一位和 AEEIS 同时接收。';
   if (groupText && botsActive) groupText.placeholder = view === 'direct' ? '写给这一位，它会自己回复。' : '写到这间群里。没有点名时 AEEIS 回复；@某一位时这一位回复。';
@@ -3293,7 +3310,7 @@ function renderBotRoster(): void {
   if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
   for (const bot of loose) renderRow(bot);
   renderLocalBotNote();
-  for (const room of roomSummaries.filter(item => item.status === 'active' && item.description === '私聊')) {
+  for (const room of roomSummaries.filter(item => item.status === 'active' && roomChat(item) === 'direct')) {
     const principalId = directMembers.get(room.id);
     if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
     const item = document.createElement('button');
@@ -3425,7 +3442,8 @@ async function openLifeThread(agentId: string): Promise<void> {
     let summary = lifeSummary(agentId);
     let view: ConversationView;
     if (botDialogueRouting && (agentId === 'aeeis' || agentId.startsWith('bot_'))) {
-      const binding = await api<{ conversationId: string }>(`/bots/${encodeURIComponent(agentId)}/dialogue`, {});
+      const binding = await api<{ conversationId: string; roomId: string }>(`/bots/${encodeURIComponent(agentId)}/dialogue`, {});
+      dialogueRoomIds.set(binding.conversationId, binding.roomId);
       view = await api<ConversationView>(`/conversations/${encodeURIComponent(binding.conversationId)}`);
     }
     else if (!summary) view = await api<ConversationView>('/conversations', { title: bot.name, agentId });
@@ -3459,7 +3477,7 @@ async function openLifeThread(agentId: string): Promise<void> {
   }
 }
 function indexDirectRooms(rooms: RoomSummary[]): void {
-  const directs = rooms.filter(room => room.status === 'active' && room.description === '私聊');
+  const directs = rooms.filter(room => room.status === 'active' && roomChat(room) === 'direct');
   const key = directs.map(room => room.id).join('|');
   if (key === directIndexKey) return;
   directIndexKey = key;
@@ -3487,7 +3505,7 @@ async function openDirect(principalId: string): Promise<void> {
     try {
       await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId, role: 'editor' });
     } catch (error) {
-      await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+      await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived', expectedRevision: room.revision ?? 0 }, 'PATCH').catch(() => undefined);
       throw error;
     }
     directMembers.set(room.id, principalId);
@@ -3501,9 +3519,9 @@ async function archiveOpenChat(): Promise<void> {
   const id = openGroupId;
   const room = chatRoom();
   if (!id || !room || !isManagedChat(room)) return;
-  const what = room.description === '私聊' ? '这间私聊' : `群聊「${room.title}」`;
+  const what = roomChat(room) === 'direct' ? '这间私聊' : `群聊「${room.title}」`;
   if (!window.confirm(`归档${what}？归档后从列表里撤下，历史和任务板仍能读，但不能再发消息。`)) return;
-  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`, { status: 'archived' }, 'PATCH');
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`, { status: 'archived', expectedRevision: room.revision ?? 0 }, 'PATCH');
   roomSummaries = roomSummaries.map(item => item.id === id ? { ...item, ...updated, status: 'archived' } : item);
   directMembers.delete(id);
   directIndexKey = '';
@@ -3604,12 +3622,12 @@ async function createGroup(event: Event): Promise<void> {
   for (const id of [...draftAgents]) if (!roomReadyBot(botById(id) ?? { id, name: id, note: '', demo: false })) draftAgents.delete(id);
   if (groupOccupancy() < 2) { message('群聊至少要 AEEIS 和另外一位。'); return; }
   if (groupOccupancy() > groupCap()) { message(`一个群聊最多 ${groupCap()} 人。`); return; }
-  const room = await api<RoomSummary>('/rooms', { title, description: '群聊' });
+  const room = await api<RoomSummary>('/rooms', { title, description: '群聊', chat: 'group', category: $<HTMLSelectElement>('group-category')?.value ?? 'general', topicRef: $<HTMLInputElement>('group-topic')?.value.trim() ?? '' });
   try {
     for (const agentId of draftAgents) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: agentId, role: 'agent' });
     for (const person of draftPeople) await api(`/rooms/${encodeURIComponent(room.id)}/members`, { principalId: person, role: 'editor' });
   } catch (error) {
-    await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH').catch(() => undefined);
+    await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived', expectedRevision: room.revision ?? 0 }, 'PATCH').catch(() => undefined);
     throw error;
   }
   roomSummaries = [room, ...roomSummaries.filter(item => item.id !== room.id)];
@@ -3638,7 +3656,9 @@ function renderGroups(all: RoomSummary[]): void {
   }
   const list = $('groups');
   if (!list) return;
-  const visible = rooms.filter(room => room.status === 'active' && room.description === '群聊');
+  const manager = $('channel-manager');
+  if (manager) renderChannelManager(manager, rooms, api, refresh, message, canCreateChannels, openGroup);
+  const visible = rooms.filter(room => room.status === 'active' && roomChat(room) === 'group');
   if (openGroupId && !rooms.some(room => room.id === openGroupId && isManagedChat(room))) {
     openGroupId = '';
     groupMembers = [];
@@ -3669,7 +3689,7 @@ async function openGroup(id: string): Promise<void> {
     room = await api<RoomSummary>(`/rooms/${encodeURIComponent(id)}`);
     roomSummaries.push(room);
   }
-  if (botDialogueRouting && room && (room.chat === 'direct' || !room.chat && room.description === '私聊')) {
+  if (botDialogueRouting && room && (room.chat === 'direct' || !room.chat && roomChat(room) === 'direct')) {
     const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(id)}/members`);
     const bot = members.find(member => member.status === 'active' && (member.principalId === 'aeeis' || member.principalId.startsWith('bot_')));
     if (bot) {
@@ -3677,7 +3697,6 @@ async function openGroup(id: string): Promise<void> {
       if (linked.agentId) { await openLifeThread(linked.agentId); return; }
     }
   }
-  if (room && room.status !== 'active') { message('这个群聊已经归档。'); return; }
   if (openGroupId !== id) { groupMembers = []; resetChannelLog(); handoffViews.clear(); hideChannelSurfaces(); clearChannelUpgrades(); trackUi('ui.channel.open', id); }
   openGroupId = id;
   groupDraftOpen = false;
@@ -4076,7 +4095,7 @@ async function recordRosterHandoff(
   announce = true,
   sourceEventId?: string,
 ): Promise<string> {
-  const kind = room?.description === '私聊' ? '私聊' : '群聊';
+  const kind = roomChat(room) === 'direct' ? '私聊' : '群聊';
   const roomTitle = room?.title || kind;
   const title = entryMentionTitle(text, roomTitle, kind);
   const known = bot.id === 'aeeis' ? aeeisThread() : lifeSummary(bot.id);
@@ -4156,7 +4175,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
   const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
   let goal = goals.find(item => item.status === 'active') ?? goals[0];
   if (!goal) goal = await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId });
-  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: room?.description === '私聊' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
+  const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goal.id)}/context-manifests`, { purpose: roomChat(room) === 'direct' ? '私聊消息' : '群聊消息', audienceMode: 'room' });
   const spoken = selectedRoomSpeaker();
   const postSession = (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => api(`/rooms/${encodeURIComponent(roomId)}/session-events`, {
     goalId: goal.id, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(),
@@ -4167,7 +4186,7 @@ async function submitGroupMessage(event: Event): Promise<void> {
   if (input) input.value = '';
   let handoffError = '';
   const chosen = selectedHandoffBot();
-  const inGroup = room?.description !== '私聊';
+  const inGroup = roomChat(room) !== 'direct';
   const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff', announce = true) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode, announce, sourceEvent.id);
   const home = botById('aeeis');
   if (!inGroup) {
@@ -4265,7 +4284,7 @@ async function renameGroup(): Promise<void> {
   const room = roomSummaries.find(item => item.id === openGroupId);
   const title = window.prompt('群聊名称', room?.title ?? '')?.trim();
   if (!title) return;
-  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(openGroupId)}`, { title }, 'PATCH');
+  const updated = await api<RoomSummary>(`/rooms/${encodeURIComponent(openGroupId)}`, { title, expectedRevision: room?.revision ?? 0 }, 'PATCH');
   roomSummaries = roomSummaries.map(item => item.id === updated.id ? { ...item, ...updated } : item);
   renderGroups(roomSummaries);
 }
@@ -4711,9 +4730,11 @@ function acceptConversation(view: ConversationView): void {
 }
 async function initializeConversations(status: RuntimeStatus): Promise<void> {
   botDialogueRouting = status.botDialogueRouting === true;
+  canCreateChannels = Boolean(status.roles?.includes('owner'));
   conversationEnabled = status.conversationRouting === true && !linkedRunId && !linkedThreadId && !readOnlyShare;
   if (!conversationEnabled) { renderConversation(); return; }
   const scope = JSON.stringify([status.mode, status.tenantId ?? '', status.principal ?? '']);
+  if (conversationScope && conversationScope !== scope) dialogueRoomIds.clear();
   if (conversationScope && conversationScope !== scope || localStorage.getItem(CONVERSATION_SCOPE) && localStorage.getItem(CONVERSATION_SCOPE) !== scope) resetConversation();
   conversationScope = scope;
   const epoch = conversationEpoch;
@@ -4726,7 +4747,8 @@ async function initializeConversations(status: RuntimeStatus): Promise<void> {
     if (selected) {
       let view = await api<ConversationView>(`/conversations/${encodeURIComponent(selected.id)}`);
       if (botDialogueRouting && (view.agentId === 'aeeis' || view.agentId?.startsWith('bot_'))) {
-        const binding = await api<{ conversationId: string }>(`/bots/${encodeURIComponent(view.agentId)}/dialogue`, {});
+        const binding = await api<{ conversationId: string; roomId: string }>(`/bots/${encodeURIComponent(view.agentId)}/dialogue`, {});
+        dialogueRoomIds.set(binding.conversationId, binding.roomId);
         view = await api<ConversationView>(`/conversations/${encodeURIComponent(binding.conversationId)}`);
       }
       if (epoch !== conversationEpoch) return;
@@ -6817,7 +6839,7 @@ async function refresh(background = false): Promise<void> {
     ]).then(([candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage]) => ({ candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage }))
     : Promise.resolve(slowLists!);
   const [runPage, goals, allRooms, owned, lists] = await Promise.all([
-    api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms?limit=50'),
+    api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms'),
     api<OwnedBotView[]>('/bots').catch(() => null), slow,
   ]);
   if (full) { slowLists = lists; slowRefreshAt = Date.now(); }
@@ -6841,6 +6863,7 @@ async function refresh(background = false): Promise<void> {
   if (full) { await renderRooms(rooms); await renderGoals(goals, runs, rooms); renderCandidates(candidates); renderImprovementSignals(signals); renderCollaborations(competitions, debates, projections, triggerPolicies, triggerDecisions); renderAgents(agents); renderReminders(reminderItems); }
   renderBotRoster();
   renderGroups(rooms);
+  updateConversationControls();
   if (selectedCandidateId) await renderCandidateDetail().catch(error => message(errorMessage(error)));
   renderRunQueue(runs);
   renderMinimalRecentRuns(runs);
@@ -7212,7 +7235,8 @@ async function renderRooms(rooms: RoomSummary[]): Promise<void> {
     const item = element('div', '', 'fact-row room-' + room.status);
     item.append(element('strong', room.title + ' · ' + runStatusLabel(room.status)), element('small', room.id + ' · ' + formatTime(room.updatedAt)));
     if (room.description) item.append(element('small', room.description));
-    if (room.status === 'active') item.append(button('归档 Room', async () => { await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived' }, 'PATCH'); await refresh(); }));
+    if (room.canArchive !== false && room.status === 'active') item.append(button('归档 Room', async () => { await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'archived', expectedRevision: room.revision ?? 0 }, 'PATCH'); await refresh(); }));
+    if (room.canArchive && room.status === 'archived') item.append(button('恢复频道', async () => { await api(`/rooms/${encodeURIComponent(room.id)}`, { status: 'active', expectedRevision: room.revision ?? 0 }, 'PATCH'); await refresh(); }));
     const { members, events } = roomData[index]!;
     if (members !== undefined) {
       const memberList = element('div', '', 'room-members');

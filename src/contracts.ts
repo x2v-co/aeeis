@@ -9,7 +9,10 @@ export interface Room {
   title: string;
   description?: string;
   /** Frozen at creation. Later edits to description cannot change it. */
-  chat?: 'direct' | 'group';
+  chat?: 'direct' | 'group' | 'unclassified';
+  category?: 'product' | 'topic' | 'general';
+  topicRef?: string;
+  revision?: number;
   status: 'active' | 'archived';
   createdAt: string;
   updatedAt: string;
@@ -190,9 +193,15 @@ export interface CreateGoalInput {
 export interface CreateRoomInput {
   title: string;
   description?: string;
+  chat?: Room['chat'];
+  category?: Room['category'];
+  topicRef?: string;
 }
 
 export interface UpdateRoomInput {
+  expectedRevision?: number;
+  category?: Room['category'];
+  topicRef?: string | null;
   title?: string;
   description?: string;
   status?: Room['status'];

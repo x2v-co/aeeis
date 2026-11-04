@@ -1,4 +1,5 @@
 import { PostgresTaskBoardStore } from '../src/adapters/task-board-store.js';
+import { AeeisService } from '../src/application/aeeis-service.js';
 import { PostgresBotDialogueStore, type BotDialogue } from '../src/bot-dialogues.js';
 import { PostgresChannelNoiseStore } from '../src/channel-noise.js';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -22,7 +23,7 @@ const databaseUrl = process.env.AEEIS_TEST_DATABASE_URL;
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!().catch(() => undefined); });
 
-const SECRET = { material: `SECRET-MATERIAL-${randomUUID()}`, conversation: `SECRET-CONVERSATION-${randomUUID()}`, memory: `SECRET-MEMORY-${randomUUID()}` };
+const SECRET = { material: `SECRET-MATERIAL-${randomUUID()}`, conversation: `SECRET-CONVERSATION-${randomUUID()}`, memory: `SECRET-MEMORY-${randomUUID()}`, topic: `SECRET-TOPIC-${randomUUID()}` };
 const model = { pin: { model: 'rls-fixture', endpoint: 'http://localhost', promptVersion: 'rls/1' }, complete: vi.fn(async (request: ModelRequest) => {
   if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Summarize', nodes: [{ id: 'summarize', title: 'Summarize', instruction: 'Summarize the material', dependsOn: [] }] } };
   throw new Error('not needed');
@@ -80,6 +81,12 @@ describe('PostgreSQL row-level security and content encryption', () => {
     const taskBoards = new PostgresTaskBoardStore(appUrl); await taskBoards.init(); cleanup.push(() => taskBoards.close());
     const { secured } = await security.finalize();
     expect(secured).toContain('aeeis_channel_noise_settings');
+    expect(secured).toContain('aeeis_channel_metadata');
+    const channelService = new AeeisService(domain);
+    const metadataRoom = await withTenantScope('team-a', () => channelService.createRoom({ title: '产品频道', category: 'product', topicRef: SECRET.topic }, undefined, 'alice', 'team-a'));
+    expect(await withTenantScope('team-a', () => channelService.getRoom(metadataRoom.id, 'alice', 'team-a'))).toMatchObject({ topicRef: SECRET.topic, revision: 0 });
+    expect(await withSystemScope(() => domain.getRoom(metadataRoom.id))).toMatchObject({ topicRef: SECRET.topic });
+    await expect(withTenantScope('team-a', () => channelService.getRoom(metadataRoom.id, 'bob', 'team-a'))).rejects.toThrow(/Unknown room/);
     const dialogueTables = ['aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations'];
     expect(secured).toEqual(expect.arrayContaining(dialogueTables));
     const dialogueAt = new Date().toISOString();
@@ -95,7 +102,7 @@ describe('PostgreSQL row-level security and content encryption', () => {
     expect(await withSystemScope(() => dialogues.list(binding))).toHaveLength(1);
     await expect(withTenantScope('team-b', () => dialogues.put(binding))).rejects.toThrow(/row-level security/);
     const scopedPool = createPostgresPool(appUrl); cleanup.push(() => scopedPool.end());
-    for (const table of dialogueTables) {
+    for (const table of [...dialogueTables, 'aeeis_channel_metadata']) {
       const original = await withTenantScope('team-a', () => scopedPool.query(`SELECT * FROM ${table}`));
       expect(original.rows).toHaveLength(1);
       expect((await withTenantScope('team-b', () => scopedPool.query(`SELECT * FROM ${table}`))).rows).toHaveLength(0);
@@ -150,7 +157,7 @@ describe('PostgreSQL row-level security and content encryption', () => {
     // A raw session as the app role that never set a tenant sees nothing.
     const raw = new pg.Client({ connectionString: appUrl }); await raw.connect();
     try {
-      for (const table of ['aeeis_runs', 'aeeis_conversations', 'aeeis_memories', 'aeeis_run_events']) expect(Number((await raw.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n), table).toBe(0);
+      for (const table of ['aeeis_runs', 'aeeis_conversations', 'aeeis_memories', 'aeeis_run_events', 'aeeis_channel_metadata']) expect(Number((await raw.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n), table).toBe(0);
     } finally { await raw.end(); }
 
     // Queries without a tenant filter still only return the caller's tenant.

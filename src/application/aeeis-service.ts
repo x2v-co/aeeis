@@ -1,3 +1,4 @@
+import { channelRoom } from '../channel-metadata.js';
 import type { Ownership } from '../security/principal.js';
 import type { ChangeContext } from '../change-audit.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, recentFirst, validateCollectionLimit } from '../adapters/collection-query.js';
@@ -46,6 +47,8 @@ export interface ProjectionIntentSink {
   enqueue(input: { channel: string; destination: string; aggregateType: ProjectionAggregateType; aggregateId: string; payload: unknown; idempotencyKey: string; owner?: string; tenantId?: string }): Promise<unknown>;
 }
 
+export type RoomAccess = Room & { memberRole: RoomMemberRole; canEdit: boolean; canArchive: boolean; canWrite: boolean };
+
 export class AeeisService {
   roomMutationGate?: <T>(roomId: string, actor: string, tenantId: string, work: () => Promise<T>) => Promise<T>;
   async ensureDialogueRoomMember(roomId: string, botId: string, scope: Ownership): Promise<void> {
@@ -62,8 +65,8 @@ export class AeeisService {
   async createRoom(input: CreateRoomInput, now = new Date().toISOString(), owner = 'owner', tenantId = 'local'): Promise<Room> {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     if (!input.title.trim()) throw new Error('Room title is required');
-    const chat = input.description === '私聊' ? 'direct' as const : input.description === '群聊' ? 'group' as const : undefined;
-    const room: Room = { id: `room_${randomUUID()}`, owner, tenantId, title: input.title.trim(), ...(input.description === undefined ? {} : { description: input.description }), ...(chat ? { chat } : {}), status: 'active', createdAt: now, updatedAt: now };
+    const chat = input.chat ?? (input.description === '私聊' ? 'direct' : 'group');
+    const room: Room = { id: `room_${randomUUID()}`, owner, tenantId, title: input.title.trim(), ...(input.description === undefined ? {} : { description: input.description }), chat, category: input.category ?? 'general', revision: 0, ...(input.topicRef === undefined ? {} : { topicRef: input.topicRef }), status: 'active', createdAt: now, updatedAt: now };
     await this.store.commitRoomCreation(room, this.buildRoomProjectionIntents(room));
     return room;
   }
@@ -73,7 +76,7 @@ export class AeeisService {
     const existing = await this.store.getRoom(id);
     if (existing) return this.getRoom(id, owner, tenantId);
     const at = new Date().toISOString();
-    const room: Room = { id, title, owner, tenantId, description: '私聊', chat: 'direct', status: 'active', createdAt: at, updatedAt: at };
+    const room: Room = { id, title, owner, tenantId, description: '私聊', chat: 'direct', category: 'general', revision: 0, status: 'active', createdAt: at, updatedAt: at };
     await this.store.commitRoomCreation(room, this.buildRoomProjectionIntents(room));
     return room;
   }
@@ -82,44 +85,57 @@ export class AeeisService {
     validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     if (input.title !== undefined && !input.title.trim()) throw new Error('Room title is required');
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const current = await this.store.getRoom(roomId);
+      const stored = await this.store.getRoom(roomId);
+      const current = stored ? channelRoom(stored) : undefined;
       if (!current || (current.tenantId ?? 'local') !== tenantId) throw new AeeisNotFound(`Unknown room: ${roomId}`);
       const role = await this.roomRole(current, owner, tenantId);
       if (role === undefined) throw new AeeisNotFound(`Unknown room: ${roomId}`);
       if (role !== 'owner' && role !== 'editor') throw new RoomMembershipConflict('Room editor role required');
       if (role !== 'owner' && input.status !== undefined) throw new RoomMembershipConflict('Only the Room owner can archive a Room');
+      if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) throw new AeeisConflict('频道版本冲突，请刷新后重试');
+      if (current.status === 'archived' && (input.status !== 'active' || Object.keys(input).some(key => !['status', 'expectedRevision'].includes(key)))) throw new AeeisConflict('已归档频道只读，请先恢复');
       const next: Room = {
         ...current,
         ...(input.title === undefined ? {} : { title: input.title.trim() }),
         ...(input.description === undefined ? {} : { description: input.description }),
         ...(input.status === undefined ? {} : { status: input.status }),
+        ...(input.category === undefined ? {} : { category: input.category }),
+        ...(typeof input.topicRef === 'string' ? { topicRef: input.topicRef } : {}),
+        revision: (current.revision ?? 0) + 1,
         updatedAt: now,
       };
+      if (input.topicRef === null) delete next.topicRef;
       try {
         await this.store.commitRoomUpdate(current, next, this.buildRoomProjectionIntents(next, 'updated'));
         return next;
       } catch (error) {
         if (!(error instanceof RoomWriteConflict)) throw error;
+        if (input.expectedRevision !== undefined) throw new AeeisConflict('频道版本冲突，请刷新后重试');
       }
     }
     throw new AeeisConflict('Room is busy; retry the update');
   }
 
-  async getRoomForPrincipal(roomId: Id, principalId = 'owner', tenantId = 'local'): Promise<Room> {
+  async getRoomForPrincipal(roomId: Id, principalId = 'owner', tenantId = 'local'): Promise<RoomAccess> {
     const room = await this.store.getRoom(roomId);
     if (!room || (room.tenantId ?? 'local') !== tenantId) throw new AeeisNotFound(`Unknown room: ${roomId}`);
     if (!this.owns(room, principalId, tenantId)) {
       const member = this.memberships ? await this.memberships.get(roomId, principalId, tenantId) : undefined;
       if (!member || member.status !== 'active') throw new AeeisNotFound(`Unknown room: ${roomId}`);
-      return room ?? (() => { throw new AeeisNotFound(`Unknown room: ${roomId}`); })();
+      return this.roomAccess(room, member.role);
     }
-    return room;
+    return this.roomAccess(room, 'owner');
   }
 
-  async listRoomsForPrincipal(principalId = 'owner', tenantId = 'local', limit?: number): Promise<Room[]> {
+  private roomAccess(room: Room, memberRole: RoomMemberRole): RoomAccess {
+    return { ...channelRoom(room), memberRole, canEdit: room.status === 'active' && ['owner', 'editor'].includes(memberRole), canArchive: memberRole === 'owner', canWrite: room.status === 'active' && ['owner', 'editor', 'agent'].includes(memberRole) };
+  }
+
+  async listRoomsForPrincipal(principalId = 'owner', tenantId = 'local', limit?: number): Promise<RoomAccess[]> {
     validateCollectionLimit(limit);
     const memberRoomIds = this.memberships ? await this.memberships.activeRoomIds(principalId, tenantId) : [];
-    return this.store.getRooms({ owner: principalId, tenantId }, limit, memberRoomIds);
+    const rooms = await this.store.getRooms({ owner: principalId, tenantId }, limit, memberRoomIds);
+    return Promise.all(rooms.map(async room => this.roomAccess(room, (await this.roomRole(room, principalId, tenantId))!)));
   }
 
   /** Internal projection view. The projector is allowed to rediscover every
@@ -186,6 +202,7 @@ export class AeeisService {
   private async addRoomMemberUnchecked(roomId: Id, principalId: string, role: Exclude<RoomMemberRole, 'owner'>, invitedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
     if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
     const room = await this.getRoomForPrincipal(roomId, invitedBy, tenantId);
+    if (room.status === 'archived') throw new AeeisConflict('已归档频道只读，请先恢复');
     const inviterRole = await this.roomRole(room, invitedBy, tenantId);
     if (inviterRole !== 'owner' && inviterRole !== 'editor') throw new RoomMembershipConflict('Room editor role required to manage members');
     if (principalId === (room.owner ?? 'owner')) throw new RoomMembershipConflict('Room owner is already a member');
@@ -247,6 +264,7 @@ export class AeeisService {
   private async revokeRoomMemberUnchecked(roomId: Id, principalId: string, revokedBy = 'owner', tenantId = 'local', now = new Date().toISOString()): Promise<RoomMember> {
     if (!this.memberships) throw new AeeisConflict('Room membership store is not configured');
     const room = await this.getRoomForPrincipal(roomId, revokedBy, tenantId);
+    if (room.status === 'archived') throw new AeeisConflict('已归档频道只读，请先恢复');
     const revokerRole = await this.roomRole(room, revokedBy, tenantId);
     if (revokerRole !== 'owner' && revokerRole !== 'editor') throw new RoomMembershipConflict('Room editor role required to manage members');
     if (principalId === (room.owner ?? 'owner')) throw new RoomMembershipConflict('Room owner cannot be revoked');
@@ -262,11 +280,11 @@ export class AeeisService {
   async getRoom(roomId: Id, owner = 'owner', tenantId = 'local'): Promise<Room> {
     const room = await this.store.getRoom(roomId);
     if (!room || !this.owns(room, owner, tenantId)) throw new AeeisNotFound(`Unknown room: ${roomId}`);
-    return room;
+    return channelRoom(room);
   }
 
   async listRooms(owner = 'owner', tenantId = 'local'): Promise<Room[]> {
-    return (await this.store.getRooms()).filter(room => this.owns(room, owner, tenantId)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return (await this.store.getRooms()).filter(room => this.owns(room, owner, tenantId)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).map(channelRoom);
   }
 
   async listGoalsInRoom(roomId: Id, owner = 'owner', tenantId = 'local'): Promise<Goal[]> {
@@ -789,9 +807,10 @@ export class AeeisService {
 
   private buildRoomProjectionIntents(room: Room, suffix = 'created'): ProjectionIntent[] {
     if (this.projectionTargets.length === 0) return [];
+    const { topicRef, ...publicRoom } = room;
     return this.projectionTargets.filter(target => !target.aggregateTypes || target.aggregateTypes.includes('room')).map((target, index) => ({
       id: `intent_room_${room.id}_${index}_${suffix}`, owner: room.owner ?? 'owner', tenantId: room.tenantId ?? 'local', channel: target.channel, destination: target.destination,
-      aggregateType: 'room', aggregateId: room.id, idempotencyKey: `${target.channel}:${target.destination}:room:${room.id}:${suffix}`, payload: room, status: 'pending' as const, createdAt: room.createdAt,
+      aggregateType: 'room', aggregateId: room.id, idempotencyKey: `${target.channel}:${target.destination}:room:${room.id}:${suffix}`, payload: publicRoom, status: 'pending' as const, createdAt: room.createdAt,
     }));
   }
 

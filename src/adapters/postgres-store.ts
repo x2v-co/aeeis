@@ -1,3 +1,4 @@
+import { CHANNEL_METADATA_MIGRATION, channelRoom } from '../channel-metadata.js';
 import { ChangeAuditService, type ChangeContext } from '../change-audit.js';
 import { memoryAuditInput, memorySnapshot, memorySnapshotIds, type MemoryChanges } from '../memory-change-audit.js';
 import { PostgresChangeAuditStore } from './postgres-change-audit.js';
@@ -66,14 +67,25 @@ export class PostgresAeeisStore implements AeeisStore {
       ALTER TABLE aeeis_context_manifests ADD COLUMN IF NOT EXISTS tenant_id text;
       UPDATE aeeis_context_manifests SET goal_id=COALESCE(goal_id, state->>'goalId'), owner=COALESCE(owner, state->>'owner', 'owner'), tenant_id=COALESCE(tenant_id, state->>'tenantId', 'local') WHERE goal_id IS NULL OR owner IS NULL OR tenant_id IS NULL;
       CREATE INDEX IF NOT EXISTS aeeis_context_manifests_scope_idx ON aeeis_context_manifests(tenant_id, owner, goal_id, created_at);
-    `); });
+    `);
+      // 009 runs under the domain lock after Rooms exist, before server RLS finalize.
+      await client.query(CHANNEL_METADATA_MIGRATION);
+    });
+  }
+
+  private async writeChannelMetadata(client: pg.PoolClient, room: Room): Promise<void> {
+    const state = await sealAggregate('channel-metadata', room.tenantId, room.id, { topicRef: room.topicRef });
+    await client.query(`INSERT INTO aeeis_channel_metadata(tenant_id,owner,room_id,category,revision,state,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT(tenant_id,owner,room_id) DO UPDATE SET category=EXCLUDED.category,revision=EXCLUDED.revision,state=EXCLUDED.state,updated_at=EXCLUDED.updated_at`,
+      [room.tenantId ?? 'local', room.owner ?? 'owner', room.id, room.category ?? 'general', room.revision ?? 0, state, room.updatedAt]);
   }
 
   async commitRoomCreation(room: Room, intents: ProjectionIntent[] = []): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('INSERT INTO aeeis_rooms(id,state,owner,tenant_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6)', [room.id, room, room.owner ?? 'owner', room.tenantId ?? 'local', room.createdAt, room.updatedAt]);
+      await client.query('INSERT INTO aeeis_rooms(id,state,owner,tenant_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6)', [room.id, roomState(room), room.owner ?? 'owner', room.tenantId ?? 'local', room.createdAt, room.updatedAt]);
+      await this.writeChannelMetadata(client, room);
       for (const intent of intents) await client.query('INSERT INTO aeeis_projection_intents(id,state,created_at,status) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [intent.id, intent, intent.createdAt, intent.status]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
@@ -83,20 +95,24 @@ export class PostgresAeeisStore implements AeeisStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const locked = await client.query<{ state: Room }>('SELECT state FROM aeeis_rooms WHERE id=$1 FOR UPDATE', [expected.id]);
-      assertRoomCommit(locked.rows[0]?.state, expected, next);
-      await client.query('UPDATE aeeis_rooms SET state=$2, owner=$3, tenant_id=$4, updated_at=$5 WHERE id=$1', [next.id, next, next.owner ?? 'owner', next.tenantId ?? 'local', next.updatedAt]);
+      // Lock first, then take a fresh snapshot of metadata after any concurrent writer commits.
+      await client.query('SELECT id FROM aeeis_rooms WHERE id=$1 FOR UPDATE', [expected.id]);
+      const locked = await client.query<RoomRow>(`${ROOM_SELECT} WHERE id=$1`, [expected.id]);
+      assertRoomCommit(locked.rows[0] ? await openRoom(locked.rows[0]) : undefined, expected, next);
+      await client.query('UPDATE aeeis_rooms SET state=$2, owner=$3, tenant_id=$4, updated_at=$5 WHERE id=$1', [next.id, roomState(next), next.owner ?? 'owner', next.tenantId ?? 'local', next.updatedAt]);
+      await this.writeChannelMetadata(client, next);
       for (const intent of intents) await client.query('INSERT INTO aeeis_projection_intents(id,state,created_at,status) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [intent.id, intent, intent.createdAt, intent.status]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async getRoom(id: Id): Promise<Room | undefined> { return one<Room>(this.pool, 'SELECT state FROM aeeis_rooms WHERE id=$1', [id]); }
+  async getRoom(id: Id): Promise<Room | undefined> { const result = await this.pool.query<RoomRow>(`${ROOM_SELECT} WHERE id=$1`, [id]); return result.rows[0] ? openRoom(result.rows[0]) : undefined; }
   async getRooms(scope?: Ownership, limit?: number, memberRoomIds?: string[]): Promise<Room[]> {
     validateCollectionLimit(limit);
     const values: unknown[] = scope ? [scope.tenantId, scope.owner, memberRoomIds ?? []] : [];
     if (limit !== undefined) values.push(limit);
-    return many<Room>(this.pool, `SELECT state FROM aeeis_rooms${scope ? " WHERE COALESCE(tenant_id, 'local')=$1 AND (COALESCE(owner, 'owner')=$2 OR id=ANY($3::text[]))" : ''} ORDER BY updated_at DESC, id${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
+    const result = await this.pool.query<RoomRow>(`${ROOM_SELECT}${scope ? " WHERE COALESCE(tenant_id, 'local')=$1 AND (COALESCE(owner, 'owner')=$2 OR id=ANY($3::text[]))" : ''} ORDER BY updated_at DESC, id${limit === undefined ? '' : ` LIMIT $${values.length}`}`, values);
+    return Promise.all(result.rows.map(openRoom));
   }
   async getRoomsPage(limit: number, cursor?: string): Promise<RoomPage> {
     validateCollectionLimit(limit);
@@ -105,8 +121,8 @@ export class PostgresAeeisStore implements AeeisStore {
     let where = '';
     if (parsed) { values.push(parsed.timestamp, parsed.id); where = ' WHERE updated_at < $1 OR (updated_at = $1 AND id > $2)'; }
     values.push(limit + 1);
-    const result = await this.pool.query<{ state: Room }>(`SELECT state FROM aeeis_rooms${where} ORDER BY updated_at DESC, id LIMIT $${values.length}`, values);
-    const page = result.rows.map(row => row.state); const hasMore = page.length > limit; const visible = hasMore ? page.slice(0, limit) : page;
+    const result = await this.pool.query<RoomRow>(`${ROOM_SELECT}${where} ORDER BY updated_at DESC, id LIMIT $${values.length}`, values);
+    const page = await Promise.all(result.rows.map(openRoom)); const hasMore = page.length > limit; const visible = hasMore ? page.slice(0, limit) : page;
     return { rooms: visible, ...(hasMore && visible.length ? { nextCursor: encodeCollectionCursor({ timestamp: visible.at(-1)!.updatedAt, id: visible.at(-1)!.id }) } : {}) };
   }
 
@@ -250,4 +266,18 @@ async function one<T>(pool: pg.Pool, query: string, values: unknown[] = []): Pro
 async function many<T>(pool: pg.Pool, query: string, values: unknown[] = []): Promise<T[]> {
   const result = await pool.query<{ state: T }>(query, values);
   return result.rows.map(row => row.state);
+}
+
+// Metadata is read in the same statement/snapshot as the Room. No second title/status authority.
+const ROOM_SELECT = `SELECT state, (SELECT jsonb_build_object('category',m.category,'revision',m.revision,'state',m.state)
+  FROM aeeis_channel_metadata m WHERE m.room_id=aeeis_rooms.id AND m.tenant_id=COALESCE(aeeis_rooms.tenant_id,'local') AND m.owner=COALESCE(aeeis_rooms.owner,'owner')) AS metadata FROM aeeis_rooms`;
+type RoomRow = { state: Room; metadata?: { category: Room['category']; revision: number; state: unknown } };
+async function openRoom(row: RoomRow): Promise<Room> {
+  const metadata = row.metadata;
+  const details = metadata ? await openAggregate<{ topicRef?: string }>('channel-metadata', row.state.id, metadata.state) : {};
+  return channelRoom({ ...row.state, ...details, category: metadata?.category ?? 'general', revision: Number(metadata?.revision ?? 0) });
+}
+function roomState(room: Room): Omit<Room, 'category' | 'revision' | 'topicRef'> {
+  const { category, revision, topicRef, ...state } = channelRoom(room);
+  return state;
 }

@@ -16,10 +16,20 @@
       <button id="reconnect" type="button">重新连接</button>
       <h2>直接消息</h2><nav id="bots" aria-label="Bot 名册"></nav>
       <h2>频道</h2><nav id="rooms" aria-label="Room 列表"></nav>
-      <p class="muted">频道管理将在后续版本开放。</p>
+      <button id="newChannel" type="button">新建频道</button>
+      <label><input id="showArchived" type="checkbox"> 查看归档</label>
+      <form id="channelEditor" hidden>
+        <h2 id="editorTitle">新建频道</h2>
+        <label>名称 <input id="channelTitle" required maxlength="500"></label>
+        <label>分类 <select id="channelCategory"><option value="general">通用</option><option value="product">产品</option><option value="topic">主题</option></select></label>
+        <label>主题说明 <input id="channelTopic" maxlength="500"></label>
+        <label id="channelMemberLabel">成员 id（逗号分隔，可留空）<input id="channelMembers" maxlength="2000"></label>
+        <button type="submit">保存频道</button><button id="cancelChannelEdit" type="button">取消</button>
+      </form>
     </aside>
     <main class="team-main">
       <header id="channelHead"><h1>选择一位 Bot 或频道</h1></header>
+      <div id="channelManagement"></div>
       <div class="team-toolbar">
         <button id="openBoard" type="button" disabled>任务看板</button>
         <button id="openArtifacts" type="button" disabled>产物</button>

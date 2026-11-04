@@ -1,7 +1,7 @@
 ---
 title: 主页与多 Bot 工作室的统一数据流
 date: 2026-11-04
-status: PR1–PR3 已实现；PR4 待实施（详见第 11、12 节）
+status: PR1–PR4 已实现（详见第 11–13 节）
 relates:
   - 2026-10-21-aeeis-interaction-design.md
   - 2026-10-29-bots-that-act.md
@@ -15,7 +15,7 @@ relates:
 
 产品原则是：**主页是精简界面，工作室是专业界面。用户从主页就能与每个 Bot 对接；需要任务细节、团队协作、操作和审批时进入工作室。两处共用对话、任务、Run 和审批，只是视图不同。** 同一条指令不能因为切换页面而再开一次 Run，同一个批准也不能因为换入口而放宽权限。
 
-核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。PR1 已实现 Bot 页直接执行：有效 OwnedBot 与 AEEIS 共用 Conversation → Thread / Run → dispatcher，背景由服务端按 tenant / owner / agentId 读取，审批沿用既有规则；未新增 migration。PR2、PR3 已实现（见第 11、12 节），PR4 待实施。第 3 节保留基线核查证据，PR1 当前行为见其第 0 项末段。
+核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。PR1 已实现 Bot 页直接执行：有效 OwnedBot 与 AEEIS 共用 Conversation → Thread / Run → dispatcher，背景由服务端按 tenant / owner / agentId 读取，审批沿用既有规则；未新增 migration。PR2–PR4 已实现（见第 11–13 节）。第 3 节保留基线核查证据，PR1 当前行为见其第 0 项末段。
 
 ## 2. 先区分当前的三个界面
 
@@ -342,7 +342,7 @@ CREATE TABLE IF NOT EXISTS aeeis_channel_metadata (
 );
 ```
 
-state 保存经过加密的 topicRef / 分类说明等；title、description、status 仍以原 Room 为准，不能在此复制第二份。Room 更新与 metadata revision 一并用事务/CAS 提交（扩展现有 Room commit 接口）；JSON 版本采用持久操作记录。旧 Room 缺 metadata 按 general 读取，惰性回填。类型字段在现有 Room state 中显式补齐，按既有 description / chat 解析，歧义保留为未分类，不能因为后来改描述改变类型。
+state 保存经过加密的 topicRef / 分类说明等；title、description、status 仍以原 Room 为准，不能在此复制第二份。Room 更新与 metadata revision 一并用事务/CAS 提交（扩展现有 Room commit 接口）；JSON 版本复用 domain store 的 `room.upsert` 持久日志，一条记录同时保存 Room、分类、主题与 revision，不另开容易部分成功的文件。旧 Room 缺 metadata 按 general 读取，惰性回填。类型字段在现有 Room state 中显式补齐，按既有 description / chat 解析，歧义保留为未分类，不能因为后来改描述改变类型。
 
 009 对 `aeeis_channel_metadata` 应用 007 的相同 RLS 模板，加入 `TENANT_POLICIES`。
 
@@ -366,7 +366,7 @@ COMMIT;
 
 ## 8. PR 拆分、依赖、测试与验收
 
-PR1–PR3 已实现，PR4 待实施。以下保留各 PR 的范围与验收边界。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
+PR1–PR4 均已实现。以下保留各 PR 的范围与验收边界。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
 
 ### PR1：设计文档 + Bot 页直接执行（方案 A）
 
@@ -467,3 +467,26 @@ COMMIT;
 ```
 
 同步回退新存储 init 和两项 TENANT_POLICIES，避免启动重建。**保留支持 `/2` 及新增 `/1` 可选字段的 SessionEvent reader**；不可删除审计或交给不识别 schema 的旧二进制。File 可在停写/导出后移走 `task-board-relations.json`，任务与 Run 仍保留；不删除 SessionEvent。DDL/文件关系回滚不会取消真实 Run、撤销真实批准或把人工验收变成执行成功。SQL 文件开头也列出同一回滚语句。
+## 13. PR4 实施记录
+
+基于 PR2 头 `6a7f40c`，在 `cursor/channel-management` 实施频道管理，不包含 PR3 任务板移动或 PR1 执行意图变更。
+
+- 主页与 `/team/` 复用 `/api/rooms` 的可见目录和既有 POST/PATCH：新建、改名、产品/主题/通用分类、主题说明、归档列表、恢复。主页以折叠的「频道管理 / 归档」提供简洁入口，工作室提供编辑表单与成员权限。两处均无业务样例；主页移除原先 50 条截断，避免后面的真实频道只在工作室出现。已有 `limit` 查询和存储游标分页继续有效；交互列表当前读取完整可见目录，超大目录按需加载是后续性能工作。
+- Room state 固定 `chat = direct | group | unclassified`。新建默认 group，旧数据仅按精确 legacy description「私聊 / 群聊」回填，歧义为 unclassified；改描述不会改变类型。009 在 PostgreSQL init 冻结旧类型；内存/File 在读取时兼容，首次修改随 Room 原子落盘。
+- Room DTO 返回 `category`、`topicRef`、`revision` 和 `memberRole / canEdit / canArchive / canWrite`。HTTP PATCH 必须提交 `expectedRevision`；同版本并发只能成功一次，重复旧提交返回 409，用户需核对最新数据后再操作。内部兼容调用可省略 expectedRevision，仍使用存储 CAS，不修改外部请求的强制版本要求。
+- owner/editor 可在活跃频道改名与分类，只有 owner 能归档/恢复；viewer 只读、agent 只在活跃频道发消息，跨 tenant/非成员仍不可读。已归档 Room 不能改名、改分类、改成员、发消息或产生普通 task action；恢复必须为单独状态修改。现有成员失效与 Bot 私聊成员固定规则保留。
+- 归档不调用 Run cancel；原 Conversation 与绑定 Room 保留。归档私聊的主页和专业入口均拒绝新消息，历史仍可读，恢复沿用原 conversationId / roomId / 链接。已有 Run 仍可推进及在原 Run 权限下处理审批。新建后加成员失败会归档刚建的频道并反馈真实错误。
+- `009-channel-metadata.sql` 与 `CHANNEL_METADATA_MIGRATION` 保持逐字一致，由 `PostgresAeeisStore.init()` 在原 domain migration lock 中执行，晚于 Room 建表、早于 `databaseSecurity.finalize()`，无需给 Worker 新增数据库生命周期。新增 `aeeis_channel_metadata` 与 Room / projection intents 同事务提交；分类与 revision 只以 metadata 表为准，主题说明走内容加密，不复制标题/状态。File 的主题字段沿用内容加密，Room/metadata 用同一条 journal operation 提交；自动 Room 投影不携带主题正文。
+- 009 安装 tenant/system 的 USING + WITH CHECK，并加入 `TENANT_POLICIES`。与 PR3 合并后实际策略计数为 **40 = PR2 的 37 + PR3 的 2 + PR4 的 1**。新增/扩展测试覆盖 SQL 副本一致、内存/File 合同与重启/加密、权限矩阵、版本冲突/重复提交、频道分页存储、双界面 CRUD、新建成员失败补偿、归档私聊不重复建 Conversation、Run 继续运行，以及 PostgreSQL fresh/legacy 升级、并发/重复 init、事务失败恢复、RLS/app role/system 与回滚兼容。
+
+回滚：先停用新写入口并导出分类/主题和 revision；使用不会再次执行 009 init 的兼容版本，由 schema owner 执行：
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS aeeis_channel_metadata;
+COMMIT;
+```
+
+同步撤销 `TENANT_POLICIES` 的 metadata 项与计数断言。保留 Room 显式 chat、原 id、名称/状态、Conversation、SessionEvent 和 Run；DROP 不撤销归档或改名。再次运行本版 init 会重建 metadata，分类/版本回到 general/0，主题需从导出恢复，不能将此当作无损回滚。File 回退前保留日志/快照和加密密钥，使用理解显式 chat 与 topic 加密字段的兼容读取代码。
+
+验证结果和沙箱限制详见工作区报告 `report-pr4.md`；本机无 PostgreSQL 服务，数据库用例由 PostgreSQL 17 CI 实跑。尚未接触部署环境，老板所见「只有客户反馈」对应部署 SHA/缓存差异仍需上线验收时核对，不能从本地测试推断。
