@@ -32,7 +32,7 @@ const schema = z.object({
     latestRunId: runId.optional(), pendingMessageId: identifier.optional(),
   }).strict()).max(100),
   messages: z.array(z.object({
-    id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']),
+    id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']), intent: z.enum(['discuss', 'execute']).optional(),
     speaker: z.object({ role: z.enum(['user', 'agent']), id: z.string().trim().min(1).max(200) }).strict().optional(),
     text: z.string(), createdAt: timestamp, replyTo: identifier.optional(), correctsMessageId: identifier.optional(),
     route: z.object({
@@ -48,6 +48,8 @@ const schema = z.object({
     notificationRunId: runId.optional(),
     source: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('channel'), channel: z.string().regex(/^[a-z][a-z0-9_.-]{1,63}$/), externalEventId: z.string().min(1).max(500), receivedAt: timestamp }).strict(),
+      z.object({ kind: z.literal('artifact'), artifactId: identifier, title: z.string().min(1).max(200), runId: runId.optional() }).strict(),
+      z.object({ kind: z.literal('room'), roomId: identifier, eventId: identifier, hash, operation: z.enum(['publish', 'revise', 'retract']), targetMessageId: identifier.optional(), referenceOnly: z.boolean(), eventType: z.string().optional(), revision: z.number().int().positive().optional(), evidenceRefs: z.array(identifier).optional(), actorType: z.enum(['principal', 'agent', 'system']).optional() }).strict(),
       z.object({ kind: z.literal('routine'), routineId: z.string().regex(/^routine_[a-f0-9-]{36}$/), deliveryId: z.string().min(1).max(200), trigger: z.enum(['schedule', 'webhook', 'manual']) }).strict(),
     ]).optional(),
   }).strict()).max(1000),
@@ -130,7 +132,7 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
   assert(draft.messages.length >= before.messages.length, 'Conversation messages are append-only');
   before.messages.forEach((message, index) => {
     const next = draft.messages[index]!;
-    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId', 'source'] as const) {
+    for (const field of ['id', 'keyHash', 'requestHash', 'role', 'intent', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId', 'source'] as const) {
       assert(isDeepStrictEqual(message[field], next[field]), `Conversation message ${field} is immutable`);
     }
     if (message.execution) {
@@ -278,8 +280,9 @@ export class FileConversationStore implements ConversationStore {
     let value: Conversation;
     try {
       const json = await readFile(this.path(id), 'utf8');
-      assertSize(json);
-      value = JSON.parse(json) as Conversation;
+      assert(Buffer.byteLength(json, 'utf8') <= 12 * 1024 * 1024, 'Conversation file exceeds capacity');
+      value = await openConversation(JSON.parse(json));
+      assertSize(JSON.stringify(value));
     }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound('Unknown conversation'); throw error; }
     validate(value);
@@ -295,7 +298,7 @@ export class FileConversationStore implements ConversationStore {
     const path = this.path(value.id), temp = `${path}.${randomUUID()}.tmp`;
     try {
       const file = await open(temp, 'wx', 0o600);
-      try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
+      try { await file.writeFile(JSON.stringify(await sealConversation(value))); await file.sync(); } finally { await file.close(); }
       await rename(temp, path);
       await this.syncDirectory();
     } finally {

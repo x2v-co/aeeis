@@ -37,6 +37,8 @@ export interface ConversationMessage {
   keyHash: string;
   requestHash: string;
   role: 'user' | 'notification';
+  /** Persisted to keep background catch-up from answering an execute request. */
+  intent?: 'discuss' | 'execute';
   /** Missing on messages written before speakers. Those are the owner, role user. */
   speaker?: ConversationSpeaker;
   text: string;
@@ -57,6 +59,8 @@ export interface ConversationMessage {
 }
 export type ConversationMessageSource =
   | { kind: 'channel'; channel: string; externalEventId: string; receivedAt: string }
+  | { kind: 'artifact'; artifactId: string; title: string; runId?: string }
+  | { kind: 'room'; roomId: string; eventId: string; hash: string; operation: 'publish' | 'revise' | 'retract'; targetMessageId?: string; referenceOnly: boolean; eventType?: string; revision?: number; evidenceRefs?: string[]; actorType?: 'principal' | 'agent' | 'system' }
   | { kind: 'routine'; routineId: string; deliveryId: string; trigger: 'schedule' | 'webhook' | 'manual' };
 export interface Conversation extends Ownership {
   schemaVersion: 'conversation/1';
@@ -82,4 +86,17 @@ export interface ConversationStore {
   list(scope: Ownership): Promise<Conversation[]>;
   mutate(id: string, scope: Ownership, change: (value: Conversation) => void): Promise<Conversation>;
   pending(): AsyncIterable<Conversation>;
+}
+
+/** Apply append-only imported revisions for every view and future execution context. */
+export function visibleConversationMessages(messages: readonly ConversationMessage[]): ConversationMessage[] {
+  const visible: ConversationMessage[] = [];
+  for (const original of messages) {
+    const message = structuredClone(original), source = message.source;
+    if (source?.kind === 'room' && source.targetMessageId && source.targetMessageId !== message.id) {
+      const target = visible.find(item => item.id === source.targetMessageId);
+      if (target) { target.text = source.operation === 'retract' ? '（已撤回）' : message.text; target.source = { ...source, targetMessageId: target.id }; }
+    } else visible.push(message);
+  }
+  return visible;
 }

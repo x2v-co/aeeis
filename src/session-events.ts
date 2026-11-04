@@ -399,13 +399,16 @@ export interface ReviseSessionEventInput {
  * separate append-only fact source so Debate/Projection transports cannot
  * become the canonical response. */
 export class SessionEventService {
+  /** Installed by the dialogue gateway; includes background Bot writes. */
+  writeGate?: <T>(roomId: string, actorId: string, tenantId: string, work: () => Promise<T>) => Promise<T>;
   readonly delivery: ChannelDigestDelivery;
   constructor(private readonly repository: SessionEventRepository, private readonly domain: AeeisService, readonly noise: ChannelNoiseStore = new InMemoryChannelNoiseStore(), now: () => number = Date.now) {
     this.delivery = new ChannelDigestDelivery(repository, noise, now);
   }
 
   async create(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
-    return this.delivery.write(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
+    const write = async () => this.delivery.write(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
+    return this.writeGate ? this.writeGate(roomId, actorId, tenantId, write) : write();
   }
 
   /** Writes a channel task action. The repository runs `guard` on the events
@@ -455,6 +458,10 @@ export class SessionEventService {
   }
 
   async revise(roomId: Id, eventId: Id, input: ReviseSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
+    const write = () => this.reviseUnchecked(roomId, eventId, input, actorId, tenantId, actorType);
+    return this.writeGate ? this.writeGate(roomId, actorId, tenantId, write) : write();
+  }
+  private async reviseUnchecked(roomId: Id, eventId: Id, input: ReviseSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
     const room = await this.domain.assertRoomEventWriter(roomId, actorId, tenantId);
     const target = await this.get(eventId, actorId, tenantId);
     if (target.roomId !== room.id) throw new AeeisNotFound(`Unknown session event: ${eventId}`);
@@ -476,6 +483,10 @@ export class SessionEventService {
   }
 
   async retract(roomId: Id, eventId: Id, reason: string, idempotencyKey: string, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
+    const write = () => this.retractUnchecked(roomId, eventId, reason, idempotencyKey, actorId, tenantId, actorType);
+    return this.writeGate ? this.writeGate(roomId, actorId, tenantId, write) : write();
+  }
+  private async retractUnchecked(roomId: Id, eventId: Id, reason: string, idempotencyKey: string, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
     const room = await this.domain.assertRoomEventWriter(roomId, actorId, tenantId);
     const target = await this.get(eventId, actorId, tenantId);
     if (target.roomId !== room.id) throw new AeeisNotFound(`Unknown session event: ${eventId}`);
@@ -507,6 +518,20 @@ export class SessionEventService {
     await this.domain.getRoomForPrincipal(roomId, actorId, tenantId);
     const page = await this.repository.pageBefore(roomId, { tenantId }, limit, beforeSequence);
     return { items: await this.visible(page.items, actorId, tenantId), ...(page.previousCursor ? { previousCursor: page.previousCursor } : {}) };
+  }
+
+  /** Owner-only migration scan, including events hidden by later membership changes. */
+  async migrationHistory(roomId: string, owner: string, tenantId: string): Promise<SessionEvent[]> {
+    await this.domain.getRoom(roomId, owner, tenantId);
+    const events: SessionEvent[] = []; let after = 0;
+    for (;;) {
+      const page = await this.repository.page(roomId, { owner, tenantId }, 200, after);
+      events.push(...page.items);
+      if (!page.nextCursor) return events;
+      const next = Number(page.nextCursor);
+      if (!Number.isInteger(next) || next <= after) throw new AeeisConflict('Invalid migration cursor');
+      after = next;
+    }
   }
 
   /** Every event this reader may see, oldest first. */

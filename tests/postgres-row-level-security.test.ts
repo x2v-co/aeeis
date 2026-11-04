@@ -1,10 +1,11 @@
+import { PostgresBotDialogueStore, type BotDialogue } from '../src/bot-dialogues.js';
 import { PostgresChannelNoiseStore } from '../src/channel-noise.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PostgresConversationStore } from '../src/adapters/conversation-store.js';
 import { PostgresAeeisStore } from '../src/adapters/postgres-store.js';
-import { withSystemScope, withTenantScope } from '../src/adapters/postgres-pool.js';
+import { createPostgresPool, withSystemScope, withTenantScope } from '../src/adapters/postgres-pool.js';
 import { backfillContent, plaintextCounts } from '../src/content-backfill.js';
 import { configureContentEncryption, contentEncryption } from '../src/content-encryption.js';
 import type { Conversation } from '../src/conversations.js';
@@ -73,8 +74,34 @@ describe('PostgreSQL row-level security and content encryption', () => {
     cleanup.push(async () => { await runs.close(); await conversations.close(); await domain.close(); });
     const noise = new PostgresChannelNoiseStore(appUrl); await noise.init();
     cleanup.push(() => noise.close());
+    const dialogues = new PostgresBotDialogueStore(appUrl); await dialogues.init();
+    cleanup.push(() => dialogues.close());
     const { secured } = await security.finalize();
     expect(secured).toContain('aeeis_channel_noise_settings');
+    const dialogueTables = ['aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations'];
+    expect(secured).toEqual(expect.arrayContaining(dialogueTables));
+    const dialogueAt = new Date().toISOString();
+    const binding: BotDialogue = { tenantId: 'team-a', owner: 'alice', botId: 'bot-a', conversationId: 'conversation-a', roomId: 'room-a', phase: 'ready', version: 1, createdAt: dialogueAt, updatedAt: dialogueAt, state: { roomIds: [], revision: 0, highWater: {} } };
+    await withTenantScope('team-a', async () => {
+      await dialogues.put(binding);
+      await dialogues.alias({ tenantId: 'team-a', owner: 'alice', botId: 'bot-a', aliasRoomId: 'old-a', canonicalRoomId: 'room-a' });
+      await dialogues.operation({ tenantId: 'team-a', owner: 'alice', botId: 'bot-a', operationKey: 'ensure:a', sourceId: 'bot-a', targetId: 'room-a', kind: 'ensure', status: 'pending', state: {} });
+    });
+    expect(await withTenantScope('team-b', () => dialogues.list(binding))).toEqual([]);
+    expect(await withTenantScope('team-b', () => dialogues.aliases(binding))).toEqual([]);
+    expect(await withTenantScope('team-b', () => dialogues.operations(binding))).toEqual([]);
+    expect(await withSystemScope(() => dialogues.list(binding))).toHaveLength(1);
+    await expect(withTenantScope('team-b', () => dialogues.put(binding))).rejects.toThrow(/row-level security/);
+    const scopedPool = createPostgresPool(appUrl); cleanup.push(() => scopedPool.end());
+    for (const table of dialogueTables) {
+      const original = await withTenantScope('team-a', () => scopedPool.query(`SELECT * FROM ${table}`));
+      expect(original.rows).toHaveLength(1);
+      expect((await withTenantScope('team-b', () => scopedPool.query(`SELECT * FROM ${table}`))).rows).toHaveLength(0);
+      await expect(withTenantScope('team-a', () => scopedPool.query(`UPDATE ${table} SET tenant_id='team-b'`))).rejects.toThrow(/row-level security/);
+      // Raw INSERT tests exercise WITH CHECK for every table, independent of service WHERE clauses.
+      await expect(withTenantScope('team-b', () => scopedPool.query(`INSERT INTO ${table} SELECT * FROM json_populate_record(NULL::${table}, $1::json)`, [JSON.stringify(original.rows[0])]))).rejects.toThrow(/row-level security/);
+    }
+
     const channel = { roomId: 'room.noise', owner: 'alice', tenantId: 'team-a' };
     await withTenantScope('team-a', () => noise.put(channel, { mode: 'lively', digestMinutes: 25 }));
     expect(await withTenantScope('team-a', () => noise.get(channel))).toMatchObject({ mode: 'lively', digestMinutes: 25 });
