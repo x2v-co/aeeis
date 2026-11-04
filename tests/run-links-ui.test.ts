@@ -150,7 +150,7 @@ describe('group chat', () => {
   });
 });
 describe('bot groups', () => {
-  it('shows demo bots in groups and keeps execution on AEEIS', async () => {
+  it('shows built-in bots in groups and lets them take work directly', async () => {
     const run = fixture();
     const fetch = vi.fn(async (url: string, init?: { method?: string }) => {
       if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
@@ -171,7 +171,7 @@ describe('bot groups', () => {
     const release = [...doc.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]')].find(row => row.dataset.botId === 'demo.release');
     release?.click();
     expect(doc.getElementById('gb-title')?.textContent).toBe('发布');
-    expect(doc.getElementById('empty')?.textContent).toContain('不会单独执行');
+    expect(doc.getElementById('empty')?.textContent).toContain('直接发给它就能开工');
     expect(doc.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]')?.disabled).toBe(true);
     expect(fetch.mock.calls.some(call => String(call[0]).startsWith('/api/runs') && (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(false);
     (doc.getElementById('bot-group-name') as HTMLInputElement).value = '值班';

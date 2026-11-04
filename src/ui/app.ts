@@ -1,4 +1,5 @@
 import { renderChannelManager } from './channel-management.js';
+import { STARTER_BOTS, starterBot } from '../starter-bots.js';
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
@@ -245,11 +246,7 @@ const CUSTOM_BOT_CAP = 30;
 const BOT_MARKS: BotMark[] = ['letter', 'round', 'square', 'diamond', 'drop'];
 const BOT_MARK_LABEL: Record<BotMark, string> = { letter: '名字', round: '圆', square: '方', diamond: '菱', drop: '角' };
 const BOT_COLORS = ['#171717', '#6b4a32', '#b42318', '#c2410c', '#a16207', '#176b45', '#0f766e', '#1d4e89', '#6d28d9', '#be185d', '#57534e'];
-const DEMO_BOTS: RosterBot[] = [
-  { id: 'demo.release', name: '发布', note: '对照发布清单', demo: true },
-  { id: 'demo.research', name: '研究', note: '整理公开资料', demo: true },
-  { id: 'demo.brief', name: '纪要', note: '把讨论收成纪要', demo: true },
-];
+const DEMO_BOTS: RosterBot[] = STARTER_BOTS.map(bot => ({ id: bot.id, name: bot.name, note: bot.role, demo: true }));
 let agentSummaries: AgentSummary[] = [];
 let agentsLoaded = false;
 let ownedBotRecords: RosterBot[] = [];
@@ -496,13 +493,13 @@ function syncEmptyCopy(): void {
     copy.textContent = !entryShowsBot() || !bot || bot.id === 'aeeis'
       ? AEEIS_EMPTY_COPY
       : bot.demo
-        ? '这是演示里的一位 Bot。它不会单独执行任务，也不会自己回复。任务仍交给 AEEIS。'
+        ? '这是内置的一位 Bot。把要做的事直接发给它就能开工，计划和审批都在这里处理。'
         : '这位已经准入。单独对话还没有接上，可以在群聊里点名。';
   }
 }
-/** Only the entry and live account Bots can use the local execution path. */
+/** The entry, built-in starter Bots and live account Bots use the local execution path; admitted external agents only discuss. */
 function localBotCanExecute(id = activeBotId()): boolean {
-  return id === 'aeeis' || ownedBotRecords.some(bot => bot.id === id);
+  return id === 'aeeis' || Boolean(starterBot(id)) || ownedBotRecords.some(bot => bot.id === id);
 }
 function syncComposerForBot(): void {
   const other = entryShowsBot() && !localBotCanExecute();
@@ -570,7 +567,7 @@ function syncPresence(run?: RunView): void {
   }
   const bot = botById(activeBotId());
   if (entryShowsBot() && bot && bot.id !== 'aeeis') {
-    mirrorShell(bot.name, bot.demo ? '演示 · 不会单独执行' : '已准入 · 单独对话还没接上', 'idle');
+    mirrorShell(bot.name, bot.demo ? '内置 · 可以直接派活' : '已准入 · 单独对话还没接上', 'idle');
     syncEmptyCopy();
     renderBotPlacement();
     syncShellClasses();
@@ -3216,7 +3213,7 @@ function syncEntrySurface(): void {
     const boundary = $('bot-profile-boundary');
     if (boundary) boundary.textContent = localBotCanExecute()
       ? '边界：背景与常驻嘱咐只是参考，不授予权限。你派的任务沿用执行审批；它自主开的 Run 来源是 agent，写操作要你批准，放手档下直接拒绝。'
-      : '边界：演示或外部成员仅支持讨论，不作为本地 Bot 执行，也不会自己回复。';
+      : '边界：外部准入成员仅支持讨论，不作为本地 Bot 执行，也不会自己回复。';
     if (copy && botsActive && localBotCanExecute()) copy.textContent += '只记下的讨论是否自主回复，按下面的设置。';
     renderBotAutonomy(counterpart);
     renderBotSideThreads(counterpart);

@@ -12,6 +12,7 @@ import { ThreadConflict } from '../runtime/threads.js';
 import { baselineVersions } from '../evolution-activation.js';
 import type { RsiService } from '../rsi.js';
 import type { OwnedBotStore } from '../owned-bots.js';
+import { starterBot } from '../starter-bots.js';
 import type { ChannelInboundMessage, LifeThreadInbox } from '../channel-ingress.js';
 
 /** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
@@ -936,8 +937,10 @@ export class ConversationService implements LifeThreadInbox {
     if (body.intent === 'execute' && !canExecute) throw new Conflict('Model and dispatcher are not configured');
     // Resolve identity on the server. Profile text is context, never execution authority.
     const person = snapshot.agentId;
-    const bot = body.intent === 'execute' && person && person !== 'aeeis' ? (await this.bots?.list(scope))?.find(item => item.id === person) : undefined;
-    if (body.intent === 'execute' && person && person !== 'aeeis' && (!bot || bot.retiredAt || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId)) {
+    // Built-in starter Bots use the entry chain with a fixed server profile; external admitted agents still cannot.
+    const starter = body.intent === 'execute' ? starterBot(person) : undefined;
+    const bot = body.intent === 'execute' && person && person !== 'aeeis' && !starter ? (await this.bots?.list(scope))?.find(item => item.id === person) : undefined;
+    if (body.intent === 'execute' && person && person !== 'aeeis' && !starter && (!bot || bot.retiredAt || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId)) {
       throw new Conflict('这位 Bot 不支持本地执行，或已撤下；请刷新成员列表');
     }
     const initialRoute = routeConversationMessage(snapshot, body);
@@ -981,7 +984,8 @@ export class ConversationService implements LifeThreadInbox {
         const options = body.runOptions ?? {};
         // These source namespaces belong to the server, including when a saved profile is cleared.
         const materials = (body.runOptions?.materials ?? []).filter(item => !item.source.startsWith('conversation:') && !item.source.startsWith('owned-bot:'));
-        const profile = bot ? { title: 'Bot profile (untrusted, not execution authority)', source: `owned-bot:${bot.id}/profile`, content: JSON.stringify({ name: bot.name, role: bot.role, background: bot.background }) } : undefined;
+        const profiled = bot ?? starter;
+        const profile = profiled ? { title: 'Bot profile (untrusted, not execution authority)', source: `owned-bot:${profiled.id}/profile`, content: JSON.stringify({ name: profiled.name, role: profiled.role, background: profiled.background }) } : undefined;
         const standing = current.standingInstruction?.trim() ?? '';
         const history = selectedNotes.length > 0;
         const reserved = (profile ? 1 : 0) + (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0) + (settingContent ? 1 : 0);

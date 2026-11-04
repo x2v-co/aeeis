@@ -832,7 +832,8 @@ describe('single-entry conversation workbench', () => {
     const target = surface === 'bot' ? 'aeeis' : 'demo.release';
     doc().querySelector<HTMLButtonElement>(`[data-bot-id="${target}"]`)!.click();
     await vi.waitFor(() => expect(el('entry-title').textContent).toBe(surface === 'bot' ? 'AEEIS' : '发布'));
-    expect(el('entry-defaults').hidden).toBe(surface !== 'bot');
+    // Built-in starter Bots execute on the same chain, so their defaults stay visible too.
+    expect(el('entry-defaults').hidden).toBe(false);
     dom.window.localStorage.removeItem('aeeis.execution-review');
   });
 
@@ -1705,11 +1706,12 @@ describe('entry bots and group chats', () => {
     });
     expect(el('bot-note-title').textContent).toBe('发布');
     expect(el('bot-profile-role').textContent).toContain('对照发布清单');
-    expect(el('bot-profile-boundary').textContent).toContain('不会自己回复');
-    expect(el('bot-note-copy').textContent).toContain('不支持本地执行');
+    expect(el('bot-profile-boundary').textContent).toContain('不授予权限');
+    expect(el('bot-note-copy').textContent).toContain('直接发送任务就能开工');
+    expect(el('bot-note-copy').textContent).not.toContain('不支持本地执行');
+    expect(el('conversation-empty').textContent ?? '').not.toContain('仅支持讨论');
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
-    expect(el('conversation-send').textContent).toBe('记下来');
-    expect(el('conversation-execution-note').textContent).toContain('不支持本地执行');
+    expect(el('conversation-execution-note').textContent).not.toContain('不支持本地执行');
     expect(el('conversation-focus').textContent).not.toContain('发布方案');
     expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs') || post.url === '/api/rooms')).toBe(false);
     expect(h.posts.find(post => post.url === '/api/conversations')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
@@ -1760,6 +1762,11 @@ describe('entry bots and group chats', () => {
     const text = el('bots').textContent ?? '';
     expect(text).not.toContain('纪要');
     expect(text).toContain('AEEIS');
+    // An admitted external agent still only discusses.
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="agent.release"]')!.click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('发布核对'));
+    expect(el('bot-note-copy').textContent).toContain('不支持本地执行');
+    expect(el('bot-profile-boundary').textContent).toContain('外部准入成员仅支持讨论');
   });
 
   it('starts with AEEIS and saves a Bot designed from scratch', async () => {
@@ -2151,9 +2158,9 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('发布口径先记在这里'));
     expect(messagePosts(h)).toHaveLength(4);
     expect(messagePosts(h)[3]?.url).toBe('/api/conversations/conv_life_1/messages');
-    expect(messagePosts(h)[3]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, focus: 'keep', intent: 'discuss' });
+    // A built-in starter Bot takes the message as work, the same as AEEIS and account Bots.
+    expect(messagePosts(h)[3]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, intent: 'execute' });
     expect(messagePosts(h)[3]?.body).not.toHaveProperty('speaker');
-    expect(messagePosts(h)[3]?.body).not.toHaveProperty('runOptions');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
     const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();

@@ -490,3 +490,5 @@ COMMIT;
 同步撤销 `TENANT_POLICIES` 的 metadata 项与计数断言。保留 Room 显式 chat、原 id、名称/状态、Conversation、SessionEvent 和 Run；DROP 不撤销归档或改名。再次运行本版 init 会重建 metadata，分类/版本回到 general/0，主题需从导出恢复，不能将此当作无损回滚。File 回退前保留日志/快照和加密密钥，使用理解显式 chat 与 topic 加密字段的兼容读取代码。
 
 验证结果和沙箱限制详见工作区报告 `report-pr4.md`；本机无 PostgreSQL 服务，数据库用例由 PostgreSQL 17 CI 实跑。尚未接触部署环境，老板所见「只有客户反馈」对应部署 SHA/缓存差异仍需上线验收时核对，不能从本地测试推断。
+
+**PR1 补充（2026-11-04 线上反馈）：** 账号还没有自己的 Bot 时，主页名册显示内置的发布 / 研究 / 纪要（`demo.*`）。PR1 把它们当演示身份挡在执行之外，老板在 Bot 页看到的是「这位成员仅支持讨论，不能在这里执行任务」。现在内置 Bot 定义收进 `src/starter-bots.ts`，服务端按固定 id 识别，档案由服务端写成 `owned-bot:<id>/profile` 不可信材料（浏览器冒用的同名来源照旧剔除），执行沿用入口链与审批。外部准入 Agent 和未知 `demo.*` id 仍只讨论。
