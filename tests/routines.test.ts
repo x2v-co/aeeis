@@ -7,6 +7,7 @@ import { ContentCipher, InMemoryContentKeyStore, configureContentEncryption } fr
 import { FileConversationStore } from '../src/adapters/conversation-store.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
+import { InMemoryOwnedBotStore } from '../src/owned-bots.js';
 import { buildApp } from '../src/runtime/http.js';
 import { decideAction } from '../src/runtime/action-policy.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
@@ -178,13 +179,15 @@ async function fixture(webhooksEnabled: boolean | undefined = true) {
   const routines = new InMemoryRoutineStore();
   const identities = new InMemoryChannelIdentityResolver([
     { schemaVersion: 'channel-identity/1', channel: 'feishu', externalSubjectId: 'ou_alice', tenantId: 'team-a', stableSubjectId: 'alice', subjectType: 'principal', status: 'active', verifiedAt: '2026-10-01T00:00:00.000Z', provenance: { source: 'manual', reference: 'test', verifiedAt: '2026-10-01T00:00:00.000Z' } },
-    { schemaVersion: 'channel-identity/1', channel: 'feishu', externalSubjectId: 'ou_bot', tenantId: 'team-a', stableSubjectId: 'writer', subjectType: 'agent', status: 'active', verifiedAt: '2026-10-01T00:00:00.000Z', provenance: { source: 'manual', reference: 'test', verifiedAt: '2026-10-01T00:00:00.000Z' } },
+    { schemaVersion: 'channel-identity/1', channel: 'feishu', externalSubjectId: 'ou_bot', tenantId: 'team-a', stableSubjectId: 'bot_writer01', subjectType: 'agent', status: 'active', verifiedAt: '2026-10-01T00:00:00.000Z', provenance: { source: 'manual', reference: 'test', verifiedAt: '2026-10-01T00:00:00.000Z' } },
   ]);
+  const bots = new InMemoryOwnedBotStore();
+  await bots.create({ id: 'bot_writer01', name: '写手', background: '整理发布摘要', mark: 'letter', color: '#171717' }, scope);
   const notify = vi.fn(async (_id: string) => undefined);
   const app = buildApp({
-    repository, engine, conversationStore: store, routines, dispatcher: { notify, close: async () => undefined },
+    repository, engine, conversationStore: store, ownedBots: bots, routines, dispatcher: { notify, close: async () => undefined },
     channelIdentityResolver: identities,
-    feishuLife: { routes: [{ chatId: 'oc_writer', agentId: 'writer', title: '写手', owner: 'alice', tenantId: 'team-a' }], encryptKey: 'encrypt-key-123' },
+    feishuLife: { routes: [{ chatId: 'oc_writer', agentId: 'bot_writer01', title: '写手', owner: 'alice', tenantId: 'team-a' }], encryptKey: 'encrypt-key-123' },
     principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] } },
   });
   cleanup.push(async () => { await app.close(); await store.close(); await repository.close(); await rm(directory, { recursive: true, force: true }); });
@@ -204,11 +207,11 @@ function hook(secret: string, body: string, delivery: string, timestamp = String
 describe('webhook routines', () => {
   it('starts one Run per delivery, keeps the payload out of the prompt, and refuses bad signatures', async () => {
     const f = await fixture();
-    const created = await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'writer', name: '新工单', prompt: '读一下新工单，写一段摘要', trigger: { kind: 'webhook' }, webhookEnabled: true, executionReview: 'yolo' } });
+    const created = await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'bot_writer01', name: '新工单', prompt: '读一下新工单，写一段摘要', trigger: { kind: 'webhook' }, webhookEnabled: true, executionReview: 'yolo' } });
     expect(created.statusCode, created.body).toBe(201);
     const { routine, webhookSecret } = created.json() as { routine: { id: string }; webhookSecret: string };
     expect(webhookSecret).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    const listed = await f.app.inject({ method: 'GET', url: '/api/routines?agentId=writer', headers: f.headers });
+    const listed = await f.app.inject({ method: 'GET', url: '/api/routines?agentId=bot_writer01', headers: f.headers });
     expect(listed.body).not.toContain(webhookSecret);
     expect(listed.json().routines[0]).toMatchObject({ id: routine.id, webhookConfigured: true });
     expect((await f.app.inject({ method: 'GET', url: '/api/routines', headers: { authorization: 'Bearer bob' } })).json().routines).toEqual([]);
@@ -233,7 +236,7 @@ describe('webhook routines', () => {
     // Item 2's rule still holds for this Run: yolo cannot run an unlisted write.
     expect(decideAction(run.actionPolicy, run.origin, run.executionReview, { kind: 'tool', id: 'delete-files', version: '1', capabilities: ['write'] })).toMatchObject({ decision: 'refuse', rule: 'external' });
 
-    const life = await f.lifeThread('writer');
+    const life = await f.lifeThread('bot_writer01');
     expect(life.tasks.map((task: { title: string }) => task.title)).toEqual(['例程：新工单']);
     expect(life.messages.at(-1)).toMatchObject({ source: { kind: 'routine', routineId: routine.id, deliveryId: 'evt-1', trigger: 'webhook' }, execution: { runId: run.id } });
 
@@ -264,7 +267,7 @@ describe('webhook routines', () => {
     const f = await fixture();
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-29T00:00:00.000Z'));
-    const created = await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'writer', name: '早报', prompt: '整理今天的待办', trigger: daily } });
+    const created = await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'bot_writer01', name: '早报', prompt: '整理今天的待办', trigger: daily } });
     expect(created.statusCode, created.body).toBe(201);
     expect(created.json()).not.toHaveProperty('webhookSecret');
     vi.setSystemTime(new Date('2026-10-31T01:30:00.000Z'));
@@ -275,8 +278,8 @@ describe('webhook routines', () => {
     expect(run!.executionReview).toBe('required');
     expect(run!.goal).toContain('迟到');
     expect(run!.goal).toContain('错过了 2 次');
-    const life = await f.lifeThread('writer');
-    expect(life.title).toBe('writer');
+    const life = await f.lifeThread('bot_writer01');
+    expect(life.title).toBe('bot_writer01');
     expect(life.messages.at(-1).source).toMatchObject({ kind: 'routine', trigger: 'schedule' });
     const owner = { kind: 'tool' as const, id: 'publish', version: '1', capabilities: ['write'] };
     expect(decideAction(run!.actionPolicy, run!.origin, 'auto', owner)).toMatchObject({ decision: 'ask', rule: 'external' });
@@ -286,7 +289,7 @@ describe('webhook routines', () => {
 describe('routine webhook hardening', () => {
   it('returns 503 for secret writes without encryption but still supports schedules and hides disabled hooks', async () => {
     const f = await fixture();
-    const payload = { agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } };
+    const payload = { agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } };
     const created = (await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload })).json();
     configureContentEncryption(undefined);
     expect((await f.app.inject({ method: 'POST', url: `/webhooks/routines/${created.routine.id}`, headers: { host: '127.0.0.1' } })).statusCode).toBe(404);
@@ -303,7 +306,7 @@ describe('routine webhook hardening', () => {
     const first = new JsonRoutineStore(path); await first.init();
     cleanup.push(() => first.close());
     const service = new RoutineService(first, vi.fn(), { runActive: async () => false });
-    const { routine, webhookSecret } = await service.create({ agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope);
+    const { routine, webhookSecret } = await service.create({ agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope);
     const disk = JSON.parse(await readFile(path, 'utf8'));
     expect(disk.routines[0].webhookSecret).toMatch(/^aeeis-enc\/1:/);
     expect(JSON.stringify(disk)).not.toContain(webhookSecret);
@@ -323,7 +326,7 @@ describe('routine webhook hardening', () => {
     expect(await second.get(routine.id)).toMatchObject({ webhookSecret, webhookEnabled: false });
     const migrated = new RoutineService(second, vi.fn(), { runActive: async () => false });
     await expect(migrated.update(routine.id, { expectedRevision: 0, name: 'renamed' }, scope)).rejects.toThrow('AEEIS_CONTENT_ENCRYPTION_KEY_FILE');
-    await expect(migrated.create({ agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope)).rejects.toThrow('AEEIS_CONTENT_ENCRYPTION_KEY_FILE');
+    await expect(migrated.create({ agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope)).rejects.toThrow('AEEIS_CONTENT_ENCRYPTION_KEY_FILE');
     configureContentEncryption(new ContentCipher(randomBytes(32), new InMemoryContentKeyStore()));
     await migrated.update(routine.id, { expectedRevision: 0, webhookEnabled: true }, scope);
     const sealed = JSON.parse(await readFile(path, 'utf8'));
@@ -347,7 +350,7 @@ describe('routine webhook hardening', () => {
     }
     const store = new TamperStore();
     const service = new RoutineService(store, vi.fn(), { runActive: async () => false });
-    const { routine } = await service.create({ agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope);
+    const { routine } = await service.create({ agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } }, scope);
     store.move(routine.id, routine.id, 'team-b');
     await expect(store.get(routine.id)).rejects.toThrow();
     store.move(routine.id, `routine_${randomUUID()}`, scope.tenantId);
@@ -356,7 +359,7 @@ describe('routine webhook hardening', () => {
 
   it('returns 404 by default, requires per-routine opt-in, and supports disabling again', async () => {
     const f = await fixture(false);
-    const created = (await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true } })).json();
+    const created = (await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true } })).json();
     const url = `/webhooks/routines/${created.routine.id}`;
     const headers = hook(created.webhookSecret, 'hello', 'nonce-1');
     expect((await f.app.inject({ method: 'POST', url, headers, payload: 'hello' })).statusCode).toBe(404);
@@ -364,7 +367,7 @@ describe('routine webhook hardening', () => {
     await expect(f.app.aeeisRoutines!.receiveWebhook(created.routine.id, 'hello', headers)).rejects.toThrow('Unknown routine');
 
     const enabled = await fixture();
-    const result = (await enabled.app.inject({ method: 'POST', url: '/api/routines', headers: enabled.headers, payload: { agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } } })).json();
+    const result = (await enabled.app.inject({ method: 'POST', url: '/api/routines', headers: enabled.headers, payload: { agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' } } })).json();
     expect(result.routine.webhookEnabled).toBe(false);
     const target = `/webhooks/routines/${result.routine.id}`;
     expect((await enabled.app.inject({ method: 'POST', url: target, headers: { host: '127.0.0.1' } })).statusCode).toBe(404);
@@ -387,7 +390,7 @@ describe('routine webhook hardening', () => {
     const start = vi.fn(async () => ({ conversationId: 'c', taskId: 't', runId: 'r' }));
     const options = { now: () => at, runActive: async () => false, webhooksEnabled: true };
     const one = new RoutineService(store, start, options), two = new RoutineService(store, start, options);
-    const { routine, webhookSecret } = await one.create({ agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true }, scope);
+    const { routine, webhookSecret } = await one.create({ agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true }, scope);
     const seconds = Date.parse(at) / 1000;
     for (const offset of [-301, 301]) await expect(one.receiveWebhook(routine.id, '{}', hook(webhookSecret!, '{}', `nonce-${offset}`, String(seconds + offset)))).rejects.toThrow('outside');
     const signed = hook(webhookSecret!, '{}', 'nonce-same', String(seconds));
@@ -411,7 +414,7 @@ describe('routine webhook hardening', () => {
     const f = await fixture();
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-29T00:00:00Z'));
-    const create = async () => (await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true } })).json();
+    const create = async () => (await f.app.inject({ method: 'POST', url: '/api/routines', headers: f.headers, payload: { agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true } })).json();
     const first = await create(), other = await create();
     const send = (id: string) => f.app.inject({ method: 'POST', url: `/webhooks/routines/${id}`, headers: { host: '127.0.0.1' } });
     for (let i = 0; i < WEBHOOK_RATE_LIMIT; i += 1) expect((await send(first.routine.id)).statusCode).toBe(401);
@@ -429,7 +432,7 @@ describe('routine webhook hardening', () => {
     const at = '2026-10-29T00:00:00.000Z';
     const start = vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValue({ conversationId: 'c', taskId: 't', runId: 'r' });
     const service = new RoutineService(store, start, { now: () => at, runActive: async () => false, webhooksEnabled: true });
-    const { routine, webhookSecret } = await service.create({ agentId: 'writer', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true }, scope);
+    const { routine, webhookSecret } = await service.create({ agentId: 'bot_writer01', name: 'hook', prompt: 'read', trigger: { kind: 'webhook' }, webhookEnabled: true }, scope);
     const signed = hook(webhookSecret!, '{}', 'nonce-pending', String(Date.parse(at) / 1000));
     expect(await service.receiveWebhook(routine.id, '{}', signed)).toMatchObject({ status: 'pending' });
     expect(await service.receiveWebhook(routine.id, '{}', signed)).toMatchObject({ status: 'pending' });
@@ -456,7 +459,7 @@ describe('Feishu life-thread entry', () => {
     expect(first.json()).toMatchObject({ status: 'accepted', externalEventId: 'evt_1' });
     const replay = await f.app.inject({ method: 'POST', url: '/webhooks/feishu/events', headers: feishu(body), payload: body });
     expect(replay.json()).toMatchObject({ status: 'duplicate', messageId: first.json().messageId });
-    const life = await f.lifeThread('writer');
+    const life = await f.lifeThread('bot_writer01');
     expect(life.title).toBe('写手');
     expect(life.messages).toHaveLength(1);
     expect(life.messages[0]).toMatchObject({ text: '明天的稿子先列个提纲', speaker: { role: 'user', id: 'alice' }, source: { kind: 'channel', channel: 'feishu', externalEventId: 'evt_1' }, route: { status: 'general', reason: 'unassigned', taskIds: [] } });
@@ -489,6 +492,6 @@ describe('Feishu life-thread entry', () => {
     const owner = feishuEvent('evt_5', 'oc_writer', 'ou_alice', '你好');
     const forged = await f.app.inject({ method: 'POST', url: '/webhooks/feishu/events', headers: { ...feishu(owner), 'x-lark-signature': '0'.repeat(64) }, payload: owner });
     expect(forged.statusCode).toBe(401);
-    expect(await f.lifeThread('writer')).toBeUndefined();
+    expect(await f.lifeThread('bot_writer01')).toBeUndefined();
   });
 });

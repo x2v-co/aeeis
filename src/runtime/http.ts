@@ -158,7 +158,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
 }
 export function buildApp(options: Options) {
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
-  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines) : undefined;
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   const feishuLife = options.feishuLife && conversations
     ? new FeishuChannelIngress({ ...options.feishuLife, inbox: conversations, ...(options.channelIdentityResolver ? { channelIdentityResolver: options.channelIdentityResolver } : {}) })

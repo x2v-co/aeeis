@@ -9,6 +9,7 @@ import { LocalToolGateway } from '../src/local-tools.js';
 import { AgentEngine } from '../src/runtime/engine.js';
 import { LocalDispatcher } from '../src/runtime/dispatcher.js';
 import { buildApp } from '../src/runtime/http.js';
+import { InMemoryOwnedBotStore } from '../src/owned-bots.js';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { FileRunRepository } from '../src/runtime/repository.js';
 
@@ -69,8 +70,10 @@ describe('approved execution uses this Run machine', () => {
     };
     const engine = new AgentEngine(repository, { model, tools: gateway });
     const dispatcher = new LocalDispatcher(engine);
+    const bots = new InMemoryOwnedBotStore();
+    const bot = await bots.create({ name: '发布', background: '核对发布清单', mark: 'letter', color: '#171717' }, { owner: 'alice', tenantId: 'team-a' });
     const app = buildApp({
-      repository, engine, dispatcher, conversationStore: store, tools: gateway, localToolDefaults: ['glob'],
+      repository, engine, dispatcher, conversationStore: store, ownedBots: bots, tools: gateway, localToolDefaults: ['glob'],
       runMachines: runId => gateway.describe(runId),
       principalTokens: {
         alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
@@ -82,7 +85,7 @@ describe('approved execution uses this Run machine', () => {
       await rm(root, { recursive: true, force: true });
     });
     const headers = { authorization: 'Bearer alice' };
-    const created = await app.inject({ method: 'POST', url: '/api/conversations', headers, payload: { title: '发布', agentId: 'demo.release' } });
+    const created = await app.inject({ method: 'POST', url: '/api/conversations', headers, payload: { title: '发布', agentId: bot.id } });
     expect(created.statusCode).toBe(201);
     const conversationId = created.json().id as string;
     const taskOf = (body: { tasks: Array<{ title: string; latestRunId?: string; machine?: { state: string; ready: boolean } }> }, title: string) => body.tasks.find(task => task.title === title);

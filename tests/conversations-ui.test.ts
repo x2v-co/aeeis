@@ -18,8 +18,9 @@ const response = (data: unknown, status = 200) => ({ ok: status < 400, status, t
 const date = '2026-10-21T10:00:00Z';
 const scope = JSON.stringify(['single-owner-local', 'local', 'owner']);
 const runId = 'run_00000000-0000-4000-8000-000000000001';
-function fixture() {
-  return { id: 'conv_00000000-0000-4000-8000-000000000001', title: '项目讨论', revision: 1, focusTaskId: 'task_a' as string | undefined,
+const ownedBot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '负责研究', role: '研究', autonomy: 'quiet' };
+function fixture(surface = 'entry') {
+  return { ...(surface === 'bot' ? { agentId: ownedBot.id } : {}), id: 'conv_00000000-0000-4000-8000-000000000001', title: '项目讨论', revision: 1, focusTaskId: 'task_a' as string | undefined,
     tasks: [{ id: 'task_a', title: '发布方案', threadId: 'thread_a', status: 'discussion' }, { id: 'task_b', title: '周报', threadId: 'thread_b', status: 'succeeded', runId, latestRunId: runId }],
     messages: [] as any[], hasEarlierMessages: false };
 }
@@ -28,7 +29,7 @@ function runFixture() {
     plans: [{ version: 1, hash: 'plan-hash', summary: 'Plan', nodes: [{ id: 'node_report', title: '核对证据', dependsOn: [] }] }],
     steps: [{ taskId: 'node_report', status: 'succeeded' }], events: [], artifacts: [], calls: [], context: { sources: [] } };
 }
-function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; handler?: (url: string, options: any) => any } = {}) {
+function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; owned?: boolean; handler?: (url: string, options: any) => any } = {}) {
   const posts: Array<{ url: string; body: any; key: string; raw: string }> = [];
   const uiEvents: Array<{ name: string; roomId: string }> = [];
   const lives = new Map<string, any>();
@@ -40,7 +41,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     return lives.get(id);
   };
   let principal = 'owner';
-  const ownedBots: Array<Record<string, unknown>> = [];
+  const ownedBots: Array<Record<string, unknown>> = options.owned || view.agentId === ownedBot.id ? [{ ...ownedBot }] : [];
   const demoNames: Record<string, string> = { aeeis: 'AEEIS', 'demo.release': '发布', 'demo.research': '研究', 'demo.brief': '纪要' };
   const nameOf = (id: string) => demoNames[id] ?? String(ownedBots.find(bot => bot.id === id)?.name ?? id);
   const readHandler = async (path: string, init: Record<string, unknown>) => {
@@ -304,8 +305,51 @@ async function ready() { await vi.waitFor(() => expect(el('conversation-focus').
 const messagePosts = (h: ReturnType<typeof harness>) => h.posts.filter(post => post.url.endsWith('/messages'));
 
 describe('single-entry conversation workbench', () => {
-  it('only records the message when the model is not ready, uses the authoritative focus and shows an honest acknowledgement', async () => {
-    const h = harness(undefined, { model: false }); start(h.fetch); await ready();
+  it('routes the old quick composer through the selected OwnedBot conversation', async () => {
+    const view = fixture('bot'), h = harness(view);
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } }); await ready(); await sendReady();
+    expect(el('bot-note-copy').textContent).toContain('直接发送任务');
+    expect(el('conversation-empty').textContent).toContain('直接交给我');
+    expect(el('entry-defaults').hidden).toBe(false);
+    fill('quick-goal', '核对发布风险');
+    el('quick-run').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]).toMatchObject({ url: `/api/conversations/${view.id}/messages`, body: { intent: 'execute', text: '核对发布风险' } });
+    expect(h.posts.some(post => post.url === '/api/runs')).toBe(false);
+  });
+
+  it('keeps speaking as an OwnedBot as discussion even when its owner can execute', async () => {
+    const h = harness(fixture('bot'));
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } }); await ready(); await sendReady();
+    fill('life-speaker', ownedBot.id);
+    fill('conversation-text', '我来补充讨论'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss', speaker: { role: 'agent', id: ownedBot.id } });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+  });
+
+  it('drops the old Bot cards and ignores its delayed refresh after switching Bot', async () => {
+    const view = fixture('bot');
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_input', runId, latestRunId: runId, pendingQuestion: { text: '旧 Bot 的问题' } } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: '旧 Bot 的任务', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+    let delay = false, reply!: (value: unknown) => void;
+    const h = harness(view, { handler(url, request) {
+      if (delay && url === `/api/conversations/${view.id}` && request.method === 'GET') return new Promise(resolve => { reply = resolve; });
+    } });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } }); await ready();
+    await vi.waitFor(() => expect(el('conversation-messages').textContent).toContain('旧 Bot 的问题'));
+    delay = true; el('conversation-refresh').click();
+    await vi.waitFor(() => expect(reply).toBeDefined());
+    doc().querySelector<HTMLButtonElement>('[data-bot-id="aeeis"]')!.click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('AEEIS'));
+    reply(response(view));
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('conversation-refresh').disabled).toBe(false));
+    expect(el('conversation-messages').textContent).not.toContain('旧 Bot');
+    expect(doc().querySelector('#conversation-messages .decision-card')).toBeNull();
+    expect(h.posts.some(post => /\/runs\//.test(post.url))).toBe(false);
+  });
+  it.each(['entry', 'bot'])('only records the message when the model is not ready, uses the authoritative focus and shows an honest acknowledgement (%s)', async surface => {
+    const h = harness(fixture(surface), { model: false }); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     fill('conversation-text', '补充讨论背景'); submit();
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执：已记录讨论'));
     expect(messagePosts(h)[0]?.body).toEqual({ text: '补充讨论背景', expectedRevision: 1, focus: 'keep', intent: 'discuss' });
@@ -362,10 +406,10 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
   });
 
-  it('appends an explicit routing correction without executing, switching focus or rewriting the original route', async () => {
-    const view = fixture();
+  it.each(['entry', 'bot'])('appends an explicit routing correction without executing, switching focus or rewriting the original route (%s)', async surface => {
+    const view = fixture(surface);
     view.messages.push({ id: 'misrouted', role: 'user', text: '只属于周报的事实', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' } });
-    const h = harness(view); start(h.fetch); await ready();
+    const h = harness(view); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     clickText('纠正归属');
     expect(el<HTMLTextAreaElement>('conversation-text').readOnly).toBe(true);
     expect(el('conversation-correction-label').textContent).toContain('只属于周报的事实');
@@ -385,8 +429,8 @@ describe('single-entry conversation workbench', () => {
     expect(el<HTMLTextAreaElement>('conversation-text').readOnly).toBe(false);
   });
 
-  it('starts execution from the send button and forwards bounded options, never approval', async () => {
-    const h = harness(); start(h.fetch); await ready();
+  it.each(['entry', 'bot'])('starts execution from the send button and forwards bounded options, never approval (%s)', async surface => {
+    const h = harness(fixture(surface)); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     fill('conversation-target', '__new'); fill('conversation-task-title', '独立发布检查'); fill('conversation-text', '核查发布风险');
     fill('conversation-focus-effect', 'switch'); fill('materials', '资料 <script>unsafe</script>'); fill('allowed-tools', 'read'); fill('model-budget-tokens', '1200');
     submit();
@@ -398,8 +442,8 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
   });
 
-  it('keeps the chosen execution review on the next run and does not execute a noted message', async () => {
-    const h = harness(); start(h.fetch); await ready();
+  it.each(['entry', 'bot'])('keeps the chosen execution review on the next run and does not execute a noted message (%s)', async surface => {
+    const h = harness(fixture(surface)); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     fill('execution-review', 'yolo');
     expect(el('conversation-execution-note').textContent).toContain('YOLO');
     fill('conversation-text', '只是讨论');
@@ -433,9 +477,9 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-execution-note').textContent).toContain('直接执行');
   });
 
-  it('blocks execution of nonterminal tasks but still accepts discussion', async () => {
-    const view = fixture(); view.tasks[0]!.status = 'needs_input';
-    const h = harness(view); start(h.fetch); await ready();
+  it.each(['entry', 'bot'])('blocks execution of nonterminal tasks but still accepts discussion (%s)', async surface => {
+    const view = fixture(surface); view.tasks[0]!.status = 'needs_input';
+    const h = harness(view); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     expect(el('conversation-send').textContent).toBe('记下来');
     expect(el('conversation-execution-note').textContent).toContain('批准、回答或取消');
     fill('conversation-text', '额外背景'); submit();
@@ -506,16 +550,16 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'], runOptions: { executionReview: 'required' } });
   });
 
-  it('shows the plan in the transcript and starts, revises or drops it from the card', async () => {
+  it.each(['entry', 'bot'])('shows the plan in the transcript and starts, revises or drops it from the card (%s)', async surface => {
     const plannedView = () => {
-      const view = fixture();
+      const view = fixture(surface);
       view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId,
         pendingApproval: { planVersion: 2, planHash: 'plan-hash-2', summary: '模型请求批准：会改动仓库。整理发布流程' },
         execution: { steps: [{ title: '读取发布脚本', state: 'waiting' }, { title: '修改 release.yml', state: 'waiting' }] } } as any;
       view.messages.push({ id: 'asked', role: 'user', text: '整理发布流程', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
       return view;
     };
-    const h = harness(plannedView()); start(h.fetch); await ready();
+    const h = harness(plannedView(), { owned: surface === 'bot' }); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     const card = () => doc().querySelector<HTMLElement>('#conversation-messages .plan-card[data-plan-task="task_a"]');
     await vi.waitFor(() => expect(card()).not.toBeNull());
     expect(card()!.dataset.state).toBe('awaiting');
@@ -530,7 +574,7 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(h.posts.some(post => post.url === `/api/runs/${runId}/approve`)).toBe(true));
     expect(h.posts.find(post => post.url === `/api/runs/${runId}/approve`)?.body).toEqual({ planHash: 'plan-hash-2', planVersion: 2 });
 
-    const revise = harness(plannedView()); dom.window.close(); start(revise.fetch); await ready();
+    const revise = harness(plannedView(), { owned: surface === 'bot' }); dom.window.close(); start(revise.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     await vi.waitFor(() => expect(card()).not.toBeNull());
     const field = card()!.querySelector<HTMLTextAreaElement>('textarea[data-plan-feedback]')!;
     expect(field.closest<HTMLElement>('.plan-card-revision')!.hidden).toBe(true);
@@ -542,7 +586,7 @@ describe('single-entry conversation workbench', () => {
     expect(revise.posts.find(post => post.url === `/api/runs/${runId}/revise-plan`)?.body).toEqual({ planVersion: 2, feedback: '先别改 release.yml，只出报告' });
     expect(revise.posts.some(post => post.url.endsWith('/approve'))).toBe(false);
 
-    const drop = harness(plannedView()); dom.window.close(); start(drop.fetch); await ready();
+    const drop = harness(plannedView(), { owned: surface === 'bot' }); dom.window.close(); start(drop.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     await vi.waitFor(() => expect(card()).not.toBeNull());
     card()!.querySelector<HTMLButtonElement>('[data-plan-cancel]')!.click();
     await vi.waitFor(() => expect(drop.posts.some(post => post.url === `/api/runs/${runId}/cancel`)).toBe(true));
@@ -577,9 +621,9 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts).toHaveLength(0);
   });
 
-  it('asks for one action decision in the transcript: approve once, deny, why, and always or block under more', async () => {
+  it.each(['entry', 'bot'])('asks for one action decision in the transcript: approve once, deny, why, and always or block under more (%s)', async surface => {
     const waitingView = () => {
-      const view = fixture();
+      const view = fixture(surface);
       view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId,
         pendingAction: { kind: 'tool', ref: 'publish@1', reason: '会对外发布一篇文章', idempotencyKey: 'call-key-1', step: '发布公告' },
         execution: { steps: [{ title: '写公告', state: 'done' }, { title: '发布公告', state: 'current' }] } } as any;
@@ -588,7 +632,7 @@ describe('single-entry conversation workbench', () => {
     };
     const card = () => doc().querySelector<HTMLElement>('#conversation-messages .decision-card[data-decision-task="task_a"]');
     const decide = async (decision: string) => {
-      const h = harness(waitingView()); if (dom) dom.window.close(); start(h.fetch); await ready();
+      const h = harness(waitingView(), { owned: surface === 'bot' }); if (dom) dom.window.close(); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
       await vi.waitFor(() => expect(card()).not.toBeNull());
       if (decision === 'always' || decision === 'block') card()!.querySelector<HTMLButtonElement>('[data-card-more]')!.click();
       card()!.querySelector<HTMLButtonElement>(`[data-card-decision="${decision}"]`)!.click();
@@ -597,7 +641,7 @@ describe('single-entry conversation workbench', () => {
       expect(h.posts.some(post => post.url.endsWith('/approve') || post.url.endsWith('/messages'))).toBe(false);
     };
 
-    const h = harness(waitingView()); start(h.fetch); await ready();
+    const h = harness(waitingView(), { owned: surface === 'bot' }); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     await vi.waitFor(() => expect(card()).not.toBeNull());
     expect(card()!.dataset.kind).toBe('action');
     expect(card()!.textContent).toContain('想调用 publish@1');
@@ -618,12 +662,12 @@ describe('single-entry conversation workbench', () => {
     for (const decision of ['once', 'deny', 'always', 'block']) await decide(decision);
   });
 
-  it('asks the Run question in the transcript and sends the answer', async () => {
-    const view = fixture();
+  it.each(['entry', 'bot'])('asks the Run question in the transcript and sends the answer (%s)', async surface => {
+    const view = fixture(surface);
     view.tasks[0] = { ...view.tasks[0]!, status: 'needs_input', runId, latestRunId: runId, pendingQuestion: { text: '发布到哪个频道？' },
       execution: { steps: [{ title: '写公告', state: 'current' }] } } as any;
     view.messages.push({ id: 'asked', role: 'user', text: '写好并发布公告', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
-    const h = harness(view); start(h.fetch); await ready();
+    const h = harness(view, { owned: surface === 'bot' }); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .decision-card[data-kind="question"]'); expect(found).not.toBeNull(); return found!; });
     expect(card.textContent).toContain('发布到哪个频道？');
     expect(doc().querySelector('#conversation-messages .plan-card .plan-card-status')?.textContent).toBe('需要你');
@@ -766,8 +810,8 @@ describe('single-entry conversation workbench', () => {
     expect(el('action-policy-note').textContent).toContain('已经开始的 Run 不受影响');
   });
 
-  it('shows the defaults the next run will use under the entry composer, and opens Settings to change them', async () => {
-    const h = harness(); start(h.fetch); await ready();
+  it.each(['entry', 'bot'])('shows the defaults the next run will use under the entry composer, and opens Settings to change them (%s)', async surface => {
+    const h = harness(fixture(surface)); start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready();
     const line = () => el('entry-defaults-text').textContent;
     await vi.waitFor(() => expect(el('entry-defaults').hidden).toBe(false));
     expect(line()).toBe('默认：自动审核 · 不设金额上限 · 不调用工具 · 隐私：内部');
@@ -785,9 +829,10 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(el('conversation-status').textContent).toContain('系统回执'));
     expect(doc().body.classList.contains('computer-open')).toBe(true);
     expect(el('gb-computer').dataset.tab).toBe('setup');
-    doc().querySelector<HTMLButtonElement>('[data-bot-id="demo.release"]')!.click();
-    await vi.waitFor(() => expect(el('entry-title').textContent).toBe('发布'));
-    expect(el('entry-defaults').hidden).toBe(true);
+    const target = surface === 'bot' ? 'aeeis' : 'demo.release';
+    doc().querySelector<HTMLButtonElement>(`[data-bot-id="${target}"]`)!.click();
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe(surface === 'bot' ? 'AEEIS' : '发布'));
+    expect(el('entry-defaults').hidden).toBe(surface !== 'bot');
     dom.window.localStorage.removeItem('aeeis.execution-review');
   });
 
@@ -809,10 +854,10 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)).toHaveLength(1);
   });
 
-  it('prevents double sends and replays the exact request and key after a lost response and reload', async () => {
+  it.each(['entry', 'bot'])('prevents double sends and replays the exact request and key after a lost response and reload (%s)', async surface => {
     let reject!: (error: Error) => void, attempts = 0;
-    const h = harness(undefined, { handler(url) { if (url.endsWith('/messages') && ++attempts === 1) return new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }); } });
-    start(h.fetch); await ready(); fill('conversation-text', '原始执行请求'); submit(); submit(); el('conversation-note').click();
+    const h = harness(fixture(surface), { handler(url) { if (url.endsWith('/messages') && ++attempts === 1) return new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }); } });
+    start(h.fetch, { local: { 'aeeis.bot': surface === 'bot' ? ownedBot.id : 'aeeis' } }); await ready(); fill('conversation-text', '原始执行请求'); submit(); submit(); el('conversation-note').click();
     await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
     expect(el<HTMLTextAreaElement>('conversation-text').disabled).toBe(true);
     reject(new Error('Lost response'));
@@ -1661,11 +1706,10 @@ describe('entry bots and group chats', () => {
     expect(el('bot-note-title').textContent).toBe('发布');
     expect(el('bot-profile-role').textContent).toContain('对照发布清单');
     expect(el('bot-profile-boundary').textContent).toContain('不会自己回复');
-    expect(el('bot-note-copy').textContent).toContain('不会自己回复');
-    expect(el('bot-note-copy').textContent).toContain('明确创建 Run');
+    expect(el('bot-note-copy').textContent).toContain('不支持本地执行');
     expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false);
     expect(el('conversation-send').textContent).toBe('记下来');
-    expect(el('conversation-execution-note').textContent).toContain('不会单独执行');
+    expect(el('conversation-execution-note').textContent).toContain('不支持本地执行');
     expect(el('conversation-focus').textContent).not.toContain('发布方案');
     expect(h.posts.some(post => post.url.endsWith('/messages') || post.url.startsWith('/api/runs') || post.url === '/api/rooms')).toBe(false);
     expect(h.posts.find(post => post.url === '/api/conversations')?.body).toEqual({ title: '发布', agentId: 'demo.release' });
@@ -3320,7 +3364,7 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(el('channel-board').textContent).toContain('提议 · AEEIS：发布前要'));
     doc().querySelector<HTMLButtonElement>(`[data-bot-id="${bot.id}"]`)!.click();
     await vi.waitFor(() => expect(el('bot-autonomy-row').hidden).toBe(false));
-    expect(el('bot-note-copy').textContent).toContain('它会自己回复');
+    expect(el('bot-note-copy').textContent).toContain('是否自主回复');
     const select = el<HTMLSelectElement>('bot-autonomy');
     expect(select.value).toBe('reply');
     select.value = 'auto';

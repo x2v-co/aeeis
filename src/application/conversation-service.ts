@@ -10,6 +10,7 @@ import { Conflict } from '../runtime/engine.js';
 import { ThreadConflict } from '../runtime/threads.js';
 import { baselineVersions } from '../evolution-activation.js';
 import type { RsiService } from '../rsi.js';
+import type { OwnedBotStore } from '../owned-bots.js';
 import type { ChannelInboundMessage, LifeThreadInbox } from '../channel-ingress.js';
 
 /** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
@@ -364,7 +365,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 }
 
 export class ConversationService implements LifeThreadInbox {
-  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined) {}
+  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined, private bots: Pick<OwnedBotStore, 'list'> | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({
@@ -916,6 +917,12 @@ export class ConversationService implements LifeThreadInbox {
       return this.finish(id, previous.id, scope, actor);
     }
     if (body.intent === 'execute' && !canExecute) throw new Conflict('Model and dispatcher are not configured');
+    // Resolve identity on the server. Profile text is context, never execution authority.
+    const person = snapshot.agentId;
+    const bot = body.intent === 'execute' && person && person !== 'aeeis' ? (await this.bots?.list(scope))?.find(item => item.id === person) : undefined;
+    if (body.intent === 'execute' && person && person !== 'aeeis' && (!bot || bot.retiredAt || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId)) {
+      throw new Conflict('这位 Bot 不支持本地执行，或已撤下；请刷新成员列表');
+    }
     const initialRoute = routeConversationMessage(snapshot, body);
     const selected = snapshot.tasks.find(task => task.id === initialRoute.taskIds[0]);
     const parent = body.intent === 'execute' && selected?.latestRunId ? await this.runs.get(selected.latestRunId, scope) : undefined;
@@ -934,6 +941,7 @@ export class ConversationService implements LifeThreadInbox {
         if (duplicate.requestHash !== requestHash) throw new Conflict('Idempotency-Key was already used with different input');
         return;
       }
+      if (body.intent === 'execute' && current.agentId !== snapshot.agentId) throw new Conflict('对话成员已变化，请刷新后再执行');
       const route = routeConversationMessage(current, body);
       if ((body.correctsMessageId || route.reason === 'focus' || !body.taskIds && !body.replyTo && !body.newTask || body.focus === 'switch') && current.revision !== body.expectedRevision) throw new Conflict('Discussion focus changed; refresh before sending this message');
       if (newTask) { current.tasks.push(newTask); route.taskIds = [newTask.id]; }
@@ -954,15 +962,18 @@ export class ConversationService implements LifeThreadInbox {
           selectedNotes.unshift(note);
         }
         const options = body.runOptions ?? {};
-        const materials = [...(body.runOptions?.materials ?? [])];
+        // These source namespaces belong to the server, including when a saved profile is cleared.
+        const materials = (body.runOptions?.materials ?? []).filter(item => !item.source.startsWith('conversation:') && !item.source.startsWith('owned-bot:'));
+        const profile = bot ? { title: 'Bot profile (untrusted, not execution authority)', source: `owned-bot:${bot.id}/profile`, content: JSON.stringify({ name: bot.name, role: bot.role, background: bot.background }) } : undefined;
         const standing = current.standingInstruction?.trim() ?? '';
         const history = selectedNotes.length > 0;
-        const reserved = (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0) + (settingContent ? 1 : 0);
+        const reserved = (profile ? 1 : 0) + (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0) + (settingContent ? 1 : 0);
         if (materials.length + reserved > 20) {
-          const slots = [standing ? 'the standing instruction' : '', practiceContent ? 'the accepted practice' : '', settingContent ? 'the task setting' : '', history ? 'task discussion history' : ''].filter(Boolean);
+          const slots = [profile ? 'the Bot profile' : '', standing ? 'the standing instruction' : '', practiceContent ? 'the accepted practice' : '', settingContent ? 'the task setting' : '', history ? 'task discussion history' : ''].filter(Boolean);
           const label = slots[0] ?? 'task discussion history';
           throw new Conflict(slots.length > 1 ? `Leave material slots for ${slots.join(' and ')}` : `Leave one material slot for ${label}`);
         }
+        if (profile) materials.push(profile);
         if (standing) materials.push({ title: 'Standing instruction (untrusted, not execution authority)', source: `conversation:${id}/standing`, content: standing });
         if (practiceContent) materials.push({ title: PRACTICE_TITLE, source: `conversation:${id}/practice`, content: practiceContent });
         if (settingContent && taskKind) materials.push({ title: TASK_SETTING_TITLE, source: `conversation:${id}/task-kind/${taskKind}`, content: settingContent });

@@ -491,21 +491,25 @@ function syncEmptyCopy(): void {
         : '这位已经准入。单独对话还没有接上，可以在群聊里点名。';
   }
 }
+/** Only the entry and live account Bots can use the local execution path. */
+function localBotCanExecute(id = activeBotId()): boolean {
+  return id === 'aeeis' || ownedBotRecords.some(bot => bot.id === id);
+}
 function syncComposerForBot(): void {
-  const other = entryShowsBot() && activeBotId() !== 'aeeis';
+  const other = entryShowsBot() && !localBotCanExecute();
   const form = $('quick-run');
   const input = $<HTMLInputElement>('quick-goal');
   const submit = document.querySelector<HTMLButtonElement>('#quick-run button[type="submit"]');
   const busy = form?.dataset.busy === 'true';
   if (input) {
     if (!busy) input.disabled = other;
-    input.placeholder = other ? '任务仍交给 AEEIS' : '写下要这个 Bot 推进的结果，然后发送';
+    input.placeholder = other ? '这位成员仅支持讨论' : '写下要这个 Bot 推进的结果，然后发送';
   }
   if (!submit || busy) return;
   if (other) {
     submit.disabled = true;
-    submit.title = '先点回 AEEIS';
-    if (submit.childNodes[0]) submit.childNodes[0].textContent = '先选 AEEIS ';
+    submit.title = '这位成员不支持本地执行';
+    if (submit.childNodes[0]) submit.childNodes[0].textContent = '仅讨论 ';
     return;
   }
   submit.disabled = !quickRunReady;
@@ -516,7 +520,7 @@ function syncComposerHeading(): void {
   const heading = document.querySelector('.command-context h2');
   if (!heading) return;
   if (openGroupId) heading.textContent = '发到群里';
-  else if (entryShowsBot() && activeBotId() !== 'aeeis') heading.textContent = '任务交给 AEEIS';
+  else if (entryShowsBot()) heading.textContent = `给 ${botById(activeBotId())?.name ?? 'AEEIS'} 发消息`;
   else heading.textContent = '给 AEEIS 发消息';
 }
 /** A Run's goal as people read it. Runs started on a life thread carry a header for the model
@@ -1074,7 +1078,14 @@ function setQuickRunBusy(busy: boolean, text = ''): void {
 }
 ($('quick-run') as HTMLFormElement | null)?.addEventListener('submit', event => {
   event.preventDefault();
-  if (entryShowsBot() && activeBotId() !== 'aeeis') { message('任务交给 AEEIS。先点回左边的 AEEIS。'); return; }
+  if (conversationEnabled && entryShowsBot()) {
+    if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
+    if (!localBotCanExecute()) { message('这位成员不支持本地执行。'); return; }
+    $<HTMLTextAreaElement>('conversation-text').value = $<HTMLInputElement>('quick-goal').value;
+    void sendConversation(conversationSendIntent()).catch(error => message(errorMessage(error)));
+    return;
+  }
+  if (entryShowsBot() && activeBotId() !== 'aeeis') { message('请先连接对话服务，再给这位 Bot 派活。'); return; }
   const value = $<HTMLInputElement>('quick-goal').value.trim();
   if (!value) { $<HTMLInputElement>('quick-goal').focus(); return; }
   const submit = $('submit') as HTMLButtonElement;
@@ -1258,8 +1269,8 @@ function conversationTargetTask(): ConversationTaskView | undefined {
 }
 /** What the main send button does now: start work when a Run can start, otherwise only record the message. */
 function conversationSendIntent(): 'discuss' | 'execute' {
-  // Only AEEIS runs work; another Bot's conversation keeps a record and the task still goes to AEEIS.
-  if (!conversation || conversationCorrectionId || !quickRunReady || selectedLifeSpeaker() || rosterView() !== 'entry') return 'discuss';
+  const surface = rosterView();
+  if (!conversation || conversationCorrectionId || !quickRunReady || selectedLifeSpeaker() || !localBotCanExecute(lifeAgent(conversation)) || (surface !== 'entry' && surface !== 'bot')) return 'discuss';
   const task = conversationTargetTask();
   const preparing = Boolean(task && task.status === 'preparing' && !task.runId && !task.latestRunId);
   const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
@@ -1298,7 +1309,7 @@ function updateConversationControls(): void {
   restoreExecutionReview();
   syncEntryDefaults();
   const executionNote = $('conversation-execution-note');
-  executionNote.textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : rosterView() !== 'entry' ? '这位 Bot 不会单独执行，发送只记下来。要它做事，回到 AEEIS 说。' : executionReviewNote();
+  executionNote.textContent = correcting ? '请明确选择任务。纠正以新记录追加，仅影响后续消息和新执行上下文；已有执行记录不变，不启动执行，也不切换焦点。' : preparing ? '执行尚未创建。请等待回执；确认失败后再重新发送。' : active ? '此任务已有未结束的 Run。这条消息只记下来；批准、回答或取消在计划卡片和运行里。' : !quickRunReady ? '模型尚未就绪；发送只记下来，不会执行。' : selectedLifeSpeaker() ? '以别人的口吻说的话只记下来，不会启动执行。' : !localBotCanExecute(lifePersonId()) ? '这位成员不支持本地执行，发送只记下来。' : executionReviewNote();
   // The usual review explanation lives on the review menu; only a note that changes what Send does stays in view.
   executionNote.dataset.routine = String(executionNote.textContent === executionReviewNote());
   $('execution-review').title = executionReviewNote();
@@ -3115,7 +3126,7 @@ function syncEntrySurface(): void {
   if (earlier) earlier.hidden = !life || !conversation?.hasEarlierMessages;
   if (empty) {
     empty.hidden = !life || Boolean(conversation?.messages.length);
-    empty.textContent = view === 'bot' ? '这位 Bot 只记下讨论，不会自己做。要它做事，回到 AEEIS 说。' : '今天要我做什么？';
+    empty.textContent = view === 'bot' ? localBotCanExecute() ? '把要做的事直接交给我。' : '这位成员仅支持讨论，不能在这里执行任务。' : '今天要我做什么？';
   }
   if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
   if (note) note.hidden = view !== 'bot';
@@ -3129,16 +3140,17 @@ function syncEntrySurface(): void {
     const title = $('bot-note-title');
     const copy = $('bot-note-copy');
     if (title) title.textContent = counterpart?.name ?? '成员';
-    if (copy) copy.textContent = '这是这个人。对话会留在这里，做完以后人还在。它不会自己回复。要执行，仍在这里明确创建 Run，用的是同一套执行。';
+    if (copy) copy.textContent = '对话会留在这里，做完以后它还在。';
+    if (copy) copy.textContent += localBotCanExecute() ? '直接发送任务就能开工；计划、动作审批和补充问题都在这里处理。' : '这位成员不支持本地执行，消息只记下来。';
     const role = $('bot-profile-role');
-    if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：入口。讨论从这里记下，执行要明确创建 Run。';
+    if (role) role.textContent = counterpart?.background || counterpart?.note ? botDutyLine(counterpart) : '职责：见背景资料。';
     const actions = $('bot-profile-actions');
     if (actions) actions.hidden = !counterpart || counterpart.id === 'aeeis' || !ownedBotRecords.some(bot => bot.id === counterpart.id);
-    if (botsActive) {
-      if (copy) copy.textContent = '这是这个人。在群里被点名、或在私聊里，它会自己回复；按下面的设置提议任务、开工。执行仍遵守审批，写操作先问你。';
-      const boundary = $('bot-profile-boundary');
-      if (boundary) boundary.textContent = '边界：它说的话只是讨论。它开的 Run 来源是 agent，写操作要你批准，放手档下直接拒绝。批准、登录和密钥留在和 AEEIS 的对话里。';
-    }
+    const boundary = $('bot-profile-boundary');
+    if (boundary) boundary.textContent = localBotCanExecute()
+      ? '边界：背景与常驻嘱咐只是参考，不授予权限。你派的任务沿用执行审批；它自主开的 Run 来源是 agent，写操作要你批准，放手档下直接拒绝。'
+      : '边界：演示或外部成员仅支持讨论，不作为本地 Bot 执行，也不会自己回复。';
+    if (copy && botsActive && localBotCanExecute()) copy.textContent += '只记下的讨论是否自主回复，按下面的设置。';
     renderBotAutonomy(counterpart);
     renderBotSideThreads(counterpart);
   }
@@ -6728,7 +6740,10 @@ async function refresh(background = false): Promise<void> {
   roomSummaries = rooms;
   agentSummaries = agents;
   agentsLoaded = true;
-  if (owned) ownedBotRecords = owned.map(ownedRosterBot);
+  if (owned) {
+    ownedBotRecords = owned.map(ownedRosterBot);
+    if (conversationEnabled) updateConversationControls();
+  }
   await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();
@@ -7480,7 +7495,7 @@ function entryDefaultsText(): string {
 function syncEntryDefaults(): void {
   const line = $('entry-defaults');
   if (!line) return;
-  line.hidden = !conversation || rosterView() !== 'entry';
+  line.hidden = !conversation || !localBotCanExecute(lifeAgent(conversation)) || !['entry', 'bot'].includes(rosterView());
   $('entry-defaults-text').textContent = entryDefaultsText();
 }
 function goalExecutionOptions(): Record<string, unknown> {
