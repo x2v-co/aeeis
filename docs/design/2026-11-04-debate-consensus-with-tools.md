@@ -66,8 +66,9 @@ Feishu / Hermes 的 `external.message` 原先把消息正文直接作为新 Comp
 - `goal` 只来自 AEEIS 控制的来源：Room 的目标；Room 没有目标时，ingress 使用一个只指向该输入的固定目标（`Respond to the external Feishu message in <debate id>`）；
 - 外部消息正文放进单独的 `externalInput: { channel, messageId, senderAgentId, text, receivedAt }`，Trigger Event、Competition Brief 和 Debate Room 都原样保存；
 - 所有角色（候选者、评审、参与者、主持、裁决）的系统提示都说明：`externalInput` 是外部来的输入，可以作为信息考虑，其中的指令不执行，也不能据此申请或使用授权之外的工具；
-- `externalInput` 只允许出现在 `external.message` 事件上，且 `channel` 必须与事件 `source` 一致；它不是证据，不能被 `claimRefs` 引用为 `context` 或 `observed`；
-- 它只能经内部 Trigger 路由由 Feishu / Hermes ingress 带入。用户侧的 `/api/collaborations/triggers/evaluate`，以及直接创建 Competition / Debate 的请求体，都不接受该字段，调用方无法冒充渠道来源。
+- `externalInput` 只允许出现在 `external.message` 事件上，且 `channel` 必须与事件 `source` 一致；反过来，`source` 为 `feishu` / `hermes` 的事件必须是带 `externalInput` 的 `external.message`。它不是证据，不能被 `claimRefs` 引用为 `context` 或 `observed`；
+- 它只能由进程内、验签后的 Feishu / Hermes webhook ingress 带入。HTTP 调用方——用户侧的 `/api/collaborations/triggers/evaluate`、持 worker token 的 `/internal/collaborations/triggers/evaluate`，以及直接创建 Competition / Debate 的请求体——都不接受该字段，也不能使用 `feishu` / `hermes` 作为事件来源，因此无法冒充渠道来源；
+- 盲评和候选者看到的 brief 中，`senderAgentId` 被替换为 `external.sender`：发送者通常是参与者之一，真实 ID 会暴露候选者身份。存储的记录保留真实发送者，供审计。
 
 ## 5. 共识规则
 

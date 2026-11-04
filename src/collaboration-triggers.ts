@@ -40,6 +40,9 @@ export const collaborationTriggerEventSchema = z.object({
   evidenceRefs: z.array(id).max(100).default([]), occurredAt: isoDate,
 }).strict();
 export type CollaborationTriggerEvent = z.infer<typeof collaborationTriggerEventSchema>;
+/** Feishu and Hermes events are only created in-process by their signed
+ * webhook ingress. No HTTP caller may claim these sources. */
+export function isChannelSource(value: CollaborationTriggerEvent['source']): boolean { return value === 'feishu' || value === 'hermes'; }
 
 const competitionActionSchema = z.object({
   type: z.literal('competition'), participantAgentIds: z.array(id).min(2).max(12), evaluatorAgentId: id,
@@ -337,6 +340,7 @@ export class CollaborationTriggerService {
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');
     if (event.externalInput && event.eventType !== 'external.message') throw new Error('Only external.message events may carry external input');
     if (event.externalInput && event.externalInput.channel !== event.source) throw new Error('External input channel must match the event source');
+    if (isChannelSource(event.source) && !(event.eventType === 'external.message' && event.externalInput)) throw new Error('Feishu and Hermes events must be external messages with external input');
     const eventScope = { owner: event.owner, tenantId: event.tenantId };
     const fromEvent = { taskId: event.taskId, contextVersion: event.contextVersion, ...(event.context ? { context: event.context } : {}) };
     const trusted = event.externalInput ? { externalInput: event.externalInput } : undefined;

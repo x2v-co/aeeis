@@ -30,6 +30,11 @@ import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, scopedRecent, validateCollectionLimit, type CollectionCursor } from './adapters/collection-query.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
 
+/** Model-facing and blind views never name the external sender: it is usually
+ * a participant, and its ID would tell candidates or the evaluator who is who. */
+function withAnonymousSender(value: CompetitionBrief): CompetitionBrief {
+  return value.externalInput ? { ...value, externalInput: { ...value.externalInput, senderAgentId: 'external.sender' } } : value;
+}
 function matchesScope(value: { owner?: string; tenantId?: string }, scope?: Ownership): boolean {
   return scope === undefined || (value.owner ?? 'owner') === scope.owner && (value.tenantId ?? 'local') === scope.tenantId;
 }
@@ -576,7 +581,7 @@ export class CollaborationService {
     const aliases = new Map(current.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
     return {
       ...current,
-      brief: { ...current.brief, participantAgentIds: current.brief.participantAgentIds.map((_agent, index) => `candidate_${index + 1}`) },
+      brief: withAnonymousSender({ ...current.brief, participantAgentIds: current.brief.participantAgentIds.map((_agent, index) => `candidate_${index + 1}`) }),
       candidates: current.candidates.map(candidate => ({ ...candidate, agentId: aliases.get(candidate.agentId)! })),
       scores: current.scores.map(score => ({ ...score, agentId: aliases.get(score.agentId) ?? score.agentId })),
       ...(current.selectedAgentId ? { selectedAgentId: aliases.get(current.selectedAgentId) ?? current.selectedAgentId } : {}),
@@ -673,7 +678,7 @@ export class CollaborationService {
         }, scope);
         if (!reserved) return this.repository.getCompetition(idValue, scope);
         try {
-          const candidate = resultEnvelopeSchema.parse(await runner.run(before.brief, { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
+          const candidate = resultEnvelopeSchema.parse(await runner.run(withAnonymousSender(before.brief), { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
           if (candidate.agentId !== participantAgentId || candidate.taskId !== before.brief.taskId || candidate.contextVersion !== before.brief.contextVersion || candidate.resultType !== before.brief.expectedResultType) throw new Error('Candidate result is not bound to the competition brief');
           await this.repository.mutateCompetition(idValue, record => {
             const attempt = record.attempts.find(item => item.id === attemptId);
@@ -707,7 +712,7 @@ export class CollaborationService {
       const resultCandidates = afterCandidates.candidates;
 
       const aliases = new Map(resultCandidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
-      const evaluationBrief = afterCandidates.brief.blindEvaluation ? { ...afterCandidates.brief, participantAgentIds: [...aliases.values()] } : afterCandidates.brief;
+      const evaluationBrief = afterCandidates.brief.blindEvaluation ? withAnonymousSender({ ...afterCandidates.brief, participantAgentIds: [...aliases.values()] }) : afterCandidates.brief;
       const evaluationCandidates = afterCandidates.brief.blindEvaluation ? resultCandidates.map((candidate, index) => ({ ...candidate, agentId: `candidate_${index + 1}` })) : resultCandidates;
       const evaluatorAttemptId = `attempt_${randomUUID()}`;
       const evaluatorInputHash = createHash('sha256').update(JSON.stringify({ brief: evaluationBrief, candidates: evaluationCandidates })).digest('hex');

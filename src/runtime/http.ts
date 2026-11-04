@@ -66,7 +66,7 @@ import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.j
 import { BotTeam } from '../bot-team.js';
 import { RoutineConflict, RoutineNotFound, RoutineRateLimitError, RoutineService, RoutineSignatureError, type RoutineStore } from '../routines.js';
 import type { HermesDebateIngress } from '../hermes-debate-ingress.js';
-import { collaborationTriggerEventSchema, collaborationTriggerReconcileSchema, CollaborationTriggerNotFound, type CollaborationTriggerService } from '../collaboration-triggers.js';
+import { collaborationTriggerEventSchema, collaborationTriggerReconcileSchema, CollaborationTriggerNotFound, isChannelSource, type CollaborationTriggerService } from '../collaboration-triggers.js';
 import { improvementSignalsForRun } from '../rsi-proposal-pump.js';
 import { synthesisAttempts, type DurableRsiProposalSynthesis } from '../rsi-proposal-synthesizer.js';
 import { ReminderConflict, ReminderNotFound, reminderRecurrenceSchema, type ReminderPump, type ReminderStatus, type ReminderStore } from '../reminders.js';
@@ -1667,16 +1667,15 @@ export function buildApp(options: Options) {
   app.post('/api/collaborations/triggers/evaluate', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');
     const principal = principalOf(request);
-    // External input only arrives through the Feishu/Hermes ingress on the
-    // internal route; a user-facing caller cannot claim channel provenance.
-    const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true, externalInput: true }).parse(request.body);
+    const body = callerTriggerEvent(collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true, externalInput: true }).parse(request.body));
     return options.collaborationTriggers.evaluate({ ...body, schemaVersion: 'collaboration-trigger-event/1', owner: principal.id, tenantId: principal.tenantId }, { owner: principal.id, tenantId: principal.tenantId });
   });
-  // Worker/event bridges use this route for Feishu/Hermes or internal system
-  // events. The worker token is checked by the shared /internal middleware.
+  // Worker bridges use this route for internal system events. The worker
+  // token is checked by the shared /internal middleware. Feishu/Hermes events
+  // come only from the in-process webhook ingress, never over HTTP.
   app.post('/internal/collaborations/triggers/evaluate', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');
-    return options.collaborationTriggers.evaluate(request.body);
+    return options.collaborationTriggers.evaluate(callerTriggerEvent(collaborationTriggerEventSchema.omit({ externalInput: true }).parse(request.body)));
   });
   app.get<{ Querystring: { limit?: string } }>('/api/collaborations/competitions', async request => {
     if (!options.collaboration) return [];
@@ -2538,6 +2537,12 @@ function readableRunAfter(run: AgentRun, cursor: ReadableRunCursor | undefined):
 function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
+/** HTTP callers, including worker bridges, cannot claim Feishu/Hermes provenance. */
+function callerTriggerEvent<T extends { source: Parameters<typeof isChannelSource>[0] }>(event: T): T {
+  if (isChannelSource(event.source)) throw new RangeError('Feishu and Hermes events only come from their webhook ingress');
+  return event;
+}
+
 function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
   const inputRequest = runInputRequest(run);
   return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}) };

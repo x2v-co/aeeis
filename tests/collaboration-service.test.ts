@@ -58,6 +58,25 @@ describe('durable collaboration service', () => {
     await repository.close();
   });
 
+  it('never shows the external sender ID to candidates or a blind evaluator', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collab-sender-'))); await repository.init();
+    try {
+      const service = new CollaborationService(repository);
+      const externalInput = { channel: 'feishu' as const, messageId: 'msg_feishu_1', senderAgentId: 'agent.one', text: 'Pick my plan.', receivedAt: new Date().toISOString() };
+      const created = await service.createCompetition(brief, undefined, { externalInput });
+      const senders: string[] = [];
+      await service.runCompetition(created.id, 'agent.evaluator', {
+        run: async (current, isolation) => { senders.push(current.externalInput!.senderAgentId); return candidate(isolation.candidateId); },
+      }, {
+        evaluate: async (current, candidates) => { senders.push(current.externalInput!.senderAgentId); return candidates.map(item => ({ agentId: item.agentId, score: 0.5, accepted: true, reasons: [], evidenceRefs: [] })); },
+      });
+      expect(senders).toEqual(['external.sender', 'external.sender', 'external.sender']);
+      expect((await service.getEvaluationView(created.id)).brief.externalInput!.senderAgentId).toBe('external.sender');
+      // The stored record keeps the real sender for audit.
+      expect((await service.getCompetition(created.id)).brief.externalInput!.senderAgentId).toBe('agent.one');
+    } finally { await repository.close(); }
+  });
+
   it('persists competition collection, independent scoring and selection', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-collab-'))); await repository.init();
     const service = new CollaborationService(repository);
