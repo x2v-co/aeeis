@@ -1,3 +1,4 @@
+import { FileTaskBoardStore, PostgresTaskBoardStore } from './adapters/task-board-store.js';
 import { JsonChannelNoiseStore, PostgresChannelNoiseStore, type ChannelNoiseStore } from './channel-noise.js';
 import pg from 'pg';
 import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
@@ -66,7 +67,7 @@ import { HermesDebateIngress, hermesDebateRouteSchema } from './hermes-debate-in
 import { CollaborationTriggerService, FileCollaborationTriggerStore, PostgresCollaborationTriggerStore } from './collaboration-triggers.js';
 import { CollaborationTriggerPump } from './collaboration-trigger-pump.js';
 import { RsiProposalPump } from './rsi-proposal-pump.js';
-import { FileRunScanCursorStore, PostgresRunScanCursorStore, type RunScanCursorStore } from './run-scan-cursor.js';
+import { RunEventScanner, FileRunScanCursorStore, PostgresRunScanCursorStore, type RunScanCursorStore } from './run-scan-cursor.js';
 import { FileRsiProposalClaimStore, PostgresRsiProposalClaimStore, type RsiProposalClaimStore } from './rsi-proposal-claims.js';
 import { DurableRsiProposalSynthesis, HttpRsiProposalSynthesizer } from './rsi-proposal-synthesizer.js';
 import { defaultRsiEvaluationSuite, RsiAutomationPump, type RsiAutomationOptions } from './rsi-automation.js';
@@ -268,6 +269,10 @@ const botDialogues = process.env.DATABASE_URL
   ? new PostgresBotDialogueStore(process.env.DATABASE_URL)
   : new FileBotDialogueStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/bot-dialogues.json`);
 await botDialogues.init();
+const taskBoardControls = process.env.DATABASE_URL
+  ? new PostgresTaskBoardStore(process.env.DATABASE_URL)
+  : new FileTaskBoardStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/task-board-relations.json`);
+await taskBoardControls.init();
 const sessionEvents = new SessionEventService(sessionEventRepository, domain, channelNoise);
 const deviceSessions: DeviceSessionRepository = process.env.DATABASE_URL
   ? new PostgresDeviceSessionRepository(process.env.DATABASE_URL)
@@ -606,7 +611,7 @@ try {
     readinessToolsTimeoutMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_TIMEOUT_MS', 3_000),
     readinessToolsRefreshMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_REFRESH_MS', 60_000),
     readinessToolsLastGoodMs: readinessToolsEnvMs(process.env, 'AEEIS_READY_TOOLS_LAST_GOOD_MS', 900_000),
-    conversationStore, botDialogues, localToolDefaults: defaultAllowedTools, demoMode: process.env.AEEIS_DEMO_MODE === '1', repository, domain, brain, brainStore, ...(brainSemanticIndex ? { brainSemanticIndex } : {}), rsi, ...(rsiProposalSynthesis ? { rsiProposalSynthesis } : {}), ...(rsiAutomation ? { rsiAutomation } : {}), ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(knowledgeMaintenance ? { knowledge: knowledgeMaintenance } : {}), ...(knowledge ? { knowledgeProvider: knowledge } : {}), ...(projectSources ? { projectSourcesProvider: projectSources } : {}), ...(trustedHosts.length ? { trustedHosts } : {}), ...(publicHosts.length ? { publicHosts } : {}), ...(trustedOrigins.length ? { trustedOrigins } : {}), ...(agentEndpointHosts.length ? { agentEndpointHosts } : {}), ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(sandboxGateway ? { runMachines: (runId: string) => sandboxGateway.describe(runId) } : {}), collaboration, collaborationTriggers, projection, reminders: reminderStore, reminderPump, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(feishuDebateIngress ? { feishuDebateIngress } : {}), ...(hermesDebateIngress ? { hermesDebateIngress } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}), ...(taskScheduler ? { taskScheduler } : {}),
+    conversationStore, botDialogues, taskBoardControls, localToolDefaults: defaultAllowedTools, demoMode: process.env.AEEIS_DEMO_MODE === '1', repository, domain, brain, brainStore, ...(brainSemanticIndex ? { brainSemanticIndex } : {}), rsi, ...(rsiProposalSynthesis ? { rsiProposalSynthesis } : {}), ...(rsiAutomation ? { rsiAutomation } : {}), ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(knowledgeMaintenance ? { knowledge: knowledgeMaintenance } : {}), ...(knowledge ? { knowledgeProvider: knowledge } : {}), ...(projectSources ? { projectSourcesProvider: projectSources } : {}), ...(trustedHosts.length ? { trustedHosts } : {}), ...(publicHosts.length ? { publicHosts } : {}), ...(trustedOrigins.length ? { trustedOrigins } : {}), ...(agentEndpointHosts.length ? { agentEndpointHosts } : {}), ...(rsiHarness ? { rsiHarness } : {}), ...(skills ? { skills } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(sandboxGateway ? { runMachines: (runId: string) => sandboxGateway.describe(runId) } : {}), collaboration, collaborationTriggers, projection, reminders: reminderStore, reminderPump, ...(projectionSink ? { projectionSink } : {}), ...(competitionRunner ? { competitionRunner } : {}), ...(competitionEvaluator ? { competitionEvaluator, competitionEvaluatorAgentId: competitionEvaluator.agentId } : {}), ...(debateRunner ? { debateRunner } : {}), ...(feishuDebateIngress ? { feishuDebateIngress } : {}), ...(hermesDebateIngress ? { hermesDebateIngress } : {}), ...(engine ? { engine } : {}), ...(dispatcher ? { dispatcher } : {}), ...(taskScheduler ? { taskScheduler } : {}),
     ...(accessToken ? { token: accessToken } : {}),
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
     ...(principalTokens ? { principalTokens } : {}),
@@ -790,6 +795,20 @@ try {
   sandboxReaper?.unref();
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
+  const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25);
+  let boardWork: Promise<void> | undefined;
+  const boardPump = () => {
+    if (boardWork) return boardWork;
+    boardWork = (async () => {
+      const batch = await boardScanner.batch(100);
+      const scopes = new Map(batch.entries.map(({ run }) => [JSON.stringify([run.tenantId ?? 'local',run.owner]),{ tenantId: run.tenantId ?? 'local',owner: run.owner }]));
+      for (const scope of scopes.values()) await app.aeeisBoardRecover?.(scope);
+      await app.aeeisBoardScan?.(); await app.aeeisBoard?.pump(); await batch.commit();
+    })().catch(error => console.error('AEEIS task board recovery failed', error instanceof Error ? error.message : error)).finally(() => { boardWork = undefined; });
+    return boardWork;
+  };
+  trackBackground(boardPump());
+  const boardTimer = setInterval(() => { if (!closing) trackBackground(boardPump()); }, 2000); boardTimer.unref();
   const digestTimer = setInterval(() => { if (!closing) trackBackground(sessionEvents.delivery.pump()); }, 15_000);
   digestTimer.unref();
   const pushPump = new PushPump(pushStore, pushSenders, scope => withTenantScope(scope.tenantId, () => app.aeeisPushMessages!(scope)), message => console.error(`AEEIS push: ${message}`), async (message, scope) => {
@@ -814,6 +833,7 @@ try {
         if (closing) return;
         if (Date.now() - lastChangeWakeAt < 250) return;
         lastChangeWakeAt = Date.now();
+        trackBackground(boardPump());
         const collaborationWork = collaborationTriggerPump.pump().catch(error => console.error('AEEIS collaboration trigger changefeed failed', error instanceof Error ? error.message : error));
         trackBackground(collaborationWork);
         if (rsiProposalIntervalMs > 0) {
@@ -958,11 +978,11 @@ try {
     // persist before the process exits (compose stop_grace_period covers it).
     const drainMs = Number(process.env.AEEIS_SHUTDOWN_DRAIN_MS ?? 240_000);
     if (engine && !(await engine.drain(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 240_000))) console.error('AEEIS: shutdown drain timed out; in-flight runs will be recovered on boot');
-    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(digestTimer); clearInterval(pushTimer); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
+    clearInterval(sandboxReaper); clearInterval(projectionPump); clearInterval(digestTimer); clearInterval(boardTimer); clearInterval(pushTimer); clearInterval(collaborationTriggerPumpTimer); if (rsiProposalPumpTimer) clearInterval(rsiProposalPumpTimer); if (rsiAutomationTimer) clearInterval(rsiAutomationTimer); if (taskSchedulerPump) clearInterval(taskSchedulerPump); if (reminderPumpTimer) clearInterval(reminderPumpTimer); if (routinePumpTimer) clearInterval(routinePumpTimer); if (botPumpTimer) clearInterval(botPumpTimer); if (knowledgeReindexPump) clearInterval(knowledgeReindexPump);
     // Detach change notifications before draining pumps. A callback already
     // in flight is covered by the pump drains; no callback can start another
     // scan after this point.
-    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await botDialogues.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
+    await unsubscribeRunChanges?.(); await localToolkit?.close(); await app.close(); await app.aeeisBots?.drain(); await Promise.allSettled([...backgroundWork]); await reminderPump.drain(); await rsiProposalPump.drain(); await rsiAutomation?.drain(); await collaborationTriggerPump.drain(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await botDialogues.close(); await taskBoardControls.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close();
   };
   process.once('SIGINT', () => void close()); process.once('SIGTERM', () => void close());
-} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await botDialogues.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }
+} catch (error) { await localToolkit?.close(); await dispatcher?.close(); await conversationStore.close(); await repository.close(); await domainStore.close(); await sessionEventRepository.close(); await channelNoise.close?.(); await botDialogues.close(); await taskBoardControls.close(); await deviceSessions.close?.(); await uiEvents.close?.(); await pushStore.close?.(); await taskDispatchRepository.close(); await reminderStore.close(); await brainStore.close(); await skillAuditPool?.end(); await evolutionRepository.close(); await evolutionActivation.close(); await collaborationRepository.close(); await collaborationTriggerStore.close(); await projection.close(); await grantLedger.close(); await globalBudgetLedger?.close(); await agentDirectory.close?.(); await projectSourceCheckpoints.close?.(); await roomMemberships.close(); await ownedBots.close(); await actionPolicies.close?.(); await routineStore.close?.(); await rsiProposalClaims.close?.(); await runScanCursors.close(); await principalDirectory?.close?.(); await channelIdentityResolver?.close?.(); await databaseSecurity.close(); throw error; }

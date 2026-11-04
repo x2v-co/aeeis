@@ -1,3 +1,5 @@
+import { acquireFileWriter, releaseFileWriter } from './adapters/file-writer-lock.js';
+import { persistBoardAction, boardControlVersion } from './task-board-controls.js';
 import { ChannelDigestDelivery } from './channel-digest.js';
 import { InMemoryChannelNoiseStore, type ChannelNoiseStore, type ChannelScope } from './channel-noise.js';
 import { mkdir, open, readFile, rename, unlink, type FileHandle } from 'node:fs/promises';
@@ -101,8 +103,9 @@ export interface SessionEventScope { tenantId: string; owner?: string }
 /** Checks the events already written about one task before a new action is
  * appended. It runs inside the same serialization boundary as sequence
  * allocation, so two writers cannot both pass it. Throw to refuse. */
-export type TaskActionGuard = (events: SessionEvent[]) => void;
+export type TaskActionGuard = (events: SessionEvent[]) => void | Promise<void>;
 export interface SessionEventRepository {
+  boardRoomsPage?(after?: string, limit?: number): Promise<{ items: ChannelScope[]; next?: string }>;
   pendingDigestRooms?(): Promise<ChannelScope[]>;
   init?(): Promise<void>;
   append(draft: SessionEventDraft): Promise<SessionEvent>;
@@ -149,11 +152,15 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
     this.events.push(structuredClone(event));
     return structuredClone(event);
   }
-  async appendGuarded(input: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent> {
-    const existing = this.events.find(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && event.idempotencyKey === input.idempotencyKey);
-    if (existing) return sameDraft(existing, input);
-    guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && citesTask(event, taskId))));
-    return this.append(input);
+  private guardQueue: Promise<unknown> = Promise.resolve();
+  appendGuarded(input: SessionEventDraft, taskId: Id, guard: TaskActionGuard): Promise<SessionEvent> {
+    const next = this.guardQueue.then(async () => {
+      const existing = this.events.find(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && event.idempotencyKey === input.idempotencyKey);
+      if (existing) return sameDraft(existing, input);
+      await guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId)));
+      return this.append(input);
+    });
+    this.guardQueue = next.catch(() => undefined); return next;
   }
   async get(eventId: Id, scope?: SessionEventScope): Promise<SessionEvent | undefined> {
     const event = this.events.find(item => item.id === eventId && matchesScope(item, scope));
@@ -169,6 +176,7 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
     return newestPage(this.events.filter(event => event.roomId === roomId && matchesScope(event, scope)), limit, beforeSequence);
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> { return structuredClone(this.events.filter(event => event.roomId === roomId && event.targetEventId === targetEventId && matchesScope(event, scope))); }
+  async boardRoomsPage(after?: string, limit = 25) { return boardRoomsPage(this.events,after,limit); }
   async pendingDigestRooms(): Promise<ChannelScope[]> { return pendingRooms(this.events); }
   async close(): Promise<void> {}
 }
@@ -177,7 +185,7 @@ export class InMemorySessionEventRepository implements SessionEventRepository {
 export class JsonSessionEventRepository implements SessionEventRepository {
   private events: SessionEvent[] = [];
   private loaded = false;
-  private lock: FileHandle | undefined = undefined;
+  private lock: { handle: FileHandle; token: string } | undefined = undefined;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly filePath: string) {}
@@ -185,17 +193,13 @@ export class JsonSessionEventRepository implements SessionEventRepository {
   async init(): Promise<void> {
     if (this.loaded) return;
     await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
-    try { this.lock = await open(`${this.filePath}.lock`, 'wx', 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      throw new Error('Session event store already has a live writer');
-    }
+    this.lock = await acquireFileWriter(`${this.filePath}.lock`);
     try {
       const raw = await readFile(this.filePath, 'utf8');
       const parsed: unknown = JSON.parse(raw);
       const values = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' && Array.isArray((parsed as { events?: unknown }).events) ? (parsed as { events: unknown[] }).events : undefined;
       if (!values) throw new Error('session event file must be an array or an object with events');
-      this.events = values.map(value => sessionEventSchema.parse(value));
+      this.events = await Promise.all(values.map(value => openEvent(value as SessionEvent)));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await this.close(); throw error; }
     }
@@ -233,7 +237,7 @@ export class JsonSessionEventRepository implements SessionEventRepository {
       this.assertOpen();
       const existing = this.events.find(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && event.idempotencyKey === input.idempotencyKey);
       if (existing) return sameDraft(existing, input);
-      guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId && citesTask(event, taskId))));
+      await guard(structuredClone(this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId)));
       const count = this.events.filter(event => event.roomId === input.roomId && event.owner === input.owner && event.tenantId === input.tenantId).length;
       const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: count + 1, ...input });
       await this.persist([...this.events, event]);
@@ -253,16 +257,18 @@ export class JsonSessionEventRepository implements SessionEventRepository {
     return { items: structuredClone(visible), ...(items.length > limit && visible.length ? { nextCursor: String(visible.at(-1)!.sequence) } : {}) };
   }
   async findByTarget(roomId: Id, targetEventId: Id, scope?: SessionEventScope): Promise<SessionEvent[]> { this.assertOpen(); return structuredClone(this.events.filter(event => event.roomId === roomId && event.targetEventId === targetEventId && matchesScope(event, scope))); }
+  async boardRoomsPage(after?: string, limit = 25) { this.assertOpen(); return boardRoomsPage(this.events,after,limit); }
   async pendingDigestRooms(): Promise<ChannelScope[]> { this.assertOpen(); return pendingRooms(this.events); }
-  async close(): Promise<void> { this.loaded = false; await this.lock?.close().catch(() => undefined); this.lock = undefined; try { await unlink(`${this.filePath}.lock`); } catch {} }
+  async close(): Promise<void> { await this.queue; this.loaded = false; if (this.lock) { await releaseFileWriter(`${this.filePath}.lock`,this.lock); this.lock = undefined; } }
 
   private assertOpen(): void { if (!this.loaded || !this.lock) throw new Error('Session event store is not open'); }
   private async serial<T>(operation: () => Promise<T>): Promise<T> { const previous = this.queue; let release!: () => void; this.queue = new Promise(resolve => { release = resolve; }); await previous; try { return await operation(); } finally { release(); } }
   private async persist(events: SessionEvent[]): Promise<void> {
     const tempPath = `${this.filePath}.${cryptoRandomId()}.tmp`;
     const file = await open(tempPath, 'wx', 0o600);
-    try { await file.writeFile(`${JSON.stringify({ events }, null, 2)}\n`); await file.sync(); } finally { await file.close(); }
+    try { await file.writeFile(`${JSON.stringify({ events: await Promise.all(events.map(event => sealEvent(event))) }, null, 2)}\n`); await file.sync(); } finally { await file.close(); }
     await rename(tempPath, this.filePath);
+    const directory = await open(dirname(this.filePath), 'r'); try { await directory.sync(); } finally { await directory.close(); }
     this.events = events;
   }
 }
@@ -284,6 +290,14 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
   constructor(connectionString: string) { this.pool = createPostgresPool(connectionString); }
   async init(): Promise<void> {
     await withPostgresMigrationLock(this.pool, 'session-events', async client => { await client.query(`CREATE TABLE IF NOT EXISTS aeeis_session_events (id text PRIMARY KEY, room_id text NOT NULL, goal_id text, owner text NOT NULL, tenant_id text NOT NULL, sequence integer NOT NULL, idempotency_key text NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL, UNIQUE(room_id, owner, tenant_id, idempotency_key), UNIQUE(room_id, owner, tenant_id, sequence)); ALTER TABLE aeeis_session_events ALTER COLUMN goal_id DROP NOT NULL; CREATE INDEX IF NOT EXISTS aeeis_session_events_room_idx ON aeeis_session_events(room_id, owner, tenant_id, sequence)`); });
+  }
+  async boardRoomsPage(after?: string, limit = 25): Promise<{ items: ChannelScope[]; next?: string }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Invalid board room scan limit');
+    const parts = after ? z.array(z.string()).length(3).parse(JSON.parse(after)) : ['', '', ''];
+    const result = await this.pool.query(`SELECT DISTINCT tenant_id,owner,room_id FROM aeeis_session_events
+      WHERE (tenant_id,owner,room_id)>($1,$2,$3) ORDER BY tenant_id,owner,room_id LIMIT $4`, [...parts,limit+1]);
+    const items = result.rows.slice(0,limit).map(row => ({ tenantId: row.tenant_id as string, owner: row.owner as string, roomId: row.room_id as string }));
+    const last = items.at(-1); return { items, ...(result.rows.length > limit && last ? { next: JSON.stringify([last.tenantId,last.owner,last.roomId]) } : {}) };
   }
   async pendingDigestRooms(): Promise<ChannelScope[]> {
     const result = await this.pool.query<{ room_id: string; owner: string; tenant_id: string }>(`SELECT DISTINCT p.room_id,p.owner,p.tenant_id FROM aeeis_session_events p
@@ -329,13 +343,23 @@ export class PostgresSessionEventRepository implements SessionEventRepository {
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.tenantId}:${input.owner}:${input.roomId}`]);
+      // Share the Room row lock with archive/update commits. Run locks are
+      // never held here. Embedded tests may use a separate domain store.
+      if (input.taskAction && !(input.taskAction.schemaVersion === 'channel-task-action/2' && input.taskAction.source === 'system')) {
+        const table = await client.query("SELECT to_regclass('aeeis_rooms') AS name");
+        if (table.rows[0]?.name) {
+          const room = await client.query("SELECT state FROM aeeis_rooms WHERE id=$1 AND owner=$2 AND tenant_id=$3 FOR UPDATE",[input.roomId,input.owner,input.tenantId]);
+          if (!room.rows[0] || room.rows[0].state.status !== 'active') throw new AeeisConflict('频道已归档或不可写，请刷新');
+        }
+      }
       const existing = await client.query<{ state: SessionEvent }>('SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND idempotency_key=$4', [input.roomId, input.owner, input.tenantId, input.idempotencyKey]);
       if (existing.rows[0]) { await client.query('COMMIT'); return sameDraft(await openEvent(existing.rows[0].state), input); }
-      const cited = await client.query<{ state: SessionEvent }>(`SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 AND (state->'evidenceRefs' ? $4 OR state->'taskAction'->>'taskId'=$4) ORDER BY sequence ASC`, [input.roomId, input.owner, input.tenantId, taskId]);
-      guard(await Promise.all(cited.rows.map(row => openEvent(row.state))));
+      const cited = await client.query<{ state: SessionEvent }>(`SELECT state FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3 ORDER BY sequence ASC`, [input.roomId, input.owner, input.tenantId]);
+      await guard(await Promise.all(cited.rows.map(row => openEvent(row.state))));
       const count = await client.query<{ max: number | null }>('SELECT max(sequence)::int AS max FROM aeeis_session_events WHERE room_id=$1 AND owner=$2 AND tenant_id=$3', [input.roomId, input.owner, input.tenantId]);
       const event = sessionEventSchema.parse({ schemaVersion: 'session-event/1', id: `session_event_${cryptoRandomId()}`, sequence: (count.rows[0]?.max ?? 0) + 1, ...input });
       await client.query('INSERT INTO aeeis_session_events(id,room_id,goal_id,owner,tenant_id,sequence,idempotency_key,state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [event.id, event.roomId, event.goalId ?? null, event.owner, event.tenantId, event.sequence, event.idempotencyKey, await sealEvent(event), event.createdAt]);
+      await persistBoardAction(client, event);
       await client.query('COMMIT');
       return event;
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; } finally { client.release(); }
@@ -406,6 +430,7 @@ export class SessionEventService {
     this.delivery = new ChannelDigestDelivery(repository, noise, now);
   }
 
+  async boardRoomsPage(after?: string): Promise<{ items: ChannelScope[]; next?: string }> { return this.repository.boardRoomsPage?.(after,25) ?? { items: [] }; }
   async create(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
     const write = async () => this.delivery.write(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
     return this.writeGate ? this.writeGate(roomId, actorId, tenantId, write) : write();
@@ -418,6 +443,20 @@ export class SessionEventService {
     const action = channelTaskActionSchema.parse(input.taskAction);
     const draft = await this.draft(roomId, { ...input, type: input.type ?? 'task_update' }, actorId, tenantId, 'principal', action);
     return this.delivery.write(draft, item => this.repository.appendGuarded(item, action.taskId, guard));
+  }
+
+  /** System-only invalidation reuses the original audience/manifest. It may
+   * repair archived boards, never authorizes a new user write or approval. */
+  async invalidateBoardControl(previous: SessionEvent, action: ChannelTaskAction): Promise<void> {
+    if (action.schemaVersion !== 'channel-task-action/2' || action.source !== 'system' || action.kind !== 'clear_override') throw new AeeisConflict('Invalid system board action');
+    const content = taskActionLineForClear(action.reason);
+    const draft = { ...previous, actorId: 'system', actorType: 'system', recordedBy: { id: 'system', type: 'system' },
+      content, contentHash: digestProtocol({ content, action }), taskAction: action, idempotencyKey: `board-auto:${previous.id}:${action.expectedRunId}:${action.expectedRunRevision}`, createdAt: new Date().toISOString() };
+    // Do not spread event identity/sequence into the new draft.
+    const { id: _id, sequence: _seq, schemaVersion: _schema, ...clean } = draft as SessionEvent;
+    await this.repository.appendGuarded(clean as SessionEventDraft, action.taskId, written => {
+      if (boardControlVersion(written,action.conversationId,action.taskId) !== action.expectedVersion) throw new AeeisConflict('任务已变化');
+    });
   }
 
   private async draft(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType, taskAction?: ChannelTaskAction): Promise<SessionEventDraft> {
@@ -590,7 +629,6 @@ export class SessionEventService {
 
 }
 
-function citesTask(event: SessionEvent, taskId: Id): boolean { return event.evidenceRefs.includes(taskId) || event.taskAction?.taskId === taskId; }
 function newestPage(events: SessionEvent[], limit: number, beforeSequence?: number): SessionEventPage {
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError('Session event page limit must be between 1 and 200');
   const items = events.filter(event => beforeSequence === undefined || event.sequence < beforeSequence).sort((a, b) => a.sequence - b.sequence);
@@ -599,6 +637,13 @@ function newestPage(events: SessionEvent[], limit: number, beforeSequence?: numb
 }
 function matchesScope(event: { owner: string; tenantId: string }, scope?: SessionEventScope): boolean { return !scope || (event.tenantId === scope.tenantId && (scope.owner === undefined || event.owner === scope.owner)); }
 function sameDraft(existing: SessionEvent, input: SessionEventDraft): SessionEvent {
+  if (existing.taskAction?.schemaVersion === 'channel-task-action/2' && input.taskAction?.schemaVersion === 'channel-task-action/2') {
+    const intent = (action: Extract<ChannelTaskAction,{ schemaVersion: 'channel-task-action/2' }>) => [action.kind,action.conversationId,action.taskId,action.toColumn,action.expectedVersion,action.expectedRunId,action.expectedRunRevision,action.reason,action.source];
+    if (existing.roomId !== input.roomId || existing.owner !== input.owner || existing.tenantId !== input.tenantId || existing.actorId !== input.actorId || existing.actorType !== input.actorType || existing.content !== input.content || JSON.stringify(intent(existing.taskAction)) !== JSON.stringify(intent(input.taskAction))) throw new SessionEventConflict('Session event idempotency key is bound to different content');
+    // Goal/context manifests are server-generated audit bindings. Independent
+    // API processes may prepare different manifests for the same command.
+    return structuredClone(existing);
+  }
   if (existing.roomId !== input.roomId || existing.goalId !== input.goalId || existing.owner !== input.owner || existing.tenantId !== input.tenantId || existing.type !== input.type || existing.actorId !== input.actorId || existing.actorType !== input.actorType || existing.operation !== (input.operation ?? 'publish') || existing.targetEventId !== input.targetEventId || existing.revision !== (input.revision ?? 1) || existing.retractionReason !== input.retractionReason || existing.contextManifestId !== input.contextManifestId || existing.contextManifestHash !== input.contextManifestHash || existing.contentHash !== input.contentHash || existing.idempotencyKey !== input.idempotencyKey || JSON.stringify(existing.taskAction ?? null) !== JSON.stringify(input.taskAction ?? null)) throw new SessionEventConflict('Session event idempotency key is bound to different content');
   return structuredClone(existing);
 }
@@ -624,4 +669,13 @@ function pendingRooms(events: SessionEvent[]): ChannelScope[] {
     rooms.set(JSON.stringify(scope), scope);
   }
   return [...rooms.values()];
+}
+
+function taskActionLineForClear(reason: string): string { return `恢复自动列：${reason}`; }
+
+function boardRoomsPage(events: SessionEvent[], after?: string, limit = 25): { items: ChannelScope[]; next?: string } {
+  const key = (e: ChannelScope) => JSON.stringify([e.tenantId,e.owner,e.roomId]);
+  const rooms = [...new Map(events.map(event => [key(event), { tenantId: event.tenantId, owner: event.owner, roomId: event.roomId }])).values()]
+    .filter(room => !after || key(room) > after).sort((a,b) => key(a) < key(b) ? -1 : 1);
+  const items = rooms.slice(0,limit); return { items, ...(rooms.length > limit ? { next: key(items.at(-1)!) } : {}) };
 }

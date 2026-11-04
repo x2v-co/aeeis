@@ -76,7 +76,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     if (request.method === 'POST' && url === '/api/ui-events') uiEvents.push(JSON.parse(request.body));
     else if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
     const boardRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/board$/)?.[1];
-    if (boardRoom) return response(await mockBoard(decodeURIComponent(boardRoom)));
+    if (boardRoom) return options.handler?.(url, request) ?? response(await mockBoard(decodeURIComponent(boardRoom)));
     const actionRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/task-actions$/)?.[1];
     if (actionRoom && request.method === 'POST') {
       const roomId = decodeURIComponent(actionRoom);
@@ -85,7 +85,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
       if (!card) return response({ error: '这件事不在这个频道的任务板上' }, 404);
       if (body.kind === 'claim' && card.decision.assigneeId) return response({ error: card.decision.assigneeId === body.agentId ? '已经领取这件事' : `${nameOf(card.decision.assigneeId)}已领取` }, 409);
       if (body.kind === 'accept' && card.status !== 'succeeded') return response({ error: '只有已成功的事可以验收' }, 409);
-      const action = { schemaVersion: 'channel-task-action/1' as const, kind: body.kind, conversationId: body.conversationId, taskId: body.taskId, ...(body.agentId ? { agentId: body.agentId } : {}), ...(body.reason ? { reason: body.reason } : {}) };
+      const action = { schemaVersion: 'channel-task-action/1' as const, kind: body.kind, conversationId: body.conversationId, taskId: body.taskId, ...(body.kind === 'accept' && card.runId ? { acceptedRunId: card.runId } : {}), ...(body.agentId ? { agentId: body.agentId } : {}), ...(body.reason ? { reason: body.reason } : {}) };
       const event = await readHandler(`/api/rooms/${encodeURIComponent(roomId)}/session-events`, { method: 'POST', body: JSON.stringify({ goalId: body.goalId, type: 'task_update', content: taskActionLine(action, body.agentId ? nameOf(body.agentId) : undefined), contextManifestId: body.contextManifestId, idempotencyKey: body.idempotencyKey, evidenceRefs: [body.conversationId, body.taskId, ...(body.agentId ? [body.agentId] : [])], taskAction: action }) });
       return response({ event, board: await mockBoard(roomId) });
     }
@@ -2214,7 +2214,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/context-manifests')) return response({ id: 'ctx_handoff' });
       if (String(url).includes('/session-events') && method === 'POST') {
         const list = events.get(roomId) ?? [];
-        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, ...(body.taskAction ? { taskAction: body.taskAction } : {}), ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
         list.push(event);
         events.set(roomId, list);
         return response(event);
@@ -2471,7 +2471,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/context-manifests')) return response({ id: `ctx_${roomId}` });
       if (String(url).includes('/session-events') && method === 'POST') {
         const list = events.get(roomId) ?? [];
-        const event = { id: `evt_${roomId}_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        const event = { id: `evt_${roomId}_${list.length}`, operation: 'publish', actorType: body.actor?.type === 'agent' ? 'agent' : 'principal', actorId: body.actor?.id ?? 'owner', type: body.type, content: body.content, ...(body.taskAction ? { taskAction: body.taskAction } : {}), ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
         list.push(event);
         events.set(roomId, list);
         return response(event);
@@ -3426,7 +3426,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/memories')) return response(memories);
       if (String(url).includes('/session-events') && method === 'POST') {
         const list = events.get(roomId) ?? [];
-        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        const event = { id: `evt_${list.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.taskAction ? { taskAction: body.taskAction } : {}), ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
         list.push(event);
         events.set(roomId, list);
         return response(event);
@@ -3708,7 +3708,7 @@ describe('entry bots and group chats', () => {
   });
   it('applies acceptance recorded after the first event page while the board is closed', async () => {
     const handoff = { id: 'evt_handoff', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给发布', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
-    const accepted = { id: 'evt_accept', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '验收通过', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
+    const accepted = { taskAction: { schemaVersion: 'channel-task-action/1' as const, kind: 'accept' as const, conversationId: 'conv_release', taskId: 'task_done', acceptedRunId: runId }, id: 'evt_accept', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'task_update', content: '验收通过', evidenceRefs: ['conv_release', 'task_done', 'demo.release'], createdAt: date };
     const room = { id: 'room_accept', title: '稍后验收', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const release = { id: 'conv_release', title: '发布', revision: 0, agentId: 'demo.release', tasks: [{ id: 'task_done', title: '待验收的清单', threadId: 'thread_done', status: 'succeeded', createdAt: date, runId, latestRunId: runId, execution: { steps: [], evidence: ['清单'] } }], messages: [], hasEarlierMessages: false };
     const h = harness(undefined, { handler: (url) => {
@@ -3748,7 +3748,7 @@ describe('entry bots and group chats', () => {
       if (String(url).includes('/context-manifests')) return response({ id: 'ctx_still' });
       if (String(url).includes('/rooms/room_still/session-events') && method === 'POST') {
         const body = request?.body ? JSON.parse(request.body) : {};
-        const event = { id: `evt_${events.length}`, operation: 'publish', sequence: events.length + 1, actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
+        const event = { id: `evt_${events.length}`, operation: 'publish', sequence: events.length + 1, actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.taskAction ? { taskAction: body.taskAction } : {}), ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date };
         events.push(event);
         return response(event);
       }
@@ -3887,7 +3887,7 @@ describe('entry bots and group chats', () => {
       }
       if (String(url).includes('/context-manifests')) return response({ id: 'ctx_marks' });
       if (String(url).includes('/session-events') && method === 'POST') {
-        events.push({ id: `evt_${events.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date });
+        events.push({ id: `evt_${events.length}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: body.type, content: body.content, ...(body.taskAction ? { taskAction: body.taskAction } : {}), ...(body.evidenceRefs ? { evidenceRefs: body.evidenceRefs } : {}), createdAt: date });
         return response(events.at(-1));
       }
       if (String(url).includes('/session-events')) {
@@ -4372,4 +4372,36 @@ describe('canonical Bot dialogue gateway', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.includes('/session-events'))).toHaveLength(0);
     expect(view.tasks[1]!.runId).toBe(runId);
   });
+});
+
+
+it('uses the authoritative Board column, sends versioned keyboard moves and refreshes without channel messages', async () => {
+  const room = { id: 'room_controls',title: '可整理任务',description: '群聊',status: 'active',createdAt: date,updatedAt: date };
+  const view = { id: 'conv_release',title: '发布',agentId: 'demo.release',revision: 1,tasks: [{ id: 'task_live',title: '联动任务',threadId: 'thread_live',status: 'running',runId }],messages: [],hasEarlierMessages: false };
+  const cite = { id: 'evt_controls',owner: 'owner',actorId: 'owner',actorType: 'principal',type: 'system',content: '交给发布',evidenceRefs: [view.id,'task_live','demo.release'],createdAt: date };
+  let column = 'blocked',version = 3;
+  const decision = { accepted: false,conflicts: [],cancelled: false,released: false,handedUp: false,lines: [] };
+  const serverBoard = () => ({ schemaVersion: 'channel-board/1',roomId: room.id,cursor: 1,cards: [{ conversationId: view.id,taskId: 'task_live',title: '联动任务',ownerId: 'demo.release',status: 'running',runId,runRevision: 7,version,canMove: true,column,autoColumn: 'doing',override: true,decision,chain: [] }],citations: [{ ...cite,eventId: cite.id,conversationId: view.id,taskId: 'task_live',agentId: 'demo.release' }],actions: [],wip: [] });
+  const h = harness(undefined,{ handler: (url,request) => {
+    if (url === '/api/rooms?limit=50') return response([room]);
+    if (url.includes('/rooms/room_controls/members')) return response([{ id: 'member_release',roomId: room.id,principalId: 'demo.release',role: 'agent',status: 'active',invitedBy: 'owner',createdAt: date,updatedAt: date }]);
+    if (url.includes('/rooms/room_controls/session-events')) return response({ items: url.includes('limit=20') ? [] : [cite] });
+    if (url === '/api/conversations/conv_release') return response(view);
+    if (url === '/api/rooms/room_controls/board') return response(serverBoard());
+    if (url === '/api/rooms/room_controls/board-controls') { const body = JSON.parse(request.body); column = body.toColumn; version++; return response({ board: serverBoard() }); }
+    return undefined;
+  } });
+  start(h.fetch,{ setup: win => { win.prompt = () => '等待设计确认'; } }); await ready();
+  await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('可整理任务'))).toBe(true));
+  [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('可整理任务'))!.click();
+  await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('联动任务'));
+  el('channel-board-open').click();
+  await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
+  const menu = doc().querySelector<HTMLSelectElement>('[aria-label="移动到 · 联动任务"]')!; menu.focus(); menu.value = 'doing'; menu.dispatchEvent(new dom.window.Event('change'));
+  await vi.waitFor(() => expect(doc().querySelector('[data-column="doing"] [data-board-task="task_live"]')).not.toBeNull());
+  expect(h.posts.find(post => post.url.endsWith('/board-controls'))?.body).toMatchObject({ expectedVersion: 3,expectedRunId: runId,expectedRunRevision: 7,toColumn: 'doing',source: 'home',reason: '等待设计确认' });
+  column = 'blocked'; version++;
+  intervals.find(item => item.ms === 2000)!.callback();
+  await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
+  expect(view.tasks[0]!.status).toBe('running');
 });

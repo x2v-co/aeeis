@@ -169,5 +169,16 @@ describe('channel board on the server', () => {
     const board = await f.board.board(f.ids.roomId, 'alice', 'team-a');
     expect(card(board, 'task_other')).toMatchObject({ status: 'unreadable', column: 'failed' });
   });
+  it('binds acceptance to the exact latest Run and refuses legacy boolean acceptance on a retry',async () => {
+    const f = await channel(new InMemorySessionEventRepository()); await f.cite('task_done','cite-current');
+    await f.act('accept','task_done','accept-current');
+    expect(card(await f.board.board(f.ids.roomId,'alice','team-a'),'task_done').decision.acceptedRunId).toBe('run_done');
+    f.tasks.tasks.find(task => task.id === 'task_done')!.latestRunId = 'run_retry';
+    const retried = card(await f.board.board(f.ids.roomId,'alice','team-a'),'task_done');
+    expect(retried.runId).toBe('run_retry'); expect(retried.column).toBe('review'); expect(retried.decision.accepted).toBe(false);
+    await f.act('accept','task_done','accept-retry');
+    expect(card(await f.board.board(f.ids.roomId,'alice','team-a'),'task_done').column).toBe('done');
+  });
+
 });
 

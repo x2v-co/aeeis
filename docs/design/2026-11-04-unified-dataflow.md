@@ -1,7 +1,7 @@
 ---
 title: 主页与多 Bot 工作室的统一数据流
 date: 2026-11-04
-status: PR1、PR2 已实现；PR3–PR4 待实施（PR2 详见第 11 节）
+status: PR1–PR3 已实现；PR4 待实施（详见第 11、12 节）
 relates:
   - 2026-10-21-aeeis-interaction-design.md
   - 2026-10-29-bots-that-act.md
@@ -15,7 +15,7 @@ relates:
 
 产品原则是：**主页是精简界面，工作室是专业界面。用户从主页就能与每个 Bot 对接；需要任务细节、团队协作、操作和审批时进入工作室。两处共用对话、任务、Run 和审批，只是视图不同。** 同一条指令不能因为切换页面而再开一次 Run，同一个批准也不能因为换入口而放宽权限。
 
-核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。PR1 已实现 Bot 页直接执行：有效 OwnedBot 与 AEEIS 共用 Conversation → Thread / Run → dispatcher，背景由服务端按 tenant / owner / agentId 读取，审批沿用既有规则；未新增 migration。PR2 已实现（见第 11 节），PR3–PR4 待实施。第 3 节保留基线核查证据，PR1 当前行为见其第 0 项末段。
+核查基线为 `x2v-co/aeeis`，`cursor/unified-dataflow-docs-bot-run`，HEAD `5c2b7b7`（当前与给定的 origin/main 基线一致）。下列文件行号均指这个提交，后续实现应按符号定位。PR1 已实现 Bot 页直接执行：有效 OwnedBot 与 AEEIS 共用 Conversation → Thread / Run → dispatcher，背景由服务端按 tenant / owner / agentId 读取，审批沿用既有规则；未新增 migration。PR2、PR3 已实现（见第 11、12 节），PR4 待实施。第 3 节保留基线核查证据，PR1 当前行为见其第 0 项末段。
 
 ## 2. 先区分当前的三个界面
 
@@ -366,7 +366,7 @@ COMMIT;
 
 ## 8. PR 拆分、依赖、测试与验收
 
-PR1、PR2 已实现，PR3–PR4 待实施。以下保留各 PR 的范围与验收边界。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
+PR1–PR3 已实现，PR4 待实施。以下保留各 PR 的范围与验收边界。每个 PR 都可单独合入并有实际用户可验收的效果；正式团队页的最终整体验收需要所有相关 PR。
 
 ### PR1：设计文档 + Bot 页直接执行（方案 A）
 
@@ -442,3 +442,28 @@ PR1 已实现此设计中的 Bot 页直接执行及对应测试，实施与验�
 - `/team/` 复用 `aeeis.token` 的请求头认证，token 不进 URL。真实 roster、所有可读 Room、消息分页、任务详情、Run 审批/拒绝/修改计划/回答问题及 Run 产物读取均调用已有权限接口；直聊任务自动列由服务端输出，群聊使用既有 Board DTO。产物的基础写入是 **Conversation 内追加的主人编辑草稿**（支持后续版本与 CAS），不覆盖 Run 的证据产物。未知发送结果保留原 body / key（sessionStorage 按身份恢复），刷新或重试不重造执行请求。频道管理与拖动只显示后续版本说明。
 
 007 回滚仍按第 7.2 节 SQL：先停止专业新入口和后台新协议写入、备份三表及 canonical Conversation，再 `BEGIN; DROP TABLE IF EXISTS aeeis_bot_dialogue_operations; DROP TABLE IF EXISTS aeeis_bot_dialogue_room_aliases; DROP TABLE IF EXISTS aeeis_bot_dialogues; COMMIT;`。应同时回退 init / RLS 清单，避免重建；保留能读取新增消息来源、修订与草稿的兼容版本。DDL 回滚不会把切换后的新消息复制回旧 SessionEvent，不能恢复旧双写行为。007 SQL 注释也列出了该回滚语句。
+
+
+## 12. PR3 实施记录（2026-11-04）
+
+本分支基于 PR2 `6a7f40c` 实现任务状态联动与任务板移列；不改变 PR1 执行意图/批准闸门，不新增频道管理，也不修改 Temporal worker。
+
+- **统一事实与 DTO。** `ChannelBoardService` 输出同一 `channel-board/1` 的扩展字段 `column / autoColumn / version / runId / runRevision / canMove / override`，Board `version` 包含各任务控制版本、当前 Run id/revision 和列。Run 的 12 种状态由 `Record<RunStatus, BoardColumn>` 完整约束；queued 的正式列名为 **ready**，不是新增 queued 列。主页群聊板直接使用服务端有效列，不再用浏览器的 Run 状态重新分列；主页 Bot 任务列表保留真实执行状态并显示同一私聊板的任务列。`/team/` 私聊和群聊都读取 `/rooms/:id/board`，不再分别映射私聊状态。
+- **任务关系与补漏。** 008 新增 `aeeis_room_tasks`、`aeeis_task_board_controls`；关系只有 tenant/owner/Room/Conversation/task/source id，控制只有版本、当前观察 Run id/revision、覆盖、验收 runId、审计事件 id。直接任务的 source 指向创建消息；已有引用和结构化动作可惰性重建。创建消息完成时登记关系；API 进程另以每页 25 个 Conversation、Room/关系补扫原始消息 source，恢复“任务已落盘、引用尚未落盘”的窗口。源频道必须是同 tenant/owner 且源 SessionEvent 当前可读；未指定源频道的私聊任务不会广播到其他频道。
+- **自动失效与恢复。** API 使用既有 `RunRepository.subscribeChanges()` 作为加速提示，使用 `RunEventScanner` 和持久 `RunScanCursorStore` 有界恢复，每批最多 100 个事件；只在处理完成后推进 checkpoint。GET board 本身也读取当前 Run，不依赖泵或频道新消息。Run id 和边界事件序号共同使旧覆盖失效：planning/running/reviewing 的普通进度、工具/步骤完成保留整理；批准、问题、外部等待、暂停/交还、未知结果和终态等边界优先，系统追加 `clear_override` 审计。迟到/重复通知不会写回旧 Run 的状态。没有另一份可写 RunStatus。
+- **移列与审批。** 新入口为 `POST /api/rooms/:id/board-controls`，命令为 `move / clear_override`，包含 expectedVersion、显式 nullable 的 expectedRunId/expectedRunRevision、原因、来源界面和幂等键。无 Run 可整理 capture/ready/doing/blocked，但不能制造 review/done/failed；queued 尚未开始可整理，已开始的 Run 不允许拖回 capture/ready。等待、失败、取消和不可读不能用移列藏起。成功后移入 done 是验收当前 Run，done→review 要求非空原因；移动不会调用执行、暂停或批准接口。owner、Room 活跃、任务关系、Run 快照、WIP 与控制版本均由服务端再检查。WIP 保留真实 planning/running/reviewing 的占用，手动移到 blocked 不释放正在执行的 Run 名额；恢复同一 Run 的 doing 不算新增占用。
+- **验收兼容。** 旧版 `accept` 新写入增加 acceptedRunId、边界水位和控制版本；旧的领取/分派/取消/验收动作也参与版本冲突检查。重试换 Run、同一 Run 跨失败/重试边界时旧验收失效。**历史裸布尔验收没有可证实的 runId，不猜测绑定到当前 Run，需重新验收**；审计原文和历史链仍保留。这是按现有代码事实补齐旧模型的必要兼容策略。
+- **原子审计与安全。** 新动作使用 `channel-task-action/2`，保存 from/to、自动列、expected/new version、runId/revision、边界、原因与 source；actor、时间和幂等键沿用 SessionEvent。Postgres 在 Room advisory lock 内追加审计和控制投影，同一事务提交；同时锁住实际 Room 行，与归档提交串行。投影可由审计恢复，版本谓词避免旧快照覆盖新投影。内存使用串行 guard；File 把 fsync/rename 的不可变 SessionEvent 当操作日志，投影直接从该日志重建，关系文件可补扫恢复。代码核查还发现 File SessionEvent 原先未调用 `sealEvent/openEvent`，本 PR 为新增审计原因补齐加密往返，并补目录 fsync、已知死进程写锁恢复。拒绝操作仅记结构化标识/错误类别，不记录原因正文。既有部署若留下无 PID 的旧空锁文件仍保守拒绝，需确认无活跃写者后由运维移除。
+- **交互与刷新。** 两处频道板接鼠标拖放、独立触摸拖柄和原生键盘“移动到”菜单；工作室显示手动整理与“尚未执行”，审批继续走既有 Run 操作。失败恢复服务端位置并提示，未知响应保留原命令/键用于确认。可见时按既有两秒节奏重读，网络重连、操作后立即刷新；主页板的刷新不再只比较频道最后消息。工作室打开的任务详情也跟随该任务的新 Run，后台不抢用户焦点。
+- **迁移与测试。** 008 SQL 与 `taskBoardMigration` 常量完全一致，适配器通过既有 migration lock 幂等 init，server 在 RLS finalize 前初始化。两表分别安装 tenant/system USING + WITH CHECK，`TENANT_POLICIES` 本分支实际为 **39**，006/007 的计数断言同步更新。新增 `task-board-controls.test.ts` 与 `postgres-task-board-controls.test.ts`；扩展 channel-board、channel-upgrades、conversations-ui、team-channel-ui、RLS 测试。覆盖全部 Run 状态/目标列、双窗口、旧动作竞争、WIP、换 Run、同 Run 边界、File 恢复、源关系补漏、三类输入设备、断网未知响应，以及 Postgres 同事务故障、并发/重复/失败 init、RLS 与回滚重建。Postgres 运行依赖 CI 的 PostgreSQL 17，本机跳过不代表数据库验证通过。
+
+008 回滚：先停用 board-controls 和 API 恢复泵，导出两表/文件关系与 SessionEvent，再由 owner 执行：
+
+```sql
+BEGIN;
+DROP TABLE IF EXISTS aeeis_task_board_controls;
+DROP TABLE IF EXISTS aeeis_room_tasks;
+COMMIT;
+```
+
+同步回退新存储 init 和两项 TENANT_POLICIES，避免启动重建。**保留支持 `/2` 及新增 `/1` 可选字段的 SessionEvent reader**；不可删除审计或交给不识别 schema 的旧二进制。File 可在停写/导出后移走 `task-board-relations.json`，任务与 Run 仍保留；不删除 SessionEvent。DDL/文件关系回滚不会取消真实 Run、撤销真实批准或把人工验收变成执行成功。SQL 文件开头也列出同一回滚语句。

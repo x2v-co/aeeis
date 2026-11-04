@@ -1,3 +1,4 @@
+import { PostgresTaskBoardStore } from '../src/adapters/task-board-store.js';
 import { PostgresBotDialogueStore, type BotDialogue } from '../src/bot-dialogues.js';
 import { PostgresChannelNoiseStore } from '../src/channel-noise.js';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -76,6 +77,7 @@ describe('PostgreSQL row-level security and content encryption', () => {
     cleanup.push(() => noise.close());
     const dialogues = new PostgresBotDialogueStore(appUrl); await dialogues.init();
     cleanup.push(() => dialogues.close());
+    const taskBoards = new PostgresTaskBoardStore(appUrl); await taskBoards.init(); cleanup.push(() => taskBoards.close());
     const { secured } = await security.finalize();
     expect(secured).toContain('aeeis_channel_noise_settings');
     const dialogueTables = ['aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations'];
@@ -101,6 +103,23 @@ describe('PostgreSQL row-level security and content encryption', () => {
       // Raw INSERT tests exercise WITH CHECK for every table, independent of service WHERE clauses.
       await expect(withTenantScope('team-b', () => scopedPool.query(`INSERT INTO ${table} SELECT * FROM json_populate_record(NULL::${table}, $1::json)`, [JSON.stringify(original.rows[0])]))).rejects.toThrow(/row-level security/);
     }
+
+    const boardTables = ['aeeis_room_tasks','aeeis_task_board_controls'];
+    expect(secured).toEqual(expect.arrayContaining(boardTables));
+    await withTenantScope('team-a',async () => {
+      await taskBoards.link({ tenantId: 'team-a',owner: 'alice',roomId: 'room-board',conversationId: 'conv-board',taskId: 'task-board',sourceId: 'source-board' });
+      await scopedPool.query(`INSERT INTO aeeis_task_board_controls(tenant_id,owner,room_id,conversation_id,task_id) VALUES('team-a','alice','room-board','conv-board','task-board')`);
+    });
+    for (const table of boardTables) {
+      const original = await withTenantScope('team-a',() => scopedPool.query(`SELECT * FROM ${table}`)); expect(original.rows).toHaveLength(1);
+      expect((await withTenantScope('team-b',() => scopedPool.query(`SELECT * FROM ${table}`))).rows).toHaveLength(0);
+      expect((await withSystemScope(() => scopedPool.query(`SELECT * FROM ${table}`))).rows).toHaveLength(1);
+      await expect(withTenantScope('team-a',() => scopedPool.query(`UPDATE ${table} SET tenant_id='team-b'`))).rejects.toThrow(/row-level security/);
+      await expect(withTenantScope('team-b',() => scopedPool.query(`INSERT INTO ${table} SELECT * FROM json_populate_record(NULL::${table},$1::json)`,[JSON.stringify(original.rows[0])]))).rejects.toThrow(/row-level security/);
+    }
+    expect(await withTenantScope('team-a',() => taskBoards.list('room-board','bob','team-a'))).toEqual([]);
+    const appPrivileges = await scopedPool.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
+    expect(appPrivileges.rows[0]).toEqual({ rolsuper: false,rolbypassrls: false });
 
     const channel = { roomId: 'room.noise', owner: 'alice', tenantId: 'team-a' };
     await withTenantScope('team-a', () => noise.put(channel, { mode: 'lively', digestMinutes: 25 }));
