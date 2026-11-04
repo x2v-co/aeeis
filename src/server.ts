@@ -221,6 +221,7 @@ const projectionSink = Object.keys(projectionRoutes).length || genericProjection
 const domainStore = process.env.DATABASE_URL
   ? new PostgresAeeisStore(process.env.DATABASE_URL)
   : new JsonFileStore(`${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/domain.json`);
+// Domain init includes 009 channel metadata; keep before databaseSecurity.finalize().
 await domainStore.init();
 const roomMemberships: RoomMembershipRepository = process.env.DATABASE_URL
   ? new PostgresRoomMembershipRepository(process.env.DATABASE_URL)

@@ -330,14 +330,14 @@ describe('AEEIS HTTP boundary', () => {
       expect((await app.inject({ method: 'POST', url: '/api/goals', headers: carol, payload: { title: 'Viewer cannot create', roomId: room.id } })).statusCode).toBe(409);
       expect((await app.inject({ method: 'POST', url: '/api/goals', headers: dave, payload: { title: 'Agent cannot create', roomId: room.id } })).statusCode).toBe(409);
       expect((await app.inject({ method: 'GET', url: `/api/rooms/${room.id}/members`, headers: bob })).statusCode).toBe(200);
-      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: bob, payload: { description: 'Edited by room editor' } })).statusCode).toBe(200);
-      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: carol, payload: { description: 'Viewer cannot edit' } })).statusCode).toBe(409);
+      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: bob, payload: { expectedRevision: 0, description: 'Edited by room editor' } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: carol, payload: { expectedRevision: 1, description: 'Viewer cannot edit' } })).statusCode).toBe(409);
       expect((await app.inject({ method: 'POST', url: `/api/rooms/${room.id}/members`, headers: bob, payload: { principalId: 'erin', role: 'viewer' } })).statusCode).toBe(200);
       expect((await app.inject({ method: 'DELETE', url: `/api/rooms/${room.id}/members/erin`, headers: bob })).statusCode).toBe(200);
-      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: bob, payload: { status: 'archived' } })).statusCode).toBe(409);
+      expect((await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: bob, payload: { expectedRevision: 1, status: 'archived' } })).statusCode).toBe(409);
       expect((await app.inject({ method: 'DELETE', url: `/api/rooms/${room.id}/members/bob`, headers: alice })).statusCode).toBe(200);
       expect((await app.inject({ method: 'GET', url: `/api/rooms/${room.id}`, headers: bob })).statusCode).toBe(404);
-      const archived = await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: alice, payload: { status: 'archived', title: 'Archived release room' } });
+      const archived = await app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: alice, payload: { expectedRevision: 1, status: 'archived', title: 'Archived release room' } });
       expect(archived.statusCode).toBe(200);
       expect(archived.json()).toMatchObject({ id: room.id, title: 'Archived release room', status: 'archived' });
       expect((await app.inject({ method: 'POST', url: '/api/goals', headers: alice, payload: { title: 'Rejected', roomId: room.id } })).statusCode).toBe(409);
@@ -1439,4 +1439,27 @@ describe('AEEIS HTTP boundary', () => {
     expect((await app.inject({ method: 'POST', url: `/api/collaborations/debates/${room.id}/close`, payload: { reason: 'done' } })).json().status).toBe('closed');
     await app.close(); await collaboration.close(); await repo.close();
   });
+});
+
+it('requires Room versions at HTTP boundary and rejects stale/repeated and cross-tenant metadata writes', async () => {
+  const domain = new AeeisService(new InMemoryStore(), [], new InMemoryRoomMembershipRepository());
+  const repository = new (await import('../src/adapters/in-memory-run-repository.js')).InMemoryRunRepository();
+  const app = buildApp({ domain, repository, principalTokens: {
+    alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, other: { id: 'alice', tenantId: 'team-b', roles: ['owner'] }, agent: { id: 'agent', tenantId: 'team-a', roles: ['agent'] },
+  } });
+  const headers = { authorization: 'Bearer alice' };
+  try {
+    expect((await app.inject({ method: 'GET', url: '/api/rooms', headers })).json()).toEqual([]);
+    expect((await app.inject({ method: 'POST', url: '/api/rooms', headers: { authorization: 'Bearer agent' }, payload: { title: '越权' } })).statusCode).toBe(403);
+    const room = (await app.inject({ method: 'POST', url: '/api/rooms', headers, payload: { title: '产品', category: 'product', topicRef: '主题' } })).json();
+    const patch = (payload: object, identity = 'alice') => app.inject({ method: 'PATCH', url: `/api/rooms/${room.id}`, headers: { authorization: `Bearer ${identity}` }, payload });
+    expect((await patch({ title: '无版本' })).statusCode).toBe(400);
+    expect((await patch({ title: '新产品', expectedRevision: 0 })).json()).toMatchObject({ revision: 1, memberRole: 'owner', canArchive: true });
+    expect((await patch({ title: '新产品', expectedRevision: 0 })).statusCode).toBe(409);
+    expect((await patch({ category: 'topic', expectedRevision: 1 }, 'other')).statusCode).toBe(404);
+    expect((await patch({ category: 'bad', expectedRevision: 1 })).statusCode).toBe(400);
+    expect((await patch({ status: 'archived', expectedRevision: 1 })).statusCode).toBe(200);
+    expect((await patch({ title: '归档改名', expectedRevision: 2 })).statusCode).toBe(409);
+    expect((await patch({ status: 'active', expectedRevision: 2 })).json()).toMatchObject({ id: room.id, revision: 3, title: '新产品' });
+  } finally { await app.close(); await repository.close(); }
 });

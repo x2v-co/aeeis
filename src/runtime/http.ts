@@ -994,15 +994,17 @@ export function buildApp(options: Options) {
   app.get<{ Querystring: { limit?: string } }>('/api/rooms', async request => { const principal = principalOf(request); const limit = collectionLimit(request.query); return options.domain ? options.domain.listRoomsForPrincipal(principal.id, principal.tenantId, limit) : []; });
   app.post('/api/rooms', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    const body = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(8000).optional() }).strict().parse(request.body);
+    const body = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(8000).optional(), chat: z.enum(['direct', 'group', 'unclassified']).optional(), category: z.enum(['product', 'topic', 'general']).optional(), topicRef: z.string().trim().max(500).optional() }).strict().parse(request.body);
     const principal = principalOf(request);
-    return options.domain.createRoom({ title: body.title, ...(body.description === undefined ? {} : { description: body.description }) }, undefined, principal.id, principal.tenantId);
+    const room = await options.domain.createRoom({ title: body.title, ...(body.description === undefined ? {} : { description: body.description }), ...(body.chat === undefined ? {} : { chat: body.chat }), ...(body.category === undefined ? {} : { category: body.category }), ...(body.topicRef === undefined ? {} : { topicRef: body.topicRef }) }, undefined, principal.id, principal.tenantId);
+    return options.domain.getRoomForPrincipal(room.id, principal.id, principal.tenantId);
   });
   app.patch<{ Params: { id: string } }>('/api/rooms/:id', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');
-    const body = z.object({ title: z.string().trim().min(1).max(500).optional(), description: z.string().max(8000).optional(), status: z.enum(['active', 'archived']).optional() }).strict().parse(request.body);
+    const body = z.object({ expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), title: z.string().trim().min(1).max(500).optional(), description: z.string().max(8000).optional(), status: z.enum(['active', 'archived']).optional(), category: z.enum(['product', 'topic', 'general']).optional(), topicRef: z.string().trim().max(500).nullable().optional() }).strict().parse(request.body);
     const principal = principalOf(request);
-    return options.domain.updateRoom(request.params.id, { ...(body.title === undefined ? {} : { title: body.title }), ...(body.description === undefined ? {} : { description: body.description }), ...(body.status === undefined ? {} : { status: body.status }) }, undefined, principal.id, principal.tenantId);
+    await options.domain.updateRoom(request.params.id, { expectedRevision: body.expectedRevision, ...(body.title === undefined ? {} : { title: body.title }), ...(body.description === undefined ? {} : { description: body.description }), ...(body.status === undefined ? {} : { status: body.status }), ...(body.category === undefined ? {} : { category: body.category }), ...(body.topicRef === undefined ? {} : { topicRef: body.topicRef }) }, undefined, principal.id, principal.tenantId);
+    return options.domain.getRoomForPrincipal(request.params.id, principal.id, principal.tenantId);
   });
   app.get<{ Params: { id: string } }>('/api/rooms/:id', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');

@@ -1,3 +1,4 @@
+import { channelRoom } from '../channel-metadata.js';
 import { ChangeAuditService, InMemoryChangeAuditStore, type ChangeContext, type ChangeAuditApi } from '../change-audit.js';
 import { memoryAuditInput, memorySnapshot, memorySnapshotIds } from '../memory-change-audit.js';
 import { afterCollectionCursor, afterVersionCursor, decodeCollectionCursor, decodeVersionCursor, encodeCollectionCursor, encodeVersionCursor, recentFirst, scopedRecent, validateCollectionLimit, visibleRooms } from './collection-query.js';
@@ -69,14 +70,14 @@ export class InMemoryStore implements AeeisStore {
     for (const intent of intents) this.projectionIntents.set(intent.id, structuredClone(intent));
   }
 
-  async getRoom(id: Id): Promise<Room | undefined> { const room = this.rooms.get(id); return room ? structuredClone(room) : undefined; }
-  async getRooms(scope?: Ownership, limit?: number, memberRoomIds?: string[]): Promise<Room[]> { return structuredClone(visibleRooms([...this.rooms.values()], scope, limit, memberRoomIds)); }
+  async getRoom(id: Id): Promise<Room | undefined> { const room = this.rooms.get(id); return room ? channelRoom(structuredClone(room)) : undefined; }
+  async getRooms(scope?: Ownership, limit?: number, memberRoomIds?: string[]): Promise<Room[]> { return structuredClone(visibleRooms([...this.rooms.values()], scope, limit, memberRoomIds).map(channelRoom)); }
   async getRoomsPage(limit: number, cursor?: string): Promise<RoomPage> {
     validateCollectionLimit(limit);
     const pageCursor = decodeCollectionCursor(cursor);
     const selected = [...this.rooms.values()].filter(room => afterCollectionCursor(room, room.updatedAt, pageCursor)).sort(recentFirst(room => room.updatedAt));
     const page = selected.slice(0, limit + 1); const hasMore = page.length > limit; const visible = hasMore ? page.slice(0, limit) : page;
-    return { rooms: structuredClone(visible), ...(hasMore && visible.length ? { nextCursor: encodeCollectionCursor({ timestamp: visible.at(-1)!.updatedAt, id: visible.at(-1)!.id }) } : {}) };
+    return { rooms: structuredClone(visible.map(channelRoom)), ...(hasMore && visible.length ? { nextCursor: encodeCollectionCursor({ timestamp: visible.at(-1)!.updatedAt, id: visible.at(-1)!.id }) } : {}) };
   }
 
   async commitGoalCreation(goal: Goal, intents: ProjectionIntent[] = []): Promise<void> {

@@ -287,7 +287,7 @@ describe('Shared Session canonical events', () => {
       actor: { type: 'principal', id: 'member.editor' },
     }, 'alice', 'team-a')).rejects.toThrow('只能以本人的身份说话');
     const renamed = await domain.updateRoom(group.id, { description: '私聊' }, undefined, 'member.editor', 'team-a');
-    expect(renamed.chat).toBeUndefined();
+    expect(renamed.chat).toBe('group');
     expect(renamed.description).toBe('私聊');
     await expect(events.create(group.id, {
       goalId: groupGoal.id, type: 'message', content: '改说明后冒充', contextManifestId: groupManifest.id, idempotencyKey: 'renamed-editor',

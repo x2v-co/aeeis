@@ -43,7 +43,7 @@ export class BotDialogueService {
   async conversationWrite<T>(conversationId: string, scope: Ownership, work: () => Promise<T>): Promise<T> {
     return this.store.withOwner(scope, async () => {
       const binding = (await this.store.list(scope)).find(b => b.conversationId === conversationId);
-      if (binding) { this.ready(binding); await this.bot(binding.botId, scope); }
+      if (binding) { this.ready(binding); await this.bot(binding.botId, scope); await this.domain.assertRoomEventWriter(binding.roomId, scope.owner, scope.tenantId); }
       return work();
     });
   }

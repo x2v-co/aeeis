@@ -7,12 +7,12 @@ async function waitFor(check: () => boolean) {
   for (let i=0; i<100; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   expect(check()).toBe(true);
 }
-async function browser(f: Awaited<ReturnType<typeof dialogueFixture>>, authenticated = true, savedPending?: string) {
+async function browser(f: Awaited<ReturnType<typeof dialogueFixture>>, authenticated: boolean | string = true, savedPending?: string) {
   const html = await readFile('public/team/index.html', 'utf8'), source = await readFile('public/team/app.js', 'utf8');
   const dom = new JSDOM(html, { url: 'http://localhost/team/', runScripts: 'outside-only', pretendToBeVisual: true });
   const requests: { path: string; body: string; key?: string }[] = [];
   let loseResponse = false, loseBoard = false;
-  if (authenticated) dom.window.localStorage.setItem('aeeis.token', 'alice');
+  if (authenticated) dom.window.localStorage.setItem('aeeis.token', typeof authenticated === 'string' ? authenticated : 'alice');
   if (savedPending) dom.window.sessionStorage.setItem('aeeis.team.pending', savedPending);
   dom.window.fetch = async (path, input: any) => {
     const url = String(path); requests.push({ path: url, body: input.body, key: input.headers['Idempotency-Key'] });
@@ -130,4 +130,63 @@ describe('multi-bot professional API view', () => {
     } finally { b.dom.window.close(); await f.close(); }
   });
 
+});
+
+describe('professional channel management', () => {
+  it('creates, detects stale edits, renames, archives and restores the exact Room shared with the homepage', async () => {
+    const f = await dialogueFixture(), b = await browser(f);
+    const clickText = (text: string) => [...b.doc.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === text)!.click();
+    const submit = () => b.doc.querySelector<HTMLFormElement>('#channelEditor')!.dispatchEvent(new b.dom.window.Event('submit', { cancelable: true }));
+    try {
+      await waitFor(() => !b.doc.querySelector<HTMLButtonElement>('#newChannel')!.disabled);
+      expect(b.doc.querySelector('#rooms')!.textContent).toContain('还没有频道');
+      b.doc.querySelector<HTMLButtonElement>('#newChannel')!.click();
+      await waitFor(() => !b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      b.doc.querySelector<HTMLInputElement>('#channelTitle')!.value = '产品 A'; b.doc.querySelector<HTMLSelectElement>('#channelCategory')!.value = 'product';
+      b.doc.querySelector<HTMLInputElement>('#channelTopic')!.value = '发布主题'; submit();
+      await waitFor(() => Boolean(b.doc.querySelector('[data-room]')) && b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      const room = (await f.request('/rooms')).json()[0];
+      expect(room).toMatchObject({ title: '产品 A', category: 'product', chat: 'group', topicRef: '发布主题', revision: 0 });
+      clickText('改名 / 分类'); await waitFor(() => !b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      await f.domain.updateRoom(room.id, { title: '主页已改名', expectedRevision: 0 }, undefined, 'alice', 'team-a');
+      b.doc.querySelector<HTMLInputElement>('#channelTitle')!.value = '过期覆盖'; submit();
+      await waitFor(() => b.doc.querySelector('#error')!.textContent!.includes('版本冲突'));
+      expect((await f.request(`/rooms/${room.id}`)).json().title).toBe('主页已改名');
+      b.doc.querySelector<HTMLButtonElement>('#cancelChannelEdit')!.click(); clickText('改名 / 分类');
+      await waitFor(() => !b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      b.doc.querySelector<HTMLInputElement>('#channelTitle')!.value = '主题 B'; b.doc.querySelector<HTMLSelectElement>('#channelCategory')!.value = 'topic'; submit();
+      await waitFor(() => b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      expect((await f.request(`/rooms/${room.id}`)).json()).toMatchObject({ title: '主题 B', category: 'topic', revision: 2 });
+      clickText('归档频道'); await waitFor(() => b.doc.querySelector('#rooms')!.textContent!.includes('还没有频道'));
+      expect(b.doc.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+      const filter = b.doc.querySelector<HTMLInputElement>('#showArchived')!; filter.checked = true; filter.dispatchEvent(new b.dom.window.Event('change'));
+      expect(b.doc.querySelector(`[data-room="${room.id}"]`)!.textContent).toContain('归档');
+      clickText('恢复频道'); await waitFor(() => b.doc.querySelector('#rooms')!.textContent!.includes('没有归档频道'));
+      expect((await f.request(`/rooms/${room.id}`)).json()).toMatchObject({ id: room.id, status: 'active', title: '主题 B', revision: 4 });
+      expect((await f.request('/rooms')).json()).toHaveLength(1);
+    } finally { b.dom.window.close(); await f.close(); }
+  });
+
+  it('archives a newly created channel when adding a member fails and shows permission feedback to viewers', async () => {
+    const f = await dialogueFixture(), b = await browser(f);
+    try {
+      await waitFor(() => !b.doc.querySelector<HTMLButtonElement>('#newChannel')!.disabled);
+      b.doc.querySelector<HTMLButtonElement>('#newChannel')!.click(); await waitFor(() => !b.doc.querySelector<HTMLFormElement>('#channelEditor')!.hidden);
+      b.doc.querySelector<HTMLInputElement>('#channelTitle')!.value = '成员失败补偿'; b.doc.querySelector<HTMLInputElement>('#channelMembers')!.value = 'alice';
+      b.doc.querySelector<HTMLFormElement>('#channelEditor')!.dispatchEvent(new b.dom.window.Event('submit', { cancelable: true }));
+      await waitFor(() => b.doc.querySelector('#error')!.textContent!.includes('成员添加失败'));
+      const archived = (await f.request('/rooms')).json()[0]; expect(archived.status).toBe('archived');
+      await f.domain.updateRoom(archived.id, { status: 'active', expectedRevision: 1 }, undefined, 'alice', 'team-a');
+      await f.domain.addRoomMember(archived.id, 'bob', 'viewer', 'alice', 'team-a');
+      const viewer = await browser(f, 'bob');
+      try {
+        await waitFor(() => Boolean(viewer.doc.querySelector('[data-room]')));
+        viewer.doc.querySelector<HTMLButtonElement>('[data-room]')!.click();
+        await waitFor(() => viewer.doc.querySelector('#channelManagement')!.textContent!.includes('viewer'));
+        expect(viewer.doc.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+        expect(viewer.doc.querySelector('#channelManagement')!.textContent).not.toContain('归档频道');
+        expect(viewer.doc.querySelector('#channelManagement')!.textContent).not.toContain('改名 / 分类');
+      } finally { viewer.dom.window.close(); }
+    } finally { b.dom.window.close(); await f.close(); }
+  });
 });

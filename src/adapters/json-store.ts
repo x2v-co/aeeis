@@ -1,3 +1,5 @@
+import { channelRoom } from '../channel-metadata.js';
+import { sealField, openField } from '../content-encryption.js';
 import { ChangeAuditLog, verifyChain, type ChangeAuditEntry, type ChangeContext, type ChangeAuditInput, type ChangeActor, type ChangeReason } from '../change-audit.js';
 import { memoryAuditInput, memorySnapshot, memorySnapshotIds, type MemoryChanges } from '../memory-change-audit.js';
 import { afterCollectionCursor, afterVersionCursor, decodeCollectionCursor, decodeVersionCursor, encodeCollectionCursor, encodeVersionCursor, recentFirst, scopedRecent, validateCollectionLimit, visibleRooms } from './collection-query.js';
@@ -7,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import type { ContextManifest, Goal, Id, MemoryEntry, Plan, ProjectionIntent, RunReceipt, Room } from '../contracts.js';
 import type { AeeisStore, RoomPage } from './in-memory-store.js';
-import { assertMemoryCommit, assertRoomCommit, assertTaskCommit } from './task-commit.js';
+import { assertMemoryCommit, assertRoomCommit, assertTaskCommit, RoomWriteConflict } from './task-commit.js';
 
 interface StoreState {
   changeAudit?: ChangeAuditEntry[];
@@ -98,23 +100,28 @@ export class JsonFileStore implements AeeisStore {
   private get compactAfterBytes(): number { return this.journalOptions.compactAfterBytes ?? 4 * 1024 * 1024; }
 
   async commitRoomCreation(room: Room, intents: ProjectionIntent[] = []): Promise<void> {
+    const stored = await sealRoomTopic(room);
     if (this.state.rooms.some(existing => existing.id === room.id)) throw new Error('Room already exists');
-    this.commit({ kind: 'room.upsert', room: structuredClone(room), intents: cloneMany(intents) });
+    this.commit({ kind: 'room.upsert', room: stored, intents: cloneMany(intents) });
   }
 
   async commitRoomUpdate(expected: Room, next: Room, intents: ProjectionIntent[] = []): Promise<void> {
-    assertRoomCommit(this.state.rooms.find(room => room.id === expected.id), expected, next);
-    this.commit({ kind: 'room.upsert', room: structuredClone(next), intents: cloneMany(intents) });
+    const storedNext = await sealRoomTopic(next);
+    const storedCurrent = this.state.rooms.find(room => room.id === expected.id);
+    const current = storedCurrent ? await openRoomTopic(storedCurrent) : undefined;
+    if (this.state.rooms.find(room => room.id === expected.id) !== storedCurrent) throw new RoomWriteConflict('Room changed during update');
+    assertRoomCommit(current, expected, next);
+    this.commit({ kind: 'room.upsert', room: storedNext, intents: cloneMany(intents) });
   }
 
-  async getRoom(id: Id): Promise<Room | undefined> { return clone(this.state.rooms.find(room => room.id === id)); }
-  async getRooms(scope?: Ownership, limit?: number, memberRoomIds?: string[]): Promise<Room[]> { return structuredClone(visibleRooms(this.state.rooms, scope, limit, memberRoomIds)); }
+  async getRoom(id: Id): Promise<Room | undefined> { const room = this.state.rooms.find(room => room.id === id); return room ? openRoomTopic(room) : undefined; }
+  async getRooms(scope?: Ownership, limit?: number, memberRoomIds?: string[]): Promise<Room[]> { return Promise.all(visibleRooms(this.state.rooms, scope, limit, memberRoomIds).map(openRoomTopic)); }
   async getRoomsPage(limit: number, cursor?: string): Promise<RoomPage> {
     validateCollectionLimit(limit);
     const pageCursor = decodeCollectionCursor(cursor);
     const selected = this.state.rooms.filter(room => afterCollectionCursor(room, room.updatedAt, pageCursor)).sort(recentFirst(room => room.updatedAt));
     const page = selected.slice(0, limit + 1); const hasMore = page.length > limit; const visible = hasMore ? page.slice(0, limit) : page;
-    return { rooms: structuredClone(visible), ...(hasMore && visible.length ? { nextCursor: encodeCollectionCursor({ timestamp: visible.at(-1)!.updatedAt, id: visible.at(-1)!.id }) } : {}) };
+    return { rooms: await Promise.all(visible.map(openRoomTopic)), ...(hasMore && visible.length ? { nextCursor: encodeCollectionCursor({ timestamp: visible.at(-1)!.updatedAt, id: visible.at(-1)!.id }) } : {}) };
   }
 
   async commitGoalCreation(goal: Goal, intents: ProjectionIntent[] = []): Promise<void> {
@@ -598,4 +605,13 @@ function writeFully(descriptor: number, value: string | Buffer): void {
 
 function clone<T>(value: T | undefined): T | undefined {
   return value === undefined ? undefined : structuredClone(value);
+}
+
+async function sealRoomTopic(room: Room): Promise<Room> {
+  const copy = structuredClone(room);
+  return copy.topicRef === undefined ? copy : { ...copy, topicRef: await sealField('channel-metadata-topic', copy.tenantId, copy.id, copy.topicRef) };
+}
+async function openRoomTopic(room: Room): Promise<Room> {
+  const copy = channelRoom(structuredClone(room));
+  return copy.topicRef === undefined ? copy : { ...copy, topicRef: await openField('channel-metadata-topic', copy.tenantId, copy.id, copy.topicRef) };
 }
