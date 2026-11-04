@@ -336,7 +336,10 @@ export class CollaborationTriggerService {
     const event = collaborationTriggerEventSchema.parse(input);
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');
     if (event.externalInput && event.eventType !== 'external.message') throw new Error('Only external.message events may carry external input');
+    if (event.externalInput && event.externalInput.channel !== event.source) throw new Error('External input channel must match the event source');
     const eventScope = { owner: event.owner, tenantId: event.tenantId };
+    const fromEvent = { taskId: event.taskId, contextVersion: event.contextVersion, ...(event.context ? { context: event.context } : {}) };
+    const trusted = event.externalInput ? { externalInput: event.externalInput } : undefined;
     const policies = await this.store.listPolicies(eventScope); const results: CollaborationTriggerResult[] = [];
     for (const policy of policies) {
       if (!this.matches(policy, event)) continue;
@@ -347,8 +350,8 @@ export class CollaborationTriggerService {
       if (!claimed.claimed) { results.push({ policyId: policy.id, decision: claimed.decision, created: false }); continue; }
       try {
         const resource = policy.action.type === 'competition'
-          ? await this.collaboration.createCompetition({ schemaVersion: 'competition-brief/1', taskId: event.taskId, contextVersion: event.contextVersion, goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation, ...(event.context ? { context: event.context } : {}), ...(event.externalInput ? { externalInput: event.externalInput } : {}) }, eventScope)
-          : await this.collaboration.createDebate({ taskId: event.taskId, contextVersion: event.contextVersion, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }), ...(event.context ? { context: event.context } : {}), ...(event.externalInput ? { externalInput: event.externalInput } : {}) }, eventScope);
+          ? await this.collaboration.createCompetition({ ...fromEvent, schemaVersion: 'competition-brief/1', goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation }, eventScope, trusted)
+          : await this.collaboration.createDebate({ ...fromEvent, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }) }, eventScope, trusted);
         let decision = await this.store.updateDecision(decisionId, current => ({ ...current, state: 'triggered', resourceId: resource.id, dispatchState: policy.action.dispatch === 'run' ? 'started' : 'not_requested', completedAt: new Date().toISOString(), reason: `Created ${policy.action.type} from ${event.eventType}` }));
         if (policy.action.dispatch === 'run') {
           try {

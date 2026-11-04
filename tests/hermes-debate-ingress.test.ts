@@ -54,7 +54,8 @@ describe('Hermes Debate ingress', () => {
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'local', key))).status).toBe('duplicate');
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ eventType: 'external.message', source: 'hermes', taskId: 'task.hermes.trigger', allowedAgentIds: ['agent.admitted'], context: { redactions: [] }, externalInput: { channel: 'hermes', senderAgentId: 'agent.admitted', text: 'Trigger a governed review.' } });
-    expect(events[0]).not.toHaveProperty('goal');
+    // The Room has no goal, so the event carries a fixed one rather than the message text.
+    expect((events[0] as { goal: string }).goal).toMatch(/^Respond to the external Hermes message in debate_/);
     expect((events[0] as { eventId: string }).eventId).toBe((events[1] as { eventId: string }).eventId);
     expect(await collaboration.listDebates(scope)).toHaveLength(1);
     await triggerStore.close(); await repository.close();

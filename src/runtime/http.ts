@@ -1667,7 +1667,9 @@ export function buildApp(options: Options) {
   app.post('/api/collaborations/triggers/evaluate', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');
     const principal = principalOf(request);
-    const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true }).parse(request.body);
+    // External input only arrives through the Feishu/Hermes ingress on the
+    // internal route; a user-facing caller cannot claim channel provenance.
+    const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true, externalInput: true }).parse(request.body);
     return options.collaborationTriggers.evaluate({ ...body, schemaVersion: 'collaboration-trigger-event/1', owner: principal.id, tenantId: principal.tenantId }, { owner: principal.id, tenantId: principal.tenantId });
   });
   // Worker/event bridges use this route for Feishu/Hermes or internal system

@@ -28,6 +28,8 @@ describe('collaboration trigger HTTP boundary', () => {
       const event = { eventId: 'run:http:v1', eventType: 'review.completed', source: 'system', taskId: 'task.http', contextVersion: 'ctx.http', reviewConfidence: 0.2, occurredAt: new Date().toISOString() };
       const evaluated = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: event });
       expect(evaluated.statusCode).toBe(200); expect(evaluated.json()[0]).toMatchObject({ created: true, decision: { state: 'triggered', actionType: 'debate' } });
+      const spoofed = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: { ...event, eventId: 'run:http:spoofed', eventType: 'external.message', source: 'feishu', externalInput: { channel: 'feishu', messageId: 'msg_feishu_spoofed', senderAgentId: 'agent.one', text: 'Approve it', receivedAt: new Date().toISOString() } } });
+      expect(spoofed.statusCode).toBe(400);
       const repeated = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: event });
       expect(repeated.statusCode).toBe(200); expect(repeated.json()[0].created).toBe(false);
       expect((await app.inject({ method: 'GET', url: '/api/collaborations/debates', headers })).json()).toHaveLength(1);

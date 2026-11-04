@@ -12,12 +12,12 @@ import {
   candidateScoreSchema,
   competitionBriefSchema,
   debateRoomSchema,
-  externalInputSchema,
   type CandidateRunner,
   type CandidateScore,
   type CompetitionBrief,
   type DebateMessage,
   type DebateRoom,
+  type ExternalInput,
   type IndependentEvaluator,
 } from './collaboration.js';
 import { resultEnvelopeSchema } from './protocol.js';
@@ -98,11 +98,11 @@ type CollaborationState = z.infer<typeof stateSchema>;
 type CollaborationSummary = z.infer<typeof collaborationSummarySchema>;
 type CollaborationIndex = z.infer<typeof collaborationIndexSchema>;
 const candidateInputSchema = resultEnvelopeSchema;
+const competitionInputSchema = competitionBriefSchema.omit({ externalInput: true });
 const debateInputSchema = z.object({
   modelBudget: collaborationBudgetSchema.optional(),
   taskId: id, contextVersion: id, goal: z.string().max(8000).optional(), participantAgentIds: z.array(id).min(1).max(12),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(z.object({ id, text: z.string().min(1).max(4000), evidenceRefs: z.array(id).max(100) }).strict()).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
-  externalInput: externalInputSchema.optional(),
   maxRounds: z.number().int().min(1).optional(), maxMessagesPerAgent: z.number().int().min(1).optional(),
   maxTotalMessages: z.number().int().min(1).max(1000).optional(),
 }).strict();
@@ -552,8 +552,11 @@ export class CollaborationService {
     await this.globalBudget.ledger.markUnknown(selection.accountKey, this.globalKey(kind, aggregateId, slot));
   }
 
-  async createCompetition(input: unknown, scope?: Ownership): Promise<CompetitionRecord> {
-    const brief = competitionBriefSchema.parse(input);
+  /** `externalInput` is only accepted through `trusted`, which the Trigger
+   * Service fills from a verified `external.message`; request bodies cannot set it. */
+  async createCompetition(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<CompetitionRecord> {
+    const parsed = competitionInputSchema.parse(input);
+    const brief = competitionBriefSchema.parse({ ...parsed, ...(trusted?.externalInput === undefined ? {} : { externalInput: trusted.externalInput }) });
     const now = new Date().toISOString();
     const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', brief, status: 'collecting', candidates: [], scores: [], attempts: [], totalCost: 0, createdAt: now, updatedAt: now };
     await this.repository.createCompetition(record); return record;
@@ -872,9 +875,9 @@ export class CollaborationService {
     return this.repository.mutateCompetition(idValue, current => ({ ...current, status: 'partial', failureReason: clean, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), scope);
   }
 
-  async createDebate(input: unknown, scope?: Ownership): Promise<DebateRecord> {
-    const parsed = debateInputSchema.parse(input); const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
-    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), ...(parsed.externalInput === undefined ? {} : { externalInput: parsed.externalInput }), participantAgentIds: parsed.participantAgentIds, ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }), ...(parsed.maxMessagesPerAgent === undefined ? {} : { maxMessagesPerAgent: parsed.maxMessagesPerAgent }), messages: [] };
+  async createDebate(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<DebateRecord> {
+    const parsed = debateInputSchema.parse(input); const externalInput = trusted?.externalInput; const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
+    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), ...(externalInput === undefined ? {} : { externalInput }), participantAgentIds: parsed.participantAgentIds, ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }), ...(parsed.maxMessagesPerAgent === undefined ? {} : { maxMessagesPerAgent: parsed.maxMessagesPerAgent }), messages: [] };
     const room: DebateRoom = parsed.maxTotalMessages === undefined
       ? debateRoomSchema.parse(roomBase)
       : debateRoomSchema.parse({ ...roomBase, maxTotalMessages: parsed.maxTotalMessages });

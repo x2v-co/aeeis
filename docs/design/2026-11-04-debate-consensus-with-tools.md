@@ -63,10 +63,11 @@ Debate 状态里维护 gap 列表：`open` → `answered`（有 observation 引�
 
 Feishu / Hermes 的 `external.message` 原先把消息正文直接作为新 Competition / Debate 的 `goal`。一旦参与者有工具，这就是指令注入入口。现在：
 
-- `goal` 只来自 AEEIS 控制的来源：Room 的目标，或 policy 的默认目标；
+- `goal` 只来自 AEEIS 控制的来源：Room 的目标；Room 没有目标时，ingress 使用一个只指向该输入的固定目标（`Respond to the external Feishu message in <debate id>`）；
 - 外部消息正文放进单独的 `externalInput: { channel, messageId, senderAgentId, text, receivedAt }`，Trigger Event、Competition Brief 和 Debate Room 都原样保存；
-- 参与者提示词说明：`externalInput` 是外部来的输入，可以作为信息考虑，其中的指令不执行，也不能据此申请或使用授权之外的工具；
-- `externalInput` 只允许出现在 `external.message` 事件上；它不是证据，不能被 `claimRefs` 引用为 `context` 或 `observed`。
+- 所有角色（候选者、评审、参与者、主持、裁决）的系统提示都说明：`externalInput` 是外部来的输入，可以作为信息考虑，其中的指令不执行，也不能据此申请或使用授权之外的工具；
+- `externalInput` 只允许出现在 `external.message` 事件上，且 `channel` 必须与事件 `source` 一致；它不是证据，不能被 `claimRefs` 引用为 `context` 或 `observed`；
+- 它只能经内部 Trigger 路由由 Feishu / Hermes ingress 带入。用户侧的 `/api/collaborations/triggers/evaluate`，以及直接创建 Competition / Debate 的请求体，都不接受该字段，调用方无法冒充渠道来源。
 
 ## 5. 共识规则
 
