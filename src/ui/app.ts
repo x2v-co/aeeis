@@ -9,7 +9,7 @@ import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
 
 window.addEventListener('pagehide', releaseArtifactDownloads);
 
-interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string; threadId?: string; parentRunId?: string; threadSequence?: number }
+interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string; threadId?: string; parentRunId?: string; threadSequence?: number; derivationBlocked?: { kind: 'collaboration_trigger' | 'project_pulse'; limit: number; reason: string; at: string; acknowledgedAt?: string } }
 interface ThreadRun extends RunSummary { threadSequence: number; privacy?: string; outputExcerpt?: string }
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
@@ -6379,7 +6379,7 @@ function openInputPanel(mode: InputPanelMode): void {
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   answer.focus();
 }
-type InboxKind = 'approval' | 'question' | 'unknown' | 'failure' | 'mention';
+type InboxKind = 'approval' | 'question' | 'unknown' | 'failure' | 'mention' | 'derivation';
 function inboxKind(status: string): InboxKind | undefined {
   if (status === 'needs_approval') return 'approval';
   if (status === 'needs_input' || status === 'waiting_external' || status === 'paused') return 'question';
@@ -6389,13 +6389,13 @@ function inboxKind(status: string): InboxKind | undefined {
 }
 function inboxSeverity(kind: InboxKind): number {
   if (kind === 'approval' || kind === 'question') return 1;
-  if (kind === 'unknown') return 2;
+  if (kind === 'unknown' || kind === 'derivation') return 2;
   return 3;
 }
 function inboxAge(at: string | undefined, kind: InboxKind): { label: string; level: 'normal' | 'remind' | 'escalate' } {
   const stamp = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : Date.now();
   const hours = Math.max(0, Date.now() - stamp) / 3_600_000;
-  const [remind, escalate] = kind === 'approval' || kind === 'question' ? [1, 4] : kind === 'unknown' ? [2, 8] : [24, 72];
+  const [remind, escalate] = kind === 'approval' || kind === 'question' ? [1, 4] : kind === 'unknown' || kind === 'derivation' ? [2, 8] : [24, 72];
   if (hours < remind) return { label: '正常', level: 'normal' };
   if (hours < escalate) return { label: '提醒', level: 'remind' };
   return { label: '升级', level: 'escalate' };
@@ -6405,12 +6405,13 @@ function inboxKindLabel(kind: InboxKind): string {
   if (kind === 'question') return '提问';
   if (kind === 'unknown') return '结果不明';
   if (kind === 'failure') return '失败';
+  if (kind === 'derivation') return '自动派生已停止';
   return '点名';
 }
 const NOTIFY_PREFERENCE = 'aeeis.notify-s1';
 const NOTIFIED_ITEMS = 'aeeis.notified-s1';
 /** Inbox items that need a person's decision now (§9.1 S1): an approval, a question, a channel block. */
-const S1_STATUSES = new Set(['needs_approval', 'needs_input', 'blocked']);
+const S1_STATUSES = new Set(['needs_approval', 'needs_input', 'blocked', 'derivation_blocked']);
 let lastInboxRuns: RunSummary[] = [];
 let lastTypedAt = 0;
 let inboxHold = 0;
@@ -6544,6 +6545,19 @@ function renderAttentionInbox(runs: RunSummary[]): void {
       open: () => openAttentionRun(run),
       quick: kind === 'failure' ? '查看原因' : kind === 'approval' ? '查看计划' : kind === 'unknown' ? '核查' : '补充',
       act: () => openAttentionRun(run),
+    });
+  }
+  // The derivation depth limit stopped an automatic chain at this Run. It
+  // waits until its owner acknowledges it; acknowledging never resumes it.
+  for (const run of runs) {
+    const block = run.derivationBlocked;
+    if (!block || block.acknowledgedAt) continue;
+    const acknowledge = async () => { await api(`/runs/${encodeURIComponent(run.id)}/derivation-block/acknowledge`, {}, 'POST'); await refresh(true); };
+    items.push({
+      key: `derivation:${run.id}:${block.at}`, kind: 'derivation', title: runTitle(run),
+      detail: `自动派生链已到 ${block.limit} 跳上限，没有再创建${block.kind === 'project_pulse' ? '后续计划' : '协作'}。要继续就手动开始一次。`,
+      at: block.at, status: 'derivation_blocked', selected: run.id === currentId,
+      open: () => openAttentionRun(run), quick: '知道了', act: acknowledge,
     });
   }
   // A channel block waits for a person even when no Run asks; it counts as a question.

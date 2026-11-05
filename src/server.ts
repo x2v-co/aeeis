@@ -1,4 +1,5 @@
 import { FileTaskBoardStore, PostgresTaskBoardStore } from './adapters/task-board-store.js';
+import { maxDerivationDepthFromEnv } from './lineage.js';
 import { JsonChannelNoiseStore, PostgresChannelNoiseStore, type ChannelNoiseStore } from './channel-noise.js';
 import pg from 'pg';
 import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
@@ -186,7 +187,8 @@ const collaborationTriggerStore = process.env.DATABASE_URL
   ? new PostgresCollaborationTriggerStore(process.env.DATABASE_URL)
   : new FileCollaborationTriggerStore(process.env.AEEIS_COLLABORATION_TRIGGERS_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration-triggers`);
 await collaborationTriggerStore.init();
-const collaborationTriggers = new CollaborationTriggerService(collaborationTriggerStore, collaboration);
+const maxDerivationDepth = maxDerivationDepthFromEnv(process.env);
+const collaborationTriggers = new CollaborationTriggerService(collaborationTriggerStore, collaboration, undefined, { maxDerivationDepth });
 const collaborationTriggerPump = new CollaborationTriggerPump(repository, collaborationTriggers, {
   scanCursorStore: runScanCursors,
   scanCursorName: 'collaboration-trigger-pump',
@@ -543,7 +545,7 @@ try {
     rsiProposalPump.setSynthesis(synthesis);
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, executionLimits: executionLimitsConfig(process.env), actionPolicies, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
+    engine = new AgentEngine(repository, { ...modelServices, maxDerivationDepth, executionLimits: executionLimitsConfig(process.env), actionPolicies, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
     const threadService = new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? DEFAULT_THREAD_HISTORY_BYTES));
     await new ConversationService(conversationStore, repository, threadService).recover();
     await threadService.recover();

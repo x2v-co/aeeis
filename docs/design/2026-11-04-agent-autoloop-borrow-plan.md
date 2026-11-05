@@ -1,7 +1,7 @@
 # 从 agent-autoloop 借鉴的改进计划
 
 > 来源：2026-11-04 对 [KKKKhazix/agent-autoloop](https://github.com/KKKKhazix/agent-autoloop)（main，2026-11-04）的对比阅读。
-> 状态：提案，尚未实施。每一项独立成 PR，可按优先级挑选。
+> 状态：提案。每一项独立成 PR，可按优先级挑选。第 2 项已实施（见该节"实施结果"）。
 
 ## 背景
 
@@ -53,6 +53,16 @@ agent-autoloop 是本机运行的事件调度中台：规则把事件派给命�
 3. successor Plan 继承来源 Run 的深度；用户手动在"长期目标"里调度时深度归零（人工介入是合法的新根）。
 
 **完成标准。** 构造 `task.completed → competition → task.completed → …` 的回环测试，第 9 跳被拦下并留下可查询的 decision；File 与 PostgreSQL 两种存储都覆盖。
+
+**实施结果（2026-11-05）。**
+
+- `src/lineage.ts` 定义 `lineage: { rootId, depth }`。Run、Competition、Debate 记录和 Plan 都有可选的只读 `lineage`；没有 lineage 的记录视为深度 0 的根。只有创建方通过受信参数写入：`CollaborationService.createCompetition / createDebate(input, scope, trusted)`、`AeeisService.createPlanRevision(..., { lineage })`、`AgentEngine.create(..., trusted)`。请求体和模型输出都过 `.strict()` schema，带 `lineage` 直接 400。
+- `collaboration-trigger-event/1` 新增 `lineage`（来源对象的位置）。只有 Run pump 通过新的 `evaluateDerived()` 带上它（取自来源 Run，`lineageOf(run)`）；`evaluate()`（HTTP 和 worker 路由）和 `evaluateExternalMessage()`（Feishu/Hermes ingress）遇到 `lineage` 一律拒绝，外部消息和 HTTP 事件都是新根。
+- Trigger Service 先算出待创建资源的 lineage（`depth = 来源 depth + 1`），超过上限就以同一个 policy/event 键写入 `state: 'blocked_depth'` 的 decision（带 lineage 和原因），不创建、不派发；该 decision 是终态，reconcile 不能复活。上限来自 `AEEIS_MAX_DERIVATION_DEPTH`（默认 8，1–1000），事件不能覆盖。
+- 通知：pump 把被拦下的派生写到来源 Run 的 `derivationBlocked` 并追加 `derivation.blocked` 事件（重放不会重复）。Run 列表摘要带上它；工作台收件箱显示"自动派生已停止"，属于 S1，会走浏览器通知和 `/api/push` 推送；`explainRun().attention.kind` 为 `inspect_derivation`。`POST /api/runs/:id/derivation-block/acknowledge` 只隐藏通知，不恢复链路。
+- Project Pulse：`projectPulseNextActions` 给 successor Plan 写 `lineage = 来源 Run + 1`；超过上限时不建 Plan，同样在 Run 上留 `derivationBlocked`（`kind: 'project_pulse'`）。用户在"长期目标"里手动建 / 修订 Plan、手动调度任务都不带 lineage，即新根。
+- 测试：`tests/derivation-depth.test.ts` 的回环测试在 File 与 PostgreSQL 存储上各跑一次：Competition 深度 1/3/5/7、派生 Run 深度 2/4/6/8，第 9 跳得到可查询的 `blocked_depth` decision；另有 HTTP / worker / ingress / 请求体不能写 lineage 的测试，以及 Pulse successor Plan 继承深度和超限被拦的测试。
+- 未做：RSI proposal pump 还没接入 lineage；目前也没有生产代码从 Competition / Debate 结果自动派生 Run（测试里由执行器模拟），以后加这条路径时用 `AgentEngine.create(..., { lineage: childLineage(lineageOf(parent)) })`。
 
 ## 3. File 存储的崩溃与随机模拟（P1）
 

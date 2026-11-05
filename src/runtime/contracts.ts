@@ -337,6 +337,12 @@ export interface AgentRun {
   /** When present, this Run is the execution receipt for one existing domain task. */
   taskExecution?: { domainPlanId: string; taskId: string; requestHash: string };
   followUpPlanId?: string;
+  /** Read-only derivation chain position, computed by the runtime from the
+   * parent this Run derives from. Missing means a depth-0 root. */
+  lineage?: import('../lineage.js').Lineage;
+  /** A derivation from this Run that the depth limit refused; the inbox shows
+   * it until a person acknowledges it. */
+  derivationBlocked?: import('../lineage.js').DerivationBlock;
   status: RunStatus; createdAt: string; updatedAt: string;
   /** Manual entry-task rank for local scheduling. 1 starts first. Missing sorts after every ranked Run.
    * The number does not approve, pause, resume, or cancel this Run. */

@@ -11,6 +11,7 @@ import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import { digestProtocol } from './protocol.js';
 import { externalInputSchema } from './collaboration.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
+import { childLineage, DEFAULT_MAX_DERIVATION_DEPTH, lineageSchema, validMaxDerivationDepth, type Lineage } from './lineage.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const scopedIdentity = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/);
@@ -37,6 +38,10 @@ export const collaborationTriggerEventSchema = z.object({
   requiredDiversity: z.number().int().min(1).max(12).optional(),
   allowedAgentIds: z.array(id).max(12).optional(), context: triggerContextSchema.optional(),
   externalInput: externalInputSchema.optional(),
+  /** Derivation chain position of the source object. Only the Run pump sets
+   * it (through `evaluateDerived`); HTTP callers and channel ingress events
+   * are depth-0 roots and are rejected if they carry it. */
+  lineage: lineageSchema.optional(),
   evidenceRefs: z.array(id).max(100).default([]), occurredAt: isoDate,
 }).strict();
 export type CollaborationTriggerEvent = z.infer<typeof collaborationTriggerEventSchema>;
@@ -71,8 +76,13 @@ export type CollaborationTriggerPolicy = z.infer<typeof collaborationTriggerPoli
 
 export const collaborationTriggerDecisionSchema = z.object({
   schemaVersion: z.literal(1), id, policyId: id, eventId: eventIdentity,
-  owner: scopedIdentity, tenantId: scopedIdentity, state: z.enum(['started', 'triggered', 'failed']),
+  owner: scopedIdentity, tenantId: scopedIdentity,
+  /** `blocked_depth`: the derivation chain reached its depth limit, so
+   * nothing was created or dispatched. */
+  state: z.enum(['started', 'triggered', 'failed', 'blocked_depth']),
   actionType: z.enum(['competition', 'debate']), resourceId: id.optional(),
+  /** Lineage the created (or refused) resource has. */
+  lineage: lineageSchema.optional(),
   dispatchState: z.enum(['not_requested', 'started', 'completed', 'unknown', 'failed']).default('not_requested'),
   dispatchError: z.string().max(4000).optional(),
   reason: z.string().max(4000).optional(), error: z.string().max(4000).optional(),
@@ -282,6 +292,12 @@ export const collaborationTriggerReconcileSchema = z.discriminatedUnion('outcome
 ]);
 export type CollaborationTriggerReconcile = z.infer<typeof collaborationTriggerReconcileSchema>;
 
+export interface CollaborationTriggerServiceOptions {
+  /** Most automatic hops a derivation chain may take (default 8). Events
+   * cannot override it. */
+  maxDerivationDepth?: number;
+}
+
 export interface CollaborationTriggerExecutors {
   runCompetition(id: string, scope: Ownership): Promise<unknown>;
   runDebate(id: string, scope: Ownership): Promise<unknown>;
@@ -294,7 +310,11 @@ export interface CollaborationTriggerExecutors {
  * durable decision. */
 export class CollaborationTriggerService {
   private executors: CollaborationTriggerExecutors | undefined;
-  constructor(private readonly store: CollaborationTriggerStore, private readonly collaboration: CollaborationService, executors?: CollaborationTriggerExecutors) { if (executors) this.executors = executors; }
+  readonly maxDerivationDepth: number;
+  constructor(private readonly store: CollaborationTriggerStore, private readonly collaboration: CollaborationService, executors?: CollaborationTriggerExecutors, options: CollaborationTriggerServiceOptions = {}) {
+    if (executors) this.executors = executors;
+    this.maxDerivationDepth = validMaxDerivationDepth(options.maxDerivationDepth ?? DEFAULT_MAX_DERIVATION_DEPTH);
+  }
   setExecutors(executors: CollaborationTriggerExecutors): void { this.executors = executors; }
   async createPolicy(input: unknown, scope: Ownership): Promise<CollaborationTriggerPolicy> {
     const body = z.object({ id, name: z.string().trim().min(1).max(200), enabled: z.boolean().default(true), eventTypes: z.array(collaborationTriggerEventTypeSchema).min(1).max(4), sources: z.array(source).min(1).max(4).optional(), riskAtLeast: risk.optional(), reviewConfidenceAtMost: z.number().min(0).max(1).optional(), requiredDiversityAtLeast: z.number().int().min(1).max(12).optional(), action: collaborationTriggerActionSchema, cooldownMs: z.number().int().min(0).max(31_536_000_000).default(0) }).strict().parse(input);
@@ -315,10 +335,10 @@ export class CollaborationTriggerService {
   async reconcileDecision(decisionId: string, input: unknown, scope?: Ownership): Promise<CollaborationTriggerDecision> {
     const body = collaborationTriggerReconcileSchema.parse(input);
     const current = await this.store.getDecision(decisionId, scope);
-    if (current.state === 'failed' || current.dispatchState === 'completed' || current.dispatchState === 'failed') throw new Error('Collaboration trigger decision is already terminal');
+    if (current.state === 'failed' || current.state === 'blocked_depth' || current.dispatchState === 'completed' || current.dispatchState === 'failed') throw new Error('Collaboration trigger decision is already terminal');
     const now = new Date().toISOString();
     return this.store.updateDecision(decisionId, decision => {
-      if (decision.state === 'failed' || decision.dispatchState === 'completed' || decision.dispatchState === 'failed') throw new Error('Collaboration trigger decision changed before reconciliation');
+      if (decision.state === 'failed' || decision.state === 'blocked_depth' || decision.dispatchState === 'completed' || decision.dispatchState === 'failed') throw new Error('Collaboration trigger decision changed before reconciliation');
       if (body.outcome === 'resource_created') {
         if (decision.state !== 'started' || decision.resourceId) throw new Error('Only a started decision without a resource can bind a created resource');
         return { ...decision, state: 'triggered', resourceId: body.resourceId, dispatchState: 'not_requested', completedAt: now, reason: body.reason, error: undefined };
@@ -339,6 +359,17 @@ export class CollaborationTriggerService {
    * real channel message. */
   async evaluate(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     const event = collaborationTriggerEventSchema.parse(input);
+    if (event.lineage) throw new RangeError('lineage is computed by the runtime; callers cannot set it');
+    return this.evaluateSystemEvent(event, scope);
+  }
+
+  /** Only the in-process Run pump calls this: its events carry the source
+   * Run's lineage, which the depth limit is checked against. */
+  async evaluateDerived(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
+    return this.evaluateSystemEvent(collaborationTriggerEventSchema.parse(input), scope);
+  }
+
+  private async evaluateSystemEvent(event: CollaborationTriggerEvent, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     if (event.externalInput) throw new RangeError('externalInput only comes from the Feishu/Hermes webhook ingress');
     if (isChannelSource(event.source)) throw new RangeError('Feishu and Hermes events only come from their webhook ingress');
     if (event.eventType === 'external.message') throw new RangeError('external.message events only come from the Feishu/Hermes webhook ingress');
@@ -349,6 +380,8 @@ export class CollaborationTriggerService {
   async evaluateExternalMessage(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     const event = collaborationTriggerEventSchema.parse(input);
     if (event.eventType !== 'external.message' || !event.externalInput || !isChannelSource(event.source) || event.externalInput.channel !== event.source) throw new RangeError('An external message needs external input from its own Feishu/Hermes channel');
+    // A channel message is a new root: a person (or an outside system) sent it.
+    if (event.lineage) throw new RangeError('lineage is computed by the runtime; channel messages are new roots');
     return this.evaluateEvent(event, scope);
   }
 
@@ -362,15 +395,23 @@ export class CollaborationTriggerService {
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');
     const eventScope = { owner: event.owner, tenantId: event.tenantId };
     const fromEvent = { taskId: event.taskId, contextVersion: event.contextVersion, ...(event.context ? { context: event.context } : {}) };
-    const trusted = event.externalInput ? { externalInput: event.externalInput } : undefined;
+    // The event's own source is the parent. Without lineage it is a root.
+    const lineage: Lineage = childLineage(event.lineage ?? { rootId: `event:${event.eventId}`, depth: 0 });
+    const blocked = lineage.depth > this.maxDerivationDepth;
+    const trusted = { ...(event.externalInput ? { externalInput: event.externalInput } : {}), lineage };
     const policies = await this.store.listPolicies(eventScope); const results: CollaborationTriggerResult[] = [];
     for (const policy of policies) {
       if (!this.matches(policy, event)) continue;
       const decisionId = `trigger_${createHash('sha256').update(`${policy.id}:${event.eventId}`).digest('hex').slice(0, 32)}`;
       const startedAt = new Date().toISOString();
-      const claimed = await this.store.claimForPolicy({ schemaVersion: 1, id: decisionId, policyId: policy.id, eventId: event.eventId, owner: event.owner, tenantId: event.tenantId, state: 'started', actionType: policy.action.type, dispatchState: 'not_requested', startedAt }, { policy, occurredAt: event.occurredAt });
+      // Over the limit the decision is recorded as already terminal, under the
+      // same policy/event key, so replays stay idempotent and nothing is created.
+      const claimed = await this.store.claimForPolicy({ schemaVersion: 1, id: decisionId, policyId: policy.id, eventId: event.eventId, owner: event.owner, tenantId: event.tenantId, actionType: policy.action.type, dispatchState: 'not_requested', startedAt, lineage,
+        ...(blocked
+          ? { state: 'blocked_depth', reason: `Derivation chain ${lineage.rootId} reached depth ${lineage.depth}, over the limit of ${this.maxDerivationDepth}; no ${policy.action.type} was created` }
+          : { state: 'started' }) }, { policy, occurredAt: event.occurredAt });
       if (!claimed) continue;
-      if (!claimed.claimed) { results.push({ policyId: policy.id, decision: claimed.decision, created: false }); continue; }
+      if (!claimed.claimed || claimed.decision.state === 'blocked_depth') { results.push({ policyId: policy.id, decision: claimed.decision, created: claimed.claimed }); continue; }
       try {
         const resource = policy.action.type === 'competition'
           ? await this.collaboration.createCompetition({ ...fromEvent, schemaVersion: 'competition-brief/1', goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation }, eventScope, trusted)

@@ -1,9 +1,12 @@
 import type { AgentRun, Event } from './runtime/contracts.js';
 import type { RunRepository } from './runtime/repository.js';
 import { RunEventScanner, type RunScanCursorStore } from './run-scan-cursor.js';
+import { lineageOf, type DerivationBlock } from './lineage.js';
+import { event as runEvent } from './runtime/engine.js';
 import {
   collaborationTriggerEventSchema,
   type CollaborationTriggerEvent,
+  type CollaborationTriggerResult,
   type CollaborationTriggerService,
 } from './collaboration-triggers.js';
 
@@ -75,6 +78,10 @@ export function runEventToCollaborationTrigger(run: AgentRun, item: Event): Coll
       redactions: [],
     },
     evidenceRefs: [...new Set(evidenceRefs)].slice(0, 100),
+    // The Run is the parent of whatever this event derives. Its lineage is
+    // runtime-owned and travels with the event so the depth limit holds
+    // across Run → collaboration → Run hops.
+    lineage: lineageOf(run),
     occurredAt: item.at,
     ...(typeof data.reviewConfidence === 'number' ? { reviewConfidence: data.reviewConfidence } : {}),
   });
@@ -116,6 +123,21 @@ export class CollaborationTriggerPump {
     return this.inFlight;
   }
   async drain(): Promise<void> { await this.inFlight; }
+
+  /** Puts the refused derivation on the source Run, where the inbox asks a
+   * person to look at it. A replayed decision does not raise it again. */
+  private async recordBlock(run: AgentRun, decision: CollaborationTriggerResult['decision'], policyId: string): Promise<void> {
+    if (!decision.lineage) return;
+    await this.repository.mutate(run.id, current => {
+      if (current.events.some(item => item.type === 'derivation.blocked' && item.data.decisionId === decision.id)) return;
+      const block: DerivationBlock = {
+        kind: 'collaboration_trigger', lineage: decision.lineage!, limit: this.triggers.maxDerivationDepth,
+        reason: decision.reason ?? 'Derivation chain reached its depth limit', decisionId: decision.id, policyId, at: new Date().toISOString(),
+      };
+      current.derivationBlocked = block;
+      runEvent(current, 'derivation.blocked', { ...block });
+    }, { owner: run.owner, tenantId: run.tenantId ?? 'local' });
+  }
   private async runPass(): Promise<{ evaluated: number; failed: number }> {
     if (this.busy) return { evaluated: 0, failed: 0 };
     this.busy = true;
@@ -143,8 +165,9 @@ export class CollaborationTriggerPump {
       for (let offset = 0; offset < count; offset += 1) {
         const current = pending[(start + offset) % pending.length]!;
         try {
-          await this.triggers.evaluate(current.event, { owner: current.run.owner, tenantId: current.run.tenantId ?? 'local' });
+          const results = await this.triggers.evaluateDerived(current.event, { owner: current.run.owner, tenantId: current.run.tenantId ?? 'local' });
           evaluated += 1;
+          for (const result of results) if (result.decision.state === 'blocked_depth') await this.recordBlock(current.run, result.decision, result.policyId);
         } catch (error) {
           failed += 1;
           this.onError(error, current.run, current.item);

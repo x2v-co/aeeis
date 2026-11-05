@@ -151,6 +151,9 @@ export interface Plan {
   version: number;
   nodes: PlanNode[];
   createdAt: string;
+  /** Read-only derivation chain position. Set by the runtime for a successor
+   * Plan it derives automatically; a Plan a person creates is a depth-0 root. */
+  lineage?: import("./lineage.js").Lineage;
 }
 
 export interface RunReceipt {
