@@ -334,11 +334,14 @@ export class CollaborationTriggerService {
   }
 
   /** Events from HTTP callers, worker bridges and the Run pump. None of them
-   * may claim Feishu/Hermes provenance or carry external input. */
+   * may claim Feishu/Hermes provenance, carry external input or send an
+   * `external.message`, so a policy on that event type only ever fires for a
+   * real channel message. */
   async evaluate(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     const event = collaborationTriggerEventSchema.parse(input);
     if (event.externalInput) throw new RangeError('externalInput only comes from the Feishu/Hermes webhook ingress');
     if (isChannelSource(event.source)) throw new RangeError('Feishu and Hermes events only come from their webhook ingress');
+    if (event.eventType === 'external.message') throw new RangeError('external.message events only come from the Feishu/Hermes webhook ingress');
     return this.evaluateEvent(event, scope);
   }
 
@@ -348,6 +351,12 @@ export class CollaborationTriggerService {
     if (event.eventType !== 'external.message' || !event.externalInput || !isChannelSource(event.source) || event.externalInput.channel !== event.source) throw new RangeError('An external message needs external input from its own Feishu/Hermes channel');
     return this.evaluateEvent(event, scope);
   }
+
+  /** The `onTrigger` callback for the Feishu/Hermes webhook ingress. The
+   * server and the ingress tests both use it, so the channel path is the one
+   * under test. */
+  readonly onChannelMessage = (event: CollaborationTriggerEvent): Promise<void> =>
+    this.evaluateExternalMessage(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined);
 
   private async evaluateEvent(event: CollaborationTriggerEvent, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');

@@ -48,7 +48,7 @@ describe('Hermes Debate ingress', () => {
     await triggers.createPolicy({ id: 'policy.hermes.message', name: 'Hermes message', enabled: true, eventTypes: ['external.message'], sources: ['hermes'], action: { type: 'debate', participantAgentIds: ['agent.admitted', 'agent.unauthorized'], maxRounds: 1, maxMessagesPerAgent: 1 } }, scope);
     const events: unknown[] = [];
     const key = 'hermes-signing-key-456';
-    const ingress = new HermesDebateIngress({ collaboration, routes: [{ roomId: 'room.trigger', debateId: debate.id }], senderAgentIds: { 'hermes-user': 'agent.admitted' }, signingKeys: { local: key }, onTrigger: async event => { events.push(event); await triggers.evaluateExternalMessage(event, scope); }, now: () => 1_700_000_000 });
+    const ingress = new HermesDebateIngress({ collaboration, routes: [{ roomId: 'room.trigger', debateId: debate.id }], senderAgentIds: { 'hermes-user': 'agent.admitted' }, signingKeys: { local: key }, onTrigger: async event => { events.push(event); await triggers.onChannelMessage(event); }, now: () => 1_700_000_000 });
     const body = JSON.stringify({ schemaVersion: 'hermes-debate-event/1', eventId: 'evt.hermes.trigger', roomId: 'room.trigger', senderRef: 'hermes-user', message: { content: 'Trigger a governed review.' } });
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'local', key))).status).toBe('accepted');
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'local', key))).status).toBe('duplicate');

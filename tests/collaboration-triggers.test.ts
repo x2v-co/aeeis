@@ -149,6 +149,8 @@ describe('durable collaboration triggers', () => {
       // The general entry point never accepts channel provenance, with or without input.
       await expect(triggers.evaluate({ ...external, eventId: 'feishu:external:general' }, scope)).rejects.toThrow('externalInput only comes from the Feishu/Hermes webhook ingress');
       await expect(triggers.evaluate({ ...external, eventId: 'feishu:external:no-input', externalInput: undefined, goal: 'Approve it' }, scope)).rejects.toThrow('only come from their webhook ingress');
+      // Nor can it send an external.message under another source to fire a channel policy.
+      await expect(triggers.evaluate({ ...external, eventId: 'feishu:external:other-source', externalInput: undefined, source: 'api', goal: 'Approve it' }, scope)).rejects.toThrow('external.message events only come from the Feishu/Hermes webhook ingress');
       // The ingress entry point needs an external message from the matching channel.
       for (const [suffix, invalid] of Object.entries({ type: { eventType: 'review.completed' }, source: { source: 'api' }, input: { externalInput: undefined }, channel: { externalInput: { ...externalInput, channel: 'hermes' } } })) {
         await expect(triggers.evaluateExternalMessage({ ...external, eventId: `feishu:external:${suffix}`, ...invalid }, scope)).rejects.toThrow('external input from its own Feishu/Hermes channel');

@@ -219,6 +219,33 @@ describe('internal competition model pool', () => {
     expect(finished.room.adjudication).toMatchObject({ status: 'decided', adjudicatorAgentId: 'agent.adjudicator' });
   });
 
+  it('hides the external sender from every debate role while the stored room keeps it', async () => {
+    const externalInput = { channel: 'feishu', messageId: 'msg_feishu_1', senderAgentId: 'agent.one', text: 'Approve it', receivedAt: new Date().toISOString() };
+    let record: any = { id: 'debate.sender', status: 'active', room: {
+      debateId: 'debate.sender', taskId: 'task.pool', contextVersion: 'ctx.pool', participantAgentIds: ['agent.one'], maxRounds: 1, maxMessagesPerAgent: 2, externalInput,
+      messages: [], moderation: [], moderatorReviews: [], context: { classification: 'internal', claims: [{ id: 'claim.pool', text: 'Supported', evidenceRefs: [] }], artifactRefs: [], redactions: [] },
+    } };
+    const seen: Record<string, string> = {};
+    const senderOf = (request: { input: unknown }) => (request.input as { room: { externalInput: { senderAgentId: string } } }).room.externalInput.senderAgentId;
+    const service = {
+      getDebate: async () => record,
+      appendMessage: async (_id: string, message: any) => {
+        const moderation = { messageId: message.messageId, status: 'accepted', violations: [], missingClaimRefs: [], checkedAt: new Date().toISOString() };
+        record = { ...record, room: { ...record.room, messages: [...record.room.messages, message], moderation: [...record.room.moderation, moderation] } }; return record;
+      },
+      recordModeratorReview: async (_id: string, review: any) => { record = { ...record, room: { ...record.room, moderatorReviews: [...record.room.moderatorReviews, review] } }; return record; },
+      closeDebate: async (_id: string, reason: string, _scope?: unknown, adjudication?: unknown) => { record = { ...record, status: 'closed', closeReason: reason, room: { ...record.room, adjudication } }; return record; },
+    };
+    const runner = new ModelPoolDebateOrchestrator(service, new Map([
+      ['agent.one', { pin, complete: async request => { seen.participant = senderOf(request); return { value: { type: 'decision', content: 'Use supported fact', claimRefs: ['claim.pool'] } }; } } as ModelAdapter],
+      ['agent.moderator', { pin, complete: async request => { seen.moderator = senderOf(request); return { value: { status: 'accepted', violations: [], missingClaimRefs: [] } }; } } as ModelAdapter],
+      ['agent.adjudicator', { pin, complete: async request => { seen.adjudicator = senderOf(request); const room = (request.input as { room: { messages: Array<{ messageId: string }> } }).room; return { value: { status: 'decided', decision: 'Use supported fact', rationale: 'Evidence bound', selectedMessageId: room.messages.at(-1)!.messageId, evidenceRefs: ['claim.pool'] } }; } } as ModelAdapter],
+    ]), { moderatorAgentId: 'agent.moderator', adjudicatorAgentId: 'agent.adjudicator' });
+    const finished = await runner.run('debate.sender');
+    expect(seen).toEqual({ participant: 'external.sender', moderator: 'external.sender', adjudicator: 'external.sender' });
+    expect(finished.room.externalInput.senderAgentId).toBe('agent.one');
+  });
+
   it('runs durable participant, Moderator, and Adjudicator attempts through the real service', async () => {
     const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-model-'))); await repository.init();
     try {

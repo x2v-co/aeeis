@@ -4,7 +4,7 @@ import { resultEnvelopeSchema } from './protocol.js';
 import type { ResultEnvelope } from './protocol.js';
 import { debateAdjudicationSchema, debateModeratorReviewSchema } from './collaboration.js';
 import type { CandidateRunner, CompetitionBrief, IndependentEvaluator } from './collaboration.js';
-import type { DebateMessage } from './collaboration.js';
+import type { DebateMessage, DebateRoom } from './collaboration.js';
 import type { Ownership } from './security/principal.js';
 import { digest } from './runtime/engine.js';
 import { ModelOutcomeUnknown } from './runtime/model.js';
@@ -19,6 +19,12 @@ import type { ModelResolver } from './runtime/model-router.js';
  * the selected provider/model is resolved behind that identity. */
 export type CollaborationModelResolver = Pick<ModelResolver, 'resolve'>;
 type CollaborationPrivacy = 'public' | 'internal' | 'confidential' | 'private';
+
+/** Every model-facing view of a room hides who sent the external input; the
+ * stored room keeps the real sender for audit. */
+function modelRoom(room: DebateRoom): DebateRoom {
+  return room.externalInput ? { ...room, externalInput: { ...room.externalInput, senderAgentId: 'external.sender' } } : room;
+}
 
 function privacyOf(classification: CollaborationPrivacy | undefined): CollaborationPrivacy {
   return classification ?? 'internal';
@@ -171,7 +177,7 @@ export class ModelPoolDebateOrchestrator {
     for (const message of record.room.messages) {
       if (record.room.moderatorReviews.some(review => review.messageId === message.messageId && review.reviewerAgentId === moderatorAgentId)) continue;
       const response = await this.call(debateId, `moderator:${message.messageId}`, moderatorAgentId, moderatorSystem,
-        { room: record.room, message, policy: record.room.moderation.find(item => item.messageId === message.messageId) }, scope);
+        { room: modelRoom(record.room), message, policy: record.room.moderation.find(item => item.messageId === message.messageId) }, scope);
       const review = moderatorOutputSchema.parse(response.value);
       record = await this.service.recordModeratorReview(debateId, debateModeratorReviewSchema.parse({ ...review, messageId: message.messageId, reviewerAgentId: moderatorAgentId, reviewedAt: new Date().toISOString() }), scope);
     }
@@ -182,7 +188,7 @@ export class ModelPoolDebateOrchestrator {
     const record = await this.reviewMessages(debateId, scope);
     const adjudicatorAgentId = this.roles.adjudicatorAgentId;
     if (!adjudicatorAgentId) return this.service.closeDebate(debateId, reason, scope);
-    const response = await this.call(debateId, 'adjudicator:final', adjudicatorAgentId, adjudicatorSystem, { room: record.room }, scope);
+    const response = await this.call(debateId, 'adjudicator:final', adjudicatorAgentId, adjudicatorSystem, { room: modelRoom(record.room) }, scope);
     const raw = adjudicatorOutputSchema.parse(response.value);
     const adjudication = debateAdjudicationSchema.parse({ ...raw, decidedAt: new Date().toISOString(), adjudicatorAgentId });
     // The domain revalidates citations, moderation, role identity and attempts
@@ -213,7 +219,7 @@ export class ModelPoolDebateOrchestrator {
           if (record.room.maxMessagesPerAgent !== undefined && record.room.messages.filter(message => message.speakerAgentId === agentId).length >= record.room.maxMessagesPerAgent) continue;
           if (record.room.messages.length >= (record.room.maxTotalMessages ?? 1000)) return await this.adjudicate(debateId, 'Debate reached its message bound', scope);
           spoke = true;
-          const response = await this.call(debateId, `participant:${round}:${agentId}`, agentId, debateSystem, { room: record.room, round, speakerAgentId: agentId }, scope);
+          const response = await this.call(debateId, `participant:${round}:${agentId}`, agentId, debateSystem, { room: modelRoom(record.room), round, speakerAgentId: agentId }, scope);
           const output = debateMessageOutputSchema.parse(response.value);
           const message = {
             ...output, schemaVersion: 'debate-message/1' as const, messageId: `message_${response.attemptId.slice('attempt_'.length)}`, debateId,
