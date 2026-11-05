@@ -122,7 +122,7 @@ relates:
 ### 2.2.1 实现（切片 B 第一部分）
 
 - **测试机**：instabox 的 `agent-browser-lj1m`（Firecracker microVM，Debian 13，4 vCPU / 8 GiB，16 GiB 系统盘 + 20 GiB `/data`，自带 Docker）。SSH 经 instabox 网关，证书约一小时有效，用 `instabox ssh-cert` 刷新。免费套餐空闲 30 分钟或运行 8 小时会暂停，SSH 随之断开。
-- **远程执行**：没有用 `docker --context`（本机没有 Docker CLI），改为 `sandbox.ssh: <Host 别名>`，`DockerSandbox` 把每个 `docker` 调用变成 `ssh -o BatchMode=yes <host> -- docker <逐个单引号转义的参数>`。本机 Unix socket 检查只对本地引擎保留。每次调用多一次 SSH 握手，超时统一加 20 秒。
+- **远程执行**：没有用 `docker --context`（本机没有 Docker CLI），改为 `sandbox.ssh: <Host 别名>`，`DockerSandbox` 把每个 `docker` 调用变成 `ssh -o BatchMode=yes <host> -- docker <逐个单引号转义的参数>`。本机 Unix socket 检查只对本地引擎保留。同一主机的 docker 调用复用一条 SSH 连接（`ControlMaster`），超时统一加 20 秒。热路径只有两次 docker 调用（检查容器、执行工具）；容器停过才重新启动代理、容器并探测工具服务。instabox 上实测：热调用从约 15 秒降到 1.4 秒，Run 首次调用从约 80 秒降到 14 秒（剩下的主要是到 instabox 网关的往返，单条命令约 0.6 秒）。
 - **出口代理**：`network: proxied`。每个 Run 一张 `--internal` 网络 + 一张出口网络 + 一个代理容器（同一镜像，`proxy.py`，无 capability、只读、`nobody`、128 MiB），代理在内部网络上的别名是 `aeeis-proxy`（容器名超过 DNS 单段 63 字符）。放行规则见 README；Run 释放时代理和两张网络一起删除。这一版的放行列表是部署级的 `sandbox.egressHosts`，不是每份授权一份；授权里的 `resources.egressHosts` 等到同一台机器上跑多份授权时再加。
 - **工作区内**：`proxied` 和 `none` 下 `shell` / `python` / `process` / `browser` 都进入 `workspaceContainedTools()`；`bridge` 照旧不算。
 - **浏览器**：工具 `browser`，每次调用开一个新页面，可选 click / type / press / wait，返回标题、状态码、可见文字、控制台错误、失败请求和截图（`artifacts/screenshots/`，路径 + SHA-256）。Playwright 默认让回环地址也走代理，已关闭，`127.0.0.1` 的开发服务器直连。

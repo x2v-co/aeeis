@@ -222,7 +222,7 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 
 `network: "proxied"` 时，Run 容器在一张 `--internal` 网络上，唯一出口是同一个 Run 的代理容器（无 capability、只读根目录、`nobody` 用户）。代理只放行 `egressHosts` 里的主机名（支持 `*.example.com`），HTTPS 走 CONNECT 443，HTTP 只放 80 端口；IP 字面量和解析到私有 / 链路本地 / 环回地址的名字一律拒绝，每次放行和拒绝记一行 JSON 日志。`egressHosts` 只填 Bot 无人值守也能访问的地址（如 `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`）：在这种网络下 `shell` / `python` / `process` / `browser` 算作只作用于工作区，范围授权内直接执行。`proxied` 不发布端口。
 
-设置 `sandbox.ssh` 为 `~/.ssh/config` 里的 Host 名时，AEEIS 通过 `ssh <host> docker …` 在那台机器上运行容器（例如测试 VPS），本机不需要 Docker；`npm run sandbox:build` 会把 `sandbox/` 以 tar 流发过去构建。SSH 必须免交互（`BatchMode=yes`）。远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
+设置 `sandbox.ssh` 为 `~/.ssh/config` 里的 Host 名时，AEEIS 通过 `ssh <host> docker …` 在那台机器上运行容器（例如测试 VPS），本机不需要 Docker；`npm run sandbox:build` 会把 `sandbox/` 以 tar 流发过去构建。SSH 必须免交互（`BatchMode=yes`）。同一台主机的所有 docker 调用复用一条 SSH 连接（控制套接字在 `/tmp/aeeis-ssh-<uid>/`，目录必须只属于当前用户，否则退回每次新建连接），空闲 5 分钟后断开。远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
 
 | 工具 | 输入与作用 |
 | --- | --- |

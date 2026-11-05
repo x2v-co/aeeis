@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
@@ -55,10 +55,15 @@ const SSH_ALLOWANCE_MS = 20_000;
 /** POSIX single-quote one argument for the remote shell that ssh hands the command to. */
 export const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /** How to run `docker <args>`: locally, or on the configured SSH host. */
-export function dockerInvocation(config: SandboxConfig, args: string[], local: string[] = dockerContextArgs(config)): { command: string; args: string[] } {
+export function dockerInvocation(config: SandboxConfig, args: string[], local: string[] = dockerContextArgs(config), controlDirectory?: string): { command: string; args: string[] } {
   if (!config.ssh) return { command: 'docker', args: [...local, ...args] };
-  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', config.ssh, '--', 'docker', ...args.map(shellQuote)] };
+  // One SSH connection per host, reused by every docker call: a new login costs seconds through a remote gateway.
+  const reuse = controlDirectory ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlDirectory}/%C`, '-o', `ControlPersist=${SSH_PERSIST_SECONDS}`] : [];
+  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', ...reuse, config.ssh, '--', 'docker', ...args.map(shellQuote)] };
 }
+const SSH_PERSIST_SECONDS = 300;
+/** Short, per-user directory for SSH control sockets (a socket path must stay under about 100 bytes). */
+export const sshControlDirectory = (uid = process.getuid?.() ?? 0) => `/tmp/aeeis-ssh-${uid}`;
 export function dockerContextArgs(config: SandboxConfig, platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
   if (config.context !== 'auto') return ['--context', config.context];
   if (env.DOCKER_HOST) return ['--host', env.DOCKER_HOST];
@@ -105,16 +110,34 @@ export class DockerSandbox {
   /** Run containers whose stop could not be confirmed because the SSH host was unreachable. Only those Runs wait;
    * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
   private unstopped = new Set<string>();
+  private controlReady: Promise<string | undefined> | undefined;
   private readonly owner: string;
   private readonly directory: string;
   constructor(readonly config: SandboxConfig, stateDirectory: string) {
     this.owner = createHash('sha256').update(stateDirectory).digest('hex').slice(0, 16);
     this.directory = join(stateDirectory, 'sandboxes');
   }
+  /** The control socket directory must be this user's alone: whoever can open the socket can use the connection.
+   * If it cannot be made private, calls fall back to a fresh SSH login each time. */
+  private controlDirectory(): Promise<string | undefined> {
+    if (!this.config.ssh) return Promise.resolve(undefined);
+    this.controlReady ??= (async () => {
+      const directory = sshControlDirectory();
+      try {
+        await mkdir(directory, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+        const info = await lstat(directory);
+        const uid = process.getuid?.();
+        if (!info.isDirectory() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o077) !== 0) return undefined;
+        return directory;
+      } catch { return undefined; }
+    })();
+    return this.controlReady;
+  }
   private async command(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    const control = await this.controlDirectory();
     return new Promise((resolve, reject) => {
       const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
-      const invocation = dockerInvocation(this.config, args, this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config));
+      const invocation = dockerInvocation(this.config, args, this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config), control);
       const child = spawn(invocation.command, invocation.args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
       const stdout: Buffer[] = [], stderr: Buffer[] = []; let size = 0, settled = false;
       const finish = (error?: Error, code?: number | null) => {
@@ -205,17 +228,17 @@ export class DockerSandbox {
     return info;
   }
   private async start(state: State) {
+    const inspected = await this.inspect(state);
+    if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
+    // A running container means its tool service is up: the container exits when the service does.
+    if (inspected.State.Running) return;
     if (this.config.network === 'proxied' && state.proxyId) {
-      // The proxy restarts with the Docker daemon on its own; start it if someone stopped it.
+      // The proxy restarts on its own after a crash or daemon restart; start it in case someone stopped it.
       const proxy = await this.command(['start', `${state.name}-proxy`], 8000);
       if (proxy.code !== 0) throw new SandboxError('Run egress proxy unavailable', 'unknown');
     }
-    const inspected = await this.inspect(state);
-    if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
-    if (!inspected.State.Running) {
-      const started = await this.command(['start', state.name], 8000);
-      if (started.code !== 0) throw new SandboxError('Could not start Run sandbox', 'unknown');
-    }
+    const started = await this.command(['start', state.name], 8000);
+    if (started.code !== 0) throw new SandboxError('Could not start Run sandbox', 'unknown');
     // Wait for the Unix tool socket, including after a daemon restart. Never replay a tool here.
     const probe = `import socket,time\nfor _ in range(100):\n try:\n  s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect("/run/aeeis.sock"); s.sendall(b'{"tool":"__ping"}'); s.shutdown(socket.SHUT_WR); assert s.recv(100)==b'{"ready":true}'; s.close(); break\n except (OSError,AssertionError): time.sleep(.05)\nelse: raise SystemExit(1)`;
     const ready = await this.command(['exec', state.name, 'python3', '-I', '-c', probe], 8000);
@@ -359,5 +382,11 @@ export class DockerSandbox {
     this.closing = true;
     await Promise.allSettled([...this.active].map(name => this.stop(name)));
     // Idle Run containers and installed packages survive an AEEIS restart.
+    const control = this.config.ssh ? await this.controlDirectory() : undefined;
+    if (control) await new Promise<void>(resolve => {
+      const child = spawn('ssh', ['-o', `ControlPath=${control}/%C`, '-O', 'exit', this.config.ssh!], { stdio: 'ignore' });
+      const timer = setTimeout(() => { child.kill(); resolve(); }, 5000);
+      child.once('error', () => { clearTimeout(timer); resolve(); }); child.once('close', () => { clearTimeout(timer); resolve(); });
+    });
   }
 }
