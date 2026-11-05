@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PostgresCollaborationRepository, CollaborationNotFound, CollaborationService } from '../src/collaboration-service.js';
 import { isolatedPostgres } from './support/postgres.js';
+import { runDebateGapsContract } from './support/debate-gaps-contract.js';
 
 const databaseUrl = process.env.AEEIS_TEST_DATABASE_URL;
 const alice = { owner: 'alice', tenantId: 'tenant-a' };
@@ -26,5 +27,14 @@ describe('Postgres collaboration persistence', () => {
       expect(await second.listDebates(alice)).toHaveLength(1);
       expect(await second.listDebates(bob)).toEqual([]);
     } finally { await first.close(); await second.close(); await db.close(); }
+  });
+
+  it.skipIf(!databaseUrl)('keeps debate trust levels and the gap ledger across repository instances', async () => {
+    const db = await isolatedPostgres(databaseUrl!);
+    const writer = new PostgresCollaborationRepository(db.url);
+    try {
+      await writer.init();
+      await runDebateGapsContract(writer, async () => { const reader = new PostgresCollaborationRepository(db.url); await reader.init(); return reader; });
+    } finally { await writer.close(); await db.close(); }
   });
 });

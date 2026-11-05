@@ -68,16 +68,40 @@ export async function runCompetition(briefInput: CompetitionBrief, runner: Candi
   return { brief, candidates, scores: validScores, ...(selected ? { selected } : {}), status: validScores.length === candidates.length ? 'completed' : 'partial' };
 }
 
+export const debateMessageTypes = ['position', 'evidence', 'challenge', 'rebuttal', 'clarification', 'concession', 'decision', 'gap', 'observation'] as const;
+/** What a gap asks: the information needed, why it changes the conclusion,
+ * and optionally how it could be found. */
+export const debateGapSchema = z.object({
+  question: z.string().trim().min(1).max(2000), impact: z.string().trim().min(1).max(2000), query: z.string().trim().min(1).max(2000).optional(),
+}).strict();
+/** Points a message at a gap. An `observation` answers it (no resolution);
+ * the agent that raised the gap resolves it from any other message. */
+export const debateGapRefSchema = z.object({ gapId: id, resolution: z.enum(['closed', 'unresolvable']).optional() }).strict();
 export const debateMessageSchema = z.object({
   schemaVersion: z.literal('debate-message/1'), messageId: id, debateId: id, round: z.number().int().positive(), speakerAgentId: id,
-  replyTo: id.optional(), type: z.enum(['position', 'evidence', 'challenge', 'rebuttal', 'clarification', 'concession', 'decision']),
+  replyTo: id.optional(), type: z.enum(debateMessageTypes),
   content: z.string().min(1).max(8000), claimRefs: z.array(id).max(100), contextVersion: id,
+  gap: debateGapSchema.optional(), gapRef: debateGapRefSchema.optional(),
   origin: z.object({ channel: z.string().min(1).max(100), externalEventId: z.string().min(1).max(500), senderRef: z.string().min(1).max(500), receivedAt: isoDate, identity: channelIdentitySchema.optional() }).strict().optional(),
-}).strict();
+}).strict().superRefine((message, context) => {
+  if ((message.type === 'gap') !== (message.gap !== undefined)) context.addIssue({ code: 'custom', path: ['gap'], message: 'A gap message, and only a gap message, carries gap details' });
+  if (message.type === 'gap' && message.gapRef) context.addIssue({ code: 'custom', path: ['gapRef'], message: 'A gap message cannot point at another gap' });
+  if (message.type === 'observation' && (!message.gapRef || message.gapRef.resolution)) context.addIssue({ code: 'custom', path: ['gapRef'], message: 'An observation answers one gap and does not resolve it' });
+  if (message.type !== 'observation' && message.gapRef && !message.gapRef.resolution) context.addIssue({ code: 'custom', path: ['gapRef'], message: 'Only an observation can answer a gap; other messages may only resolve one' });
+});
 export type DebateMessage = z.infer<typeof debateMessageSchema>;
+/** Trust levels, highest first. AEEIS assigns them from what a reference
+ * resolves to; a message cannot state its own. `observed` (AEEIS tool
+ * receipts) and `reported` (external Agent findings) arrive with tools. */
+export const debateAuthorities = ['context', 'observed', 'reported', 'asserted'] as const;
+export type DebateAuthority = typeof debateAuthorities[number];
+const debateAuthoritySchema = z.enum(debateAuthorities);
 export const debateModerationSchema = z.object({
   messageId: id, status: z.enum(['accepted', 'flagged']), violations: z.array(z.string().max(500)).max(20),
   missingClaimRefs: z.array(id).max(100), checkedAt: isoDate,
+  // Absent on moderation recorded before trust levels existed.
+  authority: debateAuthoritySchema.optional(),
+  claimAuthority: z.array(z.object({ ref: id, authority: debateAuthoritySchema }).strict()).max(100).optional(),
 }).strict();
 export type DebateModeration = z.infer<typeof debateModerationSchema>;
 export const debateModeratorReviewSchema = z.object({
@@ -101,35 +125,104 @@ export const debateRoomSchema = z.object({
 }).strict();
 export type DebateRoom = z.infer<typeof debateRoomSchema>;
 
-/** Moderator policy: message claims may only point at context evidence or
- * source references in the admitted context. Prior messages cannot introduce
- * new authority. The message remains in
- * the event log when flagged so the room can be audited and adjudicated. */
-export function moderateDebateMessage(room: DebateRoom, message: DebateMessage): DebateModeration {
-  const allowed = new Set<string>([
-    ...(room.context?.claims.map(claim => claim.id) ?? []),
-    ...(room.context?.artifactRefs ?? []),
-    ...(room.context?.claims.flatMap(claim => claim.evidenceRefs) ?? []),
-  ]);
-  const missingClaimRefs = [...new Set(message.claimRefs.filter(ref => !allowed.has(ref)))];
-  const violations: string[] = [];
-  if (missingClaimRefs.length) violations.push('message references evidence outside the Debate Context Pack');
-  const evidenceBearingTypes = new Set(['evidence', 'challenge', 'rebuttal', 'concession', 'decision']);
-  if (evidenceBearingTypes.has(message.type) && message.claimRefs.length === 0) {
-    violations.push('evidence-bearing message must cite at least one claim or artifact');
+/** The trust level of one reference, or undefined when it resolves to
+ * nothing in the room. Context Pack claims, artifacts and their evidence are
+ * `context`. A prior message is only `asserted`: citing it never raises it. */
+export function debateClaimAuthority(room: DebateRoom, ref: string): DebateAuthority | undefined {
+  const context = room.context;
+  if (context && (context.claims.some(claim => claim.id === ref || claim.evidenceRefs.includes(ref)) || context.artifactRefs.includes(ref))) return 'context';
+  if (room.messages.some(message => message.messageId === ref)) return 'asserted';
+  return undefined;
+}
+
+const supportingAuthorities = new Set<DebateAuthority>(['context', 'observed']);
+const evidenceBearingTypes = new Set<DebateMessage['type']>(['evidence', 'challenge', 'rebuttal', 'concession', 'decision', 'observation']);
+
+export type DebateGapState = 'open' | 'answered' | 'closed' | 'unresolvable';
+export interface DebateGap {
+  /** The messageId of the gap message, so AEEIS, not the Agent, names it. */
+  gapId: string; raisedBy: string; round: number; question: string; impact: string; query?: string | undefined;
+  state: DebateGapState; answeredBy: string[]; resolvedBy?: string;
+}
+
+/** The gap ledger, derived from messages that passed the Moderator policy.
+ * Flagged messages stay in the log but never change a gap. */
+export function debateGaps(room: DebateRoom): DebateGap[] {
+  const accepted = new Set((room.moderation ?? []).filter(item => item.status === 'accepted').map(item => item.messageId));
+  const gaps = new Map<string, DebateGap>();
+  for (const message of room.messages) {
+    if (!accepted.has(message.messageId)) continue;
+    if (message.type === 'gap' && message.gap) {
+      gaps.set(message.messageId, { gapId: message.messageId, raisedBy: message.speakerAgentId, round: message.round, ...message.gap, state: 'open', answeredBy: [] });
+      continue;
+    }
+    const gap = message.gapRef ? gaps.get(message.gapRef.gapId) : undefined;
+    if (!gap || !message.gapRef) continue;
+    if (message.type === 'observation') { gap.answeredBy.push(message.messageId); if (gap.state === 'open') gap.state = 'answered'; }
+    else if (message.gapRef.resolution) { gap.state = message.gapRef.resolution; gap.resolvedBy = message.messageId; }
   }
-  return { messageId: message.messageId, status: violations.length ? 'flagged' : 'accepted', violations, missingClaimRefs, checkedAt: new Date().toISOString() };
+  return [...gaps.values()];
+}
+
+/** The room as it stood before a message, which is what that message was
+ * moderated against. */
+export function debateRoomBefore(room: DebateRoom, messageId: string): DebateRoom {
+  const index = room.messages.findIndex(message => message.messageId === messageId);
+  if (index < 0) return room;
+  const earlier = new Set(room.messages.slice(0, index).map(message => message.messageId));
+  return { ...room, messages: room.messages.slice(0, index), moderation: (room.moderation ?? []).filter(item => earlier.has(item.messageId)) };
+}
+
+/** Moderator policy, run by AEEIS on every message against the room before
+ * it. It assigns each reference its trust level, requires evidence-bearing
+ * messages to cite context (or, later, observed) evidence, and checks gap
+ * transitions. In this phase an observation may cite only the Context Pack.
+ * A flagged message stays in the event log so the room can be audited and
+ * adjudicated. */
+export function moderateDebateMessage(room: DebateRoom, message: DebateMessage): DebateModeration {
+  const claimAuthority: Array<{ ref: string; authority: DebateAuthority }> = [];
+  const missing: string[] = [];
+  for (const ref of new Set(message.claimRefs)) {
+    const authority = debateClaimAuthority(room, ref);
+    if (authority) claimAuthority.push({ ref, authority }); else missing.push(ref);
+  }
+  const authority = debateAuthorities.find(level => claimAuthority.some(item => item.authority === level)) ?? 'asserted';
+  const violations: string[] = [];
+  if (missing.length) violations.push('message references evidence outside the Debate Context Pack and this room');
+  if (evidenceBearingTypes.has(message.type) && !claimAuthority.some(item => supportingAuthorities.has(item.authority))) {
+    violations.push('evidence-bearing message must cite at least one context or observed claim or artifact');
+  }
+  if (message.type === 'observation' && claimAuthority.some(item => item.authority !== 'context')) {
+    violations.push('an observation may cite only Debate Context Pack evidence in this phase');
+  }
+  if (message.gapRef) {
+    const gap = debateGaps(room).find(item => item.gapId === message.gapRef!.gapId);
+    if (!gap) violations.push('message points at an unknown gap');
+    else if (gap.state === 'closed' || gap.state === 'unresolvable') violations.push('gap is already resolved');
+    else if (message.gapRef.resolution) {
+      if (gap.raisedBy !== message.speakerAgentId) violations.push('only the agent that raised a gap can resolve it');
+      else if (message.gapRef.resolution === 'closed' && gap.state !== 'answered') violations.push('a gap can be closed only after it is answered');
+    }
+  }
+  return { messageId: message.messageId, status: violations.length ? 'flagged' : 'accepted', violations, missingClaimRefs: missing, checkedAt: new Date().toISOString(), authority, claimAuthority };
+}
+
+/** The references of a message that can support a conclusion. */
+export function debateSupportRefs(room: DebateRoom, message: DebateMessage): string[] {
+  const before = debateRoomBefore(room, message.messageId);
+  return [...new Set(message.claimRefs)].filter(ref => supportingAuthorities.has(debateClaimAuthority(before, ref) ?? 'asserted'));
 }
 
 /** Adjudicator policy: only a decision message that passed moderation can
- * close the room as decided. A missing or flagged decision is held for a
- * human or separately configured adjudicator. */
+ * close the room as decided, and only its context or observed references
+ * count as evidence. A missing or flagged decision is held for a human or
+ * separately configured adjudicator. */
 export function adjudicateDebate(room: DebateRoom): DebateAdjudication {
   const decisions = room.messages.filter(message => message.type === 'decision').reverse();
   const supported = decisions.find(message => isSupportedDebateDecision(room, message));
   if (supported) return {
     status: 'decided', decision: supported.content, rationale: 'The latest decision message passed the Moderator evidence policy.',
-    selectedMessageId: supported.messageId, evidenceRefs: supported.claimRefs, decidedAt: new Date().toISOString(),
+    selectedMessageId: supported.messageId, evidenceRefs: debateSupportRefs(room, supported), decidedAt: new Date().toISOString(),
   };
   const flagged = decisions.find(message => !isSupportedDebateDecision(room, message));
   return {
@@ -140,7 +233,7 @@ export function adjudicateDebate(room: DebateRoom): DebateAdjudication {
 }
 
 export function isSupportedDebateDecision(room: DebateRoom, message: DebateMessage): boolean {
-  return message.type === 'decision' && moderateDebateMessage(room, message).status === 'accepted'
+  return message.type === 'decision' && moderateDebateMessage(debateRoomBefore(room, message.messageId), message).status === 'accepted'
     && !(room.moderatorReviews ?? []).some(review => review.messageId === message.messageId
       && (review.status === 'flagged' || review.violations.length > 0 || review.missingClaimRefs.length > 0));
 }

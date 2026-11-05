@@ -9,6 +9,7 @@ import {
   debateModeratorReviewSchema,
   debateMessageSchema,
   isSupportedDebateDecision,
+  debateSupportRefs,
   candidateScoreSchema,
   competitionBriefSchema,
   debateRoomSchema,
@@ -1052,7 +1053,7 @@ export class CollaborationService {
       if (result.status === 'decided') {
         assertCollaborationBudget(current.modelBudget, current.attempts);
         const selected = current.room.messages.find(message => message.messageId === result.selectedMessageId);
-        if (!selected || !isSupportedDebateDecision(current.room, selected) || result.evidenceRefs.length === 0 || result.evidenceRefs.some(ref => !selected.claimRefs.includes(ref))) throw new Error('Adjudication requires supported decision evidence');
+        if (!selected || !isSupportedDebateDecision(current.room, selected) || result.evidenceRefs.length === 0 || result.evidenceRefs.some(ref => !debateSupportRefs(current.room, selected).includes(ref))) throw new Error('Adjudication requires supported decision evidence');
         if (current.attempts.some(item => item.state !== 'completed')) throw new Error('Unsettled Debate attempts prevent adjudication');
         if (current.roles?.adjudicatorAgentId && result.adjudicatorAgentId !== current.roles.adjudicatorAgentId) throw new Error('Independent adjudicator must match the pinned role');
         if (current.roles?.moderatorAgentId && !current.room.moderatorReviews.some(review => review.messageId === selected.messageId && review.reviewerAgentId === current.roles?.moderatorAgentId && review.status === 'accepted')) throw new Error('Decision requires the configured Moderator review');
