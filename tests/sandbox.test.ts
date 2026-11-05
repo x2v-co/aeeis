@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { connect as netConnect } from 'node:net';
-import { DockerSandbox, SandboxError, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs, dockerInvocation, proxyCreateArgs, shellQuote } from '../src/docker-sandbox.js';
+import { DockerSandbox, SandboxError, SandboxUnreachable, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs, dockerInvocation, proxyCreateArgs, shellQuote } from '../src/docker-sandbox.js';
 import { commitSnapshot, readSnapshot, validateSnapshot } from '../src/sandbox-workspace.js';
 import { LocalToolGateway } from '../src/local-tools.js';
 import type { ToolInvocation } from '../src/integrations.js';
@@ -300,11 +300,6 @@ describe('remote and proxied sandboxes (mocked transport)', () => {
     await sandbox.release(runId, async () => undefined);
     expect(containers.size).toBe(0); expect(networks.size).toBe(0);
   });
-  it('says when the SSH host cannot be reached', async () => {
-    const sandbox = new DockerSandbox(proxied, root);
-    vi.spyOn(sandbox as any, 'command').mockResolvedValue({ code: 255, stdout: '', stderr: 'ssh: connect to host vps-test-1: Connection refused' });
-    await expect(sandbox.imageId()).rejects.toThrow(/Cannot reach sandbox host vps-test-1/);
-  });
 });
 
 describe('browser tool pages', () => {
@@ -362,4 +357,73 @@ describe('Run egress proxy (python, no Docker)', () => {
       expect(decisions).toEqual([['evil.example', 'not allowlisted'], ['localhost', 'port'], ['localhost', 'Host resolves to a non-public address'], ['169.254.169.254', 'not allowlisted'], ['allowed.test', 'not allowlisted']]);
     } finally { child.kill(); }
   });
+});
+
+describe('SSH host paused or unreachable (mocked transport)', () => {
+  const remote = sandboxConfigSchema.parse({ ssh: 'vps-test-1' });
+  const runA = `run_${'c'.repeat(36)}`, runB = `run_${'d'.repeat(36)}`;
+  const harness = () => {
+    const sandbox = new DockerSandbox(remote, root);
+    const host = { down: false, dropDuringTool: false };
+    const containers = new Map<string, any>(), networks = new Map<string, any>();
+    const response = { schemaVersion: 'sandbox-output/2', status: 'completed', output: { ok: true }, files: [] };
+    const command = vi.spyOn(sandbox as any, 'command').mockImplementation(async (...values: any[]) => {
+      const args = values[0] as string[];
+      if (host.down) throw new SandboxUnreachable('vps-test-1', 'ssh: connect to host ssh.example port 2222: Connection refused');
+      if (args[0] === 'image') return ok(`${image} linux`);
+      if (args[0] === 'network' && args[1] === 'create') { networks.set(args.at(-1)!, { Labels: { 'aeeis.owner': args[3]!.split('=')[1], 'aeeis.sandbox': '2' } }); return ok('n'); }
+      if (args[0] === 'create') {
+        const name = args[args.indexOf('--name') + 1]!;
+        const labels = Object.fromEntries(args.flatMap((a, i) => a === '--label' ? [args[i + 1]!.split('=')] : []));
+        containers.set(name, { Id: 'e'.repeat(64), Image: image, Config: { Labels: labels }, State: { Running: false } });
+        return ok('e'.repeat(64));
+      }
+      if (args[0] === 'inspect') { const info = containers.get(args.at(-1)!); return info ? ok(JSON.stringify([info])) : { code: 1, stdout: '', stderr: 'No such container' }; }
+      if (args[0] === 'start' || args[0] === 'kill') { const info = containers.get(args[1]!); if (info) info.State.Running = args[0] === 'start'; return ok(); }
+      if (args[0] === 'exec' && args.includes('--interactive') && host.dropDuringTool && !values[2]?.includes('__restore')) { host.down = true; throw new SandboxUnreachable('vps-test-1', 'Connection reset by peer'); }
+      if (args[0] === 'exec') return ok(JSON.stringify(response));
+      return ok();
+    });
+    return { sandbox, host, command };
+  };
+  const outcome = (promise: Promise<unknown>) => promise.then(() => 'completed', (error: SandboxError) => `${error.outcome}: ${error.message}`);
+
+  it('fails a first call cleanly when the host is down, without leaving a half-created Run', async () => {
+    const { sandbox, host } = harness(); host.down = true;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toMatch(/^failed: .*unreachable over SSH; it may be paused/);
+    expect(await sandbox.describe(runA)).toBeUndefined();
+    host.down = false;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
+  });
+  it('treats a pause between tool calls as "did not run" and recovers on resume without blocking other Runs', async () => {
+    const { sandbox, host } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    host.down = true;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toMatch(/^failed: .*unreachable/);
+    host.down = false;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
+    expect(await outcome(sandbox.execute(runB, 'shell', {}, [], 300))).toBe('completed');
+  });
+  it('keeps a call cut off mid-tool unknown, holds only that Run, and stops its container first once the host is back', async () => {
+    const { sandbox, host, command } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    await sandbox.execute(runB, 'shell', {}, [], 300);
+    host.dropDuringTool = true;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toMatch(/^unknown: .*This Run waits until its container can be stopped/);
+    host.dropDuringTool = false;
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toMatch(/^failed: .*waits/);
+    host.down = false;
+    expect(await outcome(sandbox.execute(runB, 'shell', {}, [], 300))).toBe('completed');
+    command.mockClear();
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
+    const owner = createHash('sha256').update(root).digest('hex').slice(0, 16);
+    expect(command.mock.calls[0]![0]).toEqual(['kill', `aeeis-${owner}-${runA.slice(4)}`]);
+  });
+  it('turns a real ssh failure (exit 255) into an unreachable-host error', async () => {
+    const sandbox = new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'aeeis-test-no-such-host.invalid' }), root);
+    const error = await sandbox.imageId().catch(value => value);
+    expect(error).toBeInstanceOf(SandboxUnreachable);
+    expect(error.message).toMatch(/aeeis-test-no-such-host.invalid is unreachable/);
+    expect((await sandbox.health()).detail).toMatch(/unreachable over SSH/);
+  }, 30000);
 });

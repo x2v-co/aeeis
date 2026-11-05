@@ -36,6 +36,15 @@ type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
 }
+/** ssh itself failed (exit 255): the remote host is paused, stopped, unreachable or refused the login.
+ * Whether anything ran depends on the step, so callers decide the outcome; preparing a container ran nothing. */
+export class SandboxUnreachable extends SandboxError {
+  constructor(host: string, stderr: string) {
+    super(/permission denied|certificate|publickey/i.test(stderr)
+      ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
+      : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
+  }
+}
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
 export type RunMachineRecord = { state: 'present'; ready: boolean } | { state: 'released'; ready: false };
 const PROXY_PORT = 3128;
@@ -93,6 +102,9 @@ export class DockerSandbox {
   private active = new Set<string>();
   private closing = false;
   private blocked = false;
+  /** Run containers whose stop could not be confirmed because the SSH host was unreachable. Only those Runs wait;
+   * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
+  private unstopped = new Set<string>();
   private readonly owner: string;
   private readonly directory: string;
   constructor(readonly config: SandboxConfig, stateDirectory: string) {
@@ -115,7 +127,10 @@ export class DockerSandbox {
       const collect = (target: Buffer[], chunk: Buffer) => { size += chunk.length; if (size > maxBytes) finish(new SandboxError('Sandbox output exceeded its limit', 'unknown')); else target.push(chunk); };
       child.stdout.on('data', chunk => collect(stdout, chunk)); child.stderr.on('data', chunk => collect(stderr, chunk));
       child.once('error', () => finish(new SandboxError(this.config.ssh ? 'ssh executable is unavailable' : 'Docker executable is unavailable')));
-      child.once('close', code => finish(undefined, code));
+      child.once('close', code => {
+        if (this.config.ssh && code === 255 && !settled) { settled = true; clearTimeout(timer); reject(new SandboxUnreachable(this.config.ssh, Buffer.concat(stderr).toString('utf8'))); return; }
+        finish(undefined, code);
+      });
       child.stdin.on('error', () => { /* exit status/output decides whether the operation completed */ });
       child.stdin.end(input);
     });
@@ -136,7 +151,6 @@ export class DockerSandbox {
     }
     const image = await this.command(['image', 'inspect', this.config.image, '--format', '{{.Id}} {{.Os}}'], 8000);
     const match = /^(sha256:[a-f0-9]{64}) linux$/.exec(image.stdout.trim());
-    if (image.code === 255 && this.config.ssh) throw new SandboxError(`Cannot reach sandbox host ${this.config.ssh} over SSH`);
     if (image.code !== 0 || !match) throw new SandboxError('Sandbox image unavailable; run npm run sandbox:build');
     this.pinnedImage = match[1]!;
     return this.pinnedImage;
@@ -228,6 +242,8 @@ export class DockerSandbox {
       if (Date.now() - state.createdAt > this.config.maxLifetimeSeconds * 1000) throw new SandboxError('Run sandbox lifetime expired; start a new Run');
     } else {
       validateSnapshot(files, this.config.snapshotMiB * 1024 * 1024);
+      // Reach the host before recording anything, so a paused host does not leave a half-created Run behind.
+      if (this.config.ssh) await this.command(['version', '--format', '{{.Server.Version}}'], 8000);
       const name = this.name(runId);
       state = { runId, name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now() };
       await this.save(state);
@@ -260,13 +276,27 @@ export class DockerSandbox {
   }
   private async stop(name: string) {
     // Stopping the whole container also stops escaped process groups. Its filesystem remains.
-    const result = await this.command(['kill', name], 5000).catch(() => undefined);
+    let result: { code: number | null; stderr: string } | undefined;
+    try { result = await this.command(['kill', name], 5000); }
+    catch (error) {
+      if (error instanceof SandboxUnreachable) {
+        this.unstopped.add(name);
+        throw new SandboxError(`${error.message}. This Run waits until its container can be stopped; other Runs are unaffected`, 'unknown');
+      }
+    }
     if (result?.code !== 0 && !/is not running|No such container/i.test(result?.stderr ?? '')) {
       this.blocked = true; throw new SandboxError('Sandbox stop could not be confirmed; execution blocked until recovery', 'unknown');
     }
+    this.unstopped.delete(name);
   }
   async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
+    // A stop that never reached the host is retried before anything else runs in that container.
+    if (this.unstopped.has(this.name(runId))) {
+      try { await this.stop(this.name(runId)); }
+      catch (error) { throw new SandboxError(error instanceof Error ? error.message : 'Run sandbox stop pending', 'failed'); }
+    }
+    // Nothing of the tool has run while the container is being prepared, so an unreachable host is a plain failure.
     const state = await this.ensure(runId, files);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     this.active.add(state.name);
