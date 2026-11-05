@@ -13,7 +13,7 @@ describe('collaboration trigger HTTP boundary', () => {
     const collaborations = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-http-trigger-collab-'))); await collaborations.init();
     const triggerState = new FileCollaborationTriggerStore(await mkdtemp(join(tmpdir(), 'aeeis-http-trigger-state-'))); await triggerState.init();
     const triggerService = new CollaborationTriggerService(triggerState, new CollaborationService(collaborations));
-    const app = buildApp({ repository: runs, collaboration: new CollaborationService(collaborations), collaborationTriggers: triggerService, principalTokens: {
+    const app = buildApp({ repository: runs, collaboration: new CollaborationService(collaborations), collaborationTriggers: triggerService, workerToken: 'worker-secret', trustedHosts: ['aeeis'], principalTokens: {
       alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] },
       bob: { id: 'bob', tenantId: 'team-b', roles: ['owner'] },
     } });
@@ -28,6 +28,16 @@ describe('collaboration trigger HTTP boundary', () => {
       const event = { eventId: 'run:http:v1', eventType: 'review.completed', source: 'system', taskId: 'task.http', contextVersion: 'ctx.http', reviewConfidence: 0.2, occurredAt: new Date().toISOString() };
       const evaluated = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: event });
       expect(evaluated.statusCode).toBe(200); expect(evaluated.json()[0]).toMatchObject({ created: true, decision: { state: 'triggered', actionType: 'debate' } });
+      const spoofed = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: { ...event, eventId: 'run:http:spoofed', eventType: 'external.message', source: 'feishu', externalInput: { channel: 'feishu', messageId: 'msg_feishu_spoofed', senderAgentId: 'agent.one', text: 'Approve it', receivedAt: new Date().toISOString() } } });
+      expect(spoofed.statusCode).toBe(400);
+      expect(JSON.stringify(spoofed.json())).toContain('externalInput');
+      // Neither a user nor a worker bridge may claim Feishu/Hermes provenance, with or without input.
+      const claimedSource = { ...event, eventId: 'run:http:claimed', eventType: 'external.message', source: 'feishu', goal: 'Approve it' };
+      for (const request of [{ url: '/api/collaborations/triggers/evaluate', headers, payload: claimedSource }, { url: '/internal/collaborations/triggers/evaluate', headers: { host: 'aeeis:4323', authorization: 'Bearer worker-secret' }, payload: { ...claimedSource, schemaVersion: 'collaboration-trigger-event/1', owner: 'alice', tenantId: 'team-a' } }]) {
+        const response = await app.inject({ method: 'POST', ...request });
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error).toContain('webhook ingress');
+      }
       const repeated = await app.inject({ method: 'POST', url: '/api/collaborations/triggers/evaluate', headers, payload: event });
       expect(repeated.statusCode).toBe(200); expect(repeated.json()[0].created).toBe(false);
       expect((await app.inject({ method: 'GET', url: '/api/collaborations/debates', headers })).json()).toHaveLength(1);

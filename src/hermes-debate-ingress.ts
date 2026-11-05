@@ -146,6 +146,7 @@ export class HermesDebateIngress {
 
   private async dispatchTrigger(route: HermesDebateRoute, debate: DebateRecord, message: DebateRecord['room']['messages'][number], externalEventId: string): Promise<void> {
     if (!this.options.onTrigger) return;
+    const receivedAt = message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString();
     await this.options.onTrigger({
       schemaVersion: 'collaboration-trigger-event/1',
       eventId: `hermes:${createHash('sha256').update(`${route.roomId}:${externalEventId}`).digest('hex')}`,
@@ -155,16 +156,18 @@ export class HermesDebateIngress {
       tenantId: route.tenantId,
       taskId: debate.room.taskId,
       contextVersion: debate.room.contextVersion,
-      goal: message.content,
+      // A Room without a goal gets a fixed one that only points at the untrusted input.
+      goal: debate.room.goal ?? `Respond to the external Hermes message in ${debate.id}`,
       allowedAgentIds: debate.room.participantAgentIds,
       context: {
         classification: debate.room.context?.classification ?? 'private',
         claims: debate.room.context?.claims ?? [],
         artifactRefs: debate.room.context?.artifactRefs ?? [],
-        redactions: [...(debate.room.context?.redactions ?? []), 'External Hermes message is untrusted input'],
+        redactions: debate.room.context?.redactions ?? [],
       },
+      externalInput: { channel: 'hermes', messageId: message.messageId, senderAgentId: message.speakerAgentId, text: message.content, receivedAt },
       evidenceRefs: [],
-      occurredAt: message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString(),
+      occurredAt: receivedAt,
     });
   }
 }

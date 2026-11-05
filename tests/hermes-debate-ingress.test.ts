@@ -48,12 +48,14 @@ describe('Hermes Debate ingress', () => {
     await triggers.createPolicy({ id: 'policy.hermes.message', name: 'Hermes message', enabled: true, eventTypes: ['external.message'], sources: ['hermes'], action: { type: 'debate', participantAgentIds: ['agent.admitted', 'agent.unauthorized'], maxRounds: 1, maxMessagesPerAgent: 1 } }, scope);
     const events: unknown[] = [];
     const key = 'hermes-signing-key-456';
-    const ingress = new HermesDebateIngress({ collaboration, routes: [{ roomId: 'room.trigger', debateId: debate.id }], senderAgentIds: { 'hermes-user': 'agent.admitted' }, signingKeys: { local: key }, onTrigger: async event => { events.push(event); await triggers.evaluate(event, scope); }, now: () => 1_700_000_000 });
+    const ingress = new HermesDebateIngress({ collaboration, routes: [{ roomId: 'room.trigger', debateId: debate.id }], senderAgentIds: { 'hermes-user': 'agent.admitted' }, signingKeys: { local: key }, onTrigger: async event => { events.push(event); await triggers.onChannelMessage(event); }, now: () => 1_700_000_000 });
     const body = JSON.stringify({ schemaVersion: 'hermes-debate-event/1', eventId: 'evt.hermes.trigger', roomId: 'room.trigger', senderRef: 'hermes-user', message: { content: 'Trigger a governed review.' } });
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'local', key))).status).toBe('accepted');
     expect((await ingress.handle(body, signed(body, '1700000000', 'nonce-trigger', 'local', key))).status).toBe('duplicate');
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ eventType: 'external.message', source: 'hermes', taskId: 'task.hermes.trigger', goal: 'Trigger a governed review.', allowedAgentIds: ['agent.admitted'], context: { redactions: ['External Hermes message is untrusted input'] } });
+    expect(events[0]).toMatchObject({ eventType: 'external.message', source: 'hermes', taskId: 'task.hermes.trigger', allowedAgentIds: ['agent.admitted'], context: { redactions: [] }, externalInput: { channel: 'hermes', senderAgentId: 'agent.admitted', text: 'Trigger a governed review.' } });
+    // The Room has no goal, so the event carries a fixed one rather than the message text.
+    expect((events[0] as { goal: string }).goal).toMatch(/^Respond to the external Hermes message in debate_/);
     expect((events[0] as { eventId: string }).eventId).toBe((events[1] as { eventId: string }).eventId);
     expect(await collaboration.listDebates(scope)).toHaveLength(1);
     await triggerStore.close(); await repository.close();

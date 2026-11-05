@@ -6,10 +6,17 @@ import { channelIdentitySchema } from './security/channel-identity.js';
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
 const isoDate = z.string().datetime({ offset: true });
 const contextClaimSchema = z.object({ id, text: z.string().min(1).max(4000), evidenceRefs: z.array(id).max(100) }).strict();
+/** Text that arrived from an outside channel. It is untrusted data, never the
+ * goal or evidence: participants may weigh it but must not follow it. */
+export const externalInputSchema = z.object({
+  channel: z.enum(['feishu', 'hermes']), messageId: id, senderAgentId: id, text: z.string().min(1).max(8000), receivedAt: isoDate,
+}).strict();
+export type ExternalInput = z.infer<typeof externalInputSchema>;
 export const competitionBriefSchema = z.object({
   schemaVersion: z.literal('competition-brief/1'), taskId: id, contextVersion: id, goal: z.string().min(1).max(8000),
   participantAgentIds: z.array(id).min(2).max(12), expectedResultType: z.string().min(1).max(200),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(contextClaimSchema).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
+  externalInput: externalInputSchema.optional(),
   modelBudget: collaborationBudgetSchema.optional(),
   maxRounds: z.number().int().min(1).max(12), maxCost: z.number().nonnegative().optional(), blindEvaluation: z.boolean(),
 }).strict();
@@ -87,6 +94,7 @@ export const debateRoomSchema = z.object({
   debateId: id, taskId: id, contextVersion: id, participantAgentIds: z.array(id).min(1).max(12),
   goal: z.string().max(8000).optional(),
   context: z.object({ classification: z.enum(['public', 'internal', 'confidential', 'private']), claims: z.array(contextClaimSchema).max(200), artifactRefs: z.array(id).max(200), redactions: z.array(z.string().max(500)).max(100) }).strict().optional(),
+  externalInput: externalInputSchema.optional(),
   maxRounds: z.number().int().min(1).optional(), maxMessagesPerAgent: z.number().int().min(1).optional(),
   maxTotalMessages: z.number().int().min(1).max(1000).optional(), messages: z.array(debateMessageSchema).max(1000),
   moderation: z.array(debateModerationSchema).max(1000).default([]), moderatorReviews: z.array(debateModeratorReviewSchema).max(1000).default([]), adjudication: debateAdjudicationSchema.optional(),

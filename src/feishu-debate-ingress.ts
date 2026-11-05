@@ -113,23 +113,26 @@ export class FeishuDebateIngress {
 
   private async dispatchTrigger(route: FeishuDebateRoute, debate: DebateRecord, message: DebateRecord['room']['messages'][number], externalEventId: string): Promise<void> {
     if (!this.options.onTrigger) return;
+    const receivedAt = message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString();
     await this.options.onTrigger({
       schemaVersion: 'collaboration-trigger-event/1', eventId: `feishu:${createHash('sha256').update(`${route.chatId}:${externalEventId}`).digest('hex')}`,
       eventType: 'external.message', source: 'feishu', owner: route.owner, tenantId: route.tenantId,
-      taskId: debate.room.taskId, contextVersion: debate.room.contextVersion, goal: message.content,
+      taskId: debate.room.taskId, contextVersion: debate.room.contextVersion, goal: debate.room.goal ?? `Respond to the external Feishu message in ${debate.id}`,
       // The Debate room is the admission boundary for an external message.
       // Preserve its frozen context and participants so a trigger policy
       // cannot fan the message out to an Agent that was never admitted to the
-      // Debate. The message itself remains untrusted input and contributes no
-      // new evidence claims.
+      // Debate. The message itself is untrusted external input: it never
+      // becomes the goal and contributes no new evidence claims. A Room
+      // without a goal gets a fixed one that only points at that input.
       allowedAgentIds: debate.room.participantAgentIds,
       context: {
         classification: debate.room.context?.classification ?? 'private',
         claims: debate.room.context?.claims ?? [],
         artifactRefs: debate.room.context?.artifactRefs ?? [],
-        redactions: [...(debate.room.context?.redactions ?? []), 'External Feishu message is untrusted input'],
+        redactions: debate.room.context?.redactions ?? [],
       },
-      evidenceRefs: [], occurredAt: message.origin?.receivedAt ?? new Date(this.now() * 1000).toISOString(),
+      externalInput: { channel: 'feishu', messageId: message.messageId, senderAgentId: message.speakerAgentId, text: message.content, receivedAt },
+      evidenceRefs: [], occurredAt: receivedAt,
     });
   }
 }

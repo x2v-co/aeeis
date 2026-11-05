@@ -17,6 +17,7 @@ import {
   type CompetitionBrief,
   type DebateMessage,
   type DebateRoom,
+  type ExternalInput,
   type IndependentEvaluator,
 } from './collaboration.js';
 import { resultEnvelopeSchema } from './protocol.js';
@@ -29,6 +30,11 @@ import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { afterCollectionCursor, decodeCollectionCursor, encodeCollectionCursor, scopedRecent, validateCollectionLimit, type CollectionCursor } from './adapters/collection-query.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
 
+/** Model-facing and blind views never name the external sender: it is usually
+ * a participant, and its ID would tell candidates or the evaluator who is who. */
+function withAnonymousSender(value: CompetitionBrief): CompetitionBrief {
+  return value.externalInput ? { ...value, externalInput: { ...value.externalInput, senderAgentId: 'external.sender' } } : value;
+}
 function matchesScope(value: { owner?: string; tenantId?: string }, scope?: Ownership): boolean {
   return scope === undefined || (value.owner ?? 'owner') === scope.owner && (value.tenantId ?? 'local') === scope.tenantId;
 }
@@ -97,6 +103,7 @@ type CollaborationState = z.infer<typeof stateSchema>;
 type CollaborationSummary = z.infer<typeof collaborationSummarySchema>;
 type CollaborationIndex = z.infer<typeof collaborationIndexSchema>;
 const candidateInputSchema = resultEnvelopeSchema;
+const competitionInputSchema = competitionBriefSchema.omit({ externalInput: true });
 const debateInputSchema = z.object({
   modelBudget: collaborationBudgetSchema.optional(),
   taskId: id, contextVersion: id, goal: z.string().max(8000).optional(), participantAgentIds: z.array(id).min(1).max(12),
@@ -550,8 +557,11 @@ export class CollaborationService {
     await this.globalBudget.ledger.markUnknown(selection.accountKey, this.globalKey(kind, aggregateId, slot));
   }
 
-  async createCompetition(input: unknown, scope?: Ownership): Promise<CompetitionRecord> {
-    const brief = competitionBriefSchema.parse(input);
+  /** `externalInput` is only accepted through `trusted`, which the Trigger
+   * Service fills from a verified `external.message`; request bodies cannot set it. */
+  async createCompetition(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<CompetitionRecord> {
+    const parsed = competitionInputSchema.parse(input);
+    const brief = competitionBriefSchema.parse({ ...parsed, ...(trusted?.externalInput === undefined ? {} : { externalInput: trusted.externalInput }) });
     const now = new Date().toISOString();
     const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', brief, status: 'collecting', candidates: [], scores: [], attempts: [], totalCost: 0, createdAt: now, updatedAt: now };
     await this.repository.createCompetition(record); return record;
@@ -571,7 +581,7 @@ export class CollaborationService {
     const aliases = new Map(current.candidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
     return {
       ...current,
-      brief: { ...current.brief, participantAgentIds: current.brief.participantAgentIds.map((_agent, index) => `candidate_${index + 1}`) },
+      brief: withAnonymousSender({ ...current.brief, participantAgentIds: current.brief.participantAgentIds.map((_agent, index) => `candidate_${index + 1}`) }),
       candidates: current.candidates.map(candidate => ({ ...candidate, agentId: aliases.get(candidate.agentId)! })),
       scores: current.scores.map(score => ({ ...score, agentId: aliases.get(score.agentId) ?? score.agentId })),
       ...(current.selectedAgentId ? { selectedAgentId: aliases.get(current.selectedAgentId) ?? current.selectedAgentId } : {}),
@@ -645,7 +655,9 @@ export class CollaborationService {
         if (before.attempts.some(item => ['started', 'unknown'].includes(item.state))) return before;
         if (existing?.state === 'failed' || existing?.state === 'reconciled') continue;
         const attemptId = `attempt_${randomUUID()}`;
-        const inputHash = createHash('sha256').update(JSON.stringify({ brief: before.brief, participantAgentId })).digest('hex');
+        // Hash what the candidate actually receives, as the evaluator attempt does.
+        const candidateBrief = withAnonymousSender(before.brief);
+        const inputHash = createHash('sha256').update(JSON.stringify({ brief: candidateBrief, participantAgentId })).digest('hex');
         const startedAt = new Date().toISOString();
         assertCollaborationBudget(before.brief.modelBudget, competitionCalls(before), true);
         const global = await this.reserveGlobal('competition', idValue, `participant:${participantAgentId}`, scope, startedAt);
@@ -668,7 +680,7 @@ export class CollaborationService {
         }, scope);
         if (!reserved) return this.repository.getCompetition(idValue, scope);
         try {
-          const candidate = resultEnvelopeSchema.parse(await runner.run(before.brief, { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
+          const candidate = resultEnvelopeSchema.parse(await runner.run(candidateBrief, { candidateId: participantAgentId, cannotSeeCandidateIds: before.brief.participantAgentIds.filter(id => id !== participantAgentId) }, { idempotencyKey: `competition:${idValue}:${attemptId}`, recordUsage: usage => this.recordCompetitionUsage(idValue, attemptId, usage, scope), recordModel: model => this.recordCompetitionModel(idValue, attemptId, model, scope) }));
           if (candidate.agentId !== participantAgentId || candidate.taskId !== before.brief.taskId || candidate.contextVersion !== before.brief.contextVersion || candidate.resultType !== before.brief.expectedResultType) throw new Error('Candidate result is not bound to the competition brief');
           await this.repository.mutateCompetition(idValue, record => {
             const attempt = record.attempts.find(item => item.id === attemptId);
@@ -702,7 +714,7 @@ export class CollaborationService {
       const resultCandidates = afterCandidates.candidates;
 
       const aliases = new Map(resultCandidates.map((candidate, index) => [candidate.agentId, `candidate_${index + 1}`]));
-      const evaluationBrief = afterCandidates.brief.blindEvaluation ? { ...afterCandidates.brief, participantAgentIds: [...aliases.values()] } : afterCandidates.brief;
+      const evaluationBrief = afterCandidates.brief.blindEvaluation ? withAnonymousSender({ ...afterCandidates.brief, participantAgentIds: [...aliases.values()] }) : afterCandidates.brief;
       const evaluationCandidates = afterCandidates.brief.blindEvaluation ? resultCandidates.map((candidate, index) => ({ ...candidate, agentId: `candidate_${index + 1}` })) : resultCandidates;
       const evaluatorAttemptId = `attempt_${randomUUID()}`;
       const evaluatorInputHash = createHash('sha256').update(JSON.stringify({ brief: evaluationBrief, candidates: evaluationCandidates })).digest('hex');
@@ -870,9 +882,9 @@ export class CollaborationService {
     return this.repository.mutateCompetition(idValue, current => ({ ...current, status: 'partial', failureReason: clean, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), scope);
   }
 
-  async createDebate(input: unknown, scope?: Ownership): Promise<DebateRecord> {
-    const parsed = debateInputSchema.parse(input); const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
-    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), participantAgentIds: parsed.participantAgentIds, ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }), ...(parsed.maxMessagesPerAgent === undefined ? {} : { maxMessagesPerAgent: parsed.maxMessagesPerAgent }), messages: [] };
+  async createDebate(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<DebateRecord> {
+    const parsed = debateInputSchema.parse(input); const externalInput = trusted?.externalInput; const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
+    const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), ...(externalInput === undefined ? {} : { externalInput }), participantAgentIds: parsed.participantAgentIds, ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }), ...(parsed.maxMessagesPerAgent === undefined ? {} : { maxMessagesPerAgent: parsed.maxMessagesPerAgent }), messages: [] };
     const room: DebateRoom = parsed.maxTotalMessages === undefined
       ? debateRoomSchema.parse(roomBase)
       : debateRoomSchema.parse({ ...roomBase, maxTotalMessages: parsed.maxTotalMessages });

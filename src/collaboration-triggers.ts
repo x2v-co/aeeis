@@ -9,6 +9,7 @@ import { CollaborationService } from './collaboration-service.js';
 import { withPostgresMigrationLock } from './adapters/postgres-migration.js';
 import { postgresAdvisoryXactLock } from './adapters/postgres-lock.js';
 import { digestProtocol } from './protocol.js';
+import { externalInputSchema } from './collaboration.js';
 import { createPostgresPool } from './adapters/postgres-pool.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{1,127}$/);
@@ -35,9 +36,11 @@ export const collaborationTriggerEventSchema = z.object({
   risk: risk.optional(), reviewConfidence: z.number().min(0).max(1).optional(),
   requiredDiversity: z.number().int().min(1).max(12).optional(),
   allowedAgentIds: z.array(id).max(12).optional(), context: triggerContextSchema.optional(),
+  externalInput: externalInputSchema.optional(),
   evidenceRefs: z.array(id).max(100).default([]), occurredAt: isoDate,
 }).strict();
 export type CollaborationTriggerEvent = z.infer<typeof collaborationTriggerEventSchema>;
+function isChannelSource(value: CollaborationTriggerEvent['source']): boolean { return value === 'feishu' || value === 'hermes'; }
 
 const competitionActionSchema = z.object({
   type: z.literal('competition'), participantAgentIds: z.array(id).min(2).max(12), evaluatorAgentId: id,
@@ -330,10 +333,36 @@ export class CollaborationTriggerService {
     }, scope);
   }
 
+  /** Events from HTTP callers, worker bridges and the Run pump. None of them
+   * may claim Feishu/Hermes provenance, carry external input or send an
+   * `external.message`, so a policy on that event type only ever fires for a
+   * real channel message. */
   async evaluate(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     const event = collaborationTriggerEventSchema.parse(input);
+    if (event.externalInput) throw new RangeError('externalInput only comes from the Feishu/Hermes webhook ingress');
+    if (isChannelSource(event.source)) throw new RangeError('Feishu and Hermes events only come from their webhook ingress');
+    if (event.eventType === 'external.message') throw new RangeError('external.message events only come from the Feishu/Hermes webhook ingress');
+    return this.evaluateEvent(event, scope);
+  }
+
+  /** Only the signed, in-process Feishu/Hermes webhook ingress calls this. */
+  async evaluateExternalMessage(input: unknown, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
+    const event = collaborationTriggerEventSchema.parse(input);
+    if (event.eventType !== 'external.message' || !event.externalInput || !isChannelSource(event.source) || event.externalInput.channel !== event.source) throw new RangeError('An external message needs external input from its own Feishu/Hermes channel');
+    return this.evaluateEvent(event, scope);
+  }
+
+  /** The `onTrigger` callback for the Feishu/Hermes webhook ingress. The
+   * server and the ingress tests both use it, so the channel path is the one
+   * under test. */
+  readonly onChannelMessage = (event: CollaborationTriggerEvent): Promise<void> =>
+    this.evaluateExternalMessage(event, { owner: event.owner, tenantId: event.tenantId }).then(() => undefined);
+
+  private async evaluateEvent(event: CollaborationTriggerEvent, scope?: Ownership): Promise<CollaborationTriggerResult[]> {
     if (scope && (event.owner !== scope.owner || event.tenantId !== scope.tenantId)) throw new Error('Trigger event ownership does not match the authenticated principal');
     const eventScope = { owner: event.owner, tenantId: event.tenantId };
+    const fromEvent = { taskId: event.taskId, contextVersion: event.contextVersion, ...(event.context ? { context: event.context } : {}) };
+    const trusted = event.externalInput ? { externalInput: event.externalInput } : undefined;
     const policies = await this.store.listPolicies(eventScope); const results: CollaborationTriggerResult[] = [];
     for (const policy of policies) {
       if (!this.matches(policy, event)) continue;
@@ -344,8 +373,8 @@ export class CollaborationTriggerService {
       if (!claimed.claimed) { results.push({ policyId: policy.id, decision: claimed.decision, created: false }); continue; }
       try {
         const resource = policy.action.type === 'competition'
-          ? await this.collaboration.createCompetition({ schemaVersion: 'competition-brief/1', taskId: event.taskId, contextVersion: event.contextVersion, goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation, ...(event.context ? { context: event.context } : {}) }, eventScope)
-          : await this.collaboration.createDebate({ taskId: event.taskId, contextVersion: event.contextVersion, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }), ...(event.context ? { context: event.context } : {}) }, eventScope);
+          ? await this.collaboration.createCompetition({ ...fromEvent, schemaVersion: 'competition-brief/1', goal: event.goal ?? `Triggered collaboration for ${event.taskId}`, participantAgentIds: policy.action.participantAgentIds, expectedResultType: policy.action.expectedResultType, maxRounds: policy.action.maxRounds, ...(policy.action.maxCost === undefined ? {} : { maxCost: policy.action.maxCost }), blindEvaluation: policy.action.blindEvaluation }, eventScope, trusted)
+          : await this.collaboration.createDebate({ ...fromEvent, ...(event.goal === undefined ? {} : { goal: event.goal }), participantAgentIds: policy.action.participantAgentIds, maxRounds: policy.action.maxRounds, maxMessagesPerAgent: policy.action.maxMessagesPerAgent, ...(policy.action.maxTotalMessages === undefined ? {} : { maxTotalMessages: policy.action.maxTotalMessages }) }, eventScope, trusted);
         let decision = await this.store.updateDecision(decisionId, current => ({ ...current, state: 'triggered', resourceId: resource.id, dispatchState: policy.action.dispatch === 'run' ? 'started' : 'not_requested', completedAt: new Date().toISOString(), reason: `Created ${policy.action.type} from ${event.eventType}` }));
         if (policy.action.dispatch === 'run') {
           try {
@@ -366,6 +395,8 @@ export class CollaborationTriggerService {
     return results;
   }
 
+  /** Events only narrow a policy. Participants, limits, blind evaluation and
+   * dispatch always come from the policy; the strict event schema rejects them. */
   private matches(policy: CollaborationTriggerPolicy, event: CollaborationTriggerEvent): boolean {
     if (!policy.enabled || !policy.eventTypes.includes(event.eventType) || (policy.sources && !policy.sources.includes(event.source))) return false;
     if (policy.riskAtLeast && (!event.risk || riskRank(event.risk) < riskRank(policy.riskAtLeast))) return false;

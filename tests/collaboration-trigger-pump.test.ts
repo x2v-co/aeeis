@@ -74,4 +74,18 @@ describe('durable collaboration trigger pump', () => {
     const review = runEventToCollaborationTrigger(run, { id: 'evt_review_1', seq: 3, type: 'review.completed', at: '2026-09-20T00:00:03.000Z', data: { verdict: 'needs_revision', reviewConfidence: 0.2 } });
     expect(review).toMatchObject({ eventType: 'review.completed', reviewConfidence: 0.2 });
   });
+
+  it('never produces a channel event, so every pump event passes the general entry point', () => {
+    const run = fixtureRun();
+    const events = [run.events[0]!,
+      { id: 'evt_task_1', seq: 2, type: 'task.completed' as const, at: '2026-09-20T00:00:02.000Z', data: { taskId: 'task_release' } },
+      { id: 'evt_failed_1', seq: 3, type: 'run.failed' as const, at: '2026-09-20T00:00:03.000Z', data: {} },
+      { id: 'evt_review_1', seq: 4, type: 'review.completed' as const, at: '2026-09-20T00:00:04.000Z', data: { reviewConfidence: 0.2 } }];
+    for (const item of events) {
+      const event = runEventToCollaborationTrigger(run, item)!;
+      expect(event.source).toBe('system');
+      expect(event.eventType).not.toBe('external.message');
+      expect(event).not.toHaveProperty('externalInput');
+    }
+  });
 });

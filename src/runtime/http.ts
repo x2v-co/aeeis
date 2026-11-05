@@ -1670,8 +1670,9 @@ export function buildApp(options: Options) {
     const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true }).parse(request.body);
     return options.collaborationTriggers.evaluate({ ...body, schemaVersion: 'collaboration-trigger-event/1', owner: principal.id, tenantId: principal.tenantId }, { owner: principal.id, tenantId: principal.tenantId });
   });
-  // Worker/event bridges use this route for Feishu/Hermes or internal system
-  // events. The worker token is checked by the shared /internal middleware.
+  // Worker bridges use this route for internal system events. The worker
+  // token is checked by the shared /internal middleware. Feishu/Hermes events
+  // come only from the in-process webhook ingress, so evaluate() rejects them.
   app.post('/internal/collaborations/triggers/evaluate', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');
     return options.collaborationTriggers.evaluate(request.body);
@@ -2536,6 +2537,7 @@ function readableRunAfter(run: AgentRun, cursor: ReadableRunCursor | undefined):
 function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
+
 function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
   const inputRequest = runInputRequest(run);
   return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}) };
