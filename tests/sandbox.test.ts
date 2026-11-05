@@ -3,7 +3,9 @@ import { mkdtemp, readFile, writeFile, mkdir, rm, symlink, link, rename, stat } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { DockerSandbox, SandboxError, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs } from '../src/docker-sandbox.js';
+import { spawn } from 'node:child_process';
+import { connect as netConnect } from 'node:net';
+import { DockerSandbox, SandboxError, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs, dockerInvocation, proxyCreateArgs, shellQuote } from '../src/docker-sandbox.js';
 import { commitSnapshot, readSnapshot, validateSnapshot } from '../src/sandbox-workspace.js';
 import { LocalToolGateway } from '../src/local-tools.js';
 import type { ToolInvocation } from '../src/integrations.js';
@@ -238,5 +240,126 @@ describe('gateway persistence and receipts (mocked sandbox)', () => {
     expect(fetcher.mock.calls[0]?.[1].redirect).toBe('error'); fetcher.mockClear();
     for (const url of ['http://weather.example', 'https://other.example', 'https://u:p@weather.example', 'https://weather.example:9999']) expect((await gateway.invoke(call(url))).status).toBe('failed');
     expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
+describe('remote and proxied sandboxes (mocked transport)', () => {
+  const runId = `run_${'b'.repeat(36)}`;
+  const proxied = sandboxConfigSchema.parse({ ssh: 'vps-test-1', network: 'proxied', egressHosts: ['registry.npmjs.org', '*.pythonhosted.org'] });
+  it('runs docker on the SSH host with every argument quoted for the remote shell', () => {
+    const call = dockerInvocation(proxied, ['exec', 'name', 'sh', '-c', "echo 'hi'; rm -rf /"]);
+    expect(call.command).toBe('ssh');
+    expect(call.args.slice(0, 10)).toEqual(['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', 'vps-test-1', '--']);
+    expect(call.args.slice(10)).toEqual(['docker', "'exec'", "'name'", "'sh'", "'-c'", `'echo '\\''hi'\\''; rm -rf /'`]);
+    expect(shellQuote("a'b")).toBe(`'a'\\''b'`);
+    expect(dockerInvocation(config, ['info'], [])).toEqual({ command: 'docker', args: ['info'] });
+  });
+  it('rejects configurations that would leave the proxy open or ambiguous', () => {
+    expect(() => sandboxConfigSchema.parse({ network: 'proxied', ports: [3000] })).toThrow(/bridge network/);
+    expect(() => sandboxConfigSchema.parse({ network: 'bridge', egressHosts: ['pypi.org'] })).toThrow(/proxied network/);
+    expect(() => sandboxConfigSchema.parse({ ssh: 'vps', context: 'other' })).toThrow(/either ssh/);
+    for (const host of ['localhost', '10.0.0.1', 'pypi.org:443', '*.org', 'exa mple.com']) expect(() => sandboxConfigSchema.parse({ network: 'proxied', egressHosts: [host] })).toThrow();
+  });
+  it('puts the Run on an internal network whose only way out is a locked-down proxy, and removes both on release', async () => {
+    const sandbox = new DockerSandbox(proxied, root);
+    const containers = new Map<string, any>(), networks = new Map<string, any>();
+    const response = { schemaVersion: 'sandbox-output/2', status: 'completed', output: {}, files: [] };
+    const command = vi.spyOn(sandbox as any, 'command').mockImplementation(async (...values: any[]) => {
+      const args = values[0] as string[];
+      if (args[0] === 'context') throw new Error('an SSH sandbox must not look for a local socket');
+      if (args[0] === 'image') return ok(`${image} linux`);
+      if (args[0] === 'network' && args[1] === 'create') { networks.set(args.at(-1)!, { Labels: { 'aeeis.owner': args[3]!.split('=')[1], 'aeeis.sandbox': '2' } }); return ok('n'); }
+      if (args[0] === 'network' && args[1] === 'inspect') return networks.has(args[2]!) ? ok(JSON.stringify([networks.get(args[2]!)])) : { code: 1, stdout: '', stderr: 'network not found' };
+      if (args[0] === 'network' && args[1] === 'rm') { networks.delete(args[2]!); return ok(); }
+      if (args[0] === 'create') {
+        const name = args[args.indexOf('--name') + 1]!;
+        const labels = Object.fromEntries(args.flatMap((a, i) => a === '--label' ? [args[i + 1]!.split('=')] : []));
+        containers.set(name, { Id: (name.endsWith('-proxy') ? 'd' : 'c').repeat(64), Image: image, Config: { Labels: labels }, State: { Running: false } });
+        return ok(containers.get(name).Id);
+      }
+      if (args[0] === 'inspect') { const info = containers.get(args.at(-1)!); return info ? ok(JSON.stringify([info])) : { code: 1, stdout: '', stderr: 'No such container' }; }
+      if (args[0] === 'start' || args[0] === 'kill') { const info = containers.get(args[1]!); if (info) info.State.Running = args[0] === 'start'; return ok(); }
+      if (args[0] === 'rm') { containers.delete(args.at(-1)!); return ok(); }
+      if (args[0] === 'exec') return ok(JSON.stringify(response));
+      return ok();
+    });
+    await sandbox.execute(runId, 'shell', { command: 'npm install' }, [], 300);
+    const calls = command.mock.calls.map(call => call[0] as string[]);
+    const name = [...containers.keys()].find(key => !key.endsWith('-proxy'))!;
+    expect(calls.find(args => args[1] === 'create' && args.at(-1) === `${name}-net`)).toContain('--internal');
+    expect(calls.find(args => args[1] === 'create' && args.at(-1) === `${name}-egress`)).not.toContain('--internal');
+    const proxy = calls.find(args => args[0] === 'create' && args.includes(`${name}-proxy`))!;
+    expect(proxy).toEqual(proxyCreateArgs(proxied, name, image, createHash('sha256').update(root).digest('hex').slice(0, 16), runId));
+    expect(proxy).toEqual(expect.arrayContaining(['--cap-drop=ALL', '--read-only', '--user=65534:65534', `--network=${name}-egress`, 'AEEIS_EGRESS_HOSTS=registry.npmjs.org,*.pythonhosted.org']));
+    expect(calls).toContainEqual(['network', 'connect', '--alias', 'aeeis-proxy', `${name}-net`, `${name}-proxy`]);
+    const run = calls.find(args => args[0] === 'create' && args.includes(name))!;
+    expect(run).toEqual(expect.arrayContaining([`--network=${name}-net`, 'HTTPS_PROXY=http://aeeis-proxy:3128', 'NO_PROXY=localhost,127.0.0.1']));
+    expect(run).not.toContain('--publish');
+    // The proxy is started before the Run container, and again whenever the Run resumes.
+    expect(calls.findIndex(args => args[0] === 'start' && args[1] === `${name}-proxy`)).toBeLessThan(calls.findIndex(args => args[0] === 'start' && args[1] === name));
+    await sandbox.release(runId, async () => undefined);
+    expect(containers.size).toBe(0); expect(networks.size).toBe(0);
+  });
+  it('says when the SSH host cannot be reached', async () => {
+    const sandbox = new DockerSandbox(proxied, root);
+    vi.spyOn(sandbox as any, 'command').mockResolvedValue({ code: 255, stdout: '', stderr: 'ssh: connect to host vps-test-1: Connection refused' });
+    await expect(sandbox.imageId()).rejects.toThrow(/Cannot reach sandbox host vps-test-1/);
+  });
+});
+
+describe('browser tool pages', () => {
+  const load = async (sandbox: object) => {
+    const filename = join(root, 'browser.json');
+    await writeFile(filename, JSON.stringify({ schemaVersion: 'local-tools/1', workspaceRoot: 'work', stateDirectory: 'state', tools: ['browser'], sandbox }));
+    return LocalToolGateway.load(filename);
+  };
+  const open = (gateway: LocalToolGateway, url: string) => {
+    const runId = `run_${randomUUID()}`;
+    return gateway.invoke({ toolId: 'browser', toolVersion: '3', taskId: 'task', purpose: 'test', input: { url }, capabilityGrant: `run:${runId}:browser`, idempotencyKey: `${runId}:1`, timeoutMs: 1000 });
+  };
+  it('opens local dev servers, allowed hosts only through the proxy, and nothing else', async () => {
+    const execute = vi.spyOn(DockerSandbox.prototype, 'execute').mockResolvedValue({ schemaVersion: 'sandbox-output/2', status: 'completed', output: { title: 'ok' }, files: [] });
+    const proxiedGateway = await load({ network: 'proxied', egressHosts: ['docs.example.com', '*.cdn.example'] });
+    const isolated = await load({ network: 'none' });
+    try {
+      expect((await open(proxiedGateway, 'http://127.0.0.1:3000/')).status).toBe('completed');
+      expect((await open(proxiedGateway, 'https://docs.example.com/a')).status).toBe('completed');
+      expect((await open(proxiedGateway, 'https://img.cdn.example/x.png')).status).toBe('completed');
+      for (const [gateway, url, message] of [
+        [proxiedGateway, 'https://evil.example/', /not in the sandbox's allowed hosts/],
+        [proxiedGateway, 'https://cdn.example/', /not in the sandbox's allowed hosts/],
+        [proxiedGateway, 'https://user:pass@docs.example.com/', /credentials/],
+        [proxiedGateway, 'file:///etc/passwd', /http:\/\/ or https:\/\//],
+        [isolated, 'https://docs.example.com/', /no network/],
+      ] as const) {
+        const result = await open(gateway, url);
+        expect(result.status).toBe('failed'); expect(JSON.stringify(result.output)).toMatch(message);
+      }
+      expect(execute).toHaveBeenCalledTimes(3);
+    } finally { await proxiedGateway.close(); await isolated.close(); }
+  });
+});
+
+describe('Run egress proxy (python, no Docker)', () => {
+  const ask = (port: number, head: string) => new Promise<string>((resolve, reject) => {
+    const socket = netConnect(port, '127.0.0.1', () => socket.write(head));
+    let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('end', () => resolve(data)); socket.on('error', reject);
+    socket.setTimeout(5000, () => { socket.destroy(); resolve(data); });
+  });
+  it('refuses hosts outside the list, other ports, IP literals and allowed names that resolve to private addresses', async () => {
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('python3', ['-I', '-u', join(process.cwd(), 'sandbox/proxy.py')], { env: { PATH: process.env.PATH!, AEEIS_EGRESS_HOSTS: 'localhost,*.allowed.test', AEEIS_PROXY_PORT: String(port) }, stdio: ['ignore', 'pipe', 'inherit'] });
+    const lines: string[] = [];
+    try {
+      await new Promise<void>((resolve, reject) => { child.stdout!.on('data', chunk => { lines.push(...String(chunk).trim().split('\n')); if (lines.some(line => line.includes('"ready"'))) resolve(); }); child.once('exit', () => reject(new Error('proxy exited'))); });
+      expect(await ask(port, 'CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n')).toMatch(/^HTTP\/1.1 403 .*not in this Run's allowed hosts/s);
+      expect(await ask(port, 'CONNECT localhost:22 HTTP/1.1\r\n\r\n')).toMatch(/^HTTP\/1.1 403 Only HTTPS on port 443/);
+      expect(await ask(port, 'CONNECT localhost:443 HTTP/1.1\r\n\r\n')).toMatch(/^HTTP\/1.1 403 .*non-public address/s);
+      expect(await ask(port, 'GET http://169.254.169.254/latest HTTP/1.1\r\nHost: 169.254.169.254\r\n\r\n')).toMatch(/^HTTP\/1.1 403/);
+      expect(await ask(port, 'CONNECT allowed.test:443 HTTP/1.1\r\n\r\n')).toMatch(/^HTTP\/1.1 403 .*not in this Run's allowed hosts/s);
+      expect(await ask(port, 'GET /relative HTTP/1.1\r\n\r\n')).toMatch(/^HTTP\/1.1 400/);
+      const decisions = lines.map(line => JSON.parse(line)).filter(entry => entry.decision === 'deny').map(entry => [entry.host, entry.reason]);
+      expect(decisions).toEqual([['evil.example', 'not allowlisted'], ['localhost', 'port'], ['localhost', 'Host resolves to a non-public address'], ['169.254.169.254', 'not allowlisted'], ['allowed.test', 'not allowlisted']]);
+    } finally { child.kill(); }
   });
 });

@@ -1,7 +1,7 @@
 ---
 title: 下一个里程碑：先让 Bot 用上电脑，审批改为范围授权
 date: 2026-11-05
-status: 设计；切片 A（范围授权）已实现
+status: 设计；切片 A（范围授权）已实现；切片 B 第一部分（远程沙箱、出口代理、浏览器）已实现
 relates:
   - 2026-10-29-bots-that-act.md
   - 2026-11-04-agent-autoloop-borrow-plan.md
@@ -101,7 +101,7 @@ relates:
 - **接口**：`GET /api/work-grants`、`POST /api/work-grants`、`POST /api/work-grants/:id/revoke`，只对授权的主人可见。工作台「设置 → 授权」创建和撤销；发送框的「权限」菜单里列出有效的授权。
 - **Run 引用授权**：请求带 `workGrantId`，不能同时带 `executionReview`。没写工具和代理时用授权里的；模型预算取请求、单 Run 上限、剩余额度三者中最小的，创建时预留，预留按全额计入总额（用不完也不退，下一切片再结算）。Run 冻结一份 `workGrant` 快照（含 digest）；之后只会追加 `revokedAt`。
 - **计划**：每个计划版本（含失败后的重新规划）都对照快照判断。冻结的工具和代理都在授权内、授权未撤销未过期时，`approval.actor = grant:<id>`，事件 `plan.auto_approved` 带 `grantId`；否则等待批准，原因写明超出的是哪个工具或代理。授权 Run 的模型预算只来自授权，批准时不能改。主人自己要求修改计划（`revise-plan`）后的新版本仍然等主人批准。
-- **动作**：`decideAction` 在黑名单之后加一条：授权有效时，**`containedTools`** 里的工具和授权里的代理直接执行（规则 `grant`），不论 Run 从哪里发起、是否已读入外部文本。`containedTools` 是授权工具与网关 `workspaceContainedTools()` 的交集，由 AEEIS 自己的网关代码给出，不读工具元数据，远程 toolkit 无法声明。现在本地网关给出的是：文件工具（read / write / diff / glob / grep）始终算；`shell` / `python` / `process` 只在容器 `network: none` 时算——容器有网络时它们能连任何地址，所以照旧要问，直到切片 B 的出口代理落地。其他动作走原有规则。
+- **动作**：`decideAction` 在黑名单之后加一条：授权有效时，**`containedTools`** 里的工具和授权里的代理直接执行（规则 `grant`），不论 Run 从哪里发起、是否已读入外部文本。`containedTools` 是授权工具与网关 `workspaceContainedTools()` 的交集，由 AEEIS 自己的网关代码给出，不读工具元数据，远程 toolkit 无法声明。现在本地网关给出的是：文件工具（read / write / diff / glob / grep）始终算；`shell` / `python` / `process` 只在容器 `network: none` 时算——容器有网络时它们能连任何地址，所以照旧要问。切片 B 加入 `network: proxied` 后，在该网络下它们（以及 `browser`）也算，见 2.2.1。其他动作走原有规则。
 - **撤销与过期**：撤销后，该授权下未结束的 Run 写入 `revokedAt`、事件 `work_grant.revoked`，进行中的暂停；恢复后计划和动作回到普通审批。过期不暂停：之后的计划版本和工作区动作改为询问。
 
 ## 2. 一个 Bot，一台测试 VPS
@@ -118,6 +118,17 @@ relates:
 - **终端**：先做只读的实时输出——`process logs` 和 `shell` 的输出在工作台上流式显示；人要动手就用现有的接管，走同一套工具和记录。真正的交互式 TTY 放到产品化阶段。
 - **浏览器**：新增本地工具 `browser`（容器里的 Playwright）：`open / click / type / screenshot / console / network-errors`。只能访问本机预览端口和 `egressHosts`。截图存为 Run 的 artifact，并作为证据引用。
 - **预览可以访问**：VPS 上的反向代理把 `https://<随机名>.preview.<团队域名>` 转到容器的预览端口，链接带一次性令牌，只在团队网络（VPN / Tailscale）内可达，随 Run 或授权到期失效。（待定，见第 7 节。）
+
+### 2.2.1 实现（切片 B 第一部分）
+
+- **测试机**：instabox 的 `agent-browser-lj1m`（Firecracker microVM，Debian 13，4 vCPU / 8 GiB，16 GiB 系统盘 + 20 GiB `/data`，自带 Docker）。SSH 经 instabox 网关，证书约一小时有效，用 `instabox ssh-cert` 刷新。免费套餐空闲 30 分钟或运行 8 小时会暂停，SSH 随之断开。
+- **远程执行**：没有用 `docker --context`（本机没有 Docker CLI），改为 `sandbox.ssh: <Host 别名>`，`DockerSandbox` 把每个 `docker` 调用变成 `ssh -o BatchMode=yes <host> -- docker <逐个单引号转义的参数>`。本机 Unix socket 检查只对本地引擎保留。每次调用多一次 SSH 握手，超时统一加 20 秒。
+- **出口代理**：`network: proxied`。每个 Run 一张 `--internal` 网络 + 一张出口网络 + 一个代理容器（同一镜像，`proxy.py`，无 capability、只读、`nobody`、128 MiB），代理在内部网络上的别名是 `aeeis-proxy`（容器名超过 DNS 单段 63 字符）。放行规则见 README；Run 释放时代理和两张网络一起删除。这一版的放行列表是部署级的 `sandbox.egressHosts`，不是每份授权一份；授权里的 `resources.egressHosts` 等到同一台机器上跑多份授权时再加。
+- **工作区内**：`proxied` 和 `none` 下 `shell` / `python` / `process` / `browser` 都进入 `workspaceContainedTools()`；`bridge` 照旧不算。
+- **浏览器**：工具 `browser`，每次调用开一个新页面，可选 click / type / press / wait，返回标题、状态码、可见文字、控制台错误、失败请求和截图（`artifacts/screenshots/`，路径 + SHA-256）。Playwright 默认让回环地址也走代理，已关闭，`127.0.0.1` 的开发服务器直连。
+- **镜像**：`aeeis-sandbox:3` = Python 3.12 + Node.js 22 + Playwright 1.49.1 Chromium，2.3 GB。
+- **在测试机上验证过**：`example.com` 经代理 403、绕过代理连 DNS 都解析不了；`pypi.org` 200、`pip download`、`npm install` 正常；`169.254.169.254` 403；容器里 `python3 -m http.server 3000`，浏览器打开、点按钮、截图并导出；释放后 VPS 上没有残留容器和网络。
+- **还没做（第二部分）**：按授权的持久工作目录（现在仍是每个 Run 一个容器，结束时导出 `artifacts/`）；给团队看的预览链接——instabox 自带"仅持链接可访问"的 HTTPS 端口，可能替代第 7 节第 1 条里的反向代理 + VPN，需要先确认它能转到容器内端口。
 
 ### 2.3 在 AEEIS 里看和控制
 

@@ -1,12 +1,23 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { localToolsConfigSchema, LocalToolGateway } from '../src/local-tools.js';
-import { dockerContextArgs } from '../src/docker-sandbox.js';
+import { dockerContextArgs, dockerInvocation } from '../src/docker-sandbox.js';
 
 const action = process.argv[2] ?? 'doctor';
 const filename = process.env.AEEIS_LOCAL_TOOLS_CONFIG ?? 'local-tools.example.json';
 const config = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
 const dockerArgs = dockerContextArgs(config.sandbox);
+const docker = (args: string[], timeoutMs?: number) => { const call = dockerInvocation(config.sandbox, args); return run(call.command, call.args, timeoutMs); };
+/** Over SSH the build context is streamed as a tar archive, so the remote host needs no copy of this repository. */
+const buildOverSsh = () => new Promise<void>((resolve, reject) => {
+  const call = dockerInvocation(config.sandbox, ['build', '--pull', '-t', config.sandbox.image, '-']);
+  const tar = spawn('tar', ['-C', 'sandbox', '-cf', '-', '.'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const build = spawn(call.command, call.args, { stdio: ['pipe', 'inherit', 'inherit'] });
+  tar.stdout.pipe(build.stdin);
+  const timer = setTimeout(() => { build.kill('SIGTERM'); reject(new Error('build timed out')); }, 1_800_000);
+  build.once('error', error => { clearTimeout(timer); reject(error); });
+  build.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`docker build exited ${code}`)); });
+});
 const run = (command: string, args: string[], timeoutMs = 30000) => new Promise<void>((resolve, reject) => {
   const child = spawn(command, args, { stdio: 'inherit' });
   const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`${command} timed out`)); }, timeoutMs);
@@ -15,16 +26,17 @@ const run = (command: string, args: string[], timeoutMs = 30000) => new Promise<
 });
 try {
   if (action === 'up') {
-    if (process.platform === 'darwin' && dockerArgs.join(' ') === '--context colima-aeeis') {
+    if (!config.sandbox.ssh && process.platform === 'darwin' && dockerArgs.join(' ') === '--context colima-aeeis') {
       await run('colima', ['start', 'aeeis', '--runtime', 'docker', '--activate=false', '--mount', 'none', '--ssh-agent=false', '--ssh-config=false', '--cpu', '2', '--memory', '4', '--disk', '20', '--vm-type', 'vz'], 300000);
     }
-    await run('docker', [...dockerArgs, 'info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}}']);
+    await docker(['info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}}']);
     console.log('Engine ready. Next: npm run sandbox:build');
   } else if (action === 'build') {
-    await run('docker', [...dockerArgs, 'info', '--format', '{{.OSType}}'], 10000);
-    await run('docker', [...dockerArgs, 'build', '--pull', '-t', config.sandbox.image, 'sandbox'], 600000);
+    await docker(['info', '--format', '{{.OSType}}'], 20000);
+    if (config.sandbox.ssh) await buildOverSsh();
+    else await run('docker', [...dockerArgs, 'build', '--pull', '-t', config.sandbox.image, 'sandbox'], 600000);
   } else if (action === 'doctor') {
-    await run('docker', [...dockerArgs, 'info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}} · cgroup {{.CgroupVersion}}'], 10000);
+    await docker(['info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}} · cgroup {{.CgroupVersion}}'], 20000);
     const gateway = await LocalToolGateway.load(filename);
     try {
       const health = await gateway.health(); console.log(health.detail);
@@ -37,7 +49,9 @@ try {
   } else throw new Error('Usage: sandbox.ts up | build | doctor | release <runId>');
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
-  console.error(process.platform === 'darwin'
+  console.error(config.sandbox.ssh
+    ? `Remote sandbox: check that \`ssh ${config.sandbox.ssh} docker info\` works without a password prompt.`
+    : process.platform === 'darwin'
     ? 'macOS: install Colima and Docker CLI (brew install colima docker), then npm run sandbox:up. The aeeis profile does not change your global Docker context.'
     : 'Linux: install Docker Engine, start its daemon, and grant this user access to its Unix socket (rootless Docker is supported). No Colima or Docker Desktop is needed.');
   process.exitCode = 1;

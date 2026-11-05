@@ -86,10 +86,64 @@ def inventory(pattern):
     return sorted(set(results)), False
 
 
+PROXY_VARIABLES = ('HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy')
+
+
+def command_env():
+    """Commands see only a fixed environment, plus the Run's proxy when its network is proxied."""
+    env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': '/root', 'PYTHONUNBUFFERED': '1', 'PLAYWRIGHT_BROWSERS_PATH': '/opt/ms-playwright'}
+    env.update({name: os.environ[name] for name in PROXY_VARIABLES if os.environ.get(name)})
+    return env
+
+
+def browse(args, timeout):
+    """Open one page in headless Chromium, run a few steps, and keep a screenshot as an artifact."""
+    from playwright.sync_api import sync_playwright, Error as PlaywrightError
+    deadline_ms = int(max(5, min(timeout, 120)) * 1000)
+    console, failures = [], []
+    proxy = os.environ.get('HTTPS_PROXY')
+    # Playwright sends loopback through the proxy unless told not to; dev servers live on 127.0.0.1.
+    os.environ['PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK'] = '1'
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'],
+            **({'proxy': {'server': proxy, 'bypass': 'localhost,127.0.0.1'}} if proxy else {}))
+        try:
+            page = browser.new_page(viewport={'width': args.get('width', 1280), 'height': args.get('height', 800)})
+            page.set_default_timeout(min(deadline_ms, 30000))
+            page.on('console', lambda message: console.append({'type': message.type, 'text': message.text[:500]}) if message.type in ('error', 'warning') and len(console) < 50 else None)
+            page.on('pageerror', lambda error: console.append({'type': 'pageerror', 'text': str(error)[:500]}) if len(console) < 50 else None)
+            page.on('requestfailed', lambda request: failures.append({'url': request.url[:300], 'error': (request.failure or '')[:200]}) if len(failures) < 50 else None)
+            page.on('response', lambda response: failures.append({'url': response.url[:300], 'status': response.status}) if response.status >= 400 and len(failures) < 50 else None)
+            try:
+                response = page.goto(args['url'], wait_until='load', timeout=deadline_ms)
+                for step in args.get('steps', []):
+                    if step['action'] == 'click':
+                        page.click(step['selector'])
+                    elif step['action'] == 'type':
+                        page.fill(step['selector'], step['text'])
+                    elif step['action'] == 'press':
+                        page.keyboard.press(step['key'])
+                    elif step['action'] == 'wait':
+                        page.wait_for_selector(step['selector']) if step.get('selector') else page.wait_for_timeout(min(step.get('ms', 500), 10000))
+            except PlaywrightError as error:
+                raise ToolError('Browser step failed: ' + str(error).split('\n')[0][:300], 'failed', {'console': console, 'networkErrors': failures})
+            result = {'url': page.url, 'title': page.title()[:300], 'status': response.status if response else None,
+                'text': page.inner_text('body')[:4000] if page.query_selector('body') else '', 'console': console, 'networkErrors': failures}
+            if args.get('screenshot', True):
+                directory = safe_path('artifacts/screenshots/.keep', parents=True).parent
+                name = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{os.urandom(3).hex()}.png"
+                data = page.screenshot(full_page=args.get('fullPage', False), type='png')
+                (directory / name).write_bytes(data)
+                result['screenshot'] = {'path': f'artifacts/screenshots/{name}', 'sha256': sha(data), 'bytes': len(data)}
+            return result
+        finally:
+            browser.close()
+
+
 def execute(argv, timeout):
     child = subprocess.Popen(
         argv, cwd=ROOT,
-        env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': '/root', 'PYTHONUNBUFFERED': '1'},
+        env=command_env(),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True,
     )
@@ -141,6 +195,8 @@ def perform(tool, args, timeout):
         return execute([sys.executable, '-u', '-c', args['code']], timeout)
     if tool == 'shell':
         return execute(['/bin/bash', '-lc', args['command']], timeout)
+    if tool == 'browser':
+        return browse(args, timeout)
     if tool == 'read':
         content = read_text(args['path'])
         lines = content.split('\n')

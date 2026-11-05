@@ -7,7 +7,9 @@ import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import type { Receipt, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
 
-const names = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process', 'web-fetch'] as const;
+const names = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process', 'browser', 'web-fetch'] as const;
+/** Tools that run code in the Run container: what they can reach is whatever the container's network allows. */
+const runsCode = (id: string) => ['python', 'shell', 'process', 'browser'].includes(id);
 export const localToolsConfigSchema = z.object({
   schemaVersion: z.literal('local-tools/1'),
   workspaceRoot: z.string().min(1),
@@ -34,6 +36,19 @@ const schemas = {
     z.object({ action: z.enum(['list', 'ports']) }).strict(),
     z.object({ action: z.enum(['logs', 'stop']), processId: z.string().regex(/^proc_[a-f0-9]{32}$/) }).strict(),
   ]),
+  browser: z.object({
+    url: z.string().url().max(2000).refine(value => /^https?:\/\//.test(value), 'Use an http:// or https:// URL'),
+    steps: z.array(z.discriminatedUnion('action', [
+      z.object({ action: z.literal('click'), selector: z.string().min(1).max(500) }).strict(),
+      z.object({ action: z.literal('type'), selector: z.string().min(1).max(500), text: z.string().max(10_000) }).strict(),
+      z.object({ action: z.literal('press'), key: z.string().min(1).max(50) }).strict(),
+      z.object({ action: z.literal('wait'), selector: z.string().min(1).max(500).optional(), ms: z.number().int().min(0).max(10_000).optional() }).strict(),
+    ])).max(30).default([]),
+    screenshot: z.boolean().default(true),
+    fullPage: z.boolean().default(false),
+    width: z.number().int().min(320).max(2560).default(1280),
+    height: z.number().int().min(320).max(2560).default(800),
+  }).strict(),
   'web-fetch': z.object({ input: z.string().url().max(8000) }).strict(),
 };
 const descriptions: Record<typeof names[number], string> = {
@@ -45,6 +60,7 @@ const descriptions: Record<typeof names[number], string> = {
   python: 'Run Python 3.12 in this Run persistent Linux container. Installed packages and files persist between calls and AEEIS restarts. Network follows sandbox policy. Put final deliverable files under artifacts/ to export them to the host. No host files or credentials are mounted.',
   shell: 'Execute Bash in /workspace inside this Run persistent Linux container. Can use git, apt, pip, install dependencies and run system commands. Container root is available; no host mounts or Docker socket. Put deliverables in artifacts/. Use process start for persistent services. Foreground timeout stops ALL processes in this Run but preserves its files.',
   process: 'Manage background commands in this Run container: start, list, logs (last 24 KB per stream), stop, ports (host loopback mappings). Use returned processId. Services persist between tool calls and AEEIS restarts, until Run completion, idle expiry, timeout or explicit stop. Listen on 0.0.0.0 inside the container to use configured published ports.',
+  browser: 'Open a page in headless Chromium inside this Run container, optionally click, type, press keys or wait, then return the title, HTTP status, visible text, console errors and failed requests. A screenshot is saved under artifacts/screenshots/ and its path and SHA-256 are returned. Use http://127.0.0.1:<port> for a dev server started with process start. Each call opens a fresh page.',
   'web-fetch': 'Fetch an allowlisted HTTPS URL and return bounded text evidence with source URL, fetch time and content hash. Redirects are rejected.',
 };
 const sha = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
@@ -91,13 +107,24 @@ export class LocalToolGateway implements ToolGateway {
   }
   async listTools(): Promise<ToolDescriptor[]> {
     const image = this.config.tools.some(id => id !== 'web-fetch') ? await this.sandbox.imageId() : null;
-    return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}`, capabilities: ['python', 'shell', 'process'].includes(id) ? ['execute', 'read', 'write', ...(this.config.sandbox.network === 'none' ? [] : ['network'])] : id === 'write' ? ['write'] : id === 'web-fetch' ? ['read', 'network'] : ['read'], inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
+    return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}${runsCode(id) ? this.networkNote() : ''}`, capabilities: this.capabilities(id), inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
   }
-  /** File tools only touch this Run's container workspace. Code-running tools are confined only when the container
-   * has no network: with a network they can reach any host, so a Work Grant does not let them run unasked. */
+  private capabilities(id: string): string[] {
+    if (runsCode(id)) return ['execute', 'read', 'write', ...(this.config.sandbox.network === 'none' ? [] : ['network'])];
+    return id === 'write' ? ['write'] : id === 'web-fetch' ? ['read', 'network'] : ['read'];
+  }
+  private networkNote(): string {
+    const { network, egressHosts } = this.config.sandbox;
+    if (network === 'none') return ' The container has no network.';
+    if (network === 'proxied') return ` Outbound traffic goes through a proxy that allows only: ${egressHosts.join(', ') || '(none)'}; other hosts get HTTP 403.`;
+    return '';
+  }
+  /** File tools only touch this Run's container workspace. Code-running tools are confined when the container has
+   * no network, or when its only way out is the Run's proxy, which reaches just the operator's egressHosts and no
+   * private address. On the open bridge network they can reach any host, so a Work Grant does not let them run unasked. */
   async workspaceContainedTools(): Promise<string[]> {
-    const runsCode = (id: string) => ['python', 'shell', 'process'].includes(id);
-    return this.config.tools.filter(id => id !== 'web-fetch' && (!runsCode(id) || this.config.sandbox.network === 'none'));
+    const confined = this.config.sandbox.network !== 'bridge';
+    return this.config.tools.filter(id => id !== 'web-fetch' && (!runsCode(id) || confined));
   }
   async health() {
     if (this.config.tools.some(id => id !== 'web-fetch')) return this.sandbox.health();
@@ -130,7 +157,7 @@ export class LocalToolGateway implements ToolGateway {
     return { status, output, outputRefs: status === 'completed' ? [receiptId] : [], receipt: {
       schemaVersion: 'receipt/1', receiptId, provider: 'aeeis-local-tools', operation: request.toolId,
       requestHash: this.requestHash(request), responseHash: fingerprint(output), inputRefs: [request.taskId], outputRefs: status === 'completed' ? [receiptId] : [],
-      capabilitiesUsed: this.config.tools.includes(request.toolId as typeof names[number]) ? ['python', 'shell', 'process'].includes(request.toolId) ? ['execute', 'read', 'write', ...(this.config.sandbox.network === 'none' ? [] : ['network'])] : request.toolId === 'write' ? ['write'] : request.toolId === 'web-fetch' ? ['read', 'network'] : ['read'] : [],
+      capabilitiesUsed: this.config.tools.includes(request.toolId as typeof names[number]) ? this.capabilities(request.toolId) : [],
       startedAt, completedAt: new Date().toISOString(), status,
       cost: { tokens: 0, money: 0, currency: 'USD' },
       ...(status === 'completed' ? {} : { errorCode: status === 'unknown' ? 'execution_unknown' : 'tool_failed' }),
@@ -148,6 +175,7 @@ export class LocalToolGateway implements ToolGateway {
       if (previous) return previous.result ?? this.result(request, 'unknown', { error: 'A previous invocation was interrupted; reconcile before retrying.' }, startedAt);
       const id = request.toolId as typeof names[number];
       const input = schemas[id].parse(request.input);
+      if (id === 'browser') this.checkBrowserUrl((input as z.infer<typeof schemas.browser>).url);
       const workspace = join(this.config.workspaceRoot, grant[1]!);
       // Validate host state before recording a possibly side-effecting invocation.
       const files = id === 'web-fetch' ? [] : await readSnapshot(workspace, this.config.sandbox.snapshotMiB * 1024 * 1024);
@@ -178,6 +206,15 @@ export class LocalToolGateway implements ToolGateway {
   private async durableWrite(path: string, content: string) {
     const handle = await open(path, 'wx', 0o600);
     try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+  }
+  /** The page itself is checked here for a clear error; the proxy (or no network) is what actually enforces it. */
+  private checkBrowserUrl(value: string) {
+    const url = new URL(value), { network, egressHosts } = this.config.sandbox;
+    if (url.username || url.password) throw new ToolError('URLs with credentials are not allowed');
+    if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || network === 'bridge') return;
+    const host = url.hostname.toLowerCase();
+    const allowed = network === 'proxied' && egressHosts.some(rule => rule.startsWith('*.') ? host.endsWith(rule.slice(1)) : host === rule);
+    if (!allowed) throw new ToolError(network === 'none' ? 'The container has no network; open a local port such as http://127.0.0.1:3000' : `${host} is not in the sandbox's allowed hosts`);
   }
   private async webFetch(value: unknown, timeoutMs: number): Promise<unknown> {
     const input = schemas['web-fetch'].parse(value), url = new URL(input.input);

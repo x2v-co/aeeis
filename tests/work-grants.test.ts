@@ -211,16 +211,18 @@ describe('work grants over HTTP', () => {
 });
 
 describe('local tools confined to the workspace', () => {
-  it('counts code-running tools as confined only when the container has no network', async () => {
+  it('counts code-running tools as confined only without an open network', async () => {
     const { LocalToolGateway } = await import('../src/local-tools.js');
     const { writeFile } = await import('node:fs/promises');
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-contained-'));
-    const load = async (network: 'none' | 'bridge') => {
+    const load = async (network: 'none' | 'bridge' | 'proxied') => {
       const file = join(directory, `${network}.json`);
-      await writeFile(file, JSON.stringify({ schemaVersion: 'local-tools/1', workspaceRoot: `./ws-${network}`, stateDirectory: `./state-${network}`, tools: ['read', 'write', 'shell', 'process', 'web-fetch'], sandbox: { network } }));
+      await writeFile(file, JSON.stringify({ schemaVersion: 'local-tools/1', workspaceRoot: `./ws-${network}`, stateDirectory: `./state-${network}`, tools: ['read', 'write', 'shell', 'process', 'browser', 'web-fetch'], sandbox: { network, ...(network === 'proxied' ? { egressHosts: ['registry.npmjs.org'] } : {}) } }));
       return LocalToolGateway.load(file);
     };
     expect(await (await load('bridge')).workspaceContainedTools()).toEqual(['read', 'write']);
-    expect(await (await load('none')).workspaceContainedTools()).toEqual(['read', 'write', 'shell', 'process']);
+    expect(await (await load('none')).workspaceContainedTools()).toEqual(['read', 'write', 'shell', 'process', 'browser']);
+    // The Run's own proxy is its only route out, so code-running tools stay inside what the operator allowed.
+    expect(await (await load('proxied')).workspaceContainedTools()).toEqual(['read', 'write', 'shell', 'process', 'browser']);
   });
 });

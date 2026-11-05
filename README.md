@@ -220,17 +220,22 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 
 文件和命令都在 `workspaceRoot/<runId>/` 对应的持久 Linux 容器里运行。容器不挂载宿主机目录、`.env` 或 Docker socket；Run 之间使用不同容器和专用网络。容器默认 2 CPU、1 GiB 内存、256 个进程，网络为 bridge，端口只发布到宿主机 `127.0.0.1`。可在 `sandbox` 配置中把 `network` 改成 `none`、调整资源和端口，以及设置空闲回收和最长存活时间。
 
+`network: "proxied"` 时，Run 容器在一张 `--internal` 网络上，唯一出口是同一个 Run 的代理容器（无 capability、只读根目录、`nobody` 用户）。代理只放行 `egressHosts` 里的主机名（支持 `*.example.com`），HTTPS 走 CONNECT 443，HTTP 只放 80 端口；IP 字面量和解析到私有 / 链路本地 / 环回地址的名字一律拒绝，每次放行和拒绝记一行 JSON 日志。`egressHosts` 只填 Bot 无人值守也能访问的地址（如 `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`）：在这种网络下 `shell` / `python` / `process` / `browser` 算作只作用于工作区，范围授权内直接执行。`proxied` 不发布端口。
+
+设置 `sandbox.ssh` 为 `~/.ssh/config` 里的 Host 名时，AEEIS 通过 `ssh <host> docker …` 在那台机器上运行容器（例如测试 VPS），本机不需要 Docker；`npm run sandbox:build` 会把 `sandbox/` 以 tar 流发过去构建。SSH 必须免交互（`BatchMode=yes`）。
+
 | 工具 | 输入与作用 |
 | --- | --- |
 | `read` / `write` / `diff` / `glob` / `grep` | 在持久 `/workspace` 中读写、比较、查找文本；路径仍限制在工作区内 |
 | `python` | 运行 Python 3.12；可使用容器内安装的包，文件和虚拟环境跨调用保留 |
 | `shell` | 运行 Bash、Git、apt、pip 和其他 Linux 命令；容器内以 root 运行，适合安装依赖和启动服务 |
 | `process` | `start`、`list`、`logs`、`stop`、`ports`；管理跨工具调用和 AEEIS 重启仍存活的后台进程 |
+| `browser` | 在容器里用无头 Chromium 打开页面，可 click / type / press / wait；返回标题、状态码、可见文字、控制台错误和失败请求，截图存到 `artifacts/screenshots/` 并返回路径和 SHA-256。可打开 `http://127.0.0.1:<port>` 上的开发服务器；`proxied` 网络下外部地址只限 `egressHosts` |
 | `web-fetch` | 主进程按 `webHosts` HTTPS 白名单取证，拒绝跳转；Shell/Python 的网络遵循 sandbox 的 network 配置 |
 
 最终交付文件必须放在容器的 `/workspace/artifacts/` 下。Run 进入终态后，AEEIS 导出该目录到宿主机 `workspaceRoot/<runId>/artifacts/`，再停止并删除容器和专用网络；未完成 Run 会保留环境，空闲超时或达到最长存活时间后回收。容器被外部删除、策略或镜像发生变化时，AEEIS 会进入明确错误，不会静默创建一个丢失依赖的新环境。
 
-文件/Python/Shell/Process 工具版本为 `3`。AEEIS 重启会重新连接原 Run 容器，因此已安装依赖和后台服务继续存在。每个 Run 的容器 root 权限只覆盖容器本身，宿主机权限、文件和密钥不会自动开放；需要访问宿主机文件时应通过明确的资料或产物接口传递。`web-fetch` 仍由主进程执行，避免把 AEEIS 凭证带入容器。
+文件/Python/Shell/Process/Browser 工具版本为 `3`，镜像为 `aeeis-sandbox:3`（加入 Node.js 22 和 Playwright Chromium）。AEEIS 重启会重新连接原 Run 容器，因此已安装依赖和后台服务继续存在。每个 Run 的容器 root 权限只覆盖容器本身，宿主机权限、文件和密钥不会自动开放；需要访问宿主机文件时应通过明确的资料或产物接口传递。`web-fetch` 仍由主进程执行，避免把 AEEIS 凭证带入容器。
 
 macOS 推荐使用 Colima 的独立 `aeeis` profile；Linux 直接使用 Docker Engine 或 rootless Docker。两者共用同一个镜像和 JSON 配置：
 
