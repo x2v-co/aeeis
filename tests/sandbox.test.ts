@@ -375,7 +375,7 @@ describe('Run egress proxy (python, no Docker)', () => {
 });
 
 describe('SSH host paused or unreachable (mocked transport)', () => {
-  const remote = sandboxConfigSchema.parse({ ssh: 'vps-test-1' });
+  const remote = sandboxConfigSchema.parse({ ssh: 'vps-test-1', sshWaitSeconds: 0 });
   const runA = `run_${'c'.repeat(36)}`, runB = `run_${'d'.repeat(36)}`;
   const harness = () => {
     const sandbox = new DockerSandbox(remote, root);
@@ -433,6 +433,41 @@ describe('SSH host paused or unreachable (mocked transport)', () => {
     expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
     const owner = createHash('sha256').update(root).digest('hex').slice(0, 16);
     expect(command.mock.calls[0]![0]).toEqual(['kill', `aeeis-${owner}-${runA.slice(4)}`]);
+  });
+  it('waits for a paused host to come back before running, then runs the tool once', async () => {
+    const { sandbox, host, command } = harness();
+    (sandbox as any).config = { ...remote, sshWaitSeconds: 30 };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    host.down = true;
+    setTimeout(() => { host.down = false; }, 1500);
+    const started = Date.now();
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
+    // The tool ran once per call (the first call also restored the workspace): waiting never replays it.
+    expect(command.mock.calls.filter(call => (call[0] as string[]).includes('--interactive') && !String(call[2]).includes('__restore'))).toHaveLength(2);
+  });
+  it('gives up after sshWaitSeconds with a plain failure that says how long it waited', async () => {
+    const { sandbox, host } = harness();
+    (sandbox as any).config = { ...remote, sshWaitSeconds: 2 };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    host.down = true;
+    const started = Date.now();
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toMatch(/^failed: .*unreachable over SSH/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1900);
+  });
+  it('stops waiting as soon as the sandbox closes', async () => {
+    const { sandbox, host } = harness();
+    (sandbox as any).config = { ...remote, sshWaitSeconds: 600 };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    host.down = true;
+    const pending = outcome(sandbox.execute(runA, 'shell', {}, [], 300));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const started = Date.now(); await sandbox.close();
+    expect(await pending).toMatch(/^failed: /);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
   it('turns a real ssh failure (exit 255) into an unreachable-host error', async () => {
     const sandbox = new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'aeeis-test-no-such-host.invalid' }), root);
