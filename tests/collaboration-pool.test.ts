@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import type { ModelAdapter } from '../src/runtime/model.js';
 import { collaborationSystemPrompts, ModelPoolCandidateRunner, ModelPoolDebateOrchestrator, ModelPoolIndependentEvaluator } from '../src/collaboration-pool.js';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
+import { debateGaps } from '../src/collaboration.js';
 
 const pin = { model: 'fixture', endpoint: 'http://127.0.0.1:9999/chat/completions', promptVersion: 'fixture/1' } as const;
 const brief = { schemaVersion: 'competition-brief/1' as const, taskId: 'task.pool', contextVersion: 'ctx.pool', goal: 'Choose a plan', context: { classification: 'internal' as const, claims: [{ id: 'claim.pool', text: 'Use evidence', evidenceRefs: ['source.pool'] }], artifactRefs: [], redactions: [] }, participantAgentIds: ['agent.one', 'agent.two'], expectedResultType: 'plan/1', maxRounds: 1, blindEvaluation: true };
@@ -244,6 +245,31 @@ describe('internal competition model pool', () => {
     const finished = await runner.run('debate.sender');
     expect(seen).toEqual({ participant: 'external.sender', moderator: 'external.sender', adjudicator: 'external.sender' });
     expect(finished.room.externalInput.senderAgentId).toBe('agent.one');
+  });
+
+  it('lets participants raise, answer and close a gap through the real service', async () => {
+    const repository = new FileCollaborationRepository(await mkdtemp(join(tmpdir(), 'aeeis-debate-gap-pool-'))); await repository.init();
+    try {
+      const service = new CollaborationService(repository);
+      const created = await service.createDebate({ taskId: 'task.gap', contextVersion: 'ctx.gap', participantAgentIds: ['agent.one', 'agent.two'], context: { classification: 'internal', claims: [{ id: 'claim.ci', text: 'CI run 412 passed', evidenceRefs: [] }], artifactRefs: [], redactions: [] }, maxRounds: 2, maxMessagesPerAgent: 2 });
+      type Gaps = Array<{ gapId: string; state: string }>;
+      const seen: Gaps[] = [];
+      const agents = new Map<string, ModelAdapter>();
+      agents.set('agent.one', { pin, complete: async request => {
+        const { gaps } = request.input as { gaps: Gaps }; seen.push(gaps);
+        if (!gaps.length) return { value: { type: 'gap', content: 'I need the CI result', claimRefs: [], gap: { question: 'Did CI pass?', impact: 'A failing CI blocks the release' } } };
+        return { value: { type: 'decision', content: 'Release', claimRefs: ['claim.ci'], gapRef: { gapId: gaps[0]!.gapId, resolution: 'closed' } } };
+      } });
+      agents.set('agent.two', { pin, complete: async request => {
+        const { gaps } = request.input as { gaps: Gaps }; seen.push(gaps);
+        return { value: { type: 'observation', content: 'CI passed', claimRefs: ['claim.ci'], gapRef: { gapId: gaps[0]!.gapId } } };
+      } });
+      const finished = await new ModelPoolDebateOrchestrator(service, agents).run(created.id);
+      expect(finished.room.messages.map(message => message.type)).toEqual(['gap', 'observation', 'decision']);
+      expect(seen.map(gaps => gaps.map(gap => gap.state))).toEqual([[], ['open'], ['answered']]);
+      expect(debateGaps(finished.room)).toEqual([expect.objectContaining({ state: 'closed' })]);
+      expect(finished.room.adjudication).toMatchObject({ status: 'decided', evidenceRefs: ['claim.ci'] });
+    } finally { await repository.close(); }
   });
 
   it('runs durable participant, Moderator, and Adjudicator attempts through the real service', async () => {

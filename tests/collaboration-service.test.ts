@@ -4,6 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
+import { runDebateGapsContract } from './support/debate-gaps-contract.js';
 import { createGlobalBudgetSelector, InMemoryGlobalBudgetLedger } from '../src/global-budget.js';
 
 const brief = {
@@ -192,5 +193,10 @@ describe('durable collaboration service', () => {
       expect(held.room.adjudication?.status).toBe('held');
       expect(held.room.adjudication?.rationale).toContain('Independent adjudication');
     } finally { await repository.close(); }
+  });
+  it('keeps debate trust levels and the gap ledger in File storage', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-debate-gaps-'));
+    const writer = new FileCollaborationRepository(directory); await writer.init();
+    await runDebateGapsContract(writer, async () => { await writer.close(); const reader = new FileCollaborationRepository(directory); await reader.init(); return reader; });
   });
 });

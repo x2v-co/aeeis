@@ -1,6 +1,6 @@
 # Debate：用各自知识和工具反馈补齐信息差、达成共识
 
-> 状态：设计，2026-11-04。外部输入边界（第 4 节）随本文一起实现；其余各节是目标设计，按第 8 节分阶段落地。
+> 状态：设计，2026-11-04。外部输入边界（第 4 节，#182）和权威等级与 gap（第 2、3.1 节，第 2 阶段）已实现；其余各节是目标设计，按第 8 节分阶段落地。
 > 修订：[多 Agent 开放世界设计](2026-09-18-multi-agent-open-world-design.md)中"Debate Workflow"一节的证据规则和 `external.message` 的 goal 来源。
 
 ## 1. 目标
@@ -31,6 +31,8 @@ Debate 的用途不是让几个模型对同一份材料各说各话，再由裁�
 - Moderator policy 继续检查 `claimRefs`：只能指向 Context Pack、本房间的 `observed` 回执，或明确标为 `asserted` / `reported` 的论点。未知引用照旧 `flagged`。
 - "我查过了"这句话本身是 `asserted`。只有 AEEIS 有回执的调用才算 `observed`。
 
+**实现（第 2 阶段）。** 权威等级按引用判定，结果写在 AEEIS 的 moderation 记录里（`authority` 为整条消息的最高等级，`claimAuthority` 逐条列出），消息 schema 是 strict 的，带 `authority` 字段的消息直接被拒绝。Context Pack 的 claim、claim 的 evidenceRefs 和 artifact 是 `context`；`claimRefs` 指向本房间之前的消息时是 `asserted`；其余引用是 missing，消息被 `flagged`。`evidence`、`challenge`、`rebuttal`、`concession`、`decision`、`observation` 至少要有一条 `context`（以后加上 `observed`）引用。裁决的 `evidenceRefs` 只能取被选 decision 中 `context` 级的引用。`observed` 和 `reported` 已在枚举中，第 3、5 阶段才会产生。每条消息都按它发出时的房间判定，事后重新检查 decision 时也用当时的房间，后来的消息不会改变它的结果。
+
 ## 3. 信息差与工具反馈
 
 ### 3.1 消息类型
@@ -41,6 +43,15 @@ Debate 的用途不是让几个模型对同一份材料各说各话，再由裁�
 - `observation`：回应某个 `gapId`，携带一条或多条工具回执引用。
 
 Debate 状态里维护 gap 列表：`open` → `answered`（有 observation 引用）→ `closed`（提出方或 Moderator 确认足够）/ `unresolvable`（工具无法回答或被拒绝）。
+
+**实现（第 2 阶段）。**
+
+- `gap` 消息必须带 `gap: { question, impact, query? }`；`gapId` 就是这条消息的 `messageId`，由 AEEIS 生成，Agent 不能自己命名。
+- `observation` 必须带 `gapRef: { gapId }`，只能引用 Context Pack，回答 `open` 或 `answered` 的 gap。
+- 只有提出方能关闭：在之后任意一条消息上带 `gapRef: { gapId, resolution }`。`closed` 要求 gap 已是 `answered`；`unresolvable` 可以从 `open` 或 `answered` 进入。已关闭的 gap 不能再回答或改状态。Moderator 关闭 gap 和工具失败自动转 `unresolvable` 留到第 3 阶段。
+- 结构错误（gap 缺内容、observation 缺 gapRef 等）在 schema 层拒绝；状态转换不合法的消息留在日志里并被 `flagged`。
+- gap 列表由通过检查的消息推导（`debateGaps`），不单独存储；被 flagged 的消息不改变 gap。参与者和裁决者的输入带当前 gap 列表，Moderator 的输入带这条消息之前的 gap 列表。
+- Feishu / Hermes 入站暂不接受 `gap` / `observation`。
 
 ### 3.2 工具调用边界
 
@@ -112,7 +123,7 @@ Debate 在满足以下条件时以 `consensus` 结束：
 ## 8. 分阶段落地
 
 1. **外部输入边界**：本次完成（第 4 节）。
-2. **权威等级与 gap**：消息 schema 增加论点权威、`gap` / `observation` 类型和 gap 状态；Moderator policy 随之更新。先不接工具，`observation` 只能引用 Context Pack，以验证流程。
+2. **权威等级与 gap**：已完成（第 2、3.1 节的「实现」）。消息 schema 增加 `gap` / `observation` 类型和 gap 状态，权威等级由 Moderator policy 判定；先不接工具，`observation` 只能引用 Context Pack。
 3. **AEEIS 执行的只读工具**：Debate 创建时冻结每个 Agent 的只读工具集；工具 Attempt、回执持久化、reconcile、预算和重复调用复用。
 4. **共识规则与收尾**：结构化立场、`consensus` / `decided` / `held` 判定、少数意见与剩余 gap 的最终产物；工作台展示 gap 和立场变化。
 5. **副作用工具与外部 Agent**：接入 `approve-action`；外部 Agent 的 `reported` 证据及复查升级。依赖借鉴计划第 6 项的沙箱方案。
