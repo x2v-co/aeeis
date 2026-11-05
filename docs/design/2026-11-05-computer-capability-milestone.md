@@ -128,7 +128,8 @@ relates:
 - **浏览器**：工具 `browser`，每次调用开一个新页面，可选 click / type / press / wait，返回标题、状态码、可见文字、控制台错误、失败请求和截图（`artifacts/screenshots/`，路径 + SHA-256）。Playwright 默认让回环地址也走代理，已关闭，`127.0.0.1` 的开发服务器直连。
 - **镜像**：`aeeis-sandbox:3` = Python 3.12 + Node.js 22 + Playwright 1.49.1 Chromium，2.3 GB。
 - **在测试机上验证过**：`example.com` 经代理 403、绕过代理连 DNS 都解析不了；`pypi.org` 200、`pip download`、`npm install` 正常；`169.254.169.254` 403；容器里 `python3 -m http.server 3000`，浏览器打开、点按钮、截图并导出；释放后 VPS 上没有残留容器和网络。
-- **机器暂停 / 证书过期**：两者都让 `ssh` 以 255 退出。准备容器阶段（含新 Run 第一次调用前先探测主机）连不上 → 记为失败、没有执行；工具执行中断开 → 结果未知，只把这个 Run 挂起，下次调用先补做 `docker kill`，不再像本地引擎那样封锁整个网关。测试机上验证过：`instabox suspend` 期间调用失败且命令确实没跑，`resume` 后同一个 Run 继续、开发服务器仍在；过期证书报"拒绝登录"，`instabox ssh-cert` 后恢复。免费套餐运行 8 小时后会强制暂停并进入冷却期，期间无法唤醒，这一点代码绕不过去；证书自动续期也还没做。
+- **机器暂停 / 证书过期**：两者都让 `ssh` 以 255 退出。准备容器阶段（含新 Run 第一次调用前先探测主机）连不上 → 记为失败、没有执行；工具执行中断开 → 结果未知，只把这个 Run 挂起，下次调用先补做 `docker kill`，不再像本地引擎那样封锁整个网关。测试机上验证过：`instabox suspend` 期间调用失败且命令确实没跑，`resume` 后同一个 Run 继续、开发服务器仍在；过期证书报"拒绝登录"，`instabox ssh-cert` 后恢复。免费套餐运行 8 小时后会强制暂停并进入冷却期，期间无法唤醒，这一点代码绕不过去；证书续期用 `sandbox.sshLoginCommand`（如 `instabox ssh-cert`）：只在 ssh 报 `Permission denied (…)` 时运行并重试一次，测试机上删掉证书后 Run 照常继续。
+- **测试机选择**：比较过 instabox、腾讯云北京（经 Tailscale 德国中继，单次登录 8–10 秒；GitHub、Docker Hub 不通）和新加坡（直连 80 ms，但那台是 AEEIS 生产机，不放 Bot）。先用 instabox；之后换一台独立的新加坡 VPS 只需改 `sandbox.ssh`。
 - **还没做（第二部分）**：按授权的持久工作目录（现在仍是每个 Run 一个容器，结束时导出 `artifacts/`）；给团队看的预览链接——instabox 自带"仅持链接可访问"的 HTTPS 端口，可能替代第 7 节第 1 条里的反向代理 + VPN，需要先确认它能转到容器内端口。
 
 ### 2.3 在 AEEIS 里看和控制

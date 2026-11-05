@@ -442,3 +442,33 @@ describe('SSH host paused or unreachable (mocked transport)', () => {
     expect((await sandbox.health()).detail).toMatch(/unreachable over SSH/);
   }, 30000);
 });
+
+describe('renewing a refused SSH login', () => {
+  const refused = () => new SandboxUnreachable('vps-test-1', 'm_1@ssh.example: Permission denied (publickey).');
+  const sandboxWith = (sshLoginCommand: string[]) => new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'vps-test-1', sshLoginCommand }), root);
+  const call = (sandbox: DockerSandbox) => (sandbox as any).command(['ps'], 1000);
+  it('runs the login command once and retries, because a refused login ran nothing remotely', async () => {
+    const sandbox = sandboxWith(['true']);
+    const transport = vi.spyOn(sandbox as any, 'transport').mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused()).mockResolvedValue(ok('done'));
+    const results = await Promise.all([call(sandbox), call(sandbox)]);
+    expect(results.map(result => result.stdout)).toEqual(['done', 'done']);
+    expect(transport).toHaveBeenCalledTimes(4);
+  });
+  it('gives up with the original error when renewing fails, and does not rerun it for a minute', async () => {
+    const sandbox = sandboxWith(['false']);
+    const transport = vi.spyOn(sandbox as any, 'transport').mockRejectedValue(refused());
+    await expect(call(sandbox)).rejects.toThrow(/refused the SSH login/);
+    const refresh = vi.spyOn(sandbox as any, 'refreshLogin');
+    await expect(call(sandbox)).rejects.toThrow(/refused the SSH login/);
+    expect(await refresh.mock.results[0]!.value).toBe(false);
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it('does not renew or retry when the host is simply unreachable', async () => {
+    const sandbox = sandboxWith(['true']);
+    const transport = vi.spyOn(sandbox as any, 'transport').mockRejectedValue(new SandboxUnreachable('vps-test-1', 'ssh: connect to host ssh.example port 2222: Operation timed out'));
+    const refresh = vi.spyOn(sandbox as any, 'refreshLogin');
+    await expect(call(sandbox)).rejects.toThrow(/unreachable over SSH/);
+    expect(refresh).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1);
+    expect(() => sandboxConfigSchema.parse({ sshLoginCommand: ['true'] })).toThrow(/needs ssh/);
+  });
+});

@@ -11,6 +11,9 @@ export const sandboxConfigSchema = z.object({
   context: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).default('auto'),
   /** A Host alias from the operator's ~/.ssh/config. Docker then runs on that machine over SSH, e.g. a test VPS. */
   ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).optional(),
+  /** Run (no shell) when the SSH host refuses the login, then try once more — e.g. hosts whose SSH certificates
+   * expire hourly: ["npx", "-y", "instabox@latest", "ssh-cert", "my-machine"]. Nothing remote ran on a refused login. */
+  sshLoginCommand: z.array(z.string().min(1).max(500)).min(1).max(20).optional(),
   image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,250}$/).default('aeeis-sandbox:3'),
   memoryMiB: z.number().int().min(128).max(16384).default(1024),
   cpus: z.number().min(0.25).max(16).default(2),
@@ -26,7 +29,8 @@ export const sandboxConfigSchema = z.object({
 }).strict()
   .refine(config => new Set(config.ports).size === config.ports.length && (config.network === 'bridge' || config.ports.length === 0), 'Ports must be unique and need the bridge network')
   .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
-  .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context');
+  .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context')
+  .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
@@ -39,10 +43,14 @@ export class SandboxError extends Error {
 /** ssh itself failed (exit 255): the remote host is paused, stopped, unreachable or refused the login.
  * Whether anything ran depends on the step, so callers decide the outcome; preparing a container ran nothing. */
 export class SandboxUnreachable extends SandboxError {
+  /** ssh's own "Permission denied (publickey,…)": authentication failed, so no remote command started. */
+  readonly loginRefused: boolean;
   constructor(host: string, stderr: string) {
-    super(/permission denied|certificate|publickey/i.test(stderr)
+    const refused = /Permission denied \(/.test(stderr);
+    super(refused || /certificate|publickey/i.test(stderr)
       ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
       : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
+    this.loginRefused = refused;
   }
 }
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
@@ -111,6 +119,8 @@ export class DockerSandbox {
    * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
   private unstopped = new Set<string>();
   private controlReady: Promise<string | undefined> | undefined;
+  private loginRefresh: Promise<void> | undefined;
+  private lastLoginRefresh = 0;
   private readonly owner: string;
   private readonly directory: string;
   constructor(readonly config: SandboxConfig, stateDirectory: string) {
@@ -134,6 +144,30 @@ export class DockerSandbox {
     return this.controlReady;
   }
   private async command(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    try { return await this.transport(args, timeoutMs, input, maxBytes); }
+    catch (error) {
+      if (!(error instanceof SandboxUnreachable) || !error.loginRefused || !this.config.sshLoginCommand) throw error;
+      // A refused login ran nothing remotely, so renewing the login and trying once more is safe for any command.
+      if (!await this.refreshLogin()) throw error;
+      return this.transport(args, timeoutMs, input, maxBytes);
+    }
+  }
+  /** Runs sshLoginCommand at most once per minute; concurrent refusals share one run. True if it succeeded. */
+  private async refreshLogin(): Promise<boolean> {
+    if (!this.loginRefresh) {
+      if (Date.now() - this.lastLoginRefresh < 60_000) return false;
+      this.lastLoginRefresh = Date.now();
+      const [command, ...args] = this.config.sshLoginCommand!;
+      this.loginRefresh = new Promise<void>((resolve, reject) => {
+        const child = spawn(command!, args, { stdio: 'ignore', env: process.env });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timed out')); }, 120_000);
+        child.once('error', error => { clearTimeout(timer); reject(error); });
+        child.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`exited ${code}`)); });
+      }).finally(() => { this.loginRefresh = undefined; });
+    }
+    return this.loginRefresh.then(() => true, () => false);
+  }
+  private async transport(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
     const control = await this.controlDirectory();
     return new Promise((resolve, reject) => {
       const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
