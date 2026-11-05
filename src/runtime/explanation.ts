@@ -21,7 +21,7 @@ export interface RunExplanation {
     updatedAt: string;
   };
   attention: {
-    kind: 'none' | 'approve_plan' | 'approve_action' | 'provide_input' | 'reconcile_external' | 'resume' | 'hand_back' | 'review' | 'inspect_failure';
+    kind: 'none' | 'approve_plan' | 'approve_action' | 'provide_input' | 'reconcile_external' | 'resume' | 'hand_back' | 'review' | 'inspect_failure' | 'inspect_derivation';
     nextAction: string;
     blockers: Array<{ kind: string; detail: string; refs: string[] }>;
   };
@@ -95,6 +95,8 @@ function attentionFor(run: AgentRun): RunExplanation['attention'] {
   if (run.status === 'paused') return { kind: 'resume', nextAction: '确认边界后恢复运行，或取消本次 Run。', blockers: [{ kind: 'paused', detail: 'Run 已暂停，外部结果不会自动唤醒它。', refs: [] }] };
   if (run.status === 'reviewing') return { kind: 'review', nextAction: '等待独立审核完成，或检查审核输入和证据。', blockers: [{ kind: 'review', detail: '产物已生成，正在等待独立 Reviewer。', refs: [] }] };
   if (run.status === 'failed') return { kind: 'inspect_failure', nextAction: '检查失败原因和证据，再决定重试、纠正或重新规划。', blockers: [{ kind: 'failure', detail: run.error ?? 'Run 执行失败', refs: [] }] };
+  const block = run.derivationBlocked;
+  if (block && !block.acknowledgedAt) return { kind: 'inspect_derivation', nextAction: `自动派生链已到 ${block.limit} 跳上限，系统没有继续创建${block.kind === 'project_pulse' ? '后续计划' : '协作'}。检查这条链是否在回环；要继续就手动开始一次（会作为新的起点）。`, blockers: [{ kind: 'derivation_depth', detail: block.reason, refs: [block.lineage.rootId, ...(block.decisionId ? [block.decisionId] : [])] }] };
   return { kind: 'none', nextAction: run.status === 'succeeded' ? '查看交付并决定是否创建后续计划。' : '继续观察执行时间线。', blockers: [] };
 }
 

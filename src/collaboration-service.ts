@@ -21,6 +21,7 @@ import {
   type IndependentEvaluator,
 } from './collaboration.js';
 import { resultEnvelopeSchema } from './protocol.js';
+import { lineageSchema, type Lineage } from './lineage.js';
 import type { Ownership } from './security/principal.js';
 import pg from 'pg';
 import { ModelOutcomeUnknown } from './runtime/model.js';
@@ -88,6 +89,8 @@ export const competitionRecordSchema = z.object({
   attempts: z.array(competitionAttemptSchema).max(12).default([]), evaluatorAttempt: evaluatorAttemptSchema.optional(),
   evaluatorAgentId: id.optional(), selectedAgentId: id.optional(), failureReason: z.string().max(4000).optional(), totalCost: z.number().nonnegative(),
   createdAt: isoDate, updatedAt: isoDate, completedAt: isoDate.optional(),
+  /** Read-only derivation chain position; only the Trigger Service sets it. */
+  lineage: lineageSchema.optional(),
 }).strict();
 export const debateRecordSchema = z.object({
   usage: collaborationUsageSchema.optional(),
@@ -95,6 +98,8 @@ export const debateRecordSchema = z.object({
   modelBudget: collaborationBudgetSchema.optional(),
   roles: debateRolesSchema.optional(), attempts: z.array(debateAttemptSchema).max(1000).default([]),
   createdAt: isoDate, updatedAt: isoDate, closedAt: isoDate.optional(), closeReason: z.string().max(4000).optional(),
+  /** Read-only derivation chain position; only the Trigger Service sets it. */
+  lineage: lineageSchema.optional(),
 }).strict();
 const stateSchema = z.object({ competitions: z.array(competitionRecordSchema).max(1000), debates: z.array(debateRecordSchema).max(1000) }).strict();
 const collaborationSummarySchema = z.object({ id, owner: z.string().min(1).max(200), tenantId: z.string().min(1).max(200), updatedAt: isoDate, size: z.number().nonnegative(), mtimeMs: z.number().nonnegative() }).strict();
@@ -115,6 +120,8 @@ const debateInputSchema = z.object({
 export type CompetitionRecord = z.infer<typeof competitionRecordSchema>;
 export type CompetitionAttempt = z.infer<typeof competitionAttemptSchema>;
 export type DebateRecord = z.infer<typeof debateRecordSchema>;
+/** Arguments only in-process callers pass; never parsed from a request body. */
+export interface CollaborationTrustedInput { externalInput?: ExternalInput; lineage?: Lineage }
 
 export interface CollaborationRepository {
   createCompetition(record: CompetitionRecord): Promise<void>;
@@ -557,13 +564,14 @@ export class CollaborationService {
     await this.globalBudget.ledger.markUnknown(selection.accountKey, this.globalKey(kind, aggregateId, slot));
   }
 
-  /** `externalInput` is only accepted through `trusted`, which the Trigger
-   * Service fills from a verified `external.message`; request bodies cannot set it. */
-  async createCompetition(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<CompetitionRecord> {
+  /** `externalInput` and `lineage` are only accepted through `trusted`, which
+   * the Trigger Service fills from a verified `external.message` and from the
+   * source object's chain; request bodies cannot set either. */
+  async createCompetition(input: unknown, scope?: Ownership, trusted?: CollaborationTrustedInput): Promise<CompetitionRecord> {
     const parsed = competitionInputSchema.parse(input);
     const brief = competitionBriefSchema.parse({ ...parsed, ...(trusted?.externalInput === undefined ? {} : { externalInput: trusted.externalInput }) });
     const now = new Date().toISOString();
-    const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', brief, status: 'collecting', candidates: [], scores: [], attempts: [], totalCost: 0, createdAt: now, updatedAt: now };
+    const record: CompetitionRecord = { schemaVersion: 1, id: `competition_${randomUUID()}`, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', brief, status: 'collecting', candidates: [], scores: [], attempts: [], totalCost: 0, createdAt: now, updatedAt: now, ...(trusted?.lineage === undefined ? {} : { lineage: lineageSchema.parse(trusted.lineage) }) };
     await this.repository.createCompetition(record); return record;
   }
 
@@ -882,13 +890,13 @@ export class CollaborationService {
     return this.repository.mutateCompetition(idValue, current => ({ ...current, status: 'partial', failureReason: clean, completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), scope);
   }
 
-  async createDebate(input: unknown, scope?: Ownership, trusted?: { externalInput?: ExternalInput }): Promise<DebateRecord> {
+  async createDebate(input: unknown, scope?: Ownership, trusted?: CollaborationTrustedInput): Promise<DebateRecord> {
     const parsed = debateInputSchema.parse(input); const externalInput = trusted?.externalInput; const now = new Date().toISOString(); const idValue = `debate_${randomUUID()}`;
     const roomBase = { debateId: idValue, taskId: parsed.taskId, contextVersion: parsed.contextVersion, ...(parsed.goal === undefined ? {} : { goal: parsed.goal }), ...(parsed.context === undefined ? {} : { context: parsed.context }), ...(externalInput === undefined ? {} : { externalInput }), participantAgentIds: parsed.participantAgentIds, ...(parsed.maxRounds === undefined ? {} : { maxRounds: parsed.maxRounds }), ...(parsed.maxMessagesPerAgent === undefined ? {} : { maxMessagesPerAgent: parsed.maxMessagesPerAgent }), messages: [] };
     const room: DebateRoom = parsed.maxTotalMessages === undefined
       ? debateRoomSchema.parse(roomBase)
       : debateRoomSchema.parse({ ...roomBase, maxTotalMessages: parsed.maxTotalMessages });
-    const record: DebateRecord = { schemaVersion: 1, id: idValue, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', room, status: 'active', attempts: [], ...(parsed.modelBudget ? { modelBudget: parsed.modelBudget } : {}), createdAt: now, updatedAt: now };
+    const record: DebateRecord = { schemaVersion: 1, id: idValue, owner: scope?.owner ?? 'owner', tenantId: scope?.tenantId ?? 'local', room, status: 'active', attempts: [], ...(parsed.modelBudget ? { modelBudget: parsed.modelBudget } : {}), createdAt: now, updatedAt: now, ...(trusted?.lineage === undefined ? {} : { lineage: lineageSchema.parse(trusted.lineage) }) };
     await this.repository.createDebate(record); return record;
   }
 

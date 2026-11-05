@@ -1196,6 +1196,13 @@ export function buildApp(options: Options) {
       title: `${run.status === 'needs_approval' ? '等你批准' : '等你回答'}：${clip(run.goal, 60)}`,
       body: clip(run.status === 'needs_input' ? run.question?.text ?? 'Bot 需要一条补充信息才能继续。' : run.plans.at(-1)?.summary ?? '计划等你批准后才会执行。', 160),
     }));
+    // A derivation chain the depth limit stopped needs a person to decide
+    // whether to start it again by hand.
+    for (const run of await options.repository.list(scope, 200)) {
+      const block = run.derivationBlocked;
+      if (!block || block.acknowledgedAt) continue;
+      messages.push({ kind: 'derivation_blocked', key: `derivation:${run.id}:${block.at}`, url: `/runs/${run.id}`, title: `自动派生已停止：${clip(run.goal, 60)}`, body: clip(`这条自动派生链已到 ${block.limit} 跳上限，没有再创建${block.kind === 'project_pulse' ? '后续计划' : '协作'}。要继续就手动开始一次。`, 160) });
+    }
     if (channelBoard) for (const hold of await channelBoard.holdings(scope.owner, scope.tenantId)) {
       if (!hold.blocked) continue;
       messages.push({ kind: 'blocked', roomId: hold.roomId, key: `block:${hold.roomId}:${hold.conversationId}:${hold.taskId}:${hold.blockedAt ?? ''}`, url: `/#room=${encodeURIComponent(hold.roomId)}`, title: `阻塞：${clip(hold.title ?? '频道里的事', 60)}`, body: clip(`${hold.blocked}${hold.roomTitle ? ` · ${hold.roomTitle}` : ''}`, 160) });
@@ -1667,7 +1674,7 @@ export function buildApp(options: Options) {
   app.post('/api/collaborations/triggers/evaluate', async request => {
     if (!options.collaborationTriggers) throw new Conflict('Collaboration trigger service is not configured');
     const principal = principalOf(request);
-    const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true }).parse(request.body);
+    const body = collaborationTriggerEventSchema.omit({ schemaVersion: true, owner: true, tenantId: true, lineage: true }).parse(request.body);
     return options.collaborationTriggers.evaluate({ ...body, schemaVersion: 'collaboration-trigger-event/1', owner: principal.id, tenantId: principal.tenantId }, { owner: principal.id, tenantId: principal.tenantId });
   });
   // Worker bridges use this route for internal system events. The worker
@@ -2329,6 +2336,22 @@ export function buildApp(options: Options) {
     const run = await options.engine.create({ goal: goal.title, goalId: goal.id, ...body }, principal.id, principal.tenantId);
     await notify(run.id); return reply.code(202).send({ id: run.id, goalId: goal.id });
   });
+  // A derivation the depth limit refused waits in the inbox until its owner
+  // has looked at it. Acknowledging only hides the notice; it never resumes
+  // the chain. A person who wants more starts a new root.
+  app.post<{ Params: { id: string } }>('/api/runs/:id/derivation-block/acknowledge', async request => {
+    const principal = principalOf(request);
+    const before = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    z.object({}).strict().parse(request.body ?? {});
+    if (!before.derivationBlocked) throw new Conflict('This Run has no blocked derivation');
+    if (before.derivationBlocked.acknowledgedAt) return runSummary(before);
+    const run = await options.repository.mutate(before.id, current => {
+      if (!current.derivationBlocked || current.derivationBlocked.acknowledgedAt) return;
+      current.derivationBlocked = { ...current.derivationBlocked, acknowledgedAt: new Date().toISOString() };
+      event(current, 'derivation.block_acknowledged', { actor: principal.id, ...(current.derivationBlocked.decisionId ? { decisionId: current.derivationBlocked.decisionId } : {}) });
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return runSummary(run);
+  });
   app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async request => {
     const { id } = request.params;
     const principal = principalOf(request);
@@ -2538,9 +2561,9 @@ function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
 
-function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
+function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt' | 'lineage' | 'derivationBlocked'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
   const inputRequest = runInputRequest(run);
-  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}) };
+  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}), ...(run.lineage ? { lineage: run.lineage } : {}), ...(run.derivationBlocked ? { derivationBlocked: run.derivationBlocked } : {}) };
 }
 async function readableRunCandidates(repository: RunRepository, domain: AeeisService | undefined, principal: Principal): Promise<AgentRun[]> {
   const all = principal.roles.includes('operator')

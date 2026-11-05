@@ -50,6 +50,7 @@ import { threadHistoryGuidance, threadHistoryInput, threadHistorySources } from 
 import { threadHistoryAccessProvenance, type ThreadHistoryAccess } from './thread-history.js';
 
 import { canonicalize, digest } from './digest.js';
+import { childLineage, DEFAULT_MAX_DERIVATION_DEPTH, lineageOf, lineageSchema, validMaxDerivationDepth, type DerivationBlock, type Lineage } from '../lineage.js';
 export { digest } from './digest.js';
 const now = (): string => new Date().toISOString();
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
@@ -919,6 +920,9 @@ export class AgentEngine {
   private globalBudget: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector } | undefined;
   private resourceRegistry: ResourceRegistry | undefined;
   private actionPolicies: ActionPolicyStore | undefined;
+  /** Most automatic hops a derivation chain may take before the runtime stops
+   * deriving successors (Project Pulse next actions). */
+  readonly maxDerivationDepth: number;
   private readonly maxRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RECOVERABLE_TOOL_FAILURES ?? 3);
   private readonly maxRunRecoverableToolFailures = z.coerce.number().int().nonnegative().parse(process.env.AEEIS_MAX_RUN_RECOVERABLE_TOOL_FAILURES ?? 8);
   /** Counts the failure just recorded, so the limit matches the check made before recording one. */
@@ -936,8 +940,9 @@ export class AgentEngine {
     callMaxMs: z.coerce.number().int().min(10_000).parse(process.env.AEEIS_MODEL_CALL_MAX_MS ?? 420_000),
     minCallMs: z.coerce.number().int().min(1_000).parse(process.env.AEEIS_MODEL_CALL_MIN_MS ?? 60_000),
   };
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; actionPolicies?: ActionPolicyStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry }) {
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; actionPolicies?: ActionPolicyStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry; maxDerivationDepth?: number }) {
     this.executionLimits = executionLimitsSchema.parse('complete' in modelOrServices ? {} : modelOrServices.executionLimits ?? {});
+    this.maxDerivationDepth = validMaxDerivationDepth(('complete' in modelOrServices ? undefined : modelOrServices.maxDerivationDepth) ?? DEFAULT_MAX_DERIVATION_DEPTH);
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
     else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.projectSources = modelOrServices.projectSources; this.projectSourceCheckpoints = modelOrServices.projectSourceCheckpoints; this.actionPolicies = modelOrServices.actionPolicies; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.brainSemanticSearcher = modelOrServices.brainSemanticSearcher; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; this.globalBudget = modelOrServices.globalBudget; this.resourceRegistry = modelOrServices.resourceRegistry; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
@@ -1052,7 +1057,9 @@ export class AgentEngine {
       if (memoryManifestId) await this.domain.getContextManifest(goalId, memoryManifestId, scope.owner, scope.tenantId);
     }
   }
-  async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>, reservedRunId?: string, checkpoint?: CreateRunCheckpoint): Promise<AgentRun> {
+  /** `trusted.lineage` comes only from an in-process creator deriving this Run
+   * from a parent; the strict request schema rejects it in `input`. */
+  async create(input: unknown, owner = 'owner', tenantId = 'local', commit?: (run: AgentRun) => Promise<AgentRun>, reservedRunId?: string, checkpoint?: CreateRunCheckpoint, trusted?: { lineage?: Lineage }): Promise<AgentRun> {
     const principal = validatePrincipal({ id: owner, tenantId, roles: ['owner'] });
     const audience = principalAudience(principal);
     const request = requestSchema.parse(input);
@@ -1248,6 +1255,7 @@ export class AgentEngine {
       schemaVersion: 1, id: pendingRunId, revision: 0, owner, tenantId, goal: request.goal,
       ...(request.goalId ? { goalId: request.goalId } : {}),
       ...(request.taskExecution ? { domainPlanId: request.taskExecution.domainPlanId, taskExecution: { ...request.taskExecution, requestHash: taskRequestHash! } } : {}),
+      ...(trusted?.lineage ? { lineage: lineageSchema.parse(trusted.lineage) } : {}),
       status: 'queued', createdAt: timestamp, updatedAt: timestamp,
       context: { id: contextId, audience: [audience], sources, manifestHash: contextManifestHash, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: digest(memoryManifest), memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSync } : {}) }, privacy: request.privacy,
       capabilityCatalogVersion: 1, approvedAgents,
@@ -3636,7 +3644,7 @@ export class AgentEngine {
     if (!this.domain) return;
     const run = await this.repository.get(runId);
     if (run.status !== 'succeeded' || !run.goalId || !usesProjectPulse(run)) return;
-    if (run.events.some(item => item.type === 'project-pulse.next-actions.projected')) return;
+    if (run.events.some(item => item.type === 'project-pulse.next-actions.projected' || item.type === 'derivation.blocked')) return;
     const artifact = [...run.artifacts].reverse().find(item => item.artifactType === 'project-pulse/1' && item.structured);
     const actions: ProjectPulseArtifact['nextActions'] = artifact?.artifactType === 'project-pulse/1' && artifact.structured?.schemaVersion === 'project-pulse/1' ? artifact.structured.nextActions : [];
     if (!artifact || actions.length === 0) return;
@@ -3653,7 +3661,20 @@ export class AgentEngine {
       });
       return;
     }
-    const plan = await this.domain.createPlanRevision({ goalId: run.goalId, nodes }, undefined, run.owner, run.tenantId ?? 'local', { reopenGoal: true });
+    // The successor Plan is one automatic hop from this Run. Past the limit
+    // nothing is derived; the Run asks a person instead. A person scheduling
+    // the Goal again starts a new root.
+    const lineage = childLineage(lineageOf(run));
+    if (lineage.depth > this.maxDerivationDepth) {
+      await this.repository.mutate(runId, current => {
+        if (current.events.some(item => item.type === 'derivation.blocked')) return;
+        const block: DerivationBlock = { kind: 'project_pulse', lineage, limit: this.maxDerivationDepth, reason: `Derivation chain ${lineage.rootId} reached depth ${lineage.depth}, over the limit of ${this.maxDerivationDepth}; no successor Plan was created for ${actions.length} next action(s)`, at: now() };
+        current.derivationBlocked = block;
+        event(current, 'derivation.blocked', { ...block, artifactId: artifact.id });
+      });
+      return;
+    }
+    const plan = await this.domain.createPlanRevision({ goalId: run.goalId, nodes }, undefined, run.owner, run.tenantId ?? 'local', { reopenGoal: true, lineage });
     await this.repository.mutate(runId, current => {
       const previousPlanId = current.domainPlanId;
       current.followUpPlanId = plan.id;

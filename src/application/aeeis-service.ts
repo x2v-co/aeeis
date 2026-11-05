@@ -24,6 +24,7 @@ import type {
   TransitionTaskInput,
 } from "../contracts.js";
 import { createPlan, refreshReadyTasks, transitionTask } from "../domain/plan.js";
+import { lineageSchema, type Lineage } from '../lineage.js';
 import type { AeeisStore, GoalPage, PlanPage, RoomPage } from "../adapters/in-memory-store.js";
 import { MemoryWriteConflict, PlanWriteConflict, RoomWriteConflict } from "../adapters/task-commit.js";
 import { principalAudience, validatePrincipal } from '../security/principal.js';
@@ -326,12 +327,15 @@ export class AeeisService {
 
   /** Create an immutable successor plan for a goal. Older plan versions remain
    * addressable so execution receipts and evidence can still point to them. */
-  async createPlanRevision(input: CreatePlanInput, now = new Date().toISOString(), owner = "owner", tenantId = "local", options: { reopenGoal?: boolean } = {}): Promise<Plan> {
+  /** `options.lineage` is set only by the runtime when it derives this Plan
+   * from a Run (Project Pulse next actions); a Plan a person creates is a root. */
+  async createPlanRevision(input: CreatePlanInput, now = new Date().toISOString(), owner = "owner", tenantId = "local", options: { reopenGoal?: boolean; lineage?: Lineage } = {}): Promise<Plan> {
     const goal = await this.assertEditorGoal(await this.store.getGoal(input.goalId), input.goalId, owner, tenantId);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const versions = await this.store.getPlans(input.goalId);
       const nextVersion = versions.reduce((maximum, plan) => Math.max(maximum, plan.version), 0) + 1;
-      const plan = createPlan(`plan_${randomUUID()}`, input.goalId, nextVersion, input.nodes, now);
+      const created = createPlan(`plan_${randomUUID()}`, input.goalId, nextVersion, input.nodes, now);
+      const plan: Plan = options.lineage ? { ...created, lineage: lineageSchema.parse(options.lineage) } : created;
       try {
         const projectionGoal = options.reopenGoal && goal.status !== 'active' ? { ...goal, status: 'active' as const } : goal;
         await this.store.commitPlanCreation(plan, this.buildPlanProjectionIntents(projectionGoal, plan), options.reopenGoal ?? false);
