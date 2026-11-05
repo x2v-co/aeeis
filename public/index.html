@@ -922,6 +922,7 @@
 <nav class="settings-index" aria-label="设置分区">
 <a href="#new-run-panel">默认与边界</a>
 <a href="#settings-actions">动作清单</a>
+<a href="#settings-grants">授权</a>
 <a href="#settings-access">访问</a>
 <a href="#settings-goals">目标、Room 与提醒</a>
 <a href="#rsi-panel">自我改进</a>
@@ -1020,6 +1021,31 @@
 <button type="submit">加入</button>
 </form>
 <p id="action-policy-note" class="muted" role="status"></p>
+</section>
+<section id="settings-grants" class="settings-section" aria-labelledby="settings-grants-title">
+<h2 id="settings-grants-title">授权</h2>
+<p class="muted">一份授权写明 Bot 可以用哪些工具和代理、能花多少、到什么时候。在发送框的「权限」里选它之后，计划在授权范围内就直接做，重新规划也不再等你。只在 Run 自己工作区里的动作直接执行；发消息、发布、推送、购买、删除这类对外的动作仍然先问你，授权不能覆盖。每件 Run 开始时预留一份预算；撤销后进行中的 Run 会暂停。</p>
+<div id="work-grant-list" class="work-grant-list"></div>
+<form id="work-grant-add" class="work-grant-add">
+<label for="work-grant-title">名称</label>
+<input id="work-grant-title" maxlength="200" required placeholder="例如：官网改版">
+<label for="work-grant-tools">工具</label>
+<input id="work-grant-tools" maxlength="2000" placeholder="逗号分隔，例如 read, write, shell, process" autocomplete="off">
+<label for="work-grant-agents">代理</label>
+<input id="work-grant-agents" maxlength="2000" placeholder="逗号分隔，可留空" autocomplete="off">
+<label for="work-grant-run-tokens">每件 Run tokens 上限</label>
+<input id="work-grant-run-tokens" type="number" min="1" step="1" placeholder="例如 200000">
+<label for="work-grant-total-tokens">总 tokens 上限</label>
+<input id="work-grant-total-tokens" type="number" min="1" step="1" placeholder="例如 2000000">
+<label for="work-grant-run-usd">每件 Run 金额上限（USD）</label>
+<input id="work-grant-run-usd" type="number" min="0.01" step="0.01">
+<label for="work-grant-total-usd">总金额上限（USD）</label>
+<input id="work-grant-total-usd" type="number" min="0.01" step="0.01">
+<label for="work-grant-hours">有效期</label>
+<select id="work-grant-hours"><option value="8">8 小时</option><option value="24" selected>1 天</option><option value="72">3 天</option><option value="168">7 天</option></select>
+<button type="submit">创建授权</button>
+</form>
+<p id="work-grant-note" class="muted" role="status"></p>
 </section>
 <section id="settings-notify" class="settings-section" aria-labelledby="settings-notify-title">
 <h2 id="settings-notify-title">通知</h2>

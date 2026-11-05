@@ -53,6 +53,9 @@ export interface ToolGateway {
   reconcile?: ((request: ToolInvocation, receipt: Receipt) => Promise<ToolResult>) | undefined;
   /** Optional read-only protocol/dependency probe. It must not invoke a tool. */
   health?(): Promise<{ ready: boolean; detail: string; checkedAt?: string }>;
+  /** Tool ids whose every effect this gateway's own code confines to the Run's isolated workspace. It is never read
+   * from tool metadata: a remote toolkit cannot claim it. A Work Grant lets only these run without asking. */
+  workspaceContainedTools?(): Promise<string[]>;
 }
 
 /** Streamable JSON-RPC MCP client used for the normal AEEIS -> Toolkit path. */

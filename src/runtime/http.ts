@@ -77,6 +77,7 @@ import { ChannelIdentityUnavailable } from '../security/channel-identity.js';
 import type { SessionEventService } from '../session-events.js';
 import { ChannelBoardService } from '../channel-board.js';
 import { ActionPolicyConflict, ownerActionPolicyChangeSchema, type ActionPolicyStore } from '../action-policy-store.js';
+import { createWorkGrantSchema, WorkGrantConflict, WorkGrantNotFound, workGrantRemaining, workGrantState, type WorkGrant, type WorkGrantStore } from '../work-grant-store.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
 import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
@@ -84,7 +85,7 @@ import { releaseHeldBotTasks } from '../release-owned-bot.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<void>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
-interface Options { taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -559,7 +560,8 @@ export function buildApp(options: Options) {
     if (error instanceof FeishuSignatureError || error instanceof RoutineSignatureError) return reply.code(401).send({ error: error.message });
     if (error instanceof ContentEncryptionUnavailable) return reply.code(503).send({ error: 'Content encryption unavailable' });
     if (error instanceof RoutineRateLimitError) return reply.header('retry-after', error.retryAfter).code(429).send({ error: error.message });
-    if (error instanceof RoutineNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof RoutineNotFound || error instanceof WorkGrantNotFound) return reply.code(404).send({ error: error.message });
+    if (error instanceof WorkGrantConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof RoutineConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof AgentResponseRejected) return reply.code(400).send({ error: 'Agent response rejected', kind: error.kind, detail: error.message });
     if (error instanceof BrainConflict) return reply.code(409).send({ error: error.message });
@@ -1317,6 +1319,26 @@ export function buildApp(options: Options) {
     const principal = principalOf(request);
     const policy = await options.actionPolicies.change({ owner: principal.id, tenantId: principal.tenantId }, ownerActionPolicyChangeSchema.parse(request.body));
     return { allow: policy.allow, block: policy.block, revision: policy.revision, ...(policy.updatedAt ? { updatedAt: policy.updatedAt } : {}) };
+  });
+  // Work Grants: the owner's scoped authorization. Only the owner's own principal creates or revokes one.
+  const grantView = (grant: WorkGrant) => ({ ...grant, state: workGrantState(grant), remaining: workGrantRemaining(grant), runCount: grant.allocations.length });
+  const workGrantStore = () => { if (!options.workGrants) throw new Conflict('Work grant store is not configured'); return options.workGrants; };
+  app.get('/api/work-grants', async request => {
+    const principal = principalOf(request);
+    const grants = await workGrantStore().list({ owner: principal.id, tenantId: principal.tenantId });
+    return { grants: grants.map(grantView).reverse() };
+  });
+  app.post('/api/work-grants', async (request, reply) => {
+    const principal = principalOf(request);
+    const grant = await workGrantStore().create({ owner: principal.id, tenantId: principal.tenantId }, createWorkGrantSchema.parse(request.body));
+    return reply.code(201).send(grantView(grant));
+  });
+  app.post<{ Params: { id: string } }>('/api/work-grants/:id/revoke', async request => {
+    const principal = principalOf(request);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    if (!options.engine) return grantView(await workGrantStore().revoke(scope, request.params.id));
+    const result = await options.engine.revokeWorkGrant(request.params.id, scope);
+    return { ...grantView(result.grant), pausedRunIds: result.pausedRunIds, affectedRunIds: result.affectedRunIds };
   });
   app.get<{ Params: { id: string } }>('/api/goals/:id', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');

@@ -93,6 +93,12 @@ export class LocalToolGateway implements ToolGateway {
     const image = this.config.tools.some(id => id !== 'web-fetch') ? await this.sandbox.imageId() : null;
     return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}`, capabilities: ['python', 'shell', 'process'].includes(id) ? ['execute', 'read', 'write', ...(this.config.sandbox.network === 'none' ? [] : ['network'])] : id === 'write' ? ['write'] : id === 'web-fetch' ? ['read', 'network'] : ['read'], inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
   }
+  /** File tools only touch this Run's container workspace. Code-running tools are confined only when the container
+   * has no network: with a network they can reach any host, so a Work Grant does not let them run unasked. */
+  async workspaceContainedTools(): Promise<string[]> {
+    const runsCode = (id: string) => ['python', 'shell', 'process'].includes(id);
+    return this.config.tools.filter(id => id !== 'web-fetch' && (!runsCode(id) || this.config.sandbox.network === 'none'));
+  }
   async health() {
     if (this.config.tools.some(id => id !== 'web-fetch')) return this.sandbox.health();
     return { ready: !this.closing, detail: 'Allowlisted HTTPS tools ready', checkedAt: new Date().toISOString() };
@@ -205,6 +211,9 @@ export class CombinedToolGateway implements ToolGateway {
     throw new Error('Tool is not configured');
   }
   async invoke(request: ToolInvocation) { return (await this.gateway(request)).invoke(request); }
+  async workspaceContainedTools(): Promise<string[]> {
+    return (await Promise.all(this.gateways.map(gateway => gateway.workspaceContainedTools?.() ?? Promise.resolve([])))).flat();
+  }
   async reconcile(request: ToolInvocation, receipt: Receipt) {
     const gateway = await this.gateway(request);
     if (!gateway.reconcile) throw new Error('Provider does not support reconciliation');

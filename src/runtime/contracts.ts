@@ -94,6 +94,8 @@ export const requestSchema = z.object({
   actionPolicy: actionPolicySchema.optional(),
   /** Who started this Run. Missing means the owner. A non-owner origin only adds review. */
   origin: actionOriginSchema.optional(),
+  /** The owner's Work Grant this Run works under. Plans inside it need no approval; it cannot be combined with executionReview. */
+  workGrantId: z.string().regex(/^wg_[a-f0-9]{32}$/).optional(),
 }).strict();
 export const nodeSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
@@ -321,6 +323,10 @@ export interface Step {
 /** One thing the person did in the Bot's own tool session (its Run machine) while they had it taken over. */
 export interface TakeoverAction { at: string; toolId: string; summary: string; status: 'completed' | 'failed' | 'unknown'; receiptId: string }
 
+export interface WorkGrantSnapshot {
+  grantId: string; digest: string; title: string; tools: string[]; agents: string[]; containedTools: string[];
+  expiresAt: string; allocation: { tokens?: number; moneyUsd?: number }; revokedAt?: string;
+}
 export interface AgentRun {
   /** Private runtime originals and derived summaries; never project into debug/share views. */
   workingMemory?: WorkingMemory;
@@ -407,6 +413,9 @@ export interface AgentRun {
   actionPolicy?: ActionPolicy;
   /** Digest of the policy as frozen at creation, so later edits to the owner's lists are visibly not this Run's. */
   actionPolicyDigest?: string;
+  /** Frozen at creation from the owner's Work Grant. `containedTools` are the granted tools whose effects the tool
+   * gateway confines to this Run's workspace; only they run without asking. `revokedAt` is the one later change. */
+  workGrant?: WorkGrantSnapshot;
   /** Frozen at creation. Missing means the owner started the Run. */
   origin?: ActionOrigin;
   /** One external side effect waiting for, or settled by, an owner decision. It is separate from plan approval. */
@@ -427,6 +436,11 @@ export interface AgentRun {
   /** How an interrupted model call should be handled after provider reconciliation. */
   reconcileDisposition?: 'running' | 'paused' | 'cancelled';
   reconciledModelCall?: ReconciledModelCall;
+}
+
+export interface WorkGrantSnapshot {
+  grantId: string; digest: string; title: string; tools: string[]; agents: string[]; containedTools: string[];
+  expiresAt: string; allocation: { tokens?: number; moneyUsd?: number }; revokedAt?: string;
 }
 
 /** Decode model transport formatting without changing executable semantics. */

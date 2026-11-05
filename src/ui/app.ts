@@ -927,6 +927,89 @@ $('action-policy-add')?.addEventListener('submit', event => {
   void changeActionPolicy({ add: { list, ref } }, `已把 ${ref} 加到「${list === 'allow' ? '允许' : '阻止'}」。下一件 Run 开始生效。`).then(() => { if (input) input.value = ''; });
 });
 document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-actions"]')?.addEventListener('click', () => { void loadActionPolicy(); });
+interface WorkGrantView {
+  grantId: string; title: string; tools: string[]; agents: string[]; expiresAt: string; runCount: number;
+  state: 'active' | 'revoked' | 'expired' | 'exhausted'; remaining: { tokens?: number; moneyUsd?: number };
+}
+const WORK_GRANT_STATE: Record<WorkGrantView['state'], string> = { active: '有效', revoked: '已撤销', expired: '已过期', exhausted: '预算用完' };
+let workGrants: WorkGrantView[] = [];
+/** The owner's Work Grants on the Settings page, and as choices in the composer's permission menu. */
+async function loadWorkGrants(): Promise<void> {
+  const list = $('work-grant-list');
+  try { workGrants = (await api<{ grants: WorkGrantView[] }>('/work-grants')).grants ?? []; }
+  catch (error) { list?.replaceChildren(element('p', `读不到授权：${errorMessage(error)}`, 'muted')); return; }
+  renderWorkGrants();
+  syncWorkGrantChoices();
+}
+function workGrantSummary(grant: WorkGrantView): string {
+  const left = [grant.remaining.tokens === undefined ? '' : `剩 ${grant.remaining.tokens.toLocaleString()} tokens`, grant.remaining.moneyUsd === undefined ? '' : `剩 $${grant.remaining.moneyUsd}`].filter(Boolean).join('、');
+  const scope = [grant.tools.length ? `工具 ${grant.tools.join('、')}` : '', grant.agents.length ? `代理 ${grant.agents.join('、')}` : ''].filter(Boolean).join(' · ');
+  return `${WORK_GRANT_STATE[grant.state]} · ${scope} · ${left} · ${grant.runCount} 件 Run · 到 ${new Date(grant.expiresAt).toLocaleString()}`;
+}
+function renderWorkGrants(): void {
+  const list = $('work-grant-list');
+  if (!list) return;
+  list.replaceChildren();
+  if (!workGrants.length) { list.append(element('small', '还没有授权。')); return; }
+  for (const grant of workGrants) {
+    const row = element('div', '', 'action-policy-item');
+    row.dataset.workGrant = grant.grantId;
+    row.append(element('strong', grant.title), element('small', workGrantSummary(grant)));
+    if (grant.state !== 'revoked') {
+      const revoke = dashboardButton('撤销', () => revokeWorkGrant(grant));
+      revoke.dataset.workGrantRevoke = grant.grantId;
+      row.append(revoke);
+    }
+    list.append(row);
+  }
+}
+async function revokeWorkGrant(grant: WorkGrantView): Promise<void> {
+  const note = $('work-grant-note');
+  try {
+    const result = await api<{ pausedRunIds?: string[] }>(`/work-grants/${encodeURIComponent(grant.grantId)}/revoke`, {});
+    if (note) note.textContent = `已撤销「${grant.title}」${result.pausedRunIds?.length ? `，暂停了 ${result.pausedRunIds.length} 件进行中的 Run` : ''}。`;
+  } catch (error) { if (note) note.textContent = errorMessage(error); }
+  await loadWorkGrants();
+}
+/** Active grants appear in the permission menu after the three review modes. */
+function syncWorkGrantChoices(): void {
+  const select = $<HTMLSelectElement>('execution-review');
+  if (!select) return;
+  const chosen = select.value;
+  select.querySelector('optgroup[data-work-grants]')?.remove();
+  const active = workGrants.filter(grant => grant.state === 'active');
+  if (active.length) {
+    const group = document.createElement('optgroup');
+    group.label = '授权'; group.dataset.workGrants = '';
+    for (const grant of active) { const option = document.createElement('option'); option.value = `grant:${grant.grantId}`; option.textContent = `授权：${grant.title}`; group.append(option); }
+    select.append(group);
+  }
+  const saved = (() => { try { return localStorage.getItem('aeeis.execution-review'); } catch { return null; } })();
+  const wanted = chosen.startsWith('grant:') ? chosen : saved?.startsWith('grant:') ? saved : chosen;
+  select.value = [...select.options].some(option => option.value === wanted) ? wanted : chosen.startsWith('grant:') ? 'auto' : chosen;
+  updateConversationControls();
+}
+/** The grant chosen in the permission menu, if any. */
+function selectedWorkGrant(): WorkGrantView | undefined {
+  const value = $<HTMLSelectElement>('execution-review')?.value ?? '';
+  return value.startsWith('grant:') ? workGrants.find(grant => grant.grantId === value.slice('grant:'.length) && grant.state === 'active') : undefined;
+}
+$('work-grant-add')?.addEventListener('submit', event => {
+  event.preventDefault();
+  const note = $('work-grant-note');
+  const ids = (fieldId: string) => ($<HTMLInputElement>(fieldId)?.value ?? '').split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
+  const num = (fieldId: string) => { const value = $<HTMLInputElement>(fieldId)?.value.trim(); return value ? Number(value) : undefined; };
+  const perRun = { ...(num('work-grant-run-tokens') === undefined ? {} : { tokens: num('work-grant-run-tokens') }), ...(num('work-grant-run-usd') === undefined ? {} : { moneyUsd: num('work-grant-run-usd') }) };
+  const total = { ...(num('work-grant-total-tokens') === undefined ? {} : { tokens: num('work-grant-total-tokens') }), ...(num('work-grant-total-usd') === undefined ? {} : { moneyUsd: num('work-grant-total-usd') }) };
+  const body = { title: $<HTMLInputElement>('work-grant-title')?.value.trim() ?? '', tools: ids('work-grant-tools'), agents: ids('work-grant-agents'), budget: { perRun, total }, durationHours: Number($<HTMLSelectElement>('work-grant-hours')?.value ?? 24) };
+  void api<WorkGrantView>('/work-grants', body).then(async grant => {
+    if (note) note.textContent = `已创建「${grant.title}」。在发送框的「权限」里选它即可。`;
+    ($('work-grant-add') as HTMLFormElement).reset();
+    await loadWorkGrants();
+  }).catch(error => { if (note) note.textContent = errorMessage(error); });
+});
+document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-grants"]')?.addEventListener('click', () => { void loadWorkGrants(); });
+void loadWorkGrants();
 void loadActionPolicy();
 // The Settings page's own index: jump within the open pane without changing the URL.
 document.querySelectorAll<HTMLAnchorElement>('nav.settings-index a').forEach(link => {
@@ -5236,7 +5319,7 @@ $('accepted-practice-retract')?.addEventListener('click', () => {
   void retractPractice().catch(error => { $('conversation-error').textContent = errorMessage(error); });
 });
 $('execution-review')?.addEventListener('change', () => {
-  localStorage.setItem('aeeis.execution-review', executionReviewValue());
+  localStorage.setItem('aeeis.execution-review', selectedWorkGrant() ? `grant:${selectedWorkGrant()!.grantId}` : executionReviewValue());
   updateConversationControls();
 });
 for (const id of ['conversation-text', 'conversation-task-title', 'allowed-tools', 'allowed-agents', 'builtin-skill', 'external-budget-calls', 'external-budget-tokens', 'external-budget-usd']) {
@@ -7582,10 +7665,13 @@ function restoreExecutionReview(): void {
   const saved = localStorage.getItem('aeeis.execution-review');
   const select = $<HTMLSelectElement>('execution-review');
   if (!select) return;
-  // Default is auto: a small task runs, and a real plan waits. YOLO runs the plan too.
+  // Default is auto: a small task runs, and a real plan waits. YOLO runs the plan too. A saved grant is restored once grants load.
+  if (saved?.startsWith('grant:') && [...select.options].some(option => option.value === saved)) { select.value = saved; return; }
   select.value = saved === 'required' || saved === 'yolo' ? saved : 'auto';
 }
 function executionReviewNote(): string {
+  const grant = selectedWorkGrant();
+  if (grant) return `授权「${grant.title}」：计划在授权范围内就直接做，重新规划也不再等你；只在工作区里的动作直接执行，对外的动作仍先问你。${workGrantSummary(grant)}。`;
   const mode = executionReviewValue();
   const decision = currentPlanningDecision();
   const gate = mode === 'yolo'
@@ -7605,6 +7691,8 @@ function executionReviewNote(): string {
 /** One line under the entry composer: what the next run will use, read from the Settings fields it is sent with. */
 function entryDefaultsText(): string {
   const review = executionReviewValue();
+  const grant = selectedWorkGrant();
+  if (grant) return `默认：授权「${grant.title}」 · ${workGrantSummary(grant)}`;
   const parts = [review === 'yolo' ? '计划不停，直接执行' : review === 'auto' ? '自动审核' : '每份计划都要你批准'];
   const money = $<HTMLInputElement>('model-budget-usd')?.value.trim();
   const tokens = $<HTMLInputElement>('model-budget-tokens')?.value.trim();
@@ -7623,7 +7711,9 @@ function syncEntryDefaults(): void {
   $('entry-defaults-text').textContent = entryDefaultsText();
 }
 function goalExecutionOptions(): Record<string, unknown> {
-  return { ...runOptions(false), executionReview: 'required' };
+  // Goal tasks keep plan approval; a grant chosen in the composer does not carry over to them.
+  const { workGrantId: _grant, allowedTools: _tools, ...options } = runOptions(false);
+  return { ...options, allowedTools: listedIds('allowed-tools'), executionReview: 'required' };
 }
 function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
@@ -7652,7 +7742,12 @@ function runOptions(includeProjectQuery = true, goal = ''): Record<string, unkno
     ...selectedMaterialFiles.map(file => ({ title: file.name, source: `browser-file:${file.name}`, content: file.content })),
   ];
   const planning = includeProjectQuery ? currentPlanningDecision(goal || conversationExecutionGoal()).shape : undefined;
-  return { executionReview: executionReviewValue(), ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  // Under a grant the grant supplies tools, agents and the model budget, and decides which plans wait.
+  const grant = selectedWorkGrant();
+  const scope = grant
+    ? { workGrantId: grant.grantId, allowedTools: [] as string[] }
+    : { executionReview: executionReviewValue(), allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}) };
+  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
