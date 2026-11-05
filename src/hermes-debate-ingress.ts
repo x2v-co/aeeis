@@ -48,7 +48,7 @@ export interface HermesDebateIngressOptions {
 
 export type HermesIngressResult =
   | { status: 'accepted' | 'duplicate'; debate: DebateRecord; externalEventId: string }
-  | { status: 'ignored'; reason: 'unmapped_room' | 'unmapped_sender' | 'sender_not_admitted' };
+  | { status: 'ignored'; reason: 'unmapped_room' | 'unmapped_sender' | 'sender_not_admitted' | 'decision_not_allowed' };
 
 /**
  * Versioned bridge contract for the local Hermes Feishu-debate skill.
@@ -108,6 +108,9 @@ export class HermesDebateIngress {
     const externalEventId = event.eventId;
     const debate = await this.options.collaboration.getDebate(route.debateId, ownership(route));
     if (!debate.room.participantAgentIds.includes(speakerAgentId)) return { status: 'ignored', reason: 'sender_not_admitted' };
+    // A `decision` ends the Debate and sends it to adjudication. A channel
+    // sender may argue in the room but never closes it.
+    if (event.message.type === 'decision') return { status: 'ignored', reason: 'decision_not_allowed' };
     const sourceMessageId = event.messageId ?? event.eventId;
     const messageId = `msg_hermes_${createHash('sha256').update(`${event.roomId}:${externalEventId}:${sourceMessageId}`).digest('hex').slice(0, 32)}`;
     const existing = debate.room.messages.find(message => message.messageId === messageId);

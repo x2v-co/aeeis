@@ -107,6 +107,25 @@ describe('Feishu Debate ingress', () => {
     await repository.close();
   });
 
+  it('does not let a channel sender close the Debate with a decision', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-feishu-decision-'));
+    const repository = new FileCollaborationRepository(directory); await repository.init();
+    const collaboration = new CollaborationService(repository);
+    const debate = await collaboration.createDebate({ taskId: 'task.feishu.decision', contextVersion: 'ctx.feishu.decision', participantAgentIds: ['agent.admitted'], maxRounds: 1, maxMessagesPerAgent: 2 });
+    const triggered: unknown[] = [];
+    const ingress = new FeishuDebateIngress({ collaboration, routes: [{ chatId: 'oc.decision', debateId: debate.id }], senderAgentIds: { ou_sender: 'agent.admitted' }, encryptKey: 'encrypt-key-123', onTrigger: async event => { triggered.push(event); }, now: () => 1_700_000_000 });
+    const message = (eventId: string, type: string) => JSON.stringify({ header: { event_type: 'im.message.receive_v1', event_id: eventId }, event: { message: { chat_id: 'oc.decision', message_id: `om.${eventId}`, content: JSON.stringify({ text: JSON.stringify({ schemaVersion: 'debate-message/1', type, content: 'Ship it now' }) }) }, sender: { sender_id: { open_id: 'ou_sender' } } } });
+    const decision = message('evt.decision', 'decision');
+    await expect(ingress.handle(decision, signed(decision, '1700000000', 'nonce-decision', 'encrypt-key-123'))).resolves.toMatchObject({ status: 'ignored', reason: 'decision_not_allowed' });
+    expect((await collaboration.getDebate(debate.id, { owner: 'owner', tenantId: 'local' })).room.messages).toHaveLength(0);
+    expect(triggered).toHaveLength(0);
+    // Other structured types still enter the room.
+    const position = message('evt.position', 'position');
+    await expect(ingress.handle(position, signed(position, '1700000000', 'nonce-position', 'encrypt-key-123'))).resolves.toMatchObject({ status: 'accepted' });
+    expect((await collaboration.getDebate(debate.id, { owner: 'owner', tenantId: 'local' })).room.messages.map(item => item.type)).toEqual(['position']);
+    await repository.close();
+  });
+
   it('answers Feishu URL verification only after checking the signed token', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-feishu-challenge-'));
     const repository = new FileCollaborationRepository(directory); await repository.init();

@@ -28,7 +28,7 @@ export interface FeishuDebateIngressOptions {
 export type FeishuIngressResult =
   | { status: 'challenge'; challenge: string }
   | { status: 'accepted' | 'duplicate'; debate: DebateRecord; externalEventId: string }
-  | { status: 'ignored'; reason: 'unsupported_event' | 'unmapped_chat' | 'unmapped_sender' | 'sender_not_admitted' };
+  | { status: 'ignored'; reason: 'unsupported_event' | 'unmapped_chat' | 'unmapped_sender' | 'sender_not_admitted' | 'decision_not_allowed' };
 
 /** Feishu/Hermes ingress. Accepted transport events become durable Debate
  * messages carrying external provenance; the transport is never canonical. */
@@ -86,6 +86,9 @@ export class FeishuDebateIngress {
     }
     const parsedContent = parseFeishuContent(body.event.message.content);
     const structured = parseStructuredMessage(parsedContent);
+    // A `decision` ends the Debate and sends it to adjudication. A channel
+    // sender may argue in the room but never closes it.
+    if (structured?.type === 'decision') return { status: 'ignored', reason: 'decision_not_allowed' };
     const round = debateIngressRound(debate.room, structured?.round);
     const message = {
       schemaVersion: 'debate-message/1' as const,
