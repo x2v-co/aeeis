@@ -75,6 +75,26 @@ describe('Hermes Debate ingress', () => {
     await repository.close();
   });
 
+  it('does not let a channel sender close the Debate with a decision', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-hermes-decision-'));
+    const repository = new FileCollaborationRepository(directory); await repository.init();
+    const collaboration = new CollaborationService(repository);
+    const debate = await collaboration.createDebate({ taskId: 'task.hermes.decision', contextVersion: 'ctx.hermes.decision', participantAgentIds: ['agent.admitted'], maxRounds: 1, maxMessagesPerAgent: 2 });
+    const key = 'hermes-signing-key-decision';
+    const triggered: unknown[] = [];
+    const ingress = new HermesDebateIngress({ collaboration, routes: [{ roomId: 'room.decision', debateId: debate.id }], senderAgentIds: { 'hermes-user': 'agent.admitted' }, signingKeys: { local: key }, onTrigger: async event => { triggered.push(event); }, now: () => 1_700_000_000 });
+    const message = (eventId: string, type: string) => JSON.stringify({ schemaVersion: 'hermes-debate-event/1', eventId, roomId: 'room.decision', senderRef: 'hermes-user', message: { content: 'Ship it now', type } });
+    const decision = message('evt.hermes.decision', 'decision');
+    await expect(ingress.handle(decision, signed(decision, '1700000000', 'nonce-decision', 'local', key))).resolves.toMatchObject({ status: 'ignored', reason: 'decision_not_allowed' });
+    expect((await collaboration.getDebate(debate.id, { owner: 'owner', tenantId: 'local' })).room.messages).toHaveLength(0);
+    expect(triggered).toHaveLength(0);
+    // Other structured types still enter the room.
+    const position = message('evt.hermes.position', 'position');
+    await expect(ingress.handle(position, signed(position, '1700000000', 'nonce-position', 'local', key))).resolves.toMatchObject({ status: 'accepted' });
+    expect((await collaboration.getDebate(debate.id, { owner: 'owner', tenantId: 'local' })).room.messages.map(item => item.type)).toEqual(['position']);
+    await repository.close();
+  });
+
   it('fails closed when a mapped sender is not admitted to the routed Debate', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'aeeis-hermes-admission-'));
     const repository = new FileCollaborationRepository(directory); await repository.init();
