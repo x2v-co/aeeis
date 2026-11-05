@@ -10,10 +10,29 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 # Headless Chromium for the browser tool.
+# Optional build args. Empty (the default) keeps official PyPI and the Playwright CDN.
+# Do not default these to a regional mirror; pass them only for a build that needs one.
+# They apply to this RUN only and are not written into the image environment.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN pip install --no-cache-dir playwright==1.49.1 \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+ARG PIP_INDEX_URL=
+ARG PIP_TRUSTED_HOST=
+ARG PLAYWRIGHT_DOWNLOAD_HOST=
+RUN set -eu; \
+    if [ -n "${PIP_INDEX_URL}" ] && [ -n "${PIP_TRUSTED_HOST}" ]; then \
+      pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}" playwright==1.49.1; \
+    elif [ -n "${PIP_INDEX_URL}" ]; then \
+      pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" playwright==1.49.1; \
+    elif [ -n "${PIP_TRUSTED_HOST}" ]; then \
+      pip install --no-cache-dir --trusted-host "${PIP_TRUSTED_HOST}" playwright==1.49.1; \
+    else \
+      pip install --no-cache-dir playwright==1.49.1; \
+    fi; \
+    if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST}" ]; then \
+      PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}" playwright install --with-deps chromium; \
+    else \
+      playwright install --with-deps chromium; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 COPY --chmod=0444 runner.py service.py client.py proxy.py /opt/aeeis/
 RUN chmod 0755 /opt/aeeis && mkdir -p /workspace/artifacts
 WORKDIR /workspace

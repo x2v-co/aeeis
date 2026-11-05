@@ -8,9 +8,14 @@ const filename = process.env.AEEIS_LOCAL_TOOLS_CONFIG ?? 'local-tools.example.js
 const config = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
 const dockerArgs = dockerContextArgs(config.sandbox);
 const docker = (args: string[], timeoutMs?: number) => { const call = dockerInvocation(config.sandbox, args); return run(call.command, call.args, timeoutMs); };
+/** Empty values are omitted so an unset build matches official PyPI and the Playwright CDN. */
+const mirrorBuildArgs = () => ['PIP_INDEX_URL', 'PIP_TRUSTED_HOST', 'PLAYWRIGHT_DOWNLOAD_HOST'].flatMap(name => {
+  const value = process.env[name]?.trim();
+  return value ? ['--build-arg', `${name}=${value}`] : [];
+});
 /** Over SSH the build context is streamed as a tar archive, so the remote host needs no copy of this repository. */
-const buildOverSsh = () => new Promise<void>((resolve, reject) => {
-  const call = dockerInvocation(config.sandbox, ['build', '--pull', '-t', config.sandbox.image, '-']);
+const buildOverSsh = (buildArgs: string[]) => new Promise<void>((resolve, reject) => {
+  const call = dockerInvocation(config.sandbox, ['build', '--pull', ...buildArgs, '-t', config.sandbox.image, '-']);
   const tar = spawn('tar', ['-C', 'sandbox', '-cf', '-', '.'], { stdio: ['ignore', 'pipe', 'inherit'] });
   const build = spawn(call.command, call.args, { stdio: ['pipe', 'inherit', 'inherit'] });
   tar.stdout.pipe(build.stdin);
@@ -33,8 +38,10 @@ try {
     console.log('Engine ready. Next: npm run sandbox:build');
   } else if (action === 'build') {
     await docker(['info', '--format', '{{.OSType}}'], 20000);
-    if (config.sandbox.ssh) await buildOverSsh();
-    else await run('docker', [...dockerArgs, 'build', '--pull', '-t', config.sandbox.image, 'sandbox'], 600000);
+    const mirrors = mirrorBuildArgs();
+    if (mirrors.length) console.log(`Sandbox build mirrors: ${mirrors.filter(arg => arg !== '--build-arg').join(' ')}`);
+    if (config.sandbox.ssh) await buildOverSsh(mirrors);
+    else await run('docker', [...dockerArgs, 'build', '--pull', ...mirrors, '-t', config.sandbox.image, 'sandbox'], 600000);
   } else if (action === 'doctor') {
     await docker(['info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}} · cgroup {{.CgroupVersion}}'], 20000);
     const gateway = await LocalToolGateway.load(filename);
