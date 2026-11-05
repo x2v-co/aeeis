@@ -14,6 +14,9 @@ export const sandboxConfigSchema = z.object({
   /** Run (no shell) when the SSH host refuses the login, then try once more — e.g. hosts whose SSH certificates
    * expire hourly: ["npx", "-y", "instabox@latest", "ssh-cert", "my-machine"]. Nothing remote ran on a refused login. */
   sshLoginCommand: z.array(z.string().min(1).max(500)).min(1).max(20).optional(),
+  /** How long a call waits for an unreachable SSH host before giving up. Only the preparation before the tool
+   * runs is retried, so waiting never repeats work. The default covers one round of a 10-minute keep-alive. */
+  sshWaitSeconds: z.number().int().min(0).max(3600).default(720),
   image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,250}$/).default('aeeis-sandbox:3'),
   memoryMiB: z.number().int().min(128).max(16384).default(1024),
   cpus: z.number().min(0.25).max(16).default(2),
@@ -342,19 +345,14 @@ export class DockerSandbox {
       }
     }
     if (result?.code !== 0 && !/is not running|No such container/i.test(result?.stderr ?? '')) {
+      this.unstopped.delete(name);
       this.blocked = true; throw new SandboxError('Sandbox stop could not be confirmed; execution blocked until recovery', 'unknown');
     }
     this.unstopped.delete(name);
   }
   async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
-    // A stop that never reached the host is retried before anything else runs in that container.
-    if (this.unstopped.has(this.name(runId))) {
-      try { await this.stop(this.name(runId)); }
-      catch (error) { throw new SandboxError(error instanceof Error ? error.message : 'Run sandbox stop pending', 'failed'); }
-    }
-    // Nothing of the tool has run while the container is being prepared, so an unreachable host is a plain failure.
-    const state = await this.ensure(runId, files);
+    const state = await this.prepareWithWait(runId, files);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     this.active.add(state.name);
     try {
@@ -367,6 +365,33 @@ export class DockerSandbox {
       await this.stop(state.name);
       throw new SandboxError(error instanceof Error ? error.message : 'Sandbox execution failed', 'unknown');
     } finally { this.active.delete(state.name); }
+  }
+  /** Everything before the tool runs: a pending stop, then the container. While the SSH host is unreachable
+   * (paused, cooling down, rebooting) this waits with backoff up to sshWaitSeconds, because nothing has run yet.
+   * A refused login is not waited on; sshLoginCommand handles it. */
+  private async prepareWithWait(runId: string, files: WorkspaceFile[]): Promise<State> {
+    const name = this.name(runId), started = Date.now(), deadline = started + (this.config.ssh ? this.config.sshWaitSeconds * 1000 : 0);
+    for (let attempt = 0; ; attempt++) {
+      let waitable: SandboxError | undefined;
+      try {
+        // A stop that never reached the host is retried before anything else runs in that container.
+        if (this.unstopped.has(name)) await this.stop(name);
+        return await this.ensure(runId, files);
+      } catch (error) {
+        const unreachable = (error instanceof SandboxUnreachable && !error.loginRefused) || (this.unstopped.has(name) && !(error instanceof SandboxUnreachable));
+        if (!unreachable || this.closing || Date.now() >= deadline) {
+          const waited = Math.round((Date.now() - started) / 60_000);
+          const message = error instanceof Error ? error.message : 'Run sandbox unavailable';
+          // Nothing of the tool ran, so this is a plain failure, never "unknown".
+          if (error instanceof SandboxUnreachable || this.unstopped.has(name)) throw new SandboxError(waited ? `${message} (waited ${waited} min)` : message, 'failed');
+          throw error;
+        }
+        waitable = error as SandboxError;
+      }
+      if (attempt === 0) console.warn(`AEEIS sandbox: ${waitable.message}; waiting up to ${Math.round((deadline - Date.now()) / 60_000)} min for it to come back`);
+      const delay = Math.min(30_000, 2_000 * 2 ** attempt, Math.max(0, deadline - Date.now()));
+      for (const end = Date.now() + delay; Date.now() < end && !this.closing;) await new Promise(resolve => setTimeout(resolve, Math.min(500, end - Date.now())));
+    }
   }
   private async ports(state: State) {
     const result = await this.command(['port', state.name], 5000);
