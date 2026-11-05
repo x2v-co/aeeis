@@ -39,7 +39,7 @@ def process_tool(args):
         if len(processes) >= 64:
             raise runner.ToolError('Stop or inspect existing processes before starting more')
         child = subprocess.Popen(['/bin/bash', '-lc', args['command']], cwd=runner.ROOT,
-            env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8', 'HOME': '/root', 'PYTHONUNBUFFERED': '1'},
+            env=runner.command_env(),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         handle = 'proc_' + uuid.uuid4().hex
         record = {'child': child, 'stdout': b'', 'stderr': b'', 'command': args['command'][:200]}

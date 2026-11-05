@@ -9,27 +9,56 @@ import { snapshotSchema, validateSnapshot, type WorkspaceFile } from './sandbox-
 export const sandboxConfigSchema = z.object({
   runtime: z.literal('docker').default('docker'),
   context: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).default('auto'),
-  image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,250}$/).default('aeeis-sandbox:2'),
+  /** A Host alias from the operator's ~/.ssh/config. Docker then runs on that machine over SSH, e.g. a test VPS. */
+  ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).optional(),
+  image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,250}$/).default('aeeis-sandbox:3'),
   memoryMiB: z.number().int().min(128).max(16384).default(1024),
   cpus: z.number().min(0.25).max(16).default(2),
   pids: z.number().int().min(16).max(4096).default(256),
-  network: z.enum(['bridge', 'none']).default('bridge'),
+  /** bridge: open internet. none: no network. proxied: an internal network whose only way out is a per-Run proxy
+   * that allows `egressHosts` over HTTPS (and HTTP on port 80) and refuses private addresses. */
+  network: z.enum(['bridge', 'none', 'proxied']).default('bridge'),
+  egressHosts: z.array(z.string().regex(/^(?:\*\.)?[a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9][a-z0-9-]{0,62})*\.[a-z][a-z0-9-]{0,62}$/, 'Use a host name such as registry.npmjs.org or *.example.com; IP addresses are not allowed')).max(100).default([]),
   snapshotMiB: z.number().int().min(1).max(32).default(16),
   idleSeconds: z.number().int().min(60).max(86400).default(3600),
   maxLifetimeSeconds: z.number().int().min(300).max(604800).default(86400),
   ports: z.array(z.number().int().min(1024).max(65535)).max(20).default([]),
-}).strict().refine(config => new Set(config.ports).size === config.ports.length && (config.network !== 'none' || config.ports.length === 0), 'Ports must be unique and require networking');
+}).strict()
+  .refine(config => new Set(config.ports).size === config.ports.length && (config.network === 'bridge' || config.ports.length === 0), 'Ports must be unique and need the bridge network')
+  .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
+  .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
-const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional() });
+const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional() });
 type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
 }
+/** ssh itself failed (exit 255): the remote host is paused, stopped, unreachable or refused the login.
+ * Whether anything ran depends on the step, so callers decide the outcome; preparing a container ran nothing. */
+export class SandboxUnreachable extends SandboxError {
+  constructor(host: string, stderr: string) {
+    super(/permission denied|certificate|publickey/i.test(stderr)
+      ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
+      : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
+  }
+}
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
 export type RunMachineRecord = { state: 'present'; ready: boolean } | { state: 'released'; ready: false };
+const PROXY_PORT = 3128;
+/** The proxy's name on the Run's internal network. Container names are too long for one DNS label. */
+const PROXY_ALIAS = 'aeeis-proxy';
+/** Each docker call over SSH opens a connection through the remote gateway first. */
+const SSH_ALLOWANCE_MS = 20_000;
+/** POSIX single-quote one argument for the remote shell that ssh hands the command to. */
+export const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+/** How to run `docker <args>`: locally, or on the configured SSH host. */
+export function dockerInvocation(config: SandboxConfig, args: string[], local: string[] = dockerContextArgs(config)): { command: string; args: string[] } {
+  if (!config.ssh) return { command: 'docker', args: [...local, ...args] };
+  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', config.ssh, '--', 'docker', ...args.map(shellQuote)] };
+}
 export function dockerContextArgs(config: SandboxConfig, platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
   if (config.context !== 'auto') return ['--context', config.context];
   if (env.DOCKER_HOST) return ['--host', env.DOCKER_HOST];
@@ -42,11 +71,28 @@ export function sandboxCreateArgs(config: SandboxConfig, name: string, imageId: 
   return ['create', '--pull=never', '--name', name,
     '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`,
     `--network=${config.network === 'none' ? 'none' : `${name}-net`}`, '--cap-drop=NET_RAW', '--security-opt=no-new-privileges:true',
+    ...(config.network === 'proxied' ? proxyEnvArgs(name) : []),
     '--user=0:0', '--workdir=/workspace', '--restart=no', '--stop-timeout=3',
     `--memory=${config.memoryMiB}m`, `--memory-swap=${config.memoryMiB}m`, `--cpus=${config.cpus}`, `--pids-limit=${config.pids}`,
     '--ulimit=nofile=4096:4096', '--log-driver=none',
     '--env', `AEEIS_SANDBOX_IDLE_SECONDS=${config.idleSeconds}`, '--env', `AEEIS_SANDBOX_LIFETIME_SECONDS=${config.maxLifetimeSeconds}`,
     ...config.ports.flatMap(port => ['--publish', `127.0.0.1::${port}`]), imageId];
+}
+
+function proxyEnvArgs(_name: string): string[] {
+  const proxy = `http://${PROXY_ALIAS}:${PROXY_PORT}`;
+  return ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].flatMap(key => ['--env', `${key}=${proxy}`])
+    .concat(['--env', 'NO_PROXY=localhost,127.0.0.1', '--env', 'no_proxy=localhost,127.0.0.1']);
+}
+/** The Run's only route out: a small, locked-down container on both the Run's internal network and an egress network. */
+export function proxyCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test'): string[] {
+  return ['create', '--pull=never', '--name', `${name}-proxy`,
+    '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`, '--label', 'aeeis.role=proxy',
+    `--network=${name}-egress`, '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '--read-only', '--user=65534:65534',
+    '--restart=unless-stopped', '--memory=128m', '--memory-swap=128m', '--cpus=0.5', '--pids-limit=64',
+    '--log-driver=json-file', '--log-opt=max-size=1m', '--log-opt=max-file=2',
+    '--env', `AEEIS_EGRESS_HOSTS=${config.egressHosts.join(',')}`, '--env', `AEEIS_PROXY_PORT=${PROXY_PORT}`,
+    '--entrypoint', 'python3', imageId, '-I', '-u', '/opt/aeeis/proxy.py'];
 }
 
 export class DockerSandbox {
@@ -56,6 +102,9 @@ export class DockerSandbox {
   private active = new Set<string>();
   private closing = false;
   private blocked = false;
+  /** Run containers whose stop could not be confirmed because the SSH host was unreachable. Only those Runs wait;
+   * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
+  private unstopped = new Set<string>();
   private readonly owner: string;
   private readonly directory: string;
   constructor(readonly config: SandboxConfig, stateDirectory: string) {
@@ -64,8 +113,9 @@ export class DockerSandbox {
   }
   private async command(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
     return new Promise((resolve, reject) => {
-      const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG'].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
-      const child = spawn('docker', [...(this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config)), ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
+      const invocation = dockerInvocation(this.config, args, this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config));
+      const child = spawn(invocation.command, invocation.args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
       const stdout: Buffer[] = [], stderr: Buffer[] = []; let size = 0, settled = false;
       const finish = (error?: Error, code?: number | null) => {
         if (settled) return;
@@ -73,11 +123,14 @@ export class DockerSandbox {
         if (error) { child.kill('SIGKILL'); reject(error); }
         else resolve({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), code: code ?? null });
       };
-      const timer = setTimeout(() => finish(new SandboxError('Docker operation timed out')), timeoutMs);
+      const timer = setTimeout(() => finish(new SandboxError('Docker operation timed out')), timeoutMs + (this.config.ssh ? SSH_ALLOWANCE_MS : 0));
       const collect = (target: Buffer[], chunk: Buffer) => { size += chunk.length; if (size > maxBytes) finish(new SandboxError('Sandbox output exceeded its limit', 'unknown')); else target.push(chunk); };
       child.stdout.on('data', chunk => collect(stdout, chunk)); child.stderr.on('data', chunk => collect(stderr, chunk));
-      child.once('error', () => finish(new SandboxError('Docker executable is unavailable')));
-      child.once('close', code => finish(undefined, code));
+      child.once('error', () => finish(new SandboxError(this.config.ssh ? 'ssh executable is unavailable' : 'Docker executable is unavailable')));
+      child.once('close', code => {
+        if (this.config.ssh && code === 255 && !settled) { settled = true; clearTimeout(timer); reject(new SandboxUnreachable(this.config.ssh, Buffer.concat(stderr).toString('utf8'))); return; }
+        finish(undefined, code);
+      });
       child.stdin.on('error', () => { /* exit status/output decides whether the operation completed */ });
       child.stdin.end(input);
     });
@@ -90,7 +143,7 @@ export class DockerSandbox {
     return this.preparing;
   }
   private async prepare(): Promise<string> {
-    if (!this.endpoint) {
+    if (!this.endpoint && !this.config.ssh) {
       const selected = dockerContextArgs(this.config);
       const context = selected[0] === '--host' ? { code: 0, stdout: selected[1]! } : await this.command(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], 5000);
       if (context.code !== 0 || !/^unix:\/\/\/[^\r\n]+$/.test(context.stdout.trim())) throw new SandboxError('Sandbox requires a local Unix Docker socket; run npm run sandbox:up');
@@ -107,7 +160,8 @@ export class DockerSandbox {
       const image = await this.imageId();
       const probe = await this.command(['info', '--format', '{{.OSType}}'], 3000);
       if (probe.code !== 0 || probe.stdout.trim() !== 'linux') throw new SandboxError('Docker Linux engine unavailable');
-      return { ready: true, detail: `Persistent Linux sandbox · ${this.config.network} network · ${this.config.memoryMiB} MiB · ${this.config.cpus} CPU · ${image.slice(0, 19)}`, checkedAt: new Date().toISOString() };
+      const network = this.config.network === 'proxied' ? `proxied network (${this.config.egressHosts.length} allowed hosts)` : `${this.config.network} network`;
+      return { ready: true, detail: `Persistent Linux sandbox${this.config.ssh ? ` on ${this.config.ssh}` : ''} · ${network} · ${this.config.memoryMiB} MiB · ${this.config.cpus} CPU · ${image.slice(0, 19)}`, checkedAt: new Date().toISOString() };
     } catch (error) { return { ready: false, detail: error instanceof Error ? error.message : 'Docker sandbox unavailable', checkedAt: new Date().toISOString() }; }
   }
   private name(runId: string) {
@@ -151,6 +205,11 @@ export class DockerSandbox {
     return info;
   }
   private async start(state: State) {
+    if (this.config.network === 'proxied' && state.proxyId) {
+      // The proxy restarts with the Docker daemon on its own; start it if someone stopped it.
+      const proxy = await this.command(['start', `${state.name}-proxy`], 8000);
+      if (proxy.code !== 0) throw new SandboxError('Run egress proxy unavailable', 'unknown');
+    }
     const inspected = await this.inspect(state);
     if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
     if (!inspected.State.Running) {
@@ -183,12 +242,26 @@ export class DockerSandbox {
       if (Date.now() - state.createdAt > this.config.maxLifetimeSeconds * 1000) throw new SandboxError('Run sandbox lifetime expired; start a new Run');
     } else {
       validateSnapshot(files, this.config.snapshotMiB * 1024 * 1024);
+      // Reach the host before recording anything, so a paused host does not leave a half-created Run behind.
+      if (this.config.ssh) await this.command(['version', '--format', '{{.Server.Version}}'], 8000);
       const name = this.name(runId);
       state = { runId, name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now() };
       await this.save(state);
       if (this.config.network !== 'none') {
-        const network = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', state.network], 8000);
+        const internal = this.config.network === 'proxied' ? ['--internal'] : [];
+        const network = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', ...internal, state.network], 8000);
         if (network.code !== 0) throw new SandboxError('Cannot create isolated Run network');
+      }
+      if (this.config.network === 'proxied') {
+        const egress = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', `${name}-egress`], 8000);
+        if (egress.code !== 0) throw new SandboxError('Cannot create Run egress network');
+        const proxy = await this.command(proxyCreateArgs(this.config, name, image, this.owner, runId), 10000);
+        if (proxy.code !== 0 || !/^[a-f0-9]{64}$/.test(proxy.stdout.trim())) throw new SandboxError('Cannot create Run egress proxy');
+        state.proxyId = proxy.stdout.trim(); await this.save(state);
+        const attached = await this.command(['network', 'connect', '--alias', PROXY_ALIAS, state.network, `${name}-proxy`], 8000);
+        if (attached.code !== 0) throw new SandboxError('Cannot attach Run egress proxy');
+        const started = await this.command(['start', `${name}-proxy`], 8000);
+        if (started.code !== 0) throw new SandboxError('Cannot start Run egress proxy');
       }
       const created = await this.command(sandboxCreateArgs(this.config, name, image, this.owner, runId), 10000);
       if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout.trim())) throw new SandboxError('Cannot create Run sandbox');
@@ -203,13 +276,27 @@ export class DockerSandbox {
   }
   private async stop(name: string) {
     // Stopping the whole container also stops escaped process groups. Its filesystem remains.
-    const result = await this.command(['kill', name], 5000).catch(() => undefined);
+    let result: { code: number | null; stderr: string } | undefined;
+    try { result = await this.command(['kill', name], 5000); }
+    catch (error) {
+      if (error instanceof SandboxUnreachable) {
+        this.unstopped.add(name);
+        throw new SandboxError(`${error.message}. This Run waits until its container can be stopped; other Runs are unaffected`, 'unknown');
+      }
+    }
     if (result?.code !== 0 && !/is not running|No such container/i.test(result?.stderr ?? '')) {
       this.blocked = true; throw new SandboxError('Sandbox stop could not be confirmed; execution blocked until recovery', 'unknown');
     }
+    this.unstopped.delete(name);
   }
   async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
+    // A stop that never reached the host is retried before anything else runs in that container.
+    if (this.unstopped.has(this.name(runId))) {
+      try { await this.stop(this.name(runId)); }
+      catch (error) { throw new SandboxError(error instanceof Error ? error.message : 'Run sandbox stop pending', 'failed'); }
+    }
+    // Nothing of the tool has run while the container is being prepared, so an unreachable host is a plain failure.
     const state = await this.ensure(runId, files);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     this.active.add(state.name);
@@ -243,12 +330,17 @@ export class DockerSandbox {
       const removed = await this.command(['rm', '--force', state.name], 8000);
       if (removed.code !== 0) throw new SandboxError('Cannot release Run sandbox', 'unknown');
     }
-    if (this.config.network !== 'none') {
-      const network = await this.command(['network', 'inspect', state.network], 5000);
+    if (state.proxyId) {
+      const removed = await this.command(['rm', '--force', `${state.name}-proxy`], 8000);
+      if (removed.code !== 0 && !/No such container/i.test(removed.stderr)) throw new SandboxError('Cannot release Run egress proxy', 'unknown');
+    }
+    const networks = this.config.network === 'none' ? [] : this.config.network === 'proxied' ? [state.network, `${state.name}-egress`] : [state.network];
+    for (const name of networks) {
+      const network = await this.command(['network', 'inspect', name], 5000);
       if (network.code === 0) {
         const info = JSON.parse(network.stdout)[0];
         if (info?.Labels?.['aeeis.owner'] !== this.owner || info?.Labels?.['aeeis.sandbox'] !== '2') throw new SandboxError('Network ownership mismatch');
-        if ((await this.command(['network', 'rm', state.network], 8000)).code !== 0) throw new SandboxError('Cannot release Run network');
+        if ((await this.command(['network', 'rm', name], 8000)).code !== 0) throw new SandboxError('Cannot release Run network');
       } else if (!/not found|No such network/i.test(network.stderr)) throw new SandboxError('Cannot inspect Run network');
     }
     state.released = true; await this.save(state);
