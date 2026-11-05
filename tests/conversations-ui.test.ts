@@ -772,7 +772,7 @@ describe('single-entry conversation workbench', () => {
       return [...setup.querySelectorAll('[id]')].indexOf(found);
     });
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect([...setup.querySelectorAll('nav.settings-index a')].map(link => link.textContent)).toEqual(['默认与边界', '动作清单', '访问', '目标、Room 与提醒', '自我改进', '协作']);
+    expect([...setup.querySelectorAll('nav.settings-index a')].map(link => link.textContent)).toEqual(['默认与边界', '动作清单', '授权', '访问', '目标、Room 与提醒', '自我改进', '协作']);
     doc().querySelector<HTMLAnchorElement>('nav.workbench-nav a[href="#rsi-panel"]')!.click();
     expect(doc().body.classList.contains('computer-open')).toBe(true);
     expect(el('gb-computer').dataset.tab).toBe('setup');

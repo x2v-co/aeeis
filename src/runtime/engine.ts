@@ -16,6 +16,7 @@ import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSch
 import { automaticReviewCanClear, directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
 import { actionRef, approveActionSchema, decideAction, normalizeActionPolicy, withActionDecision, type ActionCandidate, type ActionVerdict } from './action-policy.js';
 import { actionPolicyDigest, frozenRunPolicy, type ActionPolicyStore } from '../action-policy-store.js';
+import { workGrantDigest, workGrantRemaining, workGrantState, type WorkGrant, type WorkGrantStore } from '../work-grant-store.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -129,10 +130,12 @@ function assertReviewVersion(run: AgentRun, version: number): void {
  * kept and the Run waits; on `refuse` the caller drops the pending call and the executor sees why.
  */
 function gateExternalAction(current: AgentRun, live: Step, candidate: ActionCandidate, pending: { taskId: string; idempotencyKey: string; input: unknown }): ActionVerdict {
-  const verdict = decideAction(current.actionPolicy, current.origin, current.executionReview, candidate, { untrusted: externalTextReceived(current) });
+  const grant = activeWorkGrant(current);
+  const verdict = decideAction(current.actionPolicy, current.origin, current.executionReview, candidate, { untrusted: externalTextReceived(current), ...(grant ? { grant: { grantId: grant.grantId, containedTools: grant.containedTools, agents: grant.agents } } : {}) });
   const ref = actionRef(candidate);
   if (verdict.decision === 'allow') {
     if (verdict.rule === 'allow') event(current, 'action.allowed', { taskId: pending.taskId, ref });
+    if (verdict.rule === 'grant') event(current, 'action.allowed', { taskId: pending.taskId, ref, rule: 'grant', grantId: grant!.grantId });
     return verdict;
   }
   if (verdict.decision === 'ask' || verdict.decision === 'judge') {
@@ -205,6 +208,32 @@ function frozenRunCanClear(current: AgentRun): boolean {
     planText,
   });
 }
+/** Per dimension the grant limits: the smallest of the request, the per-Run cap and what is left. */
+function grantedModelBudget(grant: WorkGrant, requested: TaskRequest['modelBudget']): TaskRequest['modelBudget'] {
+  const remaining = workGrantRemaining(grant);
+  const pick = (key: 'tokens' | 'moneyUsd') => {
+    const cap = grant.budget.perRun[key];
+    if (cap === undefined) return requested?.[key];
+    return Math.min(cap, remaining[key] ?? cap, requested?.[key] ?? cap);
+  };
+  const tokens = pick('tokens'), moneyUsd = pick('moneyUsd');
+  return tokens === undefined && moneyUsd === undefined ? undefined : { ...(tokens === undefined ? {} : { tokens }), ...(moneyUsd === undefined ? {} : { moneyUsd }) };
+}
+/** A Work Grant that still applies: present, not revoked and not expired. */
+function activeWorkGrant(run: AgentRun, at = Date.now()): NonNullable<AgentRun['workGrant']> | undefined {
+  const grant = run.workGrant;
+  return grant && !grant.revokedAt && at < Date.parse(grant.expiresAt) ? grant : undefined;
+}
+/** Why this Run's frozen capabilities are not inside its Work Grant, or undefined when they are. */
+function workGrantGap(run: AgentRun): string | undefined {
+  const grant = run.workGrant!;
+  if (grant.revokedAt) return `授权「${grant.title}」已撤销，计划等待批准`;
+  if (!activeWorkGrant(run)) return `授权「${grant.title}」已过期，计划等待批准`;
+  const tools = (run.approvedTools ?? []).map(tool => tool.id).filter(toolId => !grant.tools.includes(toolId));
+  const agents = (run.approvedAgents ?? []).map(agent => agent.agentId).filter(agentId => !grant.agents.includes(agentId));
+  if (tools.length || agents.length) return `计划要用授权「${grant.title}」之外的${[tools.length ? `工具 ${tools.join('、')}` : '', agents.length ? `Agent ${agents.join('、')}` : ''].filter(Boolean).join('和')}，等待批准`;
+  return undefined;
+}
 function settlePlanApproval(current: AgentRun, hash: string, version: number, judgment?: { needed: boolean; reason: string }, judgmentSource: 'model' | 'policy' = 'model', holdForOwner = false): void {
   const mode = current.executionReview ?? 'required';
   if (holdForOwner) {
@@ -213,6 +242,21 @@ function settlePlanApproval(current: AgentRun, hash: string, version: number, ju
     current.approval = { planHash: hash, planVersion: version, approved: false, ...(mode === 'required' ? {} : { mode }), reason };
     current.status = 'needs_approval';
     event(current, 'plan.approval_requested', { planHash: hash, planVersion: version, mode, reason });
+    return;
+  }
+  if (current.workGrant) {
+    // Every plan version, including a replan, is checked against the frozen grant; the record says which grant approved it.
+    const gap = workGrantGap(current);
+    const grantId = current.workGrant.grantId;
+    if (!gap) {
+      current.approval = { planHash: hash, planVersion: version, approved: true, actor: `grant:${grantId}`, at: now() };
+      current.status = 'running';
+      event(current, 'plan.auto_approved', { planHash: hash, planVersion: version, actor: `grant:${grantId}`, grantId });
+      return;
+    }
+    current.approval = { planHash: hash, planVersion: version, approved: false, reason: gap };
+    current.status = 'needs_approval';
+    event(current, 'plan.approval_requested', { planHash: hash, planVersion: version, reason: gap, grantId });
     return;
   }
   if (mode === 'yolo') {
@@ -247,6 +291,7 @@ function settlePlanApproval(current: AgentRun, hash: string, version: number, ju
 }
 function applyApprovalBudgets(run: AgentRun, input: z.infer<typeof approvalBudgetsSchema>): void {
   if (input.modelBudget === undefined && input.externalBudget === undefined) return;
+  if (run.workGrant && input.modelBudget !== undefined) throw new Conflict('这件 Run 的模型预算来自授权，不能在这里改；需要更多预算请新建或延长授权');
   if (input.modelBudget === null) delete run.modelBudget;
   else if (input.modelBudget !== undefined) run.modelBudget = { ...(input.modelBudget.tokens === undefined ? {} : { tokens: input.modelBudget.tokens }), ...(input.modelBudget.moneyUsd === undefined ? {} : { moneyUsd: input.modelBudget.moneyUsd }) };
   if (input.externalBudget === null) delete run.externalBudget;
@@ -920,6 +965,7 @@ export class AgentEngine {
   private globalBudget: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector } | undefined;
   private resourceRegistry: ResourceRegistry | undefined;
   private actionPolicies: ActionPolicyStore | undefined;
+  private workGrants: WorkGrantStore | undefined;
   /** Most automatic hops a derivation chain may take before the runtime stops
    * deriving successors (Project Pulse next actions). */
   readonly maxDerivationDepth: number;
@@ -940,11 +986,11 @@ export class AgentEngine {
     callMaxMs: z.coerce.number().int().min(10_000).parse(process.env.AEEIS_MODEL_CALL_MAX_MS ?? 420_000),
     minCallMs: z.coerce.number().int().min(1_000).parse(process.env.AEEIS_MODEL_CALL_MIN_MS ?? 60_000),
   };
-  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; actionPolicies?: ActionPolicyStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry; maxDerivationDepth?: number }) {
+  constructor(readonly repository: RunRepository, modelOrServices: ModelAdapter | { executionLimits?: Partial<ExecutionLimits>; model?: ModelAdapter; resolver?: ModelResolver; tools?: ToolGateway; skills?: SkillGovernance; agents?: AgentGateway; knowledge?: KnowledgeProvider; projectSources?: ProjectSourceProvider; projectSourceCheckpoints?: ProjectSourceCheckpointStore; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; brain?: GovernedBrain; brainPersistence?: BrainPersistence; brainSemanticSearcher?: BrainSemanticSearcher; domain?: AeeisService; evolution?: EvolutionSnapshotProvider; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; resourceRegistry?: ResourceRegistry; maxDerivationDepth?: number }) {
     this.executionLimits = executionLimitsSchema.parse('complete' in modelOrServices ? {} : modelOrServices.executionLimits ?? {});
     this.maxDerivationDepth = validMaxDerivationDepth(('complete' in modelOrServices ? undefined : modelOrServices.maxDerivationDepth) ?? DEFAULT_MAX_DERIVATION_DEPTH);
     if ('complete' in modelOrServices) this.defaultModel = modelOrServices;
-    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.projectSources = modelOrServices.projectSources; this.projectSourceCheckpoints = modelOrServices.projectSourceCheckpoints; this.actionPolicies = modelOrServices.actionPolicies; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.brainSemanticSearcher = modelOrServices.brainSemanticSearcher; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; this.globalBudget = modelOrServices.globalBudget; this.resourceRegistry = modelOrServices.resourceRegistry; }
+    else { this.defaultModel = modelOrServices.model; this.resolver = modelOrServices.resolver; this.tools = modelOrServices.tools; this.skills = modelOrServices.skills; this.agents = modelOrServices.agents; this.knowledge = modelOrServices.knowledge; this.projectSources = modelOrServices.projectSources; this.projectSourceCheckpoints = modelOrServices.projectSourceCheckpoints; this.actionPolicies = modelOrServices.actionPolicies; this.workGrants = modelOrServices.workGrants; this.brain = modelOrServices.brain; this.brainPersistence = modelOrServices.brainPersistence; this.brainSemanticSearcher = modelOrServices.brainSemanticSearcher; this.domain = modelOrServices.domain; this.evolution = modelOrServices.evolution; this.globalBudget = modelOrServices.globalBudget; this.resourceRegistry = modelOrServices.resourceRegistry; }
     if (!this.defaultModel && !this.resolver) throw new Error('A model or model resolver is required');
   }
   get modelPin() { return this.defaultModel?.pin; }
@@ -1085,6 +1131,8 @@ export class AgentEngine {
         return existing;
       } catch (error) { if (!(error instanceof NotFound)) throw error; }
     }
+    // After the task Run lookup, so the request hash is taken before the grant fills in tools and budget.
+    const grant = request.workGrantId ? await this.loadWorkGrant(request, { owner, tenantId }) : undefined;
     if (request.brainQuery && !request.brainScope) throw new Error('brainQuery requires brainScope');
     if (request.goalId && !this.domain) throw new Error('goalId was provided but the Goal domain service is not configured');
     if (request.goalId && this.domain && (await this.domain.getGoal(request.goalId, owner, tenantId)).status !== 'active') throw new Error('Runs can only be started for active Goals');
@@ -1249,7 +1297,9 @@ export class AgentEngine {
     const resourceSnapshot = freezeResourceSnapshot(request, skillSelection, toolApproval.selected, toolApproval.digest, timestamp, resourceResolution);
     const contextId = id('ctx');
     const contextManifestHash = digest({ contextId, owner, tenantId, goal: request.goal, privacy: request.privacy, audience, sources: sources.map(source => ({ id: source.id, title: source.title, source: source.source, hash: source.hash, contentHash: source.contentHash ?? materialContentHash(source.content), classification: source.classification ?? request.privacy, kind: source.kind ?? 'unknown' })) });
+    const workGrant = grant ? await this.freezeWorkGrant(grant, request, { owner, tenantId }, pendingRunId, toolApproval.selected.map(tool => tool.id), timestamp) : undefined;
     const run: AgentRun = {
+      ...(workGrant ? { workGrant } : {}),
       ...(request.workingMemory ? { workingMemory: newWorkingMemory() } : {}),
       executionLimits: { ...this.executionLimits },
       schemaVersion: 1, id: pendingRunId, revision: 0, owner, tenantId, goal: request.goal,
@@ -3714,6 +3764,66 @@ export class AgentEngine {
     }
   }
 
+  /** Checks the grant before anything else is prepared. Its tools and agents fill an empty request, and the Run's
+   * model budget becomes what the grant can still give it. */
+  private async loadWorkGrant(request: TaskRequest, scope: Ownership): Promise<WorkGrant> {
+    if (!this.workGrants) throw new Conflict('Work grants are not configured on this AEEIS');
+    if (request.executionReview) throw new RangeError('A Run under a Work Grant cannot also choose executionReview; the grant decides which plans need approval');
+    const grant = await this.workGrants.get(scope, request.workGrantId!);
+    const state = workGrantState(grant);
+    if (state !== 'active') throw new Conflict(state === 'revoked' ? '这份授权已撤销' : state === 'expired' ? '这份授权已过期' : '这份授权的预算已用完');
+    if (!request.allowedTools.length && this.tools) request.allowedTools = [...grant.tools];
+    if (!request.allowedAgents.length && this.agents) request.allowedAgents = [...grant.agents];
+    request.modelBudget = grantedModelBudget(grant, request.modelBudget);
+    return grant;
+  }
+  /** Reserves this Run's share of the grant budget and freezes the grant. Only granted tools that the gateway's own
+   * code confines to the Run workspace are recorded as contained. */
+  private async freezeWorkGrant(grant: WorkGrant, request: TaskRequest, scope: Ownership, runId: string, toolIds: string[], timestamp: string): Promise<NonNullable<AgentRun['workGrant']>> {
+    const contained = new Set(await this.tools?.workspaceContainedTools?.() ?? []);
+    const { allocation } = await this.workGrants!.allocate(scope, grant.grantId, runId, request.modelBudget, timestamp);
+    const budget = { ...(allocation.tokens === undefined ? {} : { tokens: allocation.tokens }), ...(allocation.moneyUsd === undefined ? {} : { moneyUsd: allocation.moneyUsd }) };
+    if (budget.tokens !== undefined || budget.moneyUsd !== undefined) request.modelBudget = { ...request.modelBudget, ...budget };
+    return {
+      grantId: grant.grantId, digest: workGrantDigest(grant), title: grant.title, tools: [...grant.tools], agents: [...grant.agents],
+      containedTools: [...new Set(toolIds)].filter(toolId => grant.tools.includes(toolId) && contained.has(toolId)).sort(),
+      expiresAt: grant.expiresAt, allocation: budget,
+    };
+  }
+  /** Revokes the grant and marks every unfinished Run under it. Active work pauses; nothing it does afterwards is
+   * covered by the grant, so resuming brings back ordinary plan and action approval. */
+  async revokeWorkGrant(grantId: string, scope: Ownership): Promise<{ grant: WorkGrant; pausedRunIds: string[]; affectedRunIds: string[] }> {
+    if (!this.workGrants) throw new Conflict('Work grants are not configured on this AEEIS');
+    const grant = await this.workGrants.revoke(scope, grantId);
+    const at = grant.revokedAt ?? now();
+    const affectedRunIds: string[] = [], pausedRunIds: string[] = [];
+    for (const run of await this.ownerRuns(scope)) {
+      if (run.workGrant?.grantId !== grantId || run.workGrant.revokedAt || terminalRunStatuses.has(run.status)) continue;
+      await this.repository.mutate(run.id, current => {
+        if (!current.workGrant || current.workGrant.grantId !== grantId || current.workGrant.revokedAt || terminalRunStatuses.has(current.status)) return;
+        current.workGrant.revokedAt = at;
+        affectedRunIds.push(current.id);
+        event(current, 'work_grant.revoked', { grantId, at });
+        if (runnable.has(current.status)) {
+          current.resumeStatus = current.status; current.status = 'paused'; pausedRunIds.push(current.id);
+          event(current, 'run.paused', { reason: 'work_grant_revoked', grantId });
+        }
+      }, scope);
+    }
+    return { grant, pausedRunIds, affectedRunIds };
+  }
+  /** Every Run of this owner, page by page where the repository can page; otherwise its bounded recent list. */
+  private async ownerRuns(scope: Ownership): Promise<AgentRun[]> {
+    if (!this.repository.page) return this.repository.list(scope, 1000);
+    const runs: AgentRun[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.repository.page(scope, 200, cursor);
+      runs.push(...page.runs);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return runs;
+  }
   private async approveTools(allowedTools: string[]): Promise<{ selected: ToolDescriptor[]; digest: string }> {
     if (!this.tools || !allowedTools.length) return { selected: [], digest: digest([]) };
     const manifest = await this.tools.listTools();
