@@ -122,13 +122,15 @@ relates:
 ### 2.2.1 实现（切片 B 第一部分）
 
 - **测试机**：instabox 的 `agent-browser-lj1m`（Firecracker microVM，Debian 13，4 vCPU / 8 GiB，16 GiB 系统盘 + 20 GiB `/data`，自带 Docker）。SSH 经 instabox 网关，证书约一小时有效，用 `instabox ssh-cert` 刷新。免费套餐空闲 30 分钟或运行 8 小时会暂停，SSH 随之断开。
-- **远程执行**：没有用 `docker --context`（本机没有 Docker CLI），改为 `sandbox.ssh: <Host 别名>`，`DockerSandbox` 把每个 `docker` 调用变成 `ssh -o BatchMode=yes <host> -- docker <逐个单引号转义的参数>`。本机 Unix socket 检查只对本地引擎保留。每次调用多一次 SSH 握手，超时统一加 20 秒。
+- **远程执行**：没有用 `docker --context`（本机没有 Docker CLI），改为 `sandbox.ssh: <Host 别名>`，`DockerSandbox` 把每个 `docker` 调用变成 `ssh -o BatchMode=yes <host> -- docker <逐个单引号转义的参数>`。本机 Unix socket 检查只对本地引擎保留。同一主机的 docker 调用复用一条 SSH 连接（`ControlMaster`），超时统一加 20 秒。热路径只有两次 docker 调用（检查容器、执行工具）；容器停过才重新启动代理、容器并探测工具服务。instabox 上实测：热调用从约 15 秒降到 1.4 秒，Run 首次调用从约 80 秒降到 14 秒（剩下的主要是到 instabox 网关的往返，单条命令约 0.6 秒）。
 - **出口代理**：`network: proxied`。每个 Run 一张 `--internal` 网络 + 一张出口网络 + 一个代理容器（同一镜像，`proxy.py`，无 capability、只读、`nobody`、128 MiB），代理在内部网络上的别名是 `aeeis-proxy`（容器名超过 DNS 单段 63 字符）。放行规则见 README；Run 释放时代理和两张网络一起删除。这一版的放行列表是部署级的 `sandbox.egressHosts`，不是每份授权一份；授权里的 `resources.egressHosts` 等到同一台机器上跑多份授权时再加。
 - **工作区内**：`proxied` 和 `none` 下 `shell` / `python` / `process` / `browser` 都进入 `workspaceContainedTools()`；`bridge` 照旧不算。
 - **浏览器**：工具 `browser`，每次调用开一个新页面，可选 click / type / press / wait，返回标题、状态码、可见文字、控制台错误、失败请求和截图（`artifacts/screenshots/`，路径 + SHA-256）。Playwright 默认让回环地址也走代理，已关闭，`127.0.0.1` 的开发服务器直连。
 - **镜像**：`aeeis-sandbox:3` = Python 3.12 + Node.js 22 + Playwright 1.49.1 Chromium，2.3 GB。
 - **在测试机上验证过**：`example.com` 经代理 403、绕过代理连 DNS 都解析不了；`pypi.org` 200、`pip download`、`npm install` 正常；`169.254.169.254` 403；容器里 `python3 -m http.server 3000`，浏览器打开、点按钮、截图并导出；释放后 VPS 上没有残留容器和网络。
-- **机器暂停 / 证书过期**：两者都让 `ssh` 以 255 退出。准备容器阶段（含新 Run 第一次调用前先探测主机）连不上 → 记为失败、没有执行；工具执行中断开 → 结果未知，只把这个 Run 挂起，下次调用先补做 `docker kill`，不再像本地引擎那样封锁整个网关。测试机上验证过：`instabox suspend` 期间调用失败且命令确实没跑，`resume` 后同一个 Run 继续、开发服务器仍在；过期证书报"拒绝登录"，`instabox ssh-cert` 后恢复。免费套餐运行 8 小时后会强制暂停并进入冷却期，期间无法唤醒，这一点代码绕不过去；证书自动续期也还没做。
+- **机器暂停 / 证书过期**：两者都让 `ssh` 以 255 退出。准备容器阶段（含新 Run 第一次调用前先探测主机）连不上 → 记为失败、没有执行；工具执行中断开 → 结果未知，只把这个 Run 挂起，下次调用先补做 `docker kill`，不再像本地引擎那样封锁整个网关。测试机上验证过：`instabox suspend` 期间调用失败且命令确实没跑，`resume` 后同一个 Run 继续、开发服务器仍在；过期证书报"拒绝登录"，`instabox ssh-cert` 后恢复。免费套餐运行 8 小时后会强制暂停并进入冷却期，期间无法唤醒，这一点代码绕不过去；证书续期用 `sandbox.sshLoginCommand`（如 `instabox ssh-cert`）：只在 ssh 报 `Permission denied (…)` 时运行并重试一次，测试机上删掉证书后 Run 照常继续。
+- **等主机回来**：主机连不上时，工具运行前的准备（补做停止、检查/启动容器）按 2、4、8、16、30 秒退避重试，最多 `sshWaitSeconds`（默认 12 分钟，覆盖 devbox 上 instabox 保活的一轮）。工具本身从不重放。已知限制：本地网关串行执行工具调用，等待期间其他调用（含 `web-fetch`）排队；Run 页面不显示"在等主机"，只是这次工具调用耗时更长。
+- **测试机选择**：比较过 instabox、腾讯云北京（经 Tailscale 德国中继，单次登录 8–10 秒；GitHub、Docker Hub 不通）和新加坡（直连 80 ms，但那台是 AEEIS 生产机，不放 Bot）。先用 instabox；之后换一台独立的新加坡 VPS 只需改 `sandbox.ssh`。
 - **还没做（第二部分）**：按授权的持久工作目录（现在仍是每个 Run 一个容器，结束时导出 `artifacts/`）；给团队看的预览链接——instabox 自带"仅持链接可访问"的 HTTPS 端口，可能替代第 7 节第 1 条里的反向代理 + VPN，需要先确认它能转到容器内端口。
 
 ### 2.3 在 AEEIS 里看和控制

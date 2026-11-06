@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
@@ -11,6 +11,12 @@ export const sandboxConfigSchema = z.object({
   context: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).default('auto'),
   /** A Host alias from the operator's ~/.ssh/config. Docker then runs on that machine over SSH, e.g. a test VPS. */
   ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).optional(),
+  /** Run (no shell) when the SSH host refuses the login, then try once more — e.g. hosts whose SSH certificates
+   * expire hourly: ["npx", "-y", "instabox@latest", "ssh-cert", "my-machine"]. Nothing remote ran on a refused login. */
+  sshLoginCommand: z.array(z.string().min(1).max(500)).min(1).max(20).optional(),
+  /** How long a call waits for an unreachable SSH host before giving up. Only the preparation before the tool
+   * runs is retried, so waiting never repeats work. The default covers one round of a 10-minute keep-alive. */
+  sshWaitSeconds: z.number().int().min(0).max(3600).default(720),
   image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,250}$/).default('aeeis-sandbox:3'),
   memoryMiB: z.number().int().min(128).max(16384).default(1024),
   cpus: z.number().min(0.25).max(16).default(2),
@@ -26,7 +32,8 @@ export const sandboxConfigSchema = z.object({
 }).strict()
   .refine(config => new Set(config.ports).size === config.ports.length && (config.network === 'bridge' || config.ports.length === 0), 'Ports must be unique and need the bridge network')
   .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
-  .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context');
+  .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context')
+  .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
@@ -39,10 +46,14 @@ export class SandboxError extends Error {
 /** ssh itself failed (exit 255): the remote host is paused, stopped, unreachable or refused the login.
  * Whether anything ran depends on the step, so callers decide the outcome; preparing a container ran nothing. */
 export class SandboxUnreachable extends SandboxError {
+  /** ssh's own "Permission denied (publickey,…)": authentication failed, so no remote command started. */
+  readonly loginRefused: boolean;
   constructor(host: string, stderr: string) {
-    super(/permission denied|certificate|publickey/i.test(stderr)
+    const refused = /Permission denied \(/.test(stderr);
+    super(refused || /certificate|publickey/i.test(stderr)
       ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
       : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
+    this.loginRefused = refused;
   }
 }
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
@@ -55,10 +66,15 @@ const SSH_ALLOWANCE_MS = 20_000;
 /** POSIX single-quote one argument for the remote shell that ssh hands the command to. */
 export const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /** How to run `docker <args>`: locally, or on the configured SSH host. */
-export function dockerInvocation(config: SandboxConfig, args: string[], local: string[] = dockerContextArgs(config)): { command: string; args: string[] } {
+export function dockerInvocation(config: SandboxConfig, args: string[], local: string[] = dockerContextArgs(config), controlDirectory?: string): { command: string; args: string[] } {
   if (!config.ssh) return { command: 'docker', args: [...local, ...args] };
-  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', config.ssh, '--', 'docker', ...args.map(shellQuote)] };
+  // One SSH connection per host, reused by every docker call: a new login costs seconds through a remote gateway.
+  const reuse = controlDirectory ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlDirectory}/%C`, '-o', `ControlPersist=${SSH_PERSIST_SECONDS}`] : [];
+  return { command: 'ssh', args: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', ...reuse, config.ssh, '--', 'docker', ...args.map(shellQuote)] };
 }
+const SSH_PERSIST_SECONDS = 300;
+/** Short, per-user directory for SSH control sockets (a socket path must stay under about 100 bytes). */
+export const sshControlDirectory = (uid = process.getuid?.() ?? 0) => `/tmp/aeeis-ssh-${uid}`;
 export function dockerContextArgs(config: SandboxConfig, platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
   if (config.context !== 'auto') return ['--context', config.context];
   if (env.DOCKER_HOST) return ['--host', env.DOCKER_HOST];
@@ -105,16 +121,60 @@ export class DockerSandbox {
   /** Run containers whose stop could not be confirmed because the SSH host was unreachable. Only those Runs wait;
    * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
   private unstopped = new Set<string>();
+  private controlReady: Promise<string | undefined> | undefined;
+  private loginRefresh: Promise<void> | undefined;
+  private lastLoginRefresh = 0;
   private readonly owner: string;
   private readonly directory: string;
   constructor(readonly config: SandboxConfig, stateDirectory: string) {
     this.owner = createHash('sha256').update(stateDirectory).digest('hex').slice(0, 16);
     this.directory = join(stateDirectory, 'sandboxes');
   }
+  /** The control socket directory must be this user's alone: whoever can open the socket can use the connection.
+   * If it cannot be made private, calls fall back to a fresh SSH login each time. */
+  private controlDirectory(): Promise<string | undefined> {
+    if (!this.config.ssh) return Promise.resolve(undefined);
+    this.controlReady ??= (async () => {
+      const directory = sshControlDirectory();
+      try {
+        await mkdir(directory, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+        const info = await lstat(directory);
+        const uid = process.getuid?.();
+        if (!info.isDirectory() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o077) !== 0) return undefined;
+        return directory;
+      } catch { return undefined; }
+    })();
+    return this.controlReady;
+  }
   private async command(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    try { return await this.transport(args, timeoutMs, input, maxBytes); }
+    catch (error) {
+      if (!(error instanceof SandboxUnreachable) || !error.loginRefused || !this.config.sshLoginCommand) throw error;
+      // A refused login ran nothing remotely, so renewing the login and trying once more is safe for any command.
+      if (!await this.refreshLogin()) throw error;
+      return this.transport(args, timeoutMs, input, maxBytes);
+    }
+  }
+  /** Runs sshLoginCommand at most once per minute; concurrent refusals share one run. True if it succeeded. */
+  private async refreshLogin(): Promise<boolean> {
+    if (!this.loginRefresh) {
+      if (Date.now() - this.lastLoginRefresh < 60_000) return false;
+      this.lastLoginRefresh = Date.now();
+      const [command, ...args] = this.config.sshLoginCommand!;
+      this.loginRefresh = new Promise<void>((resolve, reject) => {
+        const child = spawn(command!, args, { stdio: 'ignore', env: process.env });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timed out')); }, 120_000);
+        child.once('error', error => { clearTimeout(timer); reject(error); });
+        child.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`exited ${code}`)); });
+      }).finally(() => { this.loginRefresh = undefined; });
+    }
+    return this.loginRefresh.then(() => true, () => false);
+  }
+  private async transport(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    const control = await this.controlDirectory();
     return new Promise((resolve, reject) => {
       const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
-      const invocation = dockerInvocation(this.config, args, this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config));
+      const invocation = dockerInvocation(this.config, args, this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config), control);
       const child = spawn(invocation.command, invocation.args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
       const stdout: Buffer[] = [], stderr: Buffer[] = []; let size = 0, settled = false;
       const finish = (error?: Error, code?: number | null) => {
@@ -205,17 +265,17 @@ export class DockerSandbox {
     return info;
   }
   private async start(state: State) {
+    const inspected = await this.inspect(state);
+    if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
+    // A running container means its tool service is up: the container exits when the service does.
+    if (inspected.State.Running) return;
     if (this.config.network === 'proxied' && state.proxyId) {
-      // The proxy restarts with the Docker daemon on its own; start it if someone stopped it.
+      // The proxy restarts on its own after a crash or daemon restart; start it in case someone stopped it.
       const proxy = await this.command(['start', `${state.name}-proxy`], 8000);
       if (proxy.code !== 0) throw new SandboxError('Run egress proxy unavailable', 'unknown');
     }
-    const inspected = await this.inspect(state);
-    if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
-    if (!inspected.State.Running) {
-      const started = await this.command(['start', state.name], 8000);
-      if (started.code !== 0) throw new SandboxError('Could not start Run sandbox', 'unknown');
-    }
+    const started = await this.command(['start', state.name], 8000);
+    if (started.code !== 0) throw new SandboxError('Could not start Run sandbox', 'unknown');
     // Wait for the Unix tool socket, including after a daemon restart. Never replay a tool here.
     const probe = `import socket,time\nfor _ in range(100):\n try:\n  s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect("/run/aeeis.sock"); s.sendall(b'{"tool":"__ping"}'); s.shutdown(socket.SHUT_WR); assert s.recv(100)==b'{"ready":true}'; s.close(); break\n except (OSError,AssertionError): time.sleep(.05)\nelse: raise SystemExit(1)`;
     const ready = await this.command(['exec', state.name, 'python3', '-I', '-c', probe], 8000);
@@ -285,19 +345,14 @@ export class DockerSandbox {
       }
     }
     if (result?.code !== 0 && !/is not running|No such container/i.test(result?.stderr ?? '')) {
+      this.unstopped.delete(name);
       this.blocked = true; throw new SandboxError('Sandbox stop could not be confirmed; execution blocked until recovery', 'unknown');
     }
     this.unstopped.delete(name);
   }
   async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
-    // A stop that never reached the host is retried before anything else runs in that container.
-    if (this.unstopped.has(this.name(runId))) {
-      try { await this.stop(this.name(runId)); }
-      catch (error) { throw new SandboxError(error instanceof Error ? error.message : 'Run sandbox stop pending', 'failed'); }
-    }
-    // Nothing of the tool has run while the container is being prepared, so an unreachable host is a plain failure.
-    const state = await this.ensure(runId, files);
+    const state = await this.prepareWithWait(runId, files);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     this.active.add(state.name);
     try {
@@ -310,6 +365,33 @@ export class DockerSandbox {
       await this.stop(state.name);
       throw new SandboxError(error instanceof Error ? error.message : 'Sandbox execution failed', 'unknown');
     } finally { this.active.delete(state.name); }
+  }
+  /** Everything before the tool runs: a pending stop, then the container. While the SSH host is unreachable
+   * (paused, cooling down, rebooting) this waits with backoff up to sshWaitSeconds, because nothing has run yet.
+   * A refused login is not waited on; sshLoginCommand handles it. */
+  private async prepareWithWait(runId: string, files: WorkspaceFile[]): Promise<State> {
+    const name = this.name(runId), started = Date.now(), deadline = started + (this.config.ssh ? this.config.sshWaitSeconds * 1000 : 0);
+    for (let attempt = 0; ; attempt++) {
+      let waitable: SandboxError | undefined;
+      try {
+        // A stop that never reached the host is retried before anything else runs in that container.
+        if (this.unstopped.has(name)) await this.stop(name);
+        return await this.ensure(runId, files);
+      } catch (error) {
+        const unreachable = (error instanceof SandboxUnreachable && !error.loginRefused) || (this.unstopped.has(name) && !(error instanceof SandboxUnreachable));
+        if (!unreachable || this.closing || Date.now() >= deadline) {
+          const waited = Math.round((Date.now() - started) / 60_000);
+          const message = error instanceof Error ? error.message : 'Run sandbox unavailable';
+          // Nothing of the tool ran, so this is a plain failure, never "unknown".
+          if (error instanceof SandboxUnreachable || this.unstopped.has(name)) throw new SandboxError(waited ? `${message} (waited ${waited} min)` : message, 'failed');
+          throw error;
+        }
+        waitable = error as SandboxError;
+      }
+      if (attempt === 0) console.warn(`AEEIS sandbox: ${waitable.message}; waiting up to ${Math.round((deadline - Date.now()) / 60_000)} min for it to come back`);
+      const delay = Math.min(30_000, 2_000 * 2 ** attempt, Math.max(0, deadline - Date.now()));
+      for (const end = Date.now() + delay; Date.now() < end && !this.closing;) await new Promise(resolve => setTimeout(resolve, Math.min(500, end - Date.now())));
+    }
   }
   private async ports(state: State) {
     const result = await this.command(['port', state.name], 5000);
@@ -359,5 +441,11 @@ export class DockerSandbox {
     this.closing = true;
     await Promise.allSettled([...this.active].map(name => this.stop(name)));
     // Idle Run containers and installed packages survive an AEEIS restart.
+    const control = this.config.ssh ? await this.controlDirectory() : undefined;
+    if (control) await new Promise<void>(resolve => {
+      const child = spawn('ssh', ['-o', `ControlPath=${control}/%C`, '-O', 'exit', this.config.ssh!], { stdio: 'ignore' });
+      const timer = setTimeout(() => { child.kill(); resolve(); }, 5000);
+      child.once('error', () => { clearTimeout(timer); resolve(); }); child.once('close', () => { clearTimeout(timer); resolve(); });
+    });
   }
 }

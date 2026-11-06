@@ -222,7 +222,21 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 
 `network: "proxied"` 时，Run 容器在一张 `--internal` 网络上，唯一出口是同一个 Run 的代理容器（无 capability、只读根目录、`nobody` 用户）。代理只放行 `egressHosts` 里的主机名（支持 `*.example.com`），HTTPS 走 CONNECT 443，HTTP 只放 80 端口；IP 字面量和解析到私有 / 链路本地 / 环回地址的名字一律拒绝，每次放行和拒绝记一行 JSON 日志。`egressHosts` 只填 Bot 无人值守也能访问的地址（如 `registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`）：在这种网络下 `shell` / `python` / `process` / `browser` 算作只作用于工作区，范围授权内直接执行。`proxied` 不发布端口。
 
-设置 `sandbox.ssh` 为 `~/.ssh/config` 里的 Host 名时，AEEIS 通过 `ssh <host> docker …` 在那台机器上运行容器（例如测试 VPS），本机不需要 Docker；`npm run sandbox:build` 会把 `sandbox/` 以 tar 流发过去构建。SSH 必须免交互（`BatchMode=yes`）。远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
+设置 `sandbox.ssh` 为 `~/.ssh/config` 里的 Host 名时，AEEIS 通过 `ssh <host> docker …` 在那台机器上运行容器（例如测试 VPS），本机不需要 Docker；`npm run sandbox:build` 会把 `sandbox/` 以 tar 流发过去构建。SSH 必须免交互（`BatchMode=yes`）。同一台主机的所有 docker 调用复用一条 SSH 连接（控制套接字在 `/tmp/aeeis-ssh-<uid>/`，目录必须只属于当前用户，否则退回每次新建连接），空闲 5 分钟后断开。SSH 证书短期有效的主机（如 instabox，约 1 小时）可设 `sshLoginCommand`：登录被拒时 AEEIS 运行它（不经过 shell，最多每分钟一次），成功后重试一次；登录被拒意味着远程什么都没执行，所以重试是安全的。
+
+在 instabox 上使用：机器用 `agent-browser` 模板（自带 Docker）；在运行 AEEIS 的环境里设置 `INSTABOX_API_KEY`，执行一次 `npx instabox@latest ssh-config <机器名>`，把输出保存到 `~/.ssh/config` 引用的文件里，然后配置：
+
+```json
+"sandbox": {
+  "ssh": "instabox-<机器名>",
+  "sshLoginCommand": ["npx", "-y", "instabox@latest", "ssh-cert", "<机器名>"],
+  "image": "aeeis-sandbox:3",
+  "network": "proxied",
+  "egressHosts": ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"]
+}
+```
+
+再运行 `npm run sandbox:build`。免费套餐空闲 30 分钟会暂停（下一次 SSH 会唤醒它），运行 8 小时会强制暂停并进入冷却期。主机连不上时，工具运行之前的准备步骤会按退避重试，最多等 `sshWaitSeconds`（默认 720 秒，正好覆盖一轮 10 分钟的保活），等到了就照常执行，等不到才记为失败（工具没有执行）；登录被拒不等待，交给 `sshLoginCommand`。等待期间同一个本地网关上的其他工具调用（包括 `web-fetch`）会排在后面。远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
 
 | 工具 | 输入与作用 |
 | --- | --- |
