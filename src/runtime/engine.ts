@@ -486,6 +486,18 @@ function toolProviderRequest(pending: ExternalToolInvocation): ToolInvocation {
   };
 }
 
+/** Tokens a delegation may still spend. Under a Work Grant the budget is the Run's model budget, so what the planner
+ * and executor already used comes off it: one allocation must not be spendable twice. */
+export function delegationContext(run: AgentRun) {
+  const external = deriveExternalUsage(run).tokens ?? 0;
+  const limits = [
+    ...(run.externalBudget?.tokens === undefined ? [] : [run.externalBudget.tokens - external]),
+    ...(run.modelBudget?.tokens === undefined ? [] : [run.modelBudget.tokens - deriveModelUsage(run).tokens - external]),
+  ];
+  const tokens = limits.length ? Math.max(0, Math.min(...limits)) : undefined;
+  return { runId: run.id, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), ...(tokens === undefined ? {} : { tokens }) };
+}
+
 /** A Run under a Work Grant works in that grant's persistent workspace, when the sandbox keeps one. */
 function invokeForRun(tools: ToolGateway, run: AgentRun, request: ToolInvocation) {
   return run.workGrant ? tools.invoke(request, { workspace: run.workGrant.grantId }) : tools.invoke(request);
@@ -3441,8 +3453,8 @@ export class AgentEngine {
     };
     try {
       outcome = pending.reconcileRequested
-        ? await this.agents.reconcile(progressRequest, persistedReceipt)
-        : await this.agents.delegate(progressRequest);
+        ? await this.agents.reconcile(progressRequest, persistedReceipt, delegationContext(run))
+        : await this.agents.delegate(progressRequest, delegationContext(run));
     } catch (error) {
       // Keep known admission failures as failures; once the gateway has a
       // reservation, its transport errors are ambiguous external outcomes.

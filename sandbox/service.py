@@ -94,6 +94,28 @@ def process_tool(args):
     raise runner.ToolError('Unsupported process action')
 
 
+def executor_start(args):
+    """Starts one executor session. The argv comes from AEEIS's configuration and never passes through a shell;
+    the prompt goes in on stdin, so nothing in the task text can become an argument."""
+    directory = runner.LIVE / 'executor'
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    session = args['session']
+    if not all(c in '0123456789abcdef-' for c in session) or (directory / f'{session}.json').exists():
+        raise runner.ToolError('Invalid or repeated executor session')
+    prompt = directory / f'{session}.prompt'
+    prompt.write_text(args['prompt'])
+    env = {**runner.command_env(), **args['env']}
+    with prompt.open('rb') as stdin, (directory / f'{session}.jsonl').open('ab') as stdout, (directory / f'{session}.err').open('ab') as stderr:
+        child = subprocess.Popen(args['argv'], cwd=runner.ROOT, env=env, stdin=stdin, stdout=stdout, stderr=stderr, start_new_session=True)
+    (directory / f'{session}.json').write_text(json.dumps({'pid': child.pid, 'startedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}))
+
+    def wait():
+        code = child.wait()
+        (directory / f'{session}.exit').write_text(str(code))
+    threading.Thread(target=wait, daemon=True).start()
+    return {'session': session, 'pid': child.pid}
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         global last_activity
@@ -113,6 +135,8 @@ class Handler(socketserver.StreamRequestHandler):
                         response['output'] = {'restored': True}
                     elif message['tool'] == '__snapshot':
                         response['output'] = {'exported': True}
+                    elif message['tool'] == '__executor_start':
+                        response['output'] = executor_start(message['input'])
                     elif message['tool'] == 'process':
                         response['output'] = process_tool(message['input'])
                     else:

@@ -33,7 +33,9 @@ RUN set -eu; \
       playwright install --with-deps chromium; \
     fi; \
     rm -rf /var/lib/apt/lists/*
-COPY --chmod=0444 runner.py service.py client.py proxy.py observe.py /opt/aeeis/
+# The coding executor. Pinned, and refreshed only by changing this line.
+RUN npm install -g --no-audit --no-fund @anthropic-ai/claude-code@2.1.312
+COPY --chmod=0444 runner.py service.py client.py proxy.py observe.py relay_ctl.py /opt/aeeis/
 RUN chmod 0755 /opt/aeeis && mkdir -p /workspace/artifacts
 WORKDIR /workspace
 # Root inside a normal isolated container permits apt/pip and service setup.

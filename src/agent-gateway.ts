@@ -133,9 +133,11 @@ export interface AgentCallbackAuthentication {
 
 export class AgentCallbackAuthenticationError extends Error {}
 
+/** Which Run a delegation belongs to. Kept out of DelegationRequest, which remote transports send whole. */
+export interface DelegationContext { runId: string; workspace?: string; /** What the Run may still spend. */ tokens?: number }
 export interface AgentTransport {
-  submit(card: AgentCard, request: DelegationRequest): Promise<AgentTransportResponse>;
-  reconcile?(card: AgentCard, request: DelegationRequest, receipt: DelegationReceipt): Promise<AgentTransportResponse>;
+  submit(card: AgentCard, request: DelegationRequest, context?: DelegationContext): Promise<AgentTransportResponse>;
+  reconcile?(card: AgentCard, request: DelegationRequest, receipt: DelegationReceipt, context?: DelegationContext): Promise<AgentTransportResponse>;
 }
 
 interface RegisteredAgent {
@@ -374,7 +376,7 @@ export class AgentGateway {
     return card;
   }
 
-  async delegate(input: DelegationRequest): Promise<DelegationOutcome> {
+  async delegate(input: DelegationRequest, context?: DelegationContext): Promise<DelegationOutcome> {
     const request = validateRequest(input);
     await this.assertGrantActive(request);
     const card = await this.resolveCard(request);
@@ -398,7 +400,7 @@ export class AgentGateway {
             await request.onProgress!(progress);
           },
         } : request;
-        const response = await this.transport.submit(card, transportRequest);
+        const response = await this.transport.submit(card, transportRequest, context);
         // The grant may expire while the provider is executing. Validate the
         // immutable task/context binding, but permit the already-issued result
         // through the accounting path so it can be charged and isolated.
@@ -426,8 +428,8 @@ export class AgentGateway {
   }
 
   async reconcile(idempotencyKey: string): Promise<DelegationOutcome>;
-  async reconcile(request: DelegationRequest, persistedReceipt?: DelegationReceipt): Promise<DelegationOutcome>;
-  async reconcile(input: string | DelegationRequest, persistedReceipt?: DelegationReceipt): Promise<DelegationOutcome> {
+  async reconcile(request: DelegationRequest, persistedReceipt?: DelegationReceipt, context?: DelegationContext): Promise<DelegationOutcome>;
+  async reconcile(input: string | DelegationRequest, persistedReceipt?: DelegationReceipt, context?: DelegationContext): Promise<DelegationOutcome> {
     const entry = typeof input === 'string' ? this.inFlight.get(input) : undefined;
     const request = typeof input === 'string' ? entry?.request : validateRequest(input, { allowExpired: true });
     if (!request) throw new Error('Unknown delegation idempotency key');
@@ -439,7 +441,7 @@ export class AgentGateway {
     if (!this.transport.reconcile) throw new Error('Agent transport does not support reconciliation');
     await this.ledger.ensureUnknown(request.grant.grantId, request.idempotencyKey, request.grant.budget);
     try {
-      const response = await this.transport.reconcile(card, request, receipt);
+      const response = await this.transport.reconcile(card, request, receipt, context);
       const outcome = validateResponse(request, response, { allowExpiredGrant: grantRecord.status !== 'active' });
       let authorization: GrantAuthorizationReceipt | undefined;
       try { authorization = await this.accountOutcome(request, outcome); }

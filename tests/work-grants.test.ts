@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { AgentEngine } from '../src/runtime/engine.js';
+import { AgentEngine, delegationContext } from '../src/runtime/engine.js';
 import type { ModelRequest } from '../src/runtime/model.js';
 import type { ToolGateway } from '../src/integrations.js';
 import { decideAction, type ActionCandidate } from '../src/runtime/action-policy.js';
@@ -231,6 +231,25 @@ describe('stopping the work on a Run machine', () => {
     const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
     await h.engine.revokeWorkGrant(grant.grantId, scope);
     expect(h.interrupt).toHaveBeenCalledWith(run.id, 'freeze');
+  });
+});
+
+describe('what a delegation may spend', () => {
+  it('takes what is left of the grant, after model calls and earlier external spending', async () => {
+    const h = harness();
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    expect(delegationContext(run)).toEqual({ runId: run.id, workspace: grant.grantId, tokens: 1000 });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const finished = await h.repository.get(run.id);
+    const used = finished.modelUsage!.tokens;
+    expect(used).toBeGreaterThan(0);
+    expect(delegationContext(finished).tokens).toBe(1000 - used);
+    const external = { ...finished, delegationOutcomes: [{ status: 'completed', cost: { tokens: 100 } }] } as never as AgentRun;
+    expect(delegationContext({ ...external, externalBudget: { tokens: 150 } }).tokens).toBeLessThanOrEqual(150);
+  });
+  it('has no token figure for a Run with no budget', () => {
+    expect(delegationContext({ id: 'run_x', calls: [], delegationOutcomes: [], toolReceipts: [] } as never as AgentRun)).toEqual({ runId: 'run_x' });
   });
 });
 

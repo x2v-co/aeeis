@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs
 import { dirname, join, resolve, sep } from 'node:path';
 import { DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord } from './docker-sandbox.js';
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
+import { ClaudeCodeTransport, executorConfigSchema } from './executor.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import type { MachineInterrupt, MachineInterruptResult, Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
@@ -19,7 +20,10 @@ export const localToolsConfigSchema = z.object({
   sandbox: sandboxConfigSchema.prefault({}),
   timeoutMs: z.number().int().min(100).max(600_000).default(120_000),
   webHosts: z.array(z.string().regex(/^[a-z0-9.-]+$/)).default([]),
-}).strict().refine(config => config.defaultAllowedTools.every(name => config.tools.includes(name)), 'Default tools must be enabled');
+  /** A coding executor as an AEEIS Agent, running in each Run's container. Needs sandbox.modelRelay. */
+  executor: executorConfigSchema.optional(),
+}).strict().refine(config => config.defaultAllowedTools.every(name => config.tools.includes(name)), 'Default tools must be enabled')
+  .refine(config => !config.executor || config.sandbox.modelRelay, 'The executor needs sandbox.modelRelay');
 export type LocalToolsConfig = z.infer<typeof localToolsConfigSchema>;
 const pathInput = z.string().min(1).max(1000);
 const hashInput = z.string().regex(/^[a-f0-9]{64}$/);
@@ -98,6 +102,17 @@ export class LocalToolGateway implements ToolGateway {
   interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> { return this.sandbox.interrupt(runId, action); }
   observe(runId: string, live: boolean): Promise<MachineView> { return this.sandbox.observe(runId, live); }
   hostWait(): Promise<HostWait | undefined> { return this.sandbox.hostWait(); }
+  /** The executor, when configured. It uses the sandbox directly: a session lasts far longer than the tool queue should wait. */
+  executorTransport(): ClaudeCodeTransport | undefined {
+    if (!this.config.executor) return undefined;
+    const sandbox = this.sandbox, snapshotBytes = this.config.sandbox.snapshotMiB * 1024 * 1024, root = this.config.workspaceRoot;
+    return new ClaudeCodeTransport({
+      startExecutor: async (runId, session, workspace) => sandbox.startExecutor(runId, session, await readSnapshot(join(root, runId), snapshotBytes), workspace),
+      executorRecord: runId => sandbox.executorRecord(runId), pollExecutor: (runId, session, offset) => sandbox.pollExecutor(runId, session, offset),
+      relayUsage: (runId, token) => sandbox.relayUsage(runId, token), closeRelay: (runId, token) => sandbox.closeRelay(runId, token),
+      stopExecutor: (runId, pid) => sandbox.stopExecutor(runId, pid), observe: (runId, live) => sandbox.observe(runId, live),
+    }, this.config.executor, join(this.config.stateDirectory, 'executor-evidence'));
+  }
   private screenshotDirectory(runId: string) {
     if (!/^run_[a-f0-9-]{36}$/.test(runId)) throw new ToolError('Invalid Run identity');
     return join(this.config.workspaceRoot, runId, 'artifacts', 'screenshots');

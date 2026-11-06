@@ -242,6 +242,8 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 
 Run 页的"电脑"折叠块显示机器状态、最新截图、终端输出、后台进程、改动和预览链接，只有 Run 的所有者能看（`GET /api/runs/:id/computer`）。暂停会冻结容器里的所有进程（`docker pause`，内容都保留），继续时接着跑；取消会停掉容器；连不上主机时 Run 里会记下"没能确认"。
 
+配置 `executor`（需要 `sandbox.modelRelay: true` 和 `network: "proxied"`）后，Claude Code 作为 Agent `executor.claude-code` 运行在 Run 的容器里，用授权或计划把它列入可用 Agent。容器里没有真 API key：执行器拿到的是本次会话的令牌，真 key 放在 AEEIS 主机的环境变量 `AEEIS_EXECUTOR_API_KEY`（可用 `executor.apiKeyEnv` 改名）里，会话开始时送进代理容器的内存，结束即忘。代理按授权预算的 90% 截停。请用一把专用并设了消费上限的 key：它在会话期间位于沙箱主机的内存中。结果标记为"执行器自述"，AEEIS 自己采集的改动和用量写在结果里，输出流保存在 `stateDirectory/executor-evidence/<runId>/executor/`。
+
 `sandbox.previewPorts` 配合 `sandbox.previewCommand` 可以把开发服务器分享成私有链接：Run 的容器仍在内部网络上，代理把这些端口转进去，并只发布到远程机器的 `127.0.0.1`。工具调用 `process` 的 `{"action":"preview","port":3000}` 运行 `publish` 命令（`{port}` 替换为远程机器上的端口，命令要打印链接），返回链接；Run 释放时运行 `unpublish`。链接会出现在工具结果里。instabox 示例：
 
 ```json

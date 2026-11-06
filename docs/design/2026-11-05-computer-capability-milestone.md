@@ -1,7 +1,7 @@
 ---
 title: 下一个里程碑：先让 Bot 用上电脑，审批改为范围授权
 date: 2026-11-05
-status: 设计；切片 A（范围授权）、B（远程沙箱、出口代理、浏览器、授权工作目录、预览链接）和 C（电脑面板）已实现
+status: 设计；切片 A、B、C、D（Claude Code 执行器）已实现
 relates:
   - 2026-10-29-bots-that-act.md
   - 2026-11-04-agent-autoloop-borrow-plan.md
@@ -168,6 +168,18 @@ relates:
 - **证据**：执行器的结构化输出流（每一步工具调用、用量）作为回执保存；会话结束时 AEEIS 自己采集 `git diff`、测试输出和截图，不采信执行器的自述。执行器的"已完成"只算 `reported`（与 Debate 设计的权威等级一致），AEEIS 复查后才算数。
 - **预算**：按输出流里的用量实时累计，超过授权剩余额度就结束会话；同时有墙钟上限。
 - **结果不明**：会话中断时记 `unknown`；重启后看工作区状态和会话日志核对，决定续跑或问人。
+
+实现（切片 D，Claude Code）：
+
+- **凭证**：普通 API key 做不到"按会话、有额度、结束即吊销"，所以容器里根本不放真 key。每个 Run 的代理容器里有一个模型中继：执行器拿到的是只在本次会话有效的令牌，`ANTHROPIC_BASE_URL` 指向 `http://aeeis-proxy:3129`；中继只放行 `/v1/messages` 和 `count_tokens`，换上真 key 转发给配置的上游，并从响应里累计用量。真 key 经 `docker exec` 的 stdin 送进代理进程的内存，不进命令行、环境变量或 Docker 记录。**它仍然在 VPS 的内存里**，VPS 的 root 能拿到，所以这里用一把专用、在控制台设了消费上限的 key。
+- **预算**：用量按 `输入 + 输出 + 写缓存 + 读缓存 / 10` 累计（代理循环每轮都重读上下文，读缓存价格约十分之一）。上限取授权预算的 90%，留给停下时还在进行的那次调用。到上限后中继返回 403（不用 429，客户端会重试 429），AEEIS 结束会话。
+- **运行**：`--tools` / `--allowedTools` 来自配置，`--setting-sources user` 忽略项目里的设置，不用 `--dangerously-skip-permissions`。提示词走 stdin，argv 不经 shell。容器和出口代理才是边界，工具列表是第二层。
+- **接入**：`ClaudeCodeTransport` 实现 `AgentTransport`，卡片 endpoint 是 `aeeis-executor://claude-code`，`RoutedAgentTransport` 分流，所以授权、预算账本、审批都走现有路径。Run 的身份用 `DelegationContext` 单独传，不放进 `DelegationRequest`，因为 HTTP 传输会把请求整个发出去。
+- **证据**：输出流逐段保存到 AEEIS 这边，会话结束时 AEEIS 自己取 `git status` / `git diff`。结果的 `claims` 是空的，`unresolved` 里写明"执行器自述，AEEIS 未验证"，费用的 tokens 用中继的数，不用执行器自报。
+- **停止**：暂停冻结容器，执行器一起冻结，且不占墙钟上限；取消杀掉容器，会话记 `unknown`；连不上主机超过 15 分钟记 `unknown`。`reconcile` 只读会话结果，绝不重新启动。
+- **预算来源**：引擎发出的委派只有 `calls: 1`，没有 token 预算，所以执行器的预算取 Run 还剩多少：`externalBudget` 余额和 `modelBudget - 模型已用 - 外部已用` 中较小的，再和委派自带的上限取最小。同一份授权额度不能既给规划用又给执行器用一遍。
+- **在测试机上验证过（真实 key，Haiku）**：修 bug 任务通过，AEEIS 自己跑测试 `pass 1 fail 0`，改动只有一行；2 万 token 预算的超大任务在 18016 token 停下，中继拒绝 1 次，进程退出，结果 `partial`；会话中暂停机器再恢复，会话继续，流里只有 1 次启动；会话中断开机器的外网 30 秒再恢复，同样只启动 1 次并完成。完整路径：真实 engine、Work Grant、Agent 网关和真实 Claude Code，授权批准计划，`agent.completed`，用量记入外部花费。输出流里没有 key。
+- **还没做**：Codex；模型价格没有进中继，money 预算只看执行器自报的 `total_cost_usd`；AEEIS 的结果审核还没有接到执行器的结果上（切片 E）；一次调用超过 10% 余量时结果会被网关拒绝，转为人工核查。
 
 ## 4. 第一个验收场景：做一个网站
 
