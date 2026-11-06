@@ -18,6 +18,9 @@ lock = threading.Lock()
 born = last_activity = time.monotonic()
 
 
+LIVE_LOG_LIMIT = 256 * 1024
+
+
 def drain(stream, record, kind):
     while True:
         chunk = os.read(stream.fileno(), 4096)
@@ -25,6 +28,22 @@ def drain(stream, record, kind):
             return
         # Ring buffer: long-running services cannot fill the container disk with logs.
         record[kind] = (record[kind] + chunk)[-24000:]
+        keep_live(record, chunk)
+
+
+def keep_live(record, chunk):
+    """Mirror output where the read-only observer can read it. The size is capped the same way as the ring."""
+    path = record.get('live')
+    if path is None:
+        return
+    try:
+        with record['live_lock']:
+            with path.open('ab', buffering=0) as stream:
+                stream.write(chunk)
+            if path.stat().st_size > LIVE_LOG_LIMIT:
+                path.write_bytes(path.read_bytes()[-24000:])
+    except OSError:
+        pass
 
 
 def process_tool(args):
@@ -42,7 +61,13 @@ def process_tool(args):
             env=runner.command_env(),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         handle = 'proc_' + uuid.uuid4().hex
-        record = {'child': child, 'stdout': b'', 'stderr': b'', 'command': args['command'][:200]}
+        record = {'child': child, 'stdout': b'', 'stderr': b'', 'command': args['command'][:200], 'live_lock': threading.Lock(), 'live': None}
+        try:
+            runner.LIVE.mkdir(mode=0o700, exist_ok=True)
+            (runner.LIVE / f'{handle}.json').write_text(json.dumps({'command': args['command'][:200], 'pid': child.pid}))
+            record['live'] = runner.LIVE / f'{handle}.log'
+        except OSError:
+            pass
         processes[handle] = record
         for kind in ('stdout', 'stderr'):
             threading.Thread(target=drain, args=(getattr(child, kind), record, kind), daemon=True).start()

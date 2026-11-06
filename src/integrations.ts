@@ -29,6 +29,8 @@ export const receiptSchema = z.object({
 }).strict();
 export type Receipt = z.infer<typeof receiptSchema>;
 
+export type MachineInterrupt = 'freeze' | 'thaw' | 'halt';
+export interface MachineInterruptResult { confirmed: boolean; detail?: string }
 /** Run-side context for one call, kept out of ToolInvocation so it never reaches remote toolkits. */
 export interface ToolCallContext { workspace?: string }
 export interface ToolInvocation {
@@ -52,6 +54,9 @@ export interface ToolkitPinnedTool {
 export interface ToolGateway {
   listTools(): Promise<ToolDescriptor[]>;
   invoke(request: ToolInvocation, context?: ToolCallContext): Promise<ToolResult>;
+  /** Acts on what a Run's machine is doing right now: freeze keeps its memory, thaw continues, halt stops it all.
+   * Separate from invoke, because a call in progress is exactly what this has to reach. */
+  interruptRun?(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult>;
   reconcile?: ((request: ToolInvocation, receipt: Receipt) => Promise<ToolResult>) | undefined;
   /** Optional read-only protocol/dependency probe. It must not invoke a tool. */
   health?(): Promise<{ ready: boolean; detail: string; checkedAt?: string }>;

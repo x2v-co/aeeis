@@ -1701,3 +1701,13 @@ body.gb.conversation-mode #conversation-status:empty, body.gb.conversation-mode 
   body.gb.conversation-mode #entry-defaults { display: none; }
 }
 .channel-board-control{display:grid;gap:.35rem}.channel-board-control select{max-width:100%;min-height:40px}.board-touch-handle{touch-action:none;cursor:grab;min-height:44px}.channel-board-column{min-height:10rem}
+
+/* The Run's computer: what its machine is doing right now. */
+.run-computer { margin: 12px 0; border: 1px solid var(--line, #d8d8d8); border-radius: 8px; padding: 10px 12px; }
+.run-computer > summary { cursor: pointer; font-weight: 600; }
+.run-computer h3 { margin: 12px 0 4px; font-size: 13px; }
+.computer-notice { margin: 8px 0 0; }
+.computer-previews { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 0; }
+.computer-shot { margin: 10px 0 0; }
+.computer-shot img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line, #d8d8d8); border-radius: 6px; }
+.computer-output { max-height: 280px; overflow: auto; margin: 0; padding: 8px; border-radius: 6px; background: rgba(127, 127, 127, 0.1); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }

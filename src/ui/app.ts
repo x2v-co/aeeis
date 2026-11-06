@@ -8372,6 +8372,141 @@ function renderWorkingMemory(run: RunView): void {
     void loadIndex();
   }
 }
+interface ComputerObservation {
+  foreground: { command: string; startedAt?: string | null; finishedAt?: string | null; output: string } | null;
+  processes: { processId: string; command: string; running: boolean; output: string }[];
+  repository: { status: string; diff: string; truncated: boolean } | null;
+  files: { path: string; modifiedAt: string }[];
+}
+interface ComputerView {
+  status: string;
+  machine: { state: string; detail?: string; live?: ComputerObservation; previews: { port: number; url: string }[] };
+  screenshots: { name: string; bytes: number; capturedAt: string }[];
+  hostWait?: { since: string; message: string; availableAt?: string };
+}
+const COMPUTER_POLL_MS = 5000;
+/** Each look reaches the sandbox host, and on some hosts that counts as activity. Only work in progress is followed. */
+const COMPUTER_FOLLOWED = ['queued', 'planning', 'running', 'reviewing'];
+const COMPUTER_STATES: Record<string, string> = {
+  absent: '还没有开机', released: '已经收掉', running: '运行中', frozen: '已冻结，进程停在原地，内容都在',
+  stopped: '已停止', unreachable: '连不上', unknown: '',
+};
+const computer = { runId: '', status: '', looked: '', available: true, timer: 0, busy: false, shotName: '', live: undefined as ComputerObservation | undefined };
+function resetComputer(runId: string): void {
+  window.clearTimeout(computer.timer);
+  Object.assign(computer, { runId, status: '', looked: '', available: true, shotName: '', live: undefined });
+  $('computer-shot').hidden = true;
+  $('computer-notice').hidden = true;
+  $('computer-previews').hidden = true;
+  $('computer-terminal-block').hidden = true;
+  $('computer-changes-block').hidden = true;
+  $('computer-state').textContent = '';
+}
+/** Everything here comes from inside the machine, so it is only ever written as text. */
+function setComputerOutput(id: string, text: string): void {
+  const output = $(id), block = $(`${id}-block`);
+  // Stay on the newest lines unless the person has scrolled up. A block that was hidden has nothing to keep.
+  const following = block.hidden || output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+  block.hidden = !text;
+  if (output.textContent !== text) output.textContent = text;
+  if (following) output.scrollTop = output.scrollHeight;
+}
+function computerTerminal(live: ComputerObservation): string {
+  const parts: string[] = [];
+  if (live.foreground) parts.push(`$ ${live.foreground.command}${live.foreground.finishedAt ? '' : '  （运行中）'}\n${live.foreground.output}`.trimEnd());
+  for (const item of live.processes) parts.push(`后台 · ${item.running ? '运行中' : '已退出'} · ${item.command}\n${item.output}`.trimEnd());
+  return parts.join('\n\n');
+}
+function computerChanges(live: ComputerObservation): string {
+  if (live.repository) return `${live.repository.status}\n${live.repository.diff}${live.repository.truncated ? '\n…（改动太长，这里只显示开头）' : ''}`.trim();
+  return live.files.map(file => `${formatTime(file.modifiedAt)}  ${file.path}`).join('\n');
+}
+async function showComputerScreenshot(runId: string, shot: ComputerView['screenshots'][number]): Promise<void> {
+  if (shot.name === computer.shotName) return;
+  const token = getToken();
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/computer/screenshots/${encodeURIComponent(shot.name)}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  if (!response.ok || computer.runId !== runId) return;
+  // The screenshot route needs the auth header, and the page's image policy allows data: but not blob: URLs.
+  const image = await response.blob();
+  const url = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Screenshot could not be read'));
+    reader.readAsDataURL(image);
+  });
+  if (computer.runId !== runId) return;
+  computer.shotName = shot.name;
+  $<HTMLImageElement>('computer-shot-image').src = url;
+  $('computer-shot-caption').textContent = `最新截图 · ${formatTime(shot.capturedAt)}`;
+  $('computer-shot').hidden = false;
+}
+function renderComputerView(run: RunView, view: ComputerView): void {
+  $('computer-state').textContent = COMPUTER_STATES[view.machine.state] ?? '';
+  const interrupted = [...(run.events ?? [])].reverse().find(item => item.type.startsWith('machine.'));
+  const notice = view.hostWait
+    ? `这次工具调用在等沙箱主机恢复（从 ${formatTime(view.hostWait.since)} 起${view.hostWait.availableAt ? `，主机说 ${formatTime(view.hostWait.availableAt)} 后可用` : ''}）。工具还没有执行，主机恢复后会继续。`
+    : interrupted?.type === 'machine.interrupt_unconfirmed' ? '没能确认机器上的工作已经停下：连不上沙箱主机。主机恢复后再看一眼。'
+    : view.machine.detail ?? '';
+  $('computer-notice').textContent = notice;
+  $('computer-notice').hidden = !notice;
+  const previews = $('computer-previews');
+  previews.replaceChildren();
+  for (const preview of view.machine.previews) {
+    let url: URL;
+    try { url = new URL(preview.url); } catch { continue; }
+    if (url.protocol !== 'https:') continue;
+    const link = element('a', `打开预览（端口 ${preview.port}）`);
+    link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    previews.append(link);
+  }
+  previews.hidden = !previews.children.length;
+  computer.live = view.machine.live ?? computer.live;
+  if (computer.live) {
+    setComputerOutput('computer-terminal', computerTerminal(computer.live));
+    setComputerOutput('computer-changes', computerChanges(computer.live));
+  }
+}
+async function pollComputer(run: RunView): Promise<void> {
+  if (computer.busy || computer.runId !== run.id || !computer.available) return;
+  computer.busy = true;
+  const lookedAt = computer.status;
+  computer.looked = lookedAt;
+  try {
+    const view = await api<ComputerView>(`/runs/${encodeURIComponent(run.id)}/computer`);
+    if (computer.runId !== run.id) return;
+    renderComputerView(run, view);
+    const latest = view.screenshots[0];
+    if (latest) await showComputerScreenshot(run.id, latest);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) { computer.available = false; $('run-computer').hidden = true; }
+  } finally {
+    computer.busy = false;
+    window.clearTimeout(computer.timer);
+    const panel = $<HTMLDetailsElement>('run-computer');
+    // A pause pressed during this look changed the machine after it was read, so the view above is already old.
+    if (computer.runId === run.id && computer.available && computer.status !== lookedAt && panel.open) void pollComputer(current ?? run);
+    else if (computer.runId === run.id && computer.available && COMPUTER_FOLLOWED.includes(computer.status) && panel.open && !document.hidden) {
+      computer.timer = window.setTimeout(() => { void pollComputer(current ?? run); }, COMPUTER_POLL_MS);
+    }
+  }
+}
+function renderComputer(run: RunView): void {
+  const panel = $<HTMLDetailsElement>('run-computer');
+  if (readOnlyShare || run.canEdit === false) { window.clearTimeout(computer.timer); panel.hidden = true; return; }
+  if (computer.runId !== run.id) resetComputer(run.id);
+  if (!computer.available) return;
+  panel.hidden = false;
+  if (computer.status === run.status) return;
+  computer.status = run.status;
+  if (panel.open && !document.hidden) void pollComputer(run);
+}
+/** Coming back to the panel: a followed Run picks up again, and anything else is read only if it has not been yet. */
+function reopenComputer(): void {
+  if (!current || !$<HTMLDetailsElement>('run-computer').open || document.hidden) return;
+  if (COMPUTER_FOLLOWED.includes(computer.status) || computer.looked !== computer.status) void pollComputer(current);
+}
+$<HTMLDetailsElement>('run-computer').addEventListener('toggle', reopenComputer);
+document.addEventListener('visibilitychange', reopenComputer);
 function render(run: RunView): void {
   renderWorkingMemory(run);
   document.body.classList.toggle('run-open', currentRunOpen);
@@ -8426,6 +8561,7 @@ function render(run: RunView): void {
   if (canTakeOver(run)) controls.append(button('接管', () => takeOverRun(run)));
   if (run.takeover && run.status === 'paused') controls.append(handbackControls());
   renderTakeoverWorkspace(run);
+  renderComputer(run);
   if (run.status === 'waiting_external') controls.append(button('核查外部 Agent 结果', async () => { openInputPanel('reconcile'); }));
   if (run.status === 'needs_input' || run.status === 'unknown') controls.append(button(run.status === 'unknown' ? '填写核查说明' : '填写补充信息', async () => {
     openInputPanel(run.status === 'unknown' ? 'reconcile' : 'answer');

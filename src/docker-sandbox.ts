@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
@@ -44,6 +44,21 @@ export const sandboxConfigSchema = z.object({
   .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh')
   .refine(config => new Set(config.previewPorts).size === config.previewPorts.length && (config.previewPorts.length === 0 || (config.network === 'proxied' && config.previewCommand)), 'previewPorts must be unique and need the proxied network and previewCommand');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
+const observationSchema = z.object({
+  foreground: z.object({ command: z.string(), startedAt: z.string().nullable().optional(), finishedAt: z.string().nullable().optional(), output: z.string() }).nullable(),
+  processes: z.array(z.object({ processId: z.string(), command: z.string(), running: z.boolean(), output: z.string() })).max(8),
+  repository: z.object({ status: z.string(), diff: z.string(), truncated: z.boolean() }).nullable(),
+  files: z.array(z.object({ path: z.string(), modifiedAt: z.string() })).max(30),
+}).strict();
+export type MachineObservation = z.infer<typeof observationSchema>;
+/** What a look at the machine found. `live` is present only when the container was read just now. */
+export interface MachineView {
+  state: 'absent' | 'released' | 'running' | 'frozen' | 'stopped' | 'unreachable' | 'unknown';
+  detail?: string;
+  live?: MachineObservation;
+  previews: { port: number; url: string }[];
+}
+export interface HostWait { since: string; message: string; availableAt?: string }
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
@@ -141,6 +156,8 @@ export class DockerSandbox {
    * their next call retries the stop first. A failed stop on a reachable engine still blocks everything. */
   private unstopped = new Set<string>();
   private controlReady: Promise<string | undefined> | undefined;
+  /** Runs told to stop while no container was there to stop, such as during creation. Their next tool must not start. */
+  private held = new Set<string>();
   private loginRefresh: Promise<void> | undefined;
   private lastLoginRefresh = 0;
   private readonly owner: string;
@@ -272,7 +289,7 @@ export class DockerSandbox {
     const file = join(this.directory, `${state.runId}.json`), temp = `${file}.${randomUUID()}.tmp`;
     await writeFile(temp, JSON.stringify(state), { mode: 0o600, flag: 'wx' }); await rename(temp, file);
   }
-  private async inspect(state: State): Promise<{ Id: string; Image: string; State: { Running: boolean }; Config: { Labels: Record<string, string> } } | null> {
+  private async inspect(state: State): Promise<{ Id: string; Image: string; State: { Running: boolean; Paused?: boolean }; Config: { Labels: Record<string, string> } } | null> {
     const result = await this.command(['inspect', '--type=container', state.name], 5000);
     if (result.code !== 0) {
       if (/No such (object|container)/i.test(result.stderr)) return null;
@@ -286,6 +303,12 @@ export class DockerSandbox {
   private async start(state: State) {
     const inspected = await this.inspect(state);
     if (!inspected) throw new SandboxError('Run environment was removed externally; create a new Run instead of silently losing installed dependencies', 'unknown');
+    // A tool call on a frozen container means someone is working in it again, such as a person who took over.
+    if (inspected.State.Paused) {
+      const thawed = await this.command(['unpause', state.name], 8000);
+      if (thawed.code !== 0) throw new SandboxError('Could not resume Run sandbox', 'unknown');
+      return;
+    }
     // A running container means its tool service is up: the container exits when the service does.
     if (inspected.State.Running) return;
     if (this.config.network === 'proxied' && state.proxyId) {
@@ -407,6 +430,7 @@ export class DockerSandbox {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     const state = await this.prepareWithWait(runId, files, workspace);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
+    if (this.held.has(runId)) throw new SandboxError('This Run was stopped before the tool started; nothing ran');
     this.active.add(state.name);
     try {
       const action = tool === 'process' ? (input as { action?: string }).action : undefined;
@@ -430,12 +454,15 @@ export class DockerSandbox {
       try {
         // A stop that never reached the host is retried before anything else runs in that container.
         if (this.unstopped.has(name)) await this.stop(name);
-        return await this.ensure(runId, files, workspace);
+        const ready = await this.ensure(runId, files, workspace);
+        if (attempt > 0) await this.setHostWait(undefined);
+        return ready;
       } catch (error) {
         const unreachable = (error instanceof SandboxUnreachable && !error.loginRefused) || (this.unstopped.has(name) && !(error instanceof SandboxUnreachable));
         // A host that says it stays away past the deadline is not worth holding every other call for.
         const tooLong = error instanceof SandboxUnreachable && (error.availableAt ?? 0) > deadline;
         if (!unreachable || tooLong || this.closing || Date.now() >= deadline) {
+          if (attempt > 0) await this.setHostWait(undefined);
           const waited = Math.round((Date.now() - started) / 60_000);
           const message = error instanceof Error ? error.message : 'Run sandbox unavailable';
           // Nothing of the tool ran, so this is a plain failure, never "unknown".
@@ -444,10 +471,74 @@ export class DockerSandbox {
         }
         waitable = error as SandboxError;
       }
-      if (attempt === 0) console.warn(`AEEIS sandbox: ${waitable.message}; waiting up to ${Math.round((deadline - Date.now()) / 60_000)} min for it to come back`);
+      if (attempt === 0) {
+        console.warn(`AEEIS sandbox: ${waitable.message}; waiting up to ${Math.round((deadline - Date.now()) / 60_000)} min for it to come back`);
+        const availableAt = waitable instanceof SandboxUnreachable ? waitable.availableAt : undefined;
+        await this.setHostWait({ since: new Date(started).toISOString(), message: waitable.message, ...(availableAt ? { availableAt: new Date(availableAt).toISOString() } : {}) });
+      }
       const delay = Math.min(30_000, 2_000 * 2 ** attempt, Math.max(0, deadline - Date.now()));
       for (const end = Date.now() + delay; Date.now() < end && !this.closing;) await new Promise(resolve => setTimeout(resolve, Math.min(500, end - Date.now())));
     }
+  }
+  /** Stops or freezes a Run's container directly, without waiting behind a tool call in progress. */
+  async interrupt(runId: string, action: 'freeze' | 'thaw' | 'halt'): Promise<{ confirmed: boolean; detail?: string }> {
+    if (action === 'thaw') this.held.delete(runId); else this.held.add(runId);
+    let state: State | undefined;
+    try { state = await this.state(runId); } catch (error) { return { confirmed: false, detail: error instanceof Error ? error.message : 'Run sandbox state unreadable' }; }
+    if (!state || state.released) return { confirmed: true, detail: 'no machine' };
+    try {
+      if (action === 'halt') { await this.stop(state.name); return { confirmed: true }; }
+      const result = await this.command([action === 'freeze' ? 'pause' : 'unpause', state.name], 8000);
+      if (result.code === 0) { if (action === 'freeze') this.held.delete(runId); return { confirmed: true }; }
+      if (/already paused|is not paused|is not running|No such container/i.test(result.stderr)) return { confirmed: true };
+      return { confirmed: false, detail: result.stderr.trim().slice(0, 300) || 'Docker refused' };
+    } catch (error) {
+      return { confirmed: false, detail: error instanceof Error ? error.message : 'Sandbox host unavailable' };
+    }
+  }
+  /** A look at the machine. It never starts or thaws anything; `live: false` does not touch the host at all. */
+  async observe(runId: string, live: boolean): Promise<MachineView> {
+    let state: State | undefined;
+    try { state = await this.state(runId); }
+    catch (error) {
+      if (error instanceof SandboxError && error.message === 'Invalid Run sandbox identity') return { state: 'absent', previews: [] };
+      return { state: 'unknown', detail: error instanceof Error ? error.message : 'Run sandbox state unreadable', previews: [] };
+    }
+    if (!state) return { state: 'absent', previews: [] };
+    if (state.released) return { state: 'released', previews: [] };
+    const previews = Object.entries(state.previews ?? {}).map(([port, item]) => ({ port: Number(port), url: item.url }));
+    if (!live) return { state: 'unknown', previews };
+    try {
+      const inspected = await this.inspect(state);
+      if (!inspected) return { state: 'stopped', detail: 'The container no longer exists', previews };
+      if (inspected.State.Paused) return { state: 'frozen', previews };
+      if (!inspected.State.Running) return { state: 'stopped', previews };
+      const result = await this.command(['exec', state.name, 'python3', '-I', '/opt/aeeis/observe.py'], 15_000, undefined, 512 * 1024);
+      // It can be frozen or stopped between the two calls above.
+      if (result.code !== 0 && /is paused/i.test(result.stderr)) return { state: 'frozen', previews };
+      if (result.code !== 0 && /is not running/i.test(result.stderr)) return { state: 'stopped', previews };
+      if (result.code !== 0) return { state: 'running', detail: 'This Run was started from an older sandbox image, or the look failed', previews };
+      return { state: 'running', live: observationSchema.parse(JSON.parse(result.stdout)), previews };
+    } catch (error) {
+      if (error instanceof SandboxUnreachable) return { state: 'unreachable', detail: error.message, previews };
+      return { state: 'unknown', detail: error instanceof Error ? error.message : 'Sandbox look failed', previews };
+    }
+  }
+  private hostWaitFile() { return join(this.directory, 'host-wait.json'); }
+  private async setHostWait(wait: HostWait | undefined) {
+    try {
+      if (!wait) { await rm(this.hostWaitFile(), { force: true }); return; }
+      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await writeFile(this.hostWaitFile(), JSON.stringify(wait), { mode: 0o600 });
+    } catch (error) { console.warn(`AEEIS sandbox: could not record host wait: ${error instanceof Error ? error.message : error}`); }
+  }
+  /** Set while a tool call is waiting for the SSH host, in a file so that any AEEIS process can show it. */
+  async hostWait(): Promise<HostWait | undefined> {
+    try {
+      const wait = JSON.parse(await readFile(this.hostWaitFile(), 'utf8')) as HostWait;
+      // A record older than the longest possible wait was left by a process that died mid-wait.
+      return Date.now() - Date.parse(wait.since) > (this.config.sshWaitSeconds + 120) * 1000 ? undefined : wait;
+    } catch { return undefined; }
   }
   /** Runs an operator-configured command on the AEEIS host (no shell) and returns its standard output. */
   private localCommand(argv: string[], timeoutMs: number): Promise<string> {
