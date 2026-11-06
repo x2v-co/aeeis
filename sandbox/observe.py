@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 ROOT = Path('/workspace')
@@ -75,4 +76,23 @@ def recent_files():
     return [{'path': path, 'modifiedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(modified))} for modified, path in sorted(found, reverse=True)[:30]]
 
 
-print(json.dumps({'foreground': foreground(), 'processes': processes(), 'repository': repository(), 'files': recent_files()}, ensure_ascii=True))
+def executor(session, offset):
+    """New output from one executor session, from a byte offset, and whether it has ended."""
+    directory = LIVE / 'executor'
+    path = directory / f'{session}.jsonl'
+    if not all(c in '0123456789abcdef-' for c in session) or not path.exists():
+        return {'found': False}
+    with path.open('rb') as stream:
+        stream.seek(offset)
+        chunk = stream.read(256 * 1024)
+    complete = chunk[:chunk.rfind(b'\n') + 1]
+    exit_file = directory / f'{session}.exit'
+    code = exit_file.read_text().strip() if exit_file.exists() else None
+    return {'found': True, 'offset': offset + len(complete), 'output': complete.decode('utf-8', errors='replace'), 'more': len(chunk) == 256 * 1024,
+        'exitCode': int(code) if code else None, 'errors': tail(directory / f'{session}.err', 2000) if code else ''}
+
+
+if len(sys.argv) == 4 and sys.argv[1] == 'executor':
+    print(json.dumps(executor(sys.argv[2], int(sys.argv[3])), ensure_ascii=True))
+else:
+    print(json.dumps({'foreground': foreground(), 'processes': processes(), 'repository': repository(), 'files': recent_files()}, ensure_ascii=True))

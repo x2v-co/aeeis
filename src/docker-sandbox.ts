@@ -32,6 +32,8 @@ export const sandboxConfigSchema = z.object({
   /** Give each Work Grant a persistent Docker volume at /workspace, used by one Run at a time. Runs without a grant
    * keep the normal per-Run filesystem. Volumes outlive Runs and grants; deleting one is an operator decision. */
   workspaceVolumes: z.boolean().default(false),
+  /** Run the model relay in each Run's proxy container, so that an executor never holds a real API key. */
+  modelRelay: z.boolean().default(false),
   /** Ports a dev server may share through a link. The Run's proxy forwards them inbound; its container stays internal. */
   previewPorts: z.array(z.number().int().min(1024).max(65535)).max(5).default([]),
   /** Run (no shell, on the AEEIS host) to share a port and to stop sharing it; `{port}` is the port on the sandbox
@@ -42,6 +44,7 @@ export const sandboxConfigSchema = z.object({
   .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
   .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context')
   .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh')
+  .refine(config => !config.modelRelay || config.network === 'proxied', 'modelRelay needs the proxied network')
   .refine(config => new Set(config.previewPorts).size === config.previewPorts.length && (config.previewPorts.length === 0 || (config.network === 'proxied' && config.previewCommand)), 'previewPorts must be unique and need the proxied network and previewCommand');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const observationSchema = z.object({
@@ -58,11 +61,13 @@ export interface MachineView {
   live?: MachineObservation;
   previews: { port: number; url: string }[];
 }
+export interface ExecutorPoll { state: 'running' | 'frozen' | 'stopped' | 'unreachable' | 'missing'; output: string; offset: number; more: boolean; exitCode: number | null; errors: string }
+export interface RelayUsage { calls: number; input: number; output: number; cacheWrite: number; cacheRead: number; refused: number; tokens: number; budget: number }
 export interface HostWait { since: string; message: string; availableAt?: string }
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
-const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
+const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
 type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
@@ -142,6 +147,7 @@ export function proxyCreateArgs(config: SandboxConfig, name: string, imageId: st
     '--env', `AEEIS_EGRESS_HOSTS=${config.egressHosts.join(',')}`, '--env', `AEEIS_PROXY_PORT=${PROXY_PORT}`,
     ...(config.previewPorts.length ? ['--env', `AEEIS_PREVIEW_PORTS=${config.previewPorts.join(',')}`, '--env', `AEEIS_PREVIEW_TARGET=${RUN_ALIAS}`] : []),
     ...config.previewPorts.flatMap(port => ['--publish', `127.0.0.1::${port}`]),
+    ...(config.modelRelay ? ['--env', 'AEEIS_RELAY=1', '--tmpfs', '/run/aeeis:rw,size=1m,uid=65534,gid=65534,mode=0700'] : []),
     '--entrypoint', 'python3', imageId, '-I', '-u', '/opt/aeeis/proxy.py'];
 }
 
@@ -539,6 +545,68 @@ export class DockerSandbox {
       // A record older than the longest possible wait was left by a process that died mid-wait.
       return Date.now() - Date.parse(wait.since) > (this.config.sshWaitSeconds + 120) * 1000 ? undefined : wait;
     } catch { return undefined; }
+  }
+  /** Talks to the relay inside the Run's proxy. On stdin, because `open` carries the real API key. */
+  private async relay(state: State, message: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const result = await this.command(['exec', '--interactive', `${state.name}-proxy`, 'python3', '-I', '/opt/aeeis/relay_ctl.py'], 15_000, JSON.stringify(message));
+    if (result.code !== 0) throw new SandboxError('Model relay unavailable');
+    const answer = JSON.parse(result.stdout) as Record<string, unknown>;
+    if (typeof answer.error === 'string') throw new SandboxError(`Model relay: ${answer.error}`);
+    return answer;
+  }
+  /** Opens a relay session and starts the executor in the Run's container. Nothing has run if this throws. */
+  async startExecutor(runId: string, session: { id: string; token: string; prompt: string; argv: string[]; env: Record<string, string>; key: string; upstream: string; budget: number; seconds: number }, files: WorkspaceFile[], workspace?: string): Promise<void> {
+    if (!this.config.modelRelay) throw new SandboxError('The executor needs sandbox.modelRelay');
+    const state = await this.prepareWithWait(runId, files, workspace);
+    if (this.held.has(runId)) throw new SandboxError('This Run was stopped before the executor started; nothing ran');
+    await this.relay(state, { action: 'open', token: session.token, key: session.key, upstream: session.upstream, budget: session.budget, seconds: session.seconds });
+    this.active.add(state.name);
+    try {
+      const started = await this.exchange(state, '__executor_start', { session: session.id, prompt: session.prompt, argv: session.argv, env: session.env }, 30_000);
+      if (started.status !== 'completed') {
+        await this.relay(state, { action: 'close', token: session.token }).catch(() => undefined);
+        throw new SandboxError(`Could not start the executor: ${JSON.stringify(started.output).slice(0, 300)}`);
+      }
+      state.executor = { session: session.id, token: session.token, pid: (started.output as { pid: number }).pid };
+      await this.save(state);
+    } finally { this.active.delete(state.name); }
+  }
+  async executorRecord(runId: string) { return (await this.state(runId))?.executor; }
+  /** New output since `offset`. Reads beside the tool service and never starts or thaws anything. */
+  async pollExecutor(runId: string, session: string, offset: number): Promise<ExecutorPoll> {
+    const empty = { output: '', offset, more: false, exitCode: null, errors: '' };
+    const state = await this.state(runId);
+    if (!state) return { state: 'missing', ...empty };
+    try {
+      const result = await this.command(['exec', state.name, 'python3', '-I', '/opt/aeeis/observe.py', 'executor', session, String(offset)], 15_000, undefined, 512 * 1024);
+      if (result.code !== 0) {
+        if (/is paused/i.test(result.stderr)) return { state: 'frozen', ...empty };
+        return { state: 'stopped', ...empty };
+      }
+      const read = JSON.parse(result.stdout) as { found: boolean; offset?: number; output?: string; more?: boolean; exitCode?: number | null; errors?: string };
+      if (!read.found) return { state: 'missing', ...empty };
+      return { state: 'running', output: read.output ?? '', offset: read.offset ?? offset, more: Boolean(read.more), exitCode: read.exitCode ?? null, errors: read.errors ?? '' };
+    } catch (error) {
+      if (error instanceof SandboxUnreachable) return { state: 'unreachable', ...empty };
+      throw error;
+    }
+  }
+  /** What the relay has counted. This, not the executor's own report, is what the session cost. */
+  async relayUsage(runId: string, token: string): Promise<RelayUsage | undefined> {
+    const state = await this.state(runId);
+    if (!state) return undefined;
+    return (await this.relay(state, { action: 'status', token }).catch(() => undefined)) as RelayUsage | undefined;
+  }
+  /** Revokes the session token. Its answer is the final count. */
+  async closeRelay(runId: string, token: string): Promise<RelayUsage | undefined> {
+    const state = await this.state(runId);
+    if (!state) return undefined;
+    return (await this.relay(state, { action: 'close', token }).catch(() => undefined)) as RelayUsage | undefined;
+  }
+  /** Ends the executor's process group, leaving the container and everything else in it running. */
+  async stopExecutor(runId: string, pid: number): Promise<void> {
+    const state = await this.state(runId);
+    if (state) await this.command(['exec', state.name, 'kill', '-TERM', `-${pid}`], 8000).catch(() => undefined);
   }
   /** Runs an operator-configured command on the AEEIS host (no shell) and returns its standard output. */
   private localCommand(argv: string[], timeoutMs: number): Promise<string> {

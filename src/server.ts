@@ -4,6 +4,7 @@ import { JsonChannelNoiseStore, PostgresChannelNoiseStore, type ChannelNoiseStor
 import pg from 'pg';
 import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
 import { LocalToolGateway, CombinedToolGateway } from './local-tools.js';
+import { RoutedAgentTransport, ensureExecutorAdmitted, executorCard } from './executor.js';
 import { resolveToolDefaults } from './tool-defaults.js';
 import { collaborationPricesSchema, type CollaborationPrices } from './collaboration-budget.js';
 import { FileRunRepository, PostgresRunRepository } from './runtime/repository.js';
@@ -427,7 +428,10 @@ try {
     oauthProvider = new OAuthClientCredentialsProvider(configs);
   }
   const agentEndpointHosts = process.env.AEEIS_AGENT_ALLOWED_HOSTS === undefined ? [] : process.env.AEEIS_AGENT_ALLOWED_HOSTS.split(',').map(host => host.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean);
-  const agents: AgentGateway = new AgentGateway(agentDirectory, new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider, process.env.AEEIS_AGENT_ALLOW_INSECURE_HTTP === '1', agentEndpointHosts), grantLedger, signingKeys);
+  const httpAgents = new HttpAgentTransport(60_000, process.env.AEEIS_AGENT_BEARER_TOKEN, signingKeys, oauthProvider, process.env.AEEIS_AGENT_ALLOW_INSECURE_HTTP === '1', agentEndpointHosts);
+  const executorTransport = localToolkit?.executorTransport();
+  const agents: AgentGateway = new AgentGateway(agentDirectory, executorTransport ? new RoutedAgentTransport(executorTransport, httpAgents) : httpAgents, grantLedger, signingKeys);
+  if (executorTransport && localToolkit?.config.executor) await ensureExecutorAdmitted(agentDirectory, executorCard(localToolkit.config.executor));
   if (process.env.AEEIS_AGENT_CARDS) {
     const cards = JSON.parse(process.env.AEEIS_AGENT_CARDS) as unknown;
     if (!Array.isArray(cards)) throw new Error('AEEIS_AGENT_CARDS must be a JSON array');
