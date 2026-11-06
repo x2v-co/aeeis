@@ -241,8 +241,20 @@ def perform(tool, args, timeout):
     raise ToolError('Unsupported sandbox tool')
 
 
-def restore(files, limit):
+def retire_artifacts():
+    """A persistent workspace keeps files between Runs, but artifacts belong to one Run and were already exported."""
+    current = ROOT / 'artifacts'
+    if current.is_symlink() or (current.exists() and any(current.iterdir())):
+        archive = ROOT / '.previous-artifacts'
+        archive.mkdir(mode=0o700, exist_ok=True)
+        current.rename(archive / time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()))
+    current.mkdir(mode=0o755, exist_ok=True)
+
+
+def restore(files, limit, persistent=False):
     size = 0
+    if persistent:
+        retire_artifacts()
     if len(files) > MAX_FILES:
         raise ToolError('Too many workspace files')
     for item in files:
@@ -251,7 +263,7 @@ def restore(files, limit):
         size += len(data)
         if len(data) > MAX_FILE or size > limit:
             raise ToolError('Workspace snapshot exceeds size limit')
-        with path.open('xb') as stream:
+        with path.open('wb' if persistent else 'xb') as stream:
             stream.write(data)
 
 

@@ -128,11 +128,27 @@ async def handle(reader, writer):
     await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
 
 
+def forward_to(target, port):
+    """Inbound only: a preview visitor reaches one configured port of the Run's container, and nothing else."""
+    async def forward(reader, writer):
+        try:
+            upstream_reader, upstream_writer = await asyncio.wait_for(asyncio.open_connection(target, port), 10)
+        except Exception:
+            log('error', target, port, 'preview target not listening')
+            writer.close()
+            return
+        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+    return forward
+
+
 async def main():
     server = await asyncio.start_server(handle, '0.0.0.0', PORT, limit=MAX_HEADER)
+    target = os.environ.get('AEEIS_PREVIEW_TARGET', '')
+    ports = [int(port) for port in os.environ.get('AEEIS_PREVIEW_PORTS', '').split(',') if port]
+    previews = [await asyncio.start_server(forward_to(target, port), '0.0.0.0', port) for port in ports]
     log('ready', ','.join(ALLOWED) or '(none)', PORT)
     async with server:
-        await server.serve_forever()
+        await asyncio.gather(server.serve_forever(), *[preview.serve_forever() for preview in previews])
 
 
 if __name__ == '__main__':

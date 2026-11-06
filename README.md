@@ -236,7 +236,19 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 }
 ```
 
-再运行 `npm run sandbox:build`。免费套餐空闲 30 分钟会暂停（下一次 SSH 会唤醒它），运行 8 小时会强制暂停并进入冷却期。主机连不上时，工具运行之前的准备步骤会按退避重试，最多等 `sshWaitSeconds`（默认 720 秒，正好覆盖一轮 10 分钟的保活），等到了就照常执行，等不到才记为失败（工具没有执行）；登录被拒不等待，交给 `sshLoginCommand`。等待期间同一个本地网关上的其他工具调用（包括 `web-fetch`）会排在后面。远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
+再运行 `npm run sandbox:build`。免费套餐空闲 30 分钟会暂停（下一次 SSH 会唤醒它），运行 8 小时会强制暂停并进入冷却期。主机连不上时，工具运行之前的准备步骤会按退避重试，最多等 `sshWaitSeconds`（默认 720 秒，正好覆盖一轮 10 分钟的保活），等到了就照常执行，等不到才记为失败（工具没有执行）；登录被拒不等待，交给 `sshLoginCommand`；主机明确说明恢复时间且晚于等待上限时（instabox 的冷却期）立即失败并给出时间。等待期间同一个本地网关上的其他工具调用（包括 `web-fetch`）会排在后面。
+
+`sandbox.workspaceVolumes: true` 时，每份范围授权有一个持久 Docker 卷，挂到 `/workspace`，同一时间只给一个 Run 用（上一个 Run 释放前，新 Run 最多等 60 秒）。没有授权的 Run 仍用各自的文件系统。新 Run 开始时，上一个 Run 已导出的 `artifacts/` 移到 `.previous-artifacts/`。卷不会随 Run 或授权删除，清理由运维决定（`docker volume rm`）。卷和镜像都在 Docker 的数据目录里，机器的系统盘较小时先把 `data-root` 移到大盘。
+
+`sandbox.previewPorts` 配合 `sandbox.previewCommand` 可以把开发服务器分享成私有链接：Run 的容器仍在内部网络上，代理把这些端口转进去，并只发布到远程机器的 `127.0.0.1`。工具调用 `process` 的 `{"action":"preview","port":3000}` 运行 `publish` 命令（`{port}` 替换为远程机器上的端口，命令要打印链接），返回链接；Run 释放时运行 `unpublish`。链接会出现在工具结果里。instabox 示例：
+
+```json
+"previewPorts": [3000],
+"previewCommand": {
+  "publish": ["npx", "-y", "instabox@latest", "port", "publish", "<机器名>", "{port}", "--private"],
+  "unpublish": ["npx", "-y", "instabox@latest", "port", "unpublish", "<机器名>", "{port}"]
+}
+```远程机器暂停、关机或拒绝 SSH 登录（例如证书过期）时：准备容器阶段连不上，本次调用记为失败（工具没有执行），可以直接重试；工具执行到一半断开，本次记为结果未知，只有这个 Run 会等到能确认停掉它的容器为止，下一次调用先补做停止，其他 Run 不受影响。`sandbox:doctor` 和健康检查会直接说明是连不上还是登录被拒。
 
 | 工具 | 输入与作用 |
 | --- | --- |

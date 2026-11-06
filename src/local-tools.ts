@@ -5,7 +5,7 @@ import { DockerSandbox, SandboxError, sandboxConfigSchema, type RunMachineRecord
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
-import type { Receipt, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
+import type { Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
 
 const names = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process', 'browser', 'web-fetch'] as const;
 /** Tools that run code in the Run container: what they can reach is whatever the container's network allows. */
@@ -35,6 +35,7 @@ const schemas = {
     z.object({ action: z.literal('start'), command: z.string().min(1).max(100_000) }).strict(),
     z.object({ action: z.enum(['list', 'ports']) }).strict(),
     z.object({ action: z.enum(['logs', 'stop']), processId: z.string().regex(/^proc_[a-f0-9]{32}$/) }).strict(),
+    z.object({ action: z.literal('preview'), port: z.number().int().min(1024).max(65535) }).strict(),
   ]),
   browser: z.object({
     url: z.string().url().max(2000).refine(value => /^https?:\/\//.test(value), 'Use an http:// or https:// URL'),
@@ -59,7 +60,7 @@ const descriptions: Record<typeof names[number], string> = {
   grep: 'Search literal text (not regex) in workspace files with optional glob and case-insensitivity. Returns paths, line numbers and bounded excerpts.',
   python: 'Run Python 3.12 in this Run persistent Linux container. Installed packages and files persist between calls and AEEIS restarts. Network follows sandbox policy. Put final deliverable files under artifacts/ to export them to the host. No host files or credentials are mounted.',
   shell: 'Execute Bash in /workspace inside this Run persistent Linux container. Can use git, apt, pip, install dependencies and run system commands. Container root is available; no host mounts or Docker socket. Put deliverables in artifacts/. Use process start for persistent services. Foreground timeout stops ALL processes in this Run but preserves its files.',
-  process: 'Manage background commands in this Run container: start, list, logs (last 24 KB per stream), stop, ports (host loopback mappings). Use returned processId. Services persist between tool calls and AEEIS restarts, until Run completion, idle expiry, timeout or explicit stop. Listen on 0.0.0.0 inside the container to use configured published ports.',
+  process: 'Manage background commands in this Run container: start, list, logs (last 24 KB per stream), stop, ports (host loopback mappings). Use returned processId. Services persist between tool calls and AEEIS restarts, until Run completion, idle expiry, timeout or explicit stop. Listen on 0.0.0.0 inside the container to use configured published ports. preview returns a private link to a running dev server, for the configured preview ports; share it with the people reviewing the work.',
   browser: 'Open a page in headless Chromium inside this Run container, optionally click, type, press keys or wait, then return the title, HTTP status, visible text, console errors and failed requests. A screenshot is saved under artifacts/screenshots/ and its path and SHA-256 are returned. Use http://127.0.0.1:<port> for a dev server started with process start. Each call opens a fresh page.',
   'web-fetch': 'Fetch an allowlisted HTTPS URL and return bounded text evidence with source URL, fetch time and content hash. Redirects are rejected.',
 };
@@ -131,8 +132,12 @@ export class LocalToolGateway implements ToolGateway {
     return { ready: !this.closing, detail: 'Allowlisted HTTPS tools ready', checkedAt: new Date().toISOString() };
   }
 
-  invoke(request: ToolInvocation): Promise<ToolResult> {
-    const result = this.queue.then(() => this.execute(request));
+  async invoke(request: ToolInvocation, context?: ToolCallContext): Promise<ToolResult> {
+    const workspace = this.config.sandbox.workspaceVolumes ? context?.workspace : undefined;
+    const runId = /^run:(run_[a-f0-9-]{36}):/.exec(request.capabilityGrant)?.[1];
+    // A finished Run's release goes through the queue, so waiting for it must happen outside.
+    if (workspace && runId) await this.sandbox.waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
+    const result = this.queue.then(() => this.execute(request, workspace));
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -163,7 +168,7 @@ export class LocalToolGateway implements ToolGateway {
       ...(status === 'completed' ? {} : { errorCode: status === 'unknown' ? 'execution_unknown' : 'tool_failed' }),
     } };
   }
-  private async execute(request: ToolInvocation): Promise<ToolResult> {
+  private async execute(request: ToolInvocation, sharedWorkspace?: string): Promise<ToolResult> {
     const startedAt = new Date().toISOString();
     let journalStarted = false;
     try {
@@ -184,7 +189,7 @@ export class LocalToolGateway implements ToolGateway {
       const timeout = Math.max(100, Math.min(request.timeoutMs, this.config.timeoutMs));
       const response = id === 'web-fetch'
         ? { status: 'completed' as const, output: await this.webFetch(input, timeout), files: null }
-        : await this.sandbox.execute(grant[1]!, id, input, files, timeout);
+        : await this.sandbox.execute(grant[1]!, id, input, files, timeout, sharedWorkspace);
       if (response.files !== null) await this.saveArtifacts(grant[1]!, response.files);
       const result = this.result(request, response.status, response.output, startedAt);
       await this.saveResult(request, result);
@@ -247,7 +252,7 @@ export class CombinedToolGateway implements ToolGateway {
     for (const gateway of this.gateways) if ((await gateway.listTools()).some(tool => tool.id === request.toolId && tool.version === request.toolVersion)) return gateway;
     throw new Error('Tool is not configured');
   }
-  async invoke(request: ToolInvocation) { return (await this.gateway(request)).invoke(request); }
+  async invoke(request: ToolInvocation, context?: ToolCallContext) { return (await this.gateway(request)).invoke(request, context); }
   async workspaceContainedTools(): Promise<string[]> {
     return (await Promise.all(this.gateways.map(gateway => gateway.workspaceContainedTools?.() ?? Promise.resolve([])))).flat();
   }

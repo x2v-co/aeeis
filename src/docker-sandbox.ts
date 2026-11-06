@@ -29,16 +29,25 @@ export const sandboxConfigSchema = z.object({
   idleSeconds: z.number().int().min(60).max(86400).default(3600),
   maxLifetimeSeconds: z.number().int().min(300).max(604800).default(86400),
   ports: z.array(z.number().int().min(1024).max(65535)).max(20).default([]),
+  /** Give each Work Grant a persistent Docker volume at /workspace, used by one Run at a time. Runs without a grant
+   * keep the normal per-Run filesystem. Volumes outlive Runs and grants; deleting one is an operator decision. */
+  workspaceVolumes: z.boolean().default(false),
+  /** Ports a dev server may share through a link. The Run's proxy forwards them inbound; its container stays internal. */
+  previewPorts: z.array(z.number().int().min(1024).max(65535)).max(5).default([]),
+  /** Run (no shell, on the AEEIS host) to share a port and to stop sharing it; `{port}` is the port on the sandbox
+   * host. `publish` must print the link. Example: ["npx","-y","instabox@latest","port","publish","my-machine","{port}","--private"]. */
+  previewCommand: z.object({ publish: z.array(z.string().min(1).max(500)).min(1).max(20), unpublish: z.array(z.string().min(1).max(500)).min(1).max(20) }).strict().optional(),
 }).strict()
   .refine(config => new Set(config.ports).size === config.ports.length && (config.network === 'bridge' || config.ports.length === 0), 'Ports must be unique and need the bridge network')
   .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
   .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context')
-  .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh');
+  .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh')
+  .refine(config => new Set(config.previewPorts).size === config.previewPorts.length && (config.previewPorts.length === 0 || (config.network === 'proxied' && config.previewCommand)), 'previewPorts must be unique and need the proxied network and previewCommand');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
-const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional() });
+const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
 type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
@@ -48,12 +57,17 @@ export class SandboxError extends Error {
 export class SandboxUnreachable extends SandboxError {
   /** ssh's own "Permission denied (publickey,…)": authentication failed, so no remote command started. */
   readonly loginRefused: boolean;
+  /** When the host says it will accept connections again, e.g. instabox's "cooling down until <time>". */
+  readonly availableAt: number | undefined;
   constructor(host: string, stderr: string) {
     const refused = /Permission denied \(/.test(stderr);
-    super(refused || /certificate|publickey/i.test(stderr)
+    const cooling = /cooling down until (\S+)/.exec(stderr)?.[1];
+    const availableAt = cooling ? Date.parse(cooling) : NaN;
+    super(!Number.isNaN(availableAt) ? `Sandbox host ${host} is cooling down until ${cooling}` : refused || /certificate|publickey/i.test(stderr)
       ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
       : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
     this.loginRefused = refused;
+    this.availableAt = Number.isNaN(availableAt) ? undefined : availableAt;
   }
 }
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
@@ -61,6 +75,8 @@ export type RunMachineRecord = { state: 'present'; ready: boolean } | { state: '
 const PROXY_PORT = 3128;
 /** The proxy's name on the Run's internal network. Container names are too long for one DNS label. */
 const PROXY_ALIAS = 'aeeis-proxy';
+/** The Run container's name on its internal network, where the proxy forwards preview traffic. */
+const RUN_ALIAS = 'aeeis-run';
 /** Each docker call over SSH opens a connection through the remote gateway first. */
 const SSH_ALLOWANCE_MS = 20_000;
 /** POSIX single-quote one argument for the remote shell that ssh hands the command to. */
@@ -83,11 +99,12 @@ export function dockerContextArgs(config: SandboxConfig, platform = process.plat
 }
 
 /** Full Linux userspace, isolated from host files/devices and other Run networks. */
-export function sandboxCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test'): string[] {
+export function sandboxCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test', volume?: string): string[] {
   return ['create', '--pull=never', '--name', name,
     '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`,
     `--network=${config.network === 'none' ? 'none' : `${name}-net`}`, '--cap-drop=NET_RAW', '--security-opt=no-new-privileges:true',
-    ...(config.network === 'proxied' ? proxyEnvArgs(name) : []),
+    ...(config.network === 'proxied' ? [...proxyEnvArgs(name), `--network-alias=${RUN_ALIAS}`] : []),
+    ...(volume ? ['--volume', `${volume}:/workspace`] : []),
     '--user=0:0', '--workdir=/workspace', '--restart=no', '--stop-timeout=3',
     `--memory=${config.memoryMiB}m`, `--memory-swap=${config.memoryMiB}m`, `--cpus=${config.cpus}`, `--pids-limit=${config.pids}`,
     '--ulimit=nofile=4096:4096', '--log-driver=none',
@@ -108,6 +125,8 @@ export function proxyCreateArgs(config: SandboxConfig, name: string, imageId: st
     '--restart=unless-stopped', '--memory=128m', '--memory-swap=128m', '--cpus=0.5', '--pids-limit=64',
     '--log-driver=json-file', '--log-opt=max-size=1m', '--log-opt=max-file=2',
     '--env', `AEEIS_EGRESS_HOSTS=${config.egressHosts.join(',')}`, '--env', `AEEIS_PROXY_PORT=${PROXY_PORT}`,
+    ...(config.previewPorts.length ? ['--env', `AEEIS_PREVIEW_PORTS=${config.previewPorts.join(',')}`, '--env', `AEEIS_PREVIEW_TARGET=${RUN_ALIAS}`] : []),
+    ...config.previewPorts.flatMap(port => ['--publish', `127.0.0.1::${port}`]),
     '--entrypoint', 'python3', imageId, '-I', '-u', '/opt/aeeis/proxy.py'];
 }
 
@@ -290,7 +309,39 @@ export class DockerSandbox {
     if (response.files !== null) validateSnapshot(response.files, snapshotBytes);
     return response;
   }
-  private async ensure(runId: string, files: WorkspaceFile[]): Promise<State> {
+  private volumeName(grantId: string) {
+    if (!/^wg_[a-f0-9]{32}$/.test(grantId)) throw new SandboxError('Invalid workspace identity');
+    return `aeeis-${this.owner}-${grantId}`;
+  }
+  /** The unfinished Run currently using this grant's workspace, read from state files without touching Docker. */
+  private async workspaceHolder(volume: string, runId: string): Promise<string | undefined> {
+    let names: string[];
+    try { names = await readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    for (const name of names.filter(item => /^run_[a-f0-9-]{36}\.json$/.test(item) && item !== `${runId}.json`)) {
+      const other = await this.state(name.slice(0, -5));
+      if (other && !other.released && other.volume === volume) return other.runId;
+    }
+    return undefined;
+  }
+  /** Waits for a finished Run to be released. Callers must not hold the gateway's queue, which that release needs. */
+  async waitForWorkspace(grantId: string, runId: string, timeoutMs: number): Promise<void> {
+    const volume = this.volumeName(grantId), deadline = Date.now() + timeoutMs;
+    if (await this.state(runId)) return;
+    while (await this.workspaceHolder(volume, runId) && Date.now() < deadline && !this.closing) await new Promise(resolve => setTimeout(resolve, Math.min(500, Math.max(1, deadline - Date.now()))));
+  }
+  private async prepareVolume(volume: string, runId: string) {
+    const holder = await this.workspaceHolder(volume, runId);
+    if (holder) throw new SandboxError(`This grant's workspace is in use by ${holder}; only one Run can use it at a time`);
+    const found = await this.command(['volume', 'inspect', volume], 8000);
+    if (found.code === 0) {
+      if (JSON.parse(found.stdout)[0]?.Labels?.['aeeis.owner'] !== this.owner) throw new SandboxError('Workspace volume ownership mismatch');
+      return;
+    }
+    if (!/no such volume/i.test(found.stderr)) throw new SandboxError('Cannot inspect workspace volume');
+    const created = await this.command(['volume', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', volume], 8000);
+    if (created.code !== 0) throw new SandboxError('Cannot create workspace volume');
+  }
+  private async ensure(runId: string, files: WorkspaceFile[], workspace?: string): Promise<State> {
     if (this.blocked) throw new SandboxError('Sandbox stop could not be confirmed; recover Docker and restart AEEIS', 'unknown');
     let state = await this.state(runId);
     const image = state ? state.image : await this.imageId();
@@ -304,8 +355,10 @@ export class DockerSandbox {
       validateSnapshot(files, this.config.snapshotMiB * 1024 * 1024);
       // Reach the host before recording anything, so a paused host does not leave a half-created Run behind.
       if (this.config.ssh) await this.command(['version', '--format', '{{.Server.Version}}'], 8000);
+      const volume = workspace && this.config.workspaceVolumes ? this.volumeName(workspace) : undefined;
+      if (volume) await this.prepareVolume(volume, runId);
       const name = this.name(runId);
-      state = { runId, name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now() };
+      state = { runId, name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now(), ...(volume ? { volume } : {}) };
       await this.save(state);
       if (this.config.network !== 'none') {
         const internal = this.config.network === 'proxied' ? ['--internal'] : [];
@@ -323,11 +376,11 @@ export class DockerSandbox {
         const started = await this.command(['start', `${name}-proxy`], 8000);
         if (started.code !== 0) throw new SandboxError('Cannot start Run egress proxy');
       }
-      const created = await this.command(sandboxCreateArgs(this.config, name, image, this.owner, runId), 10000);
+      const created = await this.command(sandboxCreateArgs(this.config, name, image, this.owner, runId, volume), 10000);
       if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout.trim())) throw new SandboxError('Cannot create Run sandbox');
       state.containerId = created.stdout.trim(); await this.save(state);
       await this.start(state);
-      const restored = await this.exchange(state, '__restore', {}, 30000, files);
+      const restored = await this.exchange(state, '__restore', { persistent: Boolean(volume) }, 30000, files);
       if (restored.status !== 'completed') throw new SandboxError('Could not initialize Run workspace', 'unknown');
       state.ready = true; await this.save(state);
     }
@@ -350,14 +403,15 @@ export class DockerSandbox {
     }
     this.unstopped.delete(name);
   }
-  async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number) {
+  async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number, workspace?: string) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
-    const state = await this.prepareWithWait(runId, files);
+    const state = await this.prepareWithWait(runId, files, workspace);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     this.active.add(state.name);
     try {
-      const response = tool === 'process' && (input as { action?: string }).action === 'ports'
-        ? await this.ports(state)
+      const action = tool === 'process' ? (input as { action?: string }).action : undefined;
+      const response = action === 'ports' ? await this.ports(state)
+        : action === 'preview' ? await this.preview(state, (input as { port: number }).port)
         : await this.exchange(state, tool, input, timeoutMs);
       if (response.status === 'unknown') await this.stop(state.name);
       return response;
@@ -369,17 +423,19 @@ export class DockerSandbox {
   /** Everything before the tool runs: a pending stop, then the container. While the SSH host is unreachable
    * (paused, cooling down, rebooting) this waits with backoff up to sshWaitSeconds, because nothing has run yet.
    * A refused login is not waited on; sshLoginCommand handles it. */
-  private async prepareWithWait(runId: string, files: WorkspaceFile[]): Promise<State> {
+  private async prepareWithWait(runId: string, files: WorkspaceFile[], workspace?: string): Promise<State> {
     const name = this.name(runId), started = Date.now(), deadline = started + (this.config.ssh ? this.config.sshWaitSeconds * 1000 : 0);
     for (let attempt = 0; ; attempt++) {
       let waitable: SandboxError | undefined;
       try {
         // A stop that never reached the host is retried before anything else runs in that container.
         if (this.unstopped.has(name)) await this.stop(name);
-        return await this.ensure(runId, files);
+        return await this.ensure(runId, files, workspace);
       } catch (error) {
         const unreachable = (error instanceof SandboxUnreachable && !error.loginRefused) || (this.unstopped.has(name) && !(error instanceof SandboxUnreachable));
-        if (!unreachable || this.closing || Date.now() >= deadline) {
+        // A host that says it stays away past the deadline is not worth holding every other call for.
+        const tooLong = error instanceof SandboxUnreachable && (error.availableAt ?? 0) > deadline;
+        if (!unreachable || tooLong || this.closing || Date.now() >= deadline) {
           const waited = Math.round((Date.now() - started) / 60_000);
           const message = error instanceof Error ? error.message : 'Run sandbox unavailable';
           // Nothing of the tool ran, so this is a plain failure, never "unknown".
@@ -393,6 +449,44 @@ export class DockerSandbox {
       for (const end = Date.now() + delay; Date.now() < end && !this.closing;) await new Promise(resolve => setTimeout(resolve, Math.min(500, end - Date.now())));
     }
   }
+  /** Runs an operator-configured command on the AEEIS host (no shell) and returns its standard output. */
+  private localCommand(argv: string[], timeoutMs: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const [command, ...args] = argv;
+      const child = spawn(command!, args, { stdio: ['ignore', 'pipe', 'ignore'], env: process.env });
+      let output = '';
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timed out')); }, timeoutMs);
+      child.stdout.on('data', chunk => { if (output.length < 16_000) output += chunk; });
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.once('close', code => { clearTimeout(timer); code === 0 ? resolve(output) : reject(new Error(`exited ${code}`)); });
+    });
+  }
+  /** Shares one preview port. A failure here is the tool's result, not a reason to stop the Run's container. */
+  private async preview(state: State, port: number) {
+    const answer = (status: 'completed' | 'failed', output: unknown) => ({ schemaVersion: 'sandbox-output/2' as const, status, output, files: null });
+    if (!this.config.previewCommand || !this.config.previewPorts.includes(port)) return answer('failed', { error: `Port ${port} cannot be previewed; allowed: ${this.config.previewPorts.join(', ') || '(none)'}` });
+    const note = 'Only people with this link can open it. Listen on 0.0.0.0 inside the container. The link ends when this Run is released.';
+    const known = state.previews?.[String(port)];
+    if (known) return answer('completed', { port, url: known.url, note });
+    const mapped = await this.command(['port', `${state.name}-proxy`, `${port}/tcp`], 8000);
+    const hostPort = /:(\d+)\s*$/m.exec(mapped.stdout.trim().split('\n')[0] ?? '')?.[1];
+    if (mapped.code !== 0 || !hostPort) return answer('failed', { error: 'Preview port is not available on this Run; it needs a new Run after a configuration change' });
+    let printed: string;
+    try { printed = await this.localCommand(this.config.previewCommand.publish.map(item => item.replaceAll('{port}', hostPort)), 120_000); }
+    catch { return answer('failed', { error: 'Could not publish the preview link' }); }
+    const url = /https:\/\/[^\s"'<>]+/.exec(printed)?.[0];
+    if (!url) return answer('failed', { error: 'The preview command did not print a link' });
+    state.previews = { ...state.previews, [String(port)]: { hostPort, url } };
+    await this.save(state);
+    return answer('completed', { port, url, note });
+  }
+  private async unpublishPreviews(state: State) {
+    if (!this.config.previewCommand) return;
+    for (const { hostPort } of Object.values(state.previews ?? {})) {
+      await this.localCommand(this.config.previewCommand.unpublish.map(item => item.replaceAll('{port}', hostPort)), 120_000)
+        .catch(error => console.warn(`AEEIS sandbox: could not unpublish preview port ${hostPort}: ${error instanceof Error ? error.message : error}`));
+    }
+  }
   private async ports(state: State) {
     const result = await this.command(['port', state.name], 5000);
     if (result.code !== 0) throw new SandboxError('Could not read sandbox ports');
@@ -401,6 +495,7 @@ export class DockerSandbox {
   async release(runId: string, saveArtifacts: (files: WorkspaceFile[]) => Promise<void>) {
     const state = await this.state(runId);
     if (!state || state.released) return;
+    await this.unpublishPreviews(state);
     if (await this.inspect(state)) {
       if (state.ready) {
         // Stop background writers before exporting the final artifact snapshot.

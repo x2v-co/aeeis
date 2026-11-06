@@ -84,7 +84,7 @@ class Handler(socketserver.StreamRequestHandler):
                 limit = min(message['snapshotBytes'], 32 * 1024 * 1024)
                 try:
                     if message['tool'] == '__restore':
-                        runner.restore(message['files'], limit)
+                        runner.restore(message['files'], limit, bool(message.get('input', {}).get('persistent')))
                         response['output'] = {'restored': True}
                     elif message['tool'] == '__snapshot':
                         response['output'] = {'exported': True}

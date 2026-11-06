@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { connect as netConnect } from 'node:net';
+import { connect as netConnect, createServer } from 'node:net';
 import { DockerSandbox, SandboxError, SandboxUnreachable, sandboxConfigSchema, sandboxCreateArgs, dockerContextArgs, dockerInvocation, proxyCreateArgs, shellQuote, sshControlDirectory } from '../src/docker-sandbox.js';
 import { commitSnapshot, readSnapshot, validateSnapshot } from '../src/sandbox-workspace.js';
 import { LocalToolGateway } from '../src/local-tools.js';
@@ -469,6 +469,26 @@ describe('SSH host paused or unreachable (mocked transport)', () => {
     expect(await pending).toMatch(/^failed: /);
     expect(Date.now() - started).toBeLessThan(2000);
   });
+  it('fails at once with the time when the host says it stays away past the wait limit', async () => {
+    const { sandbox, host, command } = harness();
+    (sandbox as any).config = { ...remote, sshWaitSeconds: 600 };
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    command.mockRejectedValue(new SandboxUnreachable('vps-test-1', `channel 0: open failed: administratively prohibited: machine is cooling down until ${until}`));
+    host.down = true;
+    const started = Date.now();
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe(`failed: Sandbox host vps-test-1 is cooling down until ${until}`);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+  it('waits for a cooldown that ends before the wait limit', async () => {
+    const { sandbox, command } = harness();
+    (sandbox as any).config = { ...remote, sshWaitSeconds: 30 };
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    const working = command.getMockImplementation()!;
+    command.mockRejectedValueOnce(new SandboxUnreachable('vps-test-1', `machine is cooling down until ${new Date(Date.now() + 1000).toISOString()}`)).mockImplementation(working);
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300))).toBe('completed');
+  });
   it('turns a real ssh failure (exit 255) into an unreachable-host error', async () => {
     const sandbox = new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'aeeis-test-no-such-host.invalid' }), root);
     const error = await sandbox.imageId().catch(value => value);
@@ -505,5 +525,164 @@ describe('renewing a refused SSH login', () => {
     await expect(call(sandbox)).rejects.toThrow(/unreachable over SSH/);
     expect(refresh).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1);
     expect(() => sandboxConfigSchema.parse({ sshLoginCommand: ['true'] })).toThrow(/needs ssh/);
+  });
+});
+
+describe('grant workspaces and preview links (mocked transport)', () => {
+  const grantId = `wg_${'a'.repeat(32)}`, otherGrant = `wg_${'b'.repeat(32)}`;
+  const runA = `run_${'1'.repeat(36)}`, runB = `run_${'2'.repeat(36)}`;
+  const previewCommand = { publish: ['publish-port', '{port}'], unpublish: ['unpublish-port', '{port}'] };
+  const settings = sandboxConfigSchema.parse({ ssh: 'vps-test-1', network: 'proxied', egressHosts: ['registry.npmjs.org'], workspaceVolumes: true, previewPorts: [3000], previewCommand, sshWaitSeconds: 0 });
+  const harness = () => {
+    const sandbox = new DockerSandbox(settings, root);
+    const containers = new Map<string, any>(), networks = new Map<string, any>(), volumes = new Map<string, any>();
+    const response = { schemaVersion: 'sandbox-output/2', status: 'completed', output: {}, files: [] };
+    const restores: any[] = [];
+    const command = vi.spyOn(sandbox as any, 'command').mockImplementation(async (...values: any[]) => {
+      const args = values[0] as string[];
+      if (args[0] === 'version') return ok('29');
+      if (args[0] === 'image') return ok(`${image} linux`);
+      if (args[0] === 'volume' && args[1] === 'inspect') return volumes.has(args[2]!) ? ok(JSON.stringify([volumes.get(args[2]!)])) : { code: 1, stdout: '', stderr: 'Error: no such volume' };
+      if (args[0] === 'volume' && args[1] === 'create') { volumes.set(args.at(-1)!, { Labels: { 'aeeis.owner': args[3]!.split('=')[1] } }); return ok(args.at(-1)!); }
+      if (args[0] === 'network' && args[1] === 'create') { networks.set(args.at(-1)!, { Labels: { 'aeeis.owner': args[3]!.split('=')[1], 'aeeis.sandbox': '2' } }); return ok('n'); }
+      if (args[0] === 'network' && args[1] === 'inspect') return networks.has(args[2]!) ? ok(JSON.stringify([networks.get(args[2]!)])) : { code: 1, stdout: '', stderr: 'network not found' };
+      if (args[0] === 'network' && args[1] === 'rm') { networks.delete(args[2]!); return ok(); }
+      if (args[0] === 'create') {
+        const name = args[args.indexOf('--name') + 1]!;
+        const labels = Object.fromEntries(args.flatMap((a, i) => a === '--label' ? [args[i + 1]!.split('=')] : []));
+        containers.set(name, { Id: (name.endsWith('-proxy') ? 'd' : 'c').repeat(64), Image: image, Config: { Labels: labels }, State: { Running: false }, args });
+        return ok(containers.get(name).Id);
+      }
+      if (args[0] === 'inspect') { const info = containers.get(args.at(-1)!); return info ? ok(JSON.stringify([info])) : { code: 1, stdout: '', stderr: 'No such container' }; }
+      if (args[0] === 'start' || args[0] === 'kill') { const info = containers.get(args[1]!); if (info) info.State.Running = args[0] === 'start'; return ok(); }
+      if (args[0] === 'rm') { containers.delete(args.at(-1)!); return ok(); }
+      if (args[0] === 'port') return ok('127.0.0.1:49153\n');
+      if (args[0] === 'exec') { if (String(values[2]).includes('__restore')) restores.push(JSON.parse(values[2]).input); return ok(JSON.stringify(response)); }
+      return ok();
+    });
+    const local = vi.spyOn(sandbox as any, 'localCommand').mockResolvedValue('Published\nhttps://49153-abc.preview.example/?_token=ibp_secret\nOnly people with this link\n');
+    return { sandbox, command, local, containers, volumes, restores };
+  };
+  const outcome = (promise: Promise<any>) => promise.then(result => result, (error: SandboxError) => ({ status: 'thrown', error: error.message }));
+
+  it('rejects preview ports it could not serve', () => {
+    expect(() => sandboxConfigSchema.parse({ previewPorts: [3000], previewCommand })).toThrow(/proxied network/);
+    expect(() => sandboxConfigSchema.parse({ network: 'proxied', previewPorts: [3000] })).toThrow(/previewCommand/);
+    expect(() => sandboxConfigSchema.parse({ network: 'proxied', previewPorts: [3000, 3000], previewCommand })).toThrow(/unique/);
+  });
+  it('publishes preview ports only on the proxy, to the sandbox host loopback', () => {
+    const proxy = proxyCreateArgs(settings, 'n', image, 'owner');
+    expect(proxy).toEqual(expect.arrayContaining(['127.0.0.1::3000', 'AEEIS_PREVIEW_PORTS=3000', 'AEEIS_PREVIEW_TARGET=aeeis-run']));
+    const run = sandboxCreateArgs(settings, 'n', image, 'owner', 'r');
+    expect(run).toContain('--network-alias=aeeis-run'); expect(run).not.toContain('--publish');
+  });
+  it('gives a grant one persistent volume, one Run at a time, and keeps it after release', async () => {
+    const { sandbox, command, containers, volumes, restores } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300, grantId);
+    const owner = createHash('sha256').update(root).digest('hex').slice(0, 16), volume = `aeeis-${owner}-${grantId}`;
+    expect([...volumes.keys()]).toEqual([volume]);
+    const run = [...containers.values()].find(item => !item.Id.startsWith('d'));
+    expect(run.args).toEqual(expect.arrayContaining(['--volume', `${volume}:/workspace`]));
+    expect(restores).toEqual([{ persistent: true }]);
+    // A second Run on the same grant is refused; another grant has its own workspace.
+    expect(await outcome(sandbox.execute(runB, 'shell', {}, [], 300, grantId))).toMatchObject({ status: 'thrown', error: expect.stringContaining(`in use by ${runA}`) });
+    expect(await sandbox.describe(runB)).toBeUndefined();
+    await sandbox.execute(runB, 'shell', {}, [], 300, otherGrant);
+    await sandbox.release(runA, async () => undefined); await sandbox.release(runB, async () => undefined);
+    expect(volumes.size).toBe(2);
+    expect(command.mock.calls.some(call => (call[0] as string[])[0] === 'volume' && (call[0] as string[])[1] === 'rm')).toBe(false);
+    // The next Run reuses the volume and starts on a persistent restore again.
+    const runC = `run_${'3'.repeat(36)}`;
+    await sandbox.execute(runC, 'shell', {}, [], 300, grantId);
+    expect(command.mock.calls.filter(call => (call[0] as string[]).slice(0, 2).join(' ') === 'volume create')).toHaveLength(2);
+  });
+  it('refuses a volume that belongs to another AEEIS, and malformed workspace ids', async () => {
+    const { sandbox, volumes } = harness();
+    const owner = createHash('sha256').update(root).digest('hex').slice(0, 16);
+    volumes.set(`aeeis-${owner}-${grantId}`, { Labels: { 'aeeis.owner': 'someone-else' } });
+    expect(await outcome(sandbox.execute(runA, 'shell', {}, [], 300, grantId))).toMatchObject({ error: expect.stringContaining('ownership mismatch') });
+    expect(await outcome(sandbox.execute(runB, 'shell', {}, [], 300, '../etc'))).toMatchObject({ error: expect.stringContaining('Invalid workspace') });
+  });
+  it('keeps the normal per-Run filesystem without a grant', async () => {
+    const { sandbox, volumes, restores } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    expect(volumes.size).toBe(0); expect(restores).toEqual([{ persistent: false }]);
+  });
+  it('lets a new Run wait for the previous one to be released', async () => {
+    const { sandbox } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300, grantId);
+    setTimeout(() => { void sandbox.release(runA, async () => undefined); }, 100);
+    await sandbox.waitForWorkspace(grantId, runB, 5000);
+    await expect(sandbox.execute(runB, 'shell', {}, [], 300, grantId)).resolves.toMatchObject({ status: 'completed' });
+  });
+  it('shares a preview port once, using the host port, and removes the link on release', async () => {
+    const { sandbox, local, command } = harness();
+    const first = await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300);
+    expect(first).toMatchObject({ status: 'completed', output: { port: 3000, url: 'https://49153-abc.preview.example/?_token=ibp_secret' } });
+    expect(local).toHaveBeenCalledWith(['publish-port', '49153'], 120_000);
+    expect((await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300)).output).toMatchObject({ url: 'https://49153-abc.preview.example/?_token=ibp_secret' });
+    expect(local).toHaveBeenCalledTimes(1);
+    expect(command.mock.calls.filter(call => (call[0] as string[])[0] === 'kill')).toHaveLength(0);
+    await sandbox.release(runA, async () => undefined);
+    expect(local).toHaveBeenLastCalledWith(['unpublish-port', '49153'], 120_000);
+  });
+  it('reports preview problems as the tool result and leaves the Run container running', async () => {
+    const { sandbox, local, command } = harness();
+    await sandbox.execute(runA, 'shell', {}, [], 300);
+    expect(await sandbox.execute(runA, 'process', { action: 'preview', port: 8080 }, [], 300)).toMatchObject({ status: 'failed', output: { error: expect.stringContaining('allowed: 3000') } });
+    local.mockRejectedValueOnce(new Error('exited 1'));
+    expect(await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300)).toMatchObject({ status: 'failed', output: { error: 'Could not publish the preview link' } });
+    local.mockResolvedValueOnce('no link here');
+    expect(await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300)).toMatchObject({ status: 'failed', output: { error: expect.stringContaining('did not print') } });
+    expect(command.mock.calls.filter(call => (call[0] as string[])[0] === 'kill')).toHaveLength(0);
+  });
+  it('still releases the Run when unpublishing fails', async () => {
+    const { sandbox, local, containers } = harness();
+    await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300);
+    local.mockRejectedValueOnce(new Error('exited 1')); vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.release(runA, async () => undefined);
+    expect(containers.size).toBe(0); expect(await sandbox.describe(runA)).toEqual({ state: 'released', ready: false });
+  });
+});
+
+describe('gateway workspace context', () => {
+  const load = async (sandbox: object) => {
+    const filename = join(root, 'context.json');
+    await writeFile(filename, JSON.stringify({ schemaVersion: 'local-tools/1', workspaceRoot: 'work', stateDirectory: 'state', tools: ['shell'], sandbox }));
+    return LocalToolGateway.load(filename);
+  };
+  const call = (runId: string): ToolInvocation => ({ toolId: 'shell', toolVersion: '3', taskId: 'task', purpose: 'test', input: { command: 'true' }, capabilityGrant: `run:${runId}:shell`, idempotencyKey: `${runId}:1`, timeoutMs: 1000 });
+  it('uses the grant workspace only when workspace volumes are on', async () => {
+    const grantId = `wg_${'c'.repeat(32)}`;
+    const execute = vi.spyOn(DockerSandbox.prototype, 'execute').mockResolvedValue({ schemaVersion: 'sandbox-output/2', status: 'completed', output: {}, files: [] });
+    const off = await load({}), on = await load({ workspaceVolumes: true });
+    try {
+      await off.invoke(call(`run_${randomUUID()}`), { workspace: grantId });
+      expect(execute.mock.calls[0]![5]).toBeUndefined();
+      await on.invoke(call(`run_${randomUUID()}`), { workspace: grantId });
+      expect(execute.mock.calls[1]![5]).toBe(grantId);
+    } finally { await off.close(); await on.close(); }
+  });
+});
+
+describe('preview forwarding (python, no Docker)', () => {
+  it('forwards a preview port to the Run container and reports when nothing is listening', async () => {
+    // Same port number on both sides, as in a real Run: the target on IPv6 loopback, the forwarder on IPv4.
+    const target = createServer(socket => { socket.resume(); socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); });
+    await new Promise<void>(resolve => target.listen(0, '::1', resolve));
+    const port = (target.address() as { port: number }).port, proxyPort = port === 65535 ? port - 1 : port + 1;
+    const child = spawn('python3', ['-I', '-u', join(process.cwd(), 'sandbox/proxy.py')], { env: { PATH: process.env.PATH!, AEEIS_PROXY_PORT: String(proxyPort), AEEIS_PREVIEW_PORTS: String(port), AEEIS_PREVIEW_TARGET: '::1' }, stdio: ['ignore', 'pipe', 'inherit'] });
+    const lines: string[] = [];
+    const get = () => new Promise<string>((resolve, reject) => {
+      const socket = netConnect(port, '127.0.0.1', () => socket.write('GET / HTTP/1.1\r\n\r\n'));
+      let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('close', () => resolve(data)); socket.on('error', reject);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => { child.stdout!.on('data', chunk => { lines.push(...String(chunk).trim().split('\n')); if (lines.some(line => line.includes('"ready"'))) resolve(); }); child.once('exit', () => reject(new Error('proxy exited'))); });
+      expect(await get()).toMatch(/200 OK[\s\S]*ok$/);
+      await new Promise<void>(resolve => target.close(() => resolve()));
+      expect(await get()).toBe('');
+      await vi.waitFor(() => expect(lines.join('\n')).toContain('preview target not listening'));
+    } finally { child.kill(); target.close(); }
   });
 });

@@ -29,6 +29,8 @@ export const receiptSchema = z.object({
 }).strict();
 export type Receipt = z.infer<typeof receiptSchema>;
 
+/** Run-side context for one call, kept out of ToolInvocation so it never reaches remote toolkits. */
+export interface ToolCallContext { workspace?: string }
 export interface ToolInvocation {
   toolId: string; toolVersion: string; taskId: string; purpose: string; input: unknown;
   capabilityGrant: string; idempotencyKey: string; timeoutMs: number;
@@ -49,7 +51,7 @@ export interface ToolkitPinnedTool {
 }
 export interface ToolGateway {
   listTools(): Promise<ToolDescriptor[]>;
-  invoke(request: ToolInvocation): Promise<ToolResult>;
+  invoke(request: ToolInvocation, context?: ToolCallContext): Promise<ToolResult>;
   reconcile?: ((request: ToolInvocation, receipt: Receipt) => Promise<ToolResult>) | undefined;
   /** Optional read-only protocol/dependency probe. It must not invoke a tool. */
   health?(): Promise<{ ready: boolean; detail: string; checkedAt?: string }>;
