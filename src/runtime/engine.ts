@@ -486,6 +486,11 @@ function toolProviderRequest(pending: ExternalToolInvocation): ToolInvocation {
   };
 }
 
+/** A Run under a Work Grant works in that grant's persistent workspace, when the sandbox keeps one. */
+function invokeForRun(tools: ToolGateway, run: AgentRun, request: ToolInvocation) {
+  return run.workGrant ? tools.invoke(request, { workspace: run.workGrant.grantId }) : tools.invoke(request);
+}
+
 /** Keep Run-local delegation bookkeeping out of the external Agent protocol. */
 function agentProviderRequest(pending: PendingDelegation): DelegationRequest {
   return {
@@ -1483,7 +1488,7 @@ export class AgentEngine {
       capabilityGrant: `run:${run.id}:${tool.id}`, idempotencyKey: `${run.id}:takeover:${randomUUID()}:${tool.id}`, timeoutMs: 120_000,
     };
     let result: ToolResult;
-    try { result = await this.tools.invoke(request); }
+    try { result = await invokeForRun(this.tools, run, request); }
     catch (error) { result = { status: 'unknown', output: { error: error instanceof Error ? error.message : 'Tool call failed' }, receipt: { schemaVersion: 'receipt/1', receiptId: id('receipt'), provider: 'aeeis-runtime', operation: tool.id, requestHash: digest(request), inputRefs: [step.taskId], outputRefs: [], capabilitiesUsed: [], startedAt: now(), status: 'unknown', errorCode: 'transport_or_protocol' } }; }
     const action = { at: now(), toolId: tool.id, summary: takeoverSummary(tool.id, input.input), status: result.status, receiptId: result.receipt.receiptId };
     const updated = await this.repository.mutate(runId, current => {
@@ -3266,7 +3271,7 @@ export class AgentEngine {
       if (previous && !reissue && !this.tools.reconcile) throw new Error('Tool reconciliation is not configured');
       result = previous && !reissue
         ? await this.tools.reconcile!(providerRequest, previous)
-        : await this.tools.invoke(providerRequest);
+        : await invokeForRun(this.tools, run, providerRequest);
       const approvedTool = run.approvedTools?.find(tool => tool.id === providerRequest.toolId && tool.version === providerRequest.toolVersion);
       validateToolResult(providerRequest, result, approvedTool?.capabilities);
     } catch {

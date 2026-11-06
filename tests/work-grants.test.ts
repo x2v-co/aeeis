@@ -115,6 +115,9 @@ describe('runs under a work grant', () => {
     expect(finished.approval).toMatchObject({ approved: true, actor: `grant:${grant.grantId}` });
     expect(finished.actionApproval).toBeUndefined();
     expect(h.invoke).toHaveBeenCalledTimes(1);
+    // The grant travels beside the call, never inside the request a remote toolkit would receive.
+    expect(h.invoke.mock.calls[0]![1]).toEqual({ workspace: grant.grantId });
+    expect(JSON.stringify(h.invoke.mock.calls[0]![0])).not.toContain(grant.grantId);
     expect(finished.events.find(event => event.type === 'action.allowed')?.data).toMatchObject({ rule: 'grant', grantId: grant.grantId });
     expect(workGrantRemaining(await h.grants.get(scope, grant.grantId))).toEqual({ tokens: 1500 });
   });
