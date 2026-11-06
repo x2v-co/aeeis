@@ -140,7 +140,33 @@ def browse(args, timeout):
             browser.close()
 
 
+LIVE = Path('/run/aeeis-live')
+
+
+def begin_live(argv):
+    """The latest foreground command, kept where the read-only observer can follow it while it runs."""
+    try:
+        LIVE.mkdir(mode=0o700, exist_ok=True)
+        (LIVE / 'foreground.json').write_text(json.dumps({'command': argv[-1][:500], 'startedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}))
+        return (LIVE / 'foreground.log').open('wb', buffering=0)
+    except OSError:
+        return None
+
+
+def end_live(stream):
+    if stream is None:
+        return
+    stream.close()
+    try:
+        record = json.loads((LIVE / 'foreground.json').read_text())
+        record['finishedAt'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        (LIVE / 'foreground.json').write_text(json.dumps(record))
+    except (OSError, ValueError):
+        pass
+
+
 def execute(argv, timeout):
+    live = begin_live(argv)
     child = subprocess.Popen(
         argv, cwd=ROOT,
         env=command_env(),
@@ -167,6 +193,8 @@ def execute(argv, timeout):
                     stopped = True
                     break
                 captured[key.data].extend(chunk)
+                if live is not None:
+                    live.write(chunk)
             if stopped:
                 break
         if not stopped:
@@ -181,6 +209,7 @@ def execute(argv, timeout):
             pass
         child.wait()
         streams.close()
+        end_live(live)
     output = {key: bytes(value).decode('utf-8', errors='replace') for key, value in captured.items()}
     output['exitCode'] = child.returncode
     if stopped:

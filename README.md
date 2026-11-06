@@ -240,6 +240,8 @@ node scripts/fetch-run.mjs "$AEEIS_BASE_URL/share/<share-token>"
 
 `sandbox.workspaceVolumes: true` 时，每份范围授权有一个持久 Docker 卷，挂到 `/workspace`，同一时间只给一个 Run 用（上一个 Run 释放前，新 Run 最多等 60 秒）。没有授权的 Run 仍用各自的文件系统。新 Run 开始时，上一个 Run 已导出的 `artifacts/` 移到 `.previous-artifacts/`。卷不会随 Run 或授权删除，清理由运维决定（`docker volume rm`）。卷和镜像都在 Docker 的数据目录里，机器的系统盘较小时先把 `data-root` 移到大盘。
 
+Run 页的"电脑"折叠块显示机器状态、最新截图、终端输出、后台进程、改动和预览链接，只有 Run 的所有者能看（`GET /api/runs/:id/computer`）。暂停会冻结容器里的所有进程（`docker pause`，内容都保留），继续时接着跑；取消会停掉容器；连不上主机时 Run 里会记下"没能确认"。
+
 `sandbox.previewPorts` 配合 `sandbox.previewCommand` 可以把开发服务器分享成私有链接：Run 的容器仍在内部网络上，代理把这些端口转进去，并只发布到远程机器的 `127.0.0.1`。工具调用 `process` 的 `{"action":"preview","port":3000}` 运行 `publish` 命令（`{port}` 替换为远程机器上的端口，命令要打印链接），返回链接；Run 释放时运行 `unpublish`。链接会出现在工具结果里。instabox 示例：
 
 ```json

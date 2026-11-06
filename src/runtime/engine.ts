@@ -25,7 +25,7 @@ import { BotBackgroundError, composeBotBackground } from '../bot-background.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
-import type { ToolDescriptor, ToolGateway, SkillGovernance, ModelDecision, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
+import type { MachineInterrupt, ToolDescriptor, ToolGateway, SkillGovernance, ModelDecision, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
 import type { ModelResolution, ModelResolver } from './model-router.js';
 import { AgentGateway, AgentOutcomeUnknown } from '../agent-gateway.js';
 import type { AgentCallbackAuthentication, AgentProgressEvent, AgentTransportResponse, DelegationReceipt, DelegationOutcome, DelegationRequest } from '../agent-gateway.js';
@@ -1499,7 +1499,23 @@ export class AgentEngine {
     return { status: result.status, output: result.output, run: updated };
   }
 
+  /** Pausing or cancelling a Run has to reach the processes on its machine, not only this engine's loop.
+   * The Run records whether that was confirmed: an unreachable host must not read as stopped work. */
+  async interruptMachine(runId: string, action: MachineInterrupt, scope?: Ownership): Promise<void> {
+    if (!this.tools?.interruptRun) return;
+    const result = await this.tools.interruptRun(runId, action).catch(error => ({ confirmed: false, detail: error instanceof Error ? error.message : 'Machine interrupt failed' }));
+    if (result.detail === 'no machine') return;
+    await this.repository.mutate(runId, run => {
+      event(run, result.confirmed ? 'machine.interrupted' : 'machine.interrupt_unconfirmed', { action, ...(result.detail ? { detail: result.detail } : {}) });
+    }, scope).catch(error => console.warn(`AEEIS: could not record machine ${action} for ${runId}: ${error instanceof Error ? error.message : error}`));
+  }
   async command(runId: string, action: string, body: unknown, scope?: Ownership): Promise<AgentRun> {
+    const interrupt = ({ pause: 'freeze', resume: 'thaw', takeover: 'thaw', handback: 'thaw', cancel: 'halt' } as Record<string, MachineInterrupt>)[action];
+    const result = await this.mutateCommand(runId, action, body, scope);
+    if (interrupt) await this.interruptMachine(runId, interrupt, scope);
+    return result;
+  }
+  private async mutateCommand(runId: string, action: string, body: unknown, scope?: Ownership): Promise<AgentRun> {
     const result = await this.repository.mutate(runId, async run => {
       if (action === 'approve') {
         const input = approvePlanSchema.parse(body);
@@ -3815,6 +3831,7 @@ export class AgentEngine {
         }
       }, scope);
     }
+    await Promise.all(pausedRunIds.map(id => this.interruptMachine(id, 'freeze', scope)));
     return { grant, pausedRunIds, affectedRunIds };
   }
   /** Every Run of this owner, page by page where the repository can page; otherwise its bounded recent list. */

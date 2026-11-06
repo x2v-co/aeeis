@@ -82,10 +82,17 @@ import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
 import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
+import type { HostWait, MachineView } from '../docker-sandbox.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<void>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
-interface Options { taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface RunComputer {
+  observe(runId: string, live: boolean): Promise<MachineView>;
+  screenshots(runId: string): Promise<{ name: string; bytes: number; capturedAt: string }[]>;
+  screenshot(runId: string, name: string): Promise<Buffer | undefined>;
+  hostWait(): Promise<HostWait | undefined>;
+}
+interface Options { runComputer?: RunComputer; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -2387,6 +2394,7 @@ export function buildApp(options: Options) {
       current.cancellation = { reason, actor: principal.id, at: new Date().toISOString(), source: 'api' };
       event(current, 'run.cancelled', { reason, actor: principal.id });
     }, scope);
+    await options.engine?.interruptMachine(id, 'halt', scope);
     try {
       const workflow = options.dispatcher?.cancel ? await options.dispatcher.cancel(id, reason) : { outcome: 'unsupported' as const };
       return { run: withoutWorkingMemoryPayloads(run), workflow };
@@ -2418,6 +2426,24 @@ export function buildApp(options: Options) {
     return { dry_run: body.dry_run, scanned: results.length, results };
   });
   // §7.6: the person who took over a Run works in the Bot's own workspace through the Run's own tool grant.
+  // The owner's view of a Run's machine. Terminal output can hold secrets and preview links carry tokens, so unlike
+  // the Run itself this is never available to people it was shared with.
+  app.get<{ Params: { id: string } }>('/api/runs/:id/computer', async (request, reply) => {
+    const principal = principalOf(request);
+    const run = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    if (!options.runComputer) return reply.code(404).send({ error: 'This AEEIS has no Run machines' });
+    // Each look reaches the host, and on some hosts that counts as activity, so only working Runs are looked at.
+    const live = ['queued', 'planning', 'running', 'reviewing', 'needs_input', 'waiting_external', 'paused'].includes(run.status);
+    const [machine, screenshots, hostWait] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait()]);
+    return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}) };
+  });
+  app.get<{ Params: { id: string; name: string } }>('/api/runs/:id/computer/screenshots/:name', async (request, reply) => {
+    const principal = principalOf(request);
+    const run = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    const image = await options.runComputer?.screenshot(run.id, request.params.name);
+    if (!image) return reply.code(404).send({ error: 'Screenshot not found' });
+    return reply.header('content-type', 'image/png').header('x-content-type-options', 'nosniff').header('content-security-policy', "default-src 'none'; sandbox").header('cache-control', 'private, max-age=86400').send(image);
+  });
   app.post<{ Params: { id: string } }>('/api/runs/:id/takeover-tool', async (request, reply) => {
     if (!options.engine) return reply.code(503).send({ error: 'Model is not configured' });
     const principal = principalOf(request); await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);

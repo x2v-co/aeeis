@@ -33,7 +33,7 @@ RUN set -eu; \
       playwright install --with-deps chromium; \
     fi; \
     rm -rf /var/lib/apt/lists/*
-COPY --chmod=0444 runner.py service.py client.py proxy.py /opt/aeeis/
+COPY --chmod=0444 runner.py service.py client.py proxy.py observe.py /opt/aeeis/
 RUN chmod 0755 /opt/aeeis && mkdir -p /workspace/artifacts
 WORKDIR /workspace
 # Root inside a normal isolated container permits apt/pip and service setup.

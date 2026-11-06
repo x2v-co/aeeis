@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, realpath, rename } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
-import { DockerSandbox, SandboxError, sandboxConfigSchema, type RunMachineRecord } from './docker-sandbox.js';
+import { DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord } from './docker-sandbox.js';
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
-import type { Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
+import type { MachineInterrupt, MachineInterruptResult, Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
 
 const names = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process', 'browser', 'web-fetch'] as const;
 /** Tools that run code in the Run container: what they can reach is whatever the container's network allows. */
@@ -64,6 +64,7 @@ const descriptions: Record<typeof names[number], string> = {
   browser: 'Open a page in headless Chromium inside this Run container, optionally click, type, press keys or wait, then return the title, HTTP status, visible text, console errors and failed requests. A screenshot is saved under artifacts/screenshots/ and its path and SHA-256 are returned. Use http://127.0.0.1:<port> for a dev server started with process start. Each call opens a fresh page.',
   'web-fetch': 'Fetch an allowlisted HTTPS URL and return bounded text evidence with source URL, fetch time and content hash. Redirects are rejected.',
 };
+const screenshotName = /^\d{8}T\d{6}-[a-f0-9]{6}\.png$/;
 const sha = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
 const fingerprint = digestProtocol;
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -93,6 +94,33 @@ export class LocalToolGateway implements ToolGateway {
     }
   }
   describe(runId: string): Promise<RunMachineRecord | undefined> { return this.sandbox.describe(runId); }
+  /** Reaches the container directly: the queue may be held by the very call this has to stop. */
+  interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> { return this.sandbox.interrupt(runId, action); }
+  observe(runId: string, live: boolean): Promise<MachineView> { return this.sandbox.observe(runId, live); }
+  hostWait(): Promise<HostWait | undefined> { return this.sandbox.hostWait(); }
+  private screenshotDirectory(runId: string) {
+    if (!/^run_[a-f0-9-]{36}$/.test(runId)) throw new ToolError('Invalid Run identity');
+    return join(this.config.workspaceRoot, runId, 'artifacts', 'screenshots');
+  }
+  /** Screenshots already exported to this host, newest first. Reading them never touches the sandbox host. */
+  async screenshots(runId: string): Promise<{ name: string; bytes: number; capturedAt: string }[]> {
+    let names: string[];
+    try { names = await readdir(this.screenshotDirectory(runId)); }
+    catch (error) { if (isMissing(error)) return []; throw error; }
+    const listed = [];
+    for (const name of names.filter(item => screenshotName.test(item)).sort().reverse().slice(0, 24)) {
+      const info = await lstat(join(this.screenshotDirectory(runId), name)).catch(() => undefined);
+      if (info?.isFile()) listed.push({ name, bytes: info.size, capturedAt: info.mtime.toISOString() });
+    }
+    return listed;
+  }
+  async screenshot(runId: string, name: string): Promise<Buffer | undefined> {
+    if (!screenshotName.test(name)) return undefined;
+    const path = join(this.screenshotDirectory(runId), name);
+    const info = await lstat(path).catch(() => undefined);
+    if (!info?.isFile() || info.size > 8 * 1024 * 1024) return undefined;
+    return readFile(path);
+  }
   static async load(filename: string): Promise<LocalToolGateway> {
     const config = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
     config.workspaceRoot = resolve(dirname(filename), config.workspaceRoot);
@@ -255,6 +283,10 @@ export class CombinedToolGateway implements ToolGateway {
   async invoke(request: ToolInvocation, context?: ToolCallContext) { return (await this.gateway(request)).invoke(request, context); }
   async workspaceContainedTools(): Promise<string[]> {
     return (await Promise.all(this.gateways.map(gateway => gateway.workspaceContainedTools?.() ?? Promise.resolve([])))).flat();
+  }
+  async interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> {
+    const results = await Promise.all(this.gateways.map(gateway => gateway.interruptRun?.(runId, action) ?? Promise.resolve({ confirmed: true })));
+    return results.find(result => !result.confirmed) ?? { confirmed: true };
   }
   async reconcile(request: ToolInvocation, receipt: Receipt) {
     const gateway = await this.gateway(request);

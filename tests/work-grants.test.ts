@@ -1,3 +1,4 @@
+import type { AgentRun } from '../src/runtime/contracts.js';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -61,6 +62,7 @@ describe('action decisions under a work grant', () => {
 function harness(options: { calls?: string[]; reject?: boolean } = {}) {
   const repository = new InMemoryRunRepository();
   const grants = new InMemoryWorkGrantStore();
+  const interrupt = vi.fn<NonNullable<ToolGateway['interruptRun']>>(async () => ({ confirmed: true }));
   const invoke = vi.fn<ToolGateway['invoke']>(async request => ({ status: 'completed', output: { done: request.toolId }, outputRefs: ['out'], receipt: {
     schemaVersion: 'receipt/1', receiptId: `receipt_00000000-0000-0000-0000-${String(invoke.mock.calls.length).padStart(12, '0')}`, provider: 'aeeis-local-tools', operation: request.toolId,
     requestHash: 'a'.repeat(64), inputRefs: [request.taskId], outputRefs: ['out'], capabilitiesUsed: request.toolId === 'edit' ? ['write'] : ['write', 'network'], startedAt: new Date().toISOString(), status: 'completed',
@@ -73,6 +75,7 @@ function harness(options: { calls?: string[]; reject?: boolean } = {}) {
     ],
     invoke,
     workspaceContainedTools: async () => ['edit', 'other'],
+    interruptRun: interrupt,
   };
   const sequence = options.calls ?? ['edit'];
   let plans = 0;
@@ -99,7 +102,7 @@ function harness(options: { calls?: string[]; reject?: boolean } = {}) {
     for (let i = 0; i < 30; i++) { const status = await engine.advance(id); if (stopAt.includes(status)) return status; }
     return (await repository.get(id)).status;
   };
-  return { repository, grants, invoke, engine, materials, settle };
+  return { repository, grants, invoke, interrupt, engine, materials, settle };
 }
 
 describe('runs under a work grant', () => {
@@ -187,6 +190,86 @@ describe('runs under a work grant', () => {
     await expect(h.engine.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version, modelBudget: { tokens: 99999 } })).rejects.toThrow('授权');
     await h.engine.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version });
     expect((await h.repository.get(run.id)).approval).toMatchObject({ approved: true, actor: 'owner' });
+  });
+});
+
+describe('stopping the work on a Run machine', () => {
+  const start = async (h: ReturnType<typeof harness>) => (await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: (await h.grants.create(scope, grantInput)).grantId, origin: 'channel' })).id;
+  const events = async (h: ReturnType<typeof harness>, id: string) => (await h.repository.get(id)).events.filter(item => item.type.startsWith('machine.')).map(item => [item.type, item.data]);
+  it('freezes on pause, continues on resume, and stops everything on cancel', async () => {
+    const h = harness();
+    const id = await start(h);
+    await h.engine.command(id, 'pause', {});
+    expect(h.interrupt).toHaveBeenLastCalledWith(id, 'freeze');
+    await h.engine.command(id, 'resume', {});
+    expect(h.interrupt).toHaveBeenLastCalledWith(id, 'thaw');
+    await h.engine.command(id, 'cancel', {});
+    expect(h.interrupt).toHaveBeenLastCalledWith(id, 'halt');
+    expect(await events(h, id)).toEqual([['machine.interrupted', { action: 'freeze' }], ['machine.interrupted', { action: 'thaw' }], ['machine.interrupted', { action: 'halt' }]]);
+  });
+  it('says so when the host could not confirm, and the Run still pauses', async () => {
+    const h = harness();
+    const id = await start(h);
+    h.interrupt.mockResolvedValueOnce({ confirmed: false, detail: 'Sandbox host vps is unreachable' });
+    expect((await h.engine.command(id, 'pause', {})).status).toBe('paused');
+    expect(await events(h, id)).toEqual([['machine.interrupt_unconfirmed', { action: 'freeze', detail: 'Sandbox host vps is unreachable' }]]);
+    h.interrupt.mockRejectedValueOnce(new Error('gateway down'));
+    await h.engine.command(id, 'cancel', {});
+    expect((await h.repository.get(id)).status).toBe('cancelled');
+    expect((await events(h, id)).at(-1)).toEqual(['machine.interrupt_unconfirmed', { action: 'halt', detail: 'gateway down' }]);
+  });
+  it('records nothing for a Run that has no machine yet', async () => {
+    const h = harness();
+    const id = await start(h);
+    h.interrupt.mockResolvedValueOnce({ confirmed: true, detail: 'no machine' });
+    await h.engine.command(id, 'pause', {});
+    expect(await events(h, id)).toEqual([]);
+  });
+  it('freezes the machine when a grant is revoked', async () => {
+    const h = harness();
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    await h.engine.revokeWorkGrant(grant.grantId, scope);
+    expect(h.interrupt).toHaveBeenCalledWith(run.id, 'freeze');
+  });
+});
+
+describe('the computer panel API', () => {
+  const machine = { state: 'running' as const, previews: [{ port: 3000, url: 'https://x.example/?_token=ibp_secret' }], live: { foreground: null, processes: [], repository: null, files: [] } };
+  const setup = async (status: string) => {
+    const { buildApp } = await import('../src/runtime/http.js');
+    const repository = new InMemoryRunRepository();
+    const run = { id: `run_${'9'.repeat(36)}`, goal: 'Site', status, owner: 'alice', tenantId: 'team-a', events: [], calls: [], steps: [], artifacts: [] } as never as AgentRun;
+    await repository.create(run);
+    const runComputer = {
+      observe: vi.fn(async () => machine), screenshots: vi.fn(async () => [{ name: '20261106T000000-abc123.png', bytes: 4, capturedAt: '2026-11-06T00:00:00.000Z' }]),
+      screenshot: vi.fn(async (_id: string, name: string) => name === '20261106T000000-abc123.png' ? Buffer.from('png!') : undefined), hostWait: vi.fn(async () => undefined as never),
+    };
+    const app = buildApp({ repository, runComputer, principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] } } });
+    return { app, run, runComputer, alice: { authorization: 'Bearer alice' }, bob: { authorization: 'Bearer bob' } };
+  };
+  it('shows the machine to its owner only, and looks at working Runs only', async () => {
+    const { app, run, runComputer, alice, bob } = await setup('running');
+    try {
+      const view = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer`, headers: alice });
+      expect(view.statusCode).toBe(200);
+      expect(view.json()).toMatchObject({ status: 'running', machine: { state: 'running' }, screenshots: [{ name: '20261106T000000-abc123.png' }] });
+      expect(runComputer.observe).toHaveBeenLastCalledWith(run.id, true);
+      const refused = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer`, headers: bob });
+      expect(refused.statusCode).toBe(404); expect(refused.body).not.toContain('ibp_secret');
+      expect((await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer/screenshots/20261106T000000-abc123.png`, headers: bob })).statusCode).toBe(404);
+      const image = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer/screenshots/20261106T000000-abc123.png`, headers: alice });
+      expect(image.headers).toMatchObject({ 'content-type': 'image/png', 'x-content-type-options': 'nosniff' });
+      expect(image.body).toBe('png!');
+      expect((await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer/screenshots/..%2F..%2Fsecret.png`, headers: alice })).statusCode).toBe(404);
+    } finally { await app.close(); }
+  });
+  it('does not reach the host for a finished Run', async () => {
+    const { app, run, runComputer, alice } = await setup('succeeded');
+    try {
+      await app.inject({ method: 'GET', url: `/api/runs/${run.id}/computer`, headers: alice });
+      expect(runComputer.observe).toHaveBeenLastCalledWith(run.id, false);
+    } finally { await app.close(); }
   });
 });
 

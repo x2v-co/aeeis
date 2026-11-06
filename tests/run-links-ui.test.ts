@@ -557,6 +557,71 @@ describe('plan review workbench', () => {
     expect(f.posts).toHaveLength(0);
   });
 });
+describe('the computer panel', () => {
+  const view = (overrides: Record<string, unknown> = {}) => ({
+    status: 'running',
+    machine: { state: 'running', previews: [{ port: 3000, url: 'https://3000-abc.instabox.tech/?_token=ibp_secret' }, { port: 3001, url: 'javascript:alert(1)' }], live: {
+      foreground: { command: 'npm test', startedAt: '2026-11-06T00:00:00Z', output: '<img src=x onerror=alert(1)>passing' },
+      processes: [{ processId: 'proc_1', command: 'npm run dev', running: true, output: 'listening on 3000' }],
+      repository: { status: ' M a.txt', diff: '+new line', truncated: false }, files: [],
+    } },
+    screenshots: [],
+    ...overrides,
+  });
+  const open = async (status: string, computer: (url: string) => unknown, canEdit = true) => {
+    const run = fixture();
+    Object.assign(run, { status, review: undefined, error: undefined, events: [] });
+    const calls: string[] = [];
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/computer')) { calls.push(String(url)); return computer(String(url)); }
+      if (String(url) === `/api/runs/${run.id}`) return response({ ...run, canEdit });
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBeTruthy());
+    return { doc: dom.window.document, calls, run };
+  };
+  it('shows what the machine is doing, as text only, with safe links', async () => {
+    const { doc } = await open('running', () => response(view()));
+    await vi.waitFor(() => expect(doc.getElementById('computer-state')?.textContent).toBe('运行中'));
+    const terminal = doc.getElementById('computer-terminal')!;
+    expect(terminal.textContent).toContain('$ npm test  （运行中）');
+    expect(terminal.textContent).toContain('<img src=x onerror=alert(1)>passing');
+    expect(terminal.textContent).toContain('后台 · 运行中 · npm run dev');
+    expect(terminal.querySelector('img')).toBeNull();
+    expect(doc.getElementById('computer-changes')?.textContent).toContain('+new line');
+    const links = [...doc.querySelectorAll<HTMLAnchorElement>('#computer-previews a')];
+    expect(links.map(link => link.textContent)).toEqual(['打开预览（端口 3000）']);
+    expect(links[0]!.rel).toBe('noopener noreferrer');
+  });
+  it('says when a tool call is waiting for the host, and when a stop was not confirmed', async () => {
+    const waiting = await open('running', () => response(view({ machine: { state: 'unreachable', previews: [] }, hostWait: { since: '2026-11-06T00:00:00Z', message: 'paused' } })));
+    await vi.waitFor(() => expect(waiting.doc.getElementById('computer-notice')?.textContent).toContain('在等沙箱主机恢复'));
+    expect(waiting.doc.getElementById('computer-state')?.textContent).toBe('连不上');
+    expect(waiting.doc.getElementById('computer-notice')?.textContent).toContain('工具还没有执行');
+  });
+  it('is not offered to people who can only read the Run', async () => {
+    const { doc, calls } = await open('running', () => response(view()), false);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(doc.querySelector<HTMLElement>('#run-computer')!.hidden).toBe(true);
+    expect(calls).toEqual([]);
+  });
+  it('disappears on an AEEIS without Run machines', async () => {
+    const { doc, calls } = await open('running', () => ({ ok: false, status: 404, text: async () => JSON.stringify({ error: 'no machines' }) }));
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    await vi.waitFor(() => expect(doc.querySelector<HTMLElement>('#run-computer')!.hidden).toBe(true));
+  });
+  it('looks once at a finished Run instead of following it', async () => {
+    const { calls } = await open('succeeded', () => response(view({ status: 'succeeded', machine: { state: 'released', previews: [] } })));
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('workbench takeover', () => {
   it('takes over a running Run after confirming, and hands it back only with a note', async () => {
     const run = fixture();

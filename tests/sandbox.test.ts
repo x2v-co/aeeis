@@ -686,3 +686,126 @@ describe('preview forwarding (python, no Docker)', () => {
     } finally { child.kill(); target.close(); }
   });
 });
+
+describe('reaching a Run machine directly (mocked transport)', () => {
+  const runId = `run_${'e'.repeat(36)}`;
+  const settings = sandboxConfigSchema.parse({ ssh: 'vps-test-1', sshWaitSeconds: 0 });
+  const observation = { foreground: { command: 'npm test', startedAt: '2026-11-06T00:00:00Z', output: 'passing' }, processes: [], repository: null, files: [] };
+  const harness = (config = settings) => {
+    const sandbox = new DockerSandbox(config, root);
+    const host = { down: false };
+    let info: any;
+    const response = { schemaVersion: 'sandbox-output/2', status: 'completed', output: {}, files: [] };
+    const command = vi.spyOn(sandbox as any, 'command').mockImplementation(async (...values: any[]) => {
+      const args = values[0] as string[];
+      if (host.down) throw new SandboxUnreachable('vps-test-1', 'ssh: connect to host: Operation timed out');
+      if (args[0] === 'image') return ok(`${image} linux`);
+      if (args[0] === 'network') return ok('n');
+      if (args[0] === 'create') {
+        const labels = Object.fromEntries(args.flatMap((a, i) => a === '--label' ? [args[i + 1]!.split('=')] : []));
+        info = { Id: 'c'.repeat(64), Image: image, Config: { Labels: labels }, State: { Running: false, Paused: false } }; return ok(info.Id);
+      }
+      if (args[0] === 'inspect') return info ? ok(JSON.stringify([info])) : { code: 1, stdout: '', stderr: 'No such container' };
+      if (args[0] === 'start') { info.State.Running = true; return ok(); }
+      if (args[0] === 'kill') { info.State.Running = false; info.State.Paused = false; return ok(); }
+      if (args[0] === 'pause') { info.State.Paused = true; return ok(); }
+      if (args[0] === 'unpause') { info.State.Paused = false; return ok(); }
+      if (args[0] === 'exec' && args.includes('/opt/aeeis/observe.py')) return ok(JSON.stringify(observation));
+      if (args[0] === 'exec') return ok(JSON.stringify(response));
+      return ok();
+    });
+    return { sandbox, host, command, state: () => info };
+  };
+  const used = (command: any) => command.mock.calls.map((call: any) => (call[0] as string[])[0]);
+  it('freezes, thaws and halts without going through a tool call', async () => {
+    const { sandbox, state } = harness();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    expect(await sandbox.interrupt(runId, 'freeze')).toEqual({ confirmed: true }); expect(state().State.Paused).toBe(true);
+    expect(await sandbox.interrupt(runId, 'thaw')).toEqual({ confirmed: true }); expect(state().State.Paused).toBe(false);
+    expect(await sandbox.interrupt(runId, 'halt')).toEqual({ confirmed: true }); expect(state().State.Running).toBe(false);
+  });
+  it('does not claim a stop it could not make, and retries a halt on the next call', async () => {
+    const { sandbox, host, command } = harness();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    host.down = true;
+    expect(await sandbox.interrupt(runId, 'freeze')).toMatchObject({ confirmed: false, detail: expect.stringContaining('unreachable') });
+    expect(await sandbox.interrupt(runId, 'halt')).toMatchObject({ confirmed: false });
+    host.down = false; command.mockClear();
+    await expect(sandbox.execute(runId, 'shell', {}, [], 300)).rejects.toThrow(/stopped before the tool started/);
+    expect(used(command)[0]).toBe('kill');
+  });
+  it('refuses to start a tool on a Run stopped while its container was still being created', async () => {
+    const { sandbox, command } = harness();
+    await sandbox.interrupt(runId, 'freeze');
+    await expect(sandbox.execute(runId, 'shell', {}, [], 300)).rejects.toThrow(/stopped before the tool started/);
+    expect(command.mock.calls.filter((call: any) => (call[0] as string[]).includes('--interactive') && !String(call[2]).includes('__restore'))).toHaveLength(0);
+    await sandbox.interrupt(runId, 'thaw');
+    await expect(sandbox.execute(runId, 'shell', {}, [], 300)).resolves.toMatchObject({ status: 'completed' });
+    await sandbox.interrupt(runId, 'halt');
+    await expect(sandbox.execute(runId, 'shell', {}, [], 300)).rejects.toThrow(/stopped before the tool started/);
+  });
+  it('has nothing to interrupt before a Run has a machine', async () => {
+    const { sandbox, command } = harness();
+    expect(await sandbox.interrupt(runId, 'halt')).toEqual({ confirmed: true, detail: 'no machine' });
+    expect(command).not.toHaveBeenCalled();
+  });
+  it('thaws a frozen container when a tool is used in it, as a person who took over would', async () => {
+    const { sandbox, command, state } = harness();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    await sandbox.interrupt(runId, 'freeze'); command.mockClear();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    expect(used(command)).toEqual(['inspect', 'unpause', 'exec']); expect(state().State.Paused).toBe(false);
+  });
+  it('reads a running machine and never starts, thaws or changes anything by looking', async () => {
+    const { sandbox, command, state, host } = harness();
+    expect(await sandbox.observe(runId, true)).toEqual({ state: 'absent', previews: [] });
+    expect(command).not.toHaveBeenCalled();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    command.mockClear();
+    expect(await sandbox.observe(runId, true)).toMatchObject({ state: 'running', live: { foreground: { output: 'passing' } } });
+    expect(used(command)).toEqual(['inspect', 'exec']);
+    state().State.Paused = true; command.mockClear();
+    expect(await sandbox.observe(runId, true)).toEqual({ state: 'frozen', previews: [] });
+    state().State.Paused = false; state().State.Running = false; command.mockClear();
+    expect(await sandbox.observe(runId, true)).toEqual({ state: 'stopped', previews: [] });
+    expect(used(command)).toEqual(['inspect']);
+    state().State.Running = true; host.down = true;
+    expect(await sandbox.observe(runId, true)).toMatchObject({ state: 'unreachable', detail: expect.stringContaining('unreachable') });
+    command.mockClear(); expect((await sandbox.observe(runId, false)).live).toBeUndefined(); expect(command).not.toHaveBeenCalled();
+  });
+  it('reports frozen or stopped when that happens between checking the container and reading it', async () => {
+    const { sandbox, command } = harness();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    const working = command.getMockImplementation()!;
+    const refuse = (stderr: string) => command.mockImplementation(async (...values: any[]) => (values[0] as string[]).includes('/opt/aeeis/observe.py') ? { code: 1, stdout: '', stderr } : working(...values));
+    refuse('Error response from daemon: container abc is paused, unpause the container before exec');
+    expect(await sandbox.observe(runId, true)).toEqual({ state: 'frozen', previews: [] });
+    refuse('Error response from daemon: container abc is not running');
+    expect(await sandbox.observe(runId, true)).toEqual({ state: 'stopped', previews: [] });
+  });
+  it('handles an image from before the observer existed', async () => {
+    const { sandbox, command } = harness();
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    const working = command.getMockImplementation()!;
+    command.mockImplementation(async (...values: any[]) => (values[0] as string[]).includes('/opt/aeeis/observe.py') ? { code: 2, stdout: '', stderr: 'no such file' } : working(...values));
+    expect(await sandbox.observe(runId, true)).toMatchObject({ state: 'running', detail: expect.stringContaining('older sandbox image') });
+  });
+  it('shows that a call is waiting for the host, and clears it when the host is back', async () => {
+    const { sandbox, host } = harness(sandboxConfigSchema.parse({ ssh: 'vps-test-1', sshWaitSeconds: 30 }));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    expect(await sandbox.hostWait()).toBeUndefined();
+    host.down = true;
+    const seen = new Promise(resolve => setTimeout(async () => { const wait = await sandbox.hostWait(); host.down = false; resolve(wait); }, 400));
+    await sandbox.execute(runId, 'shell', {}, [], 300);
+    expect(await seen).toMatchObject({ message: expect.stringContaining('unreachable'), since: expect.any(String) });
+    expect(await sandbox.hostWait()).toBeUndefined();
+  });
+  it('ignores a wait record left behind by a process that died', async () => {
+    const { sandbox } = harness(sandboxConfigSchema.parse({ ssh: 'vps-test-1', sshWaitSeconds: 30 }));
+    await mkdir(join(root, 'sandboxes'), { recursive: true });
+    await writeFile(join(root, 'sandboxes', 'host-wait.json'), JSON.stringify({ since: new Date(Date.now() - 3_600_000).toISOString(), message: 'old' }));
+    expect(await sandbox.hostWait()).toBeUndefined();
+    expect(await sandbox.pendingRuns()).toEqual([]);
+  });
+});
