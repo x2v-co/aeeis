@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "local-tools/1",
+  "workspaceRoot": "/app/data/workspaces",
+  "stateDirectory": "/app/data/tool-state",
+  "tools": ["read", "write", "diff", "glob", "grep", "shell", "process", "browser"],
+  "timeoutMs": 300000,
+  "sandbox": {
+    "ssh": "instabox-REPLACE_WITH_MACHINE_NAME",
+    "sshLoginCommand": ["/app/scripts/instabox-login.sh", "REPLACE_WITH_MACHINE_NAME"],
+    "sshWaitSeconds": 720,
+    "image": "aeeis-sandbox:3",
+    "network": "proxied",
+    "egressHosts": ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"],
+    "memoryMiB": 4096,
+    "cpus": 3,
+    "pids": 1024,
+    "workspaceVolumes": true,
+    "previewPorts": [3000],
+    "previewCommand": {
+      "publish": ["sh", "-c", "INSTABOX_API_KEY=\"$(cat /run/aeeis-secrets/instabox-key)\" exec npx -y instabox@0.8.186 port publish REPLACE_WITH_MACHINE_NAME \"$0\" --private", "{port}"],
+      "unpublish": ["sh", "-c", "INSTABOX_API_KEY=\"$(cat /run/aeeis-secrets/instabox-key)\" exec npx -y instabox@0.8.186 port unpublish REPLACE_WITH_MACHINE_NAME \"$0\"", "{port}"]
+    },
+    "modelRelay": true
+  },
+  "executor": {
+    "maxMinutes": 30,
+    "model": "claude-sonnet-5-5",
+    "keepHours": 1
+  }
+}

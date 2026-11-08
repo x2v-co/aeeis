@@ -526,6 +526,14 @@ describe('renewing a refused SSH login', () => {
     expect(refresh).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1);
     expect(() => sandboxConfigSchema.parse({ sshLoginCommand: ['true'] })).toThrow(/needs ssh/);
   });
+  it('logs in when the host alias does not exist yet, as on a fresh deployment', async () => {
+    const sandbox = sandboxWith(['true']);
+    const unknown = new SandboxUnreachable('vps-test-1', 'ssh: Could not resolve hostname vps-test-1: Name or service not known');
+    expect(unknown.loginRefused).toBe(false); expect(unknown.unresolved).toBe(true);
+    const transport = vi.spyOn(sandbox as any, 'transport').mockRejectedValueOnce(unknown).mockResolvedValue(ok('done'));
+    expect((await call(sandbox)).stdout).toBe('done');
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('grant workspaces and preview links (mocked transport)', () => {

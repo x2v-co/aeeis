@@ -196,6 +196,8 @@ services:
       # Optional *_FILE secrets (e.g. AEEIS_MODEL_API_KEY_FILE=/run/aeeis-secrets/model-key).
       # Files must be readable by uid 1000 (chown 1000:1000, chmod 400).
       - ${AEEIS_SECRETS_DIR:-./secrets}:/run/aeeis-secrets:ro
+      # Bot sandbox login state (SSH key and short-lived certificate), kept across restarts.
+      - aeeis-home-config:/home/node/.config
     healthcheck:
       # /health = liveness. Readiness (/readyz) needs the Worker, which starts
       # after the API, so readiness is checked by bin/deploy.sh and monitoring.
@@ -256,5 +258,7 @@ volumes:
     name: ${AEEIS_POSTGRES_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-postgres}
   aeeis-data:
     name: ${AEEIS_DATA_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-data}
+  aeeis-home-config:
+    name: ${AEEIS_HOME_CONFIG_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-home-config}
   temporal-postgres:
     name: ${AEEIS_TEMPORAL_POSTGRES_VOLUME:-${AEEIS_STACK:-aeeis-cn-prod}-temporal-postgres}

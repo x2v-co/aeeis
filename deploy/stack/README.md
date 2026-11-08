@@ -101,6 +101,33 @@ queue and database credentials when carrying over state. A fresh installation
 can generate secrets locally with `openssl rand -hex 32`. Never commit live env
 files or secrets. The regional templates contain no actual IPs, domains or keys.
 
+### Bot computer (optional)
+
+A Bot can get its own computer: a container on a separate Docker host, reached
+over SSH, with Claude Code as the coding executor and an independent acceptance
+check. The engine runs in the API container, so only the API needs it. Without
+`AEEIS_LOCAL_TOOLS_CONFIG` the stack runs as before.
+
+1. On the Docker host, build the sandbox image once: `docker build -t
+   aeeis-sandbox:3 sandbox/` (from this repository).
+2. Copy `local-tools.example.instabox.json` to `secrets/local-tools.json` and
+   replace `REPLACE_WITH_MACHINE_NAME`. For a host other than Instabox, set
+   `ssh` to a host the API container can reach and drop `sshLoginCommand` and
+   `previewCommand` (without `previewCommand`, set `previewPorts` to `[]`).
+3. Put the Instabox API key in `secrets/instabox-key` and a dedicated Anthropic
+   key with a spending limit in `secrets/executor-key` (uid 1000, mode 0400).
+4. Uncomment `AEEIS_LOCAL_TOOLS_CONFIG` and `AEEIS_EXECUTOR_API_KEY_FILE` in
+   the env file and redeploy.
+
+On first use the API has no SSH host entry, so it runs `sshLoginCommand`
+(`/app/scripts/instabox-login.sh`). That creates an SSH key and a short-lived
+certificate in the `<stack>-home-config` volume, writes the
+`instabox-<machine>` host entry, and the API connects. A refused login renews the
+certificate; a paused or cooling-down machine is waited for up to
+`sshWaitSeconds`. The API container needs outbound access to the SSH gateway
+and to the npm registry for the pinned `instabox` CLI. The Anthropic key never
+enters the Bot's container: the per-Run relay holds it.
+
 ## Network and trust
 
 `netns` owns a stable network namespace shared by API and worker. Worker → API
