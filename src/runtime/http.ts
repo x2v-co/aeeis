@@ -83,6 +83,7 @@ import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, d
 import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 import type { HostWait, MachineView } from '../docker-sandbox.js';
+import { runMetrics } from './run-metrics.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<void>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
@@ -90,6 +91,7 @@ interface RunComputer {
   observe(runId: string, live: boolean): Promise<MachineView>;
   screenshots(runId: string): Promise<{ name: string; bytes: number; capturedAt: string }[]>;
   screenshot(runId: string, name: string): Promise<Buffer | undefined>;
+  sourceArchive(runId: string): Promise<Buffer | undefined>;
   hostWait(): Promise<HostWait | undefined>;
 }
 interface Options { runComputer?: RunComputer; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
@@ -2436,6 +2438,17 @@ export function buildApp(options: Options) {
     const live = ['queued', 'planning', 'running', 'reviewing', 'needs_input', 'waiting_external', 'paused'].includes(run.status);
     const [machine, screenshots, hostWait] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait()]);
     return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}) };
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/metrics', async request => {
+    const principal = principalOf(request);
+    return runMetrics(await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId));
+  });
+  app.get<{ Params: { id: string } }>('/api/runs/:id/computer/source', async (request, reply) => {
+    const principal = principalOf(request);
+    const run = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    const archive = await options.runComputer?.sourceArchive(run.id);
+    if (!archive) return reply.code(404).send({ error: 'No source archive for this Run' });
+    return reply.header('content-type', 'application/gzip').header('content-disposition', `attachment; filename="${run.id}-source.tar.gz"`).header('x-content-type-options', 'nosniff').send(archive);
   });
   app.get<{ Params: { id: string; name: string } }>('/api/runs/:id/computer/screenshots/:name', async (request, reply) => {
     const principal = principalOf(request);

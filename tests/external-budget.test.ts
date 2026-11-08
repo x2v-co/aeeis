@@ -38,7 +38,7 @@ function agentResult(request: DelegationRequest, cost: { tokens?: number; money?
     } }),
   };
 }
-async function setup(options: { cost?: Receipt['cost']; sequence?: Array<'tool' | 'agent'>; ledger?: InMemoryGrantLedger; invoke?: ToolGateway['invoke']; submit?: (request: DelegationRequest) => Promise<AgentTransportResponse> } = {}) {
+async function setup(options: { goal?: string; cost?: Receipt['cost']; sequence?: Array<'tool' | 'agent'>; ledger?: InMemoryGrantLedger; invoke?: ToolGateway['invoke']; submit?: (request: DelegationRequest) => Promise<AgentTransportResponse> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'aeeis-external-budget-'));
   const repo = new FileRunRepository(directory); await repo.init(); resources.push({ directory, repo });
   let toolCalls = 0, agentCalls = 0, modelCalls = 0, reconciles = 0;
@@ -63,7 +63,7 @@ async function setup(options: { cost?: Receipt['cost']; sequence?: Array<'tool' 
         ? { summary: 'Use capabilities', nodes: [{ id: 'work', title: 'Work', instruction: 'Inspect and deliver', dependsOn: [] }] }
         : request.system.includes('Independently review') ? { verdict: 'accepted', summary: 'Done', issues: [] }
         : next === 'tool' ? { type: 'capability', toolId: 'lookup', toolVersion: '1', input: {}, purpose: 'Inspect' }
-        : next === 'agent' ? { type: 'delegate', agentId: 'agent.partner', goal: 'Research', expectedOutput: 'research/1' }
+        : next === 'agent' ? { type: 'delegate', agentId: 'agent.partner', goal: options.goal ?? 'Research', expectedOutput: 'research/1' }
         : { type: 'finish', title: 'Result', content: 'Delivered', evidenceRefs: [] };
       return { value, usage: { inputTokens: 1, outputTokens: 1 } };
     },
@@ -191,6 +191,15 @@ describe('Run external capability budgets', () => {
     expect(counts()).toMatchObject({ toolCalls: 1, reconciles: 1 });
   });
 
+  it('delegates a long brief: the goal may be longer than the grant purpose that summarizes it', async () => {
+    let delegated: DelegationRequest | undefined;
+    const { engine, repo, prepare } = await setup({ goal: `Build it. ${'Detail. '.repeat(900)}`, sequence: ['agent'], submit: async request => { delegated = request; return agentResult(request, { tokens: 1, money: 0.01, currency: 'USD' }); } });
+    const id = await prepare({ calls: 1, tokens: 10, moneyUsd: 1 });
+    await engine.advance(id);
+    expect((await repo.get(id)).error).toBeUndefined();
+    expect(delegated?.taskBrief.goal.length).toBeGreaterThan(7000);
+    expect(delegated?.grant.purpose).toHaveLength(2000);
+  });
   it('settles accepted Agent work on callback, with USD currency and duplicate delivery', async () => {
     let delegated!: DelegationRequest;
     const { engine, repo, prepare } = await setup({ sequence: ['agent'], submit: async request => { delegated = request; return agentResult(request, {}, 'accepted'); } });

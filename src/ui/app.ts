@@ -8440,7 +8440,38 @@ async function showComputerScreenshot(runId: string, shot: ComputerView['screens
   $('computer-shot-caption').textContent = `最新截图 · ${formatTime(shot.capturedAt)}`;
   $('computer-shot').hidden = false;
 }
+interface AcceptanceView { round: number; passed: boolean; projectChanged: boolean; error?: string; items: { requirement: string; status: string; notes: string; screenshot?: string }[]; previewUrl?: string; sourceArchive?: string }
+const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '没通过', unverified: '没能确认' };
+function renderAcceptance(run: RunView): void {
+  const check = ((run as RunView & { acceptanceChecks?: AcceptanceView[] }).acceptanceChecks ?? []).at(-1);
+  $('computer-acceptance').hidden = !check;
+  if (!check) return;
+  const passed = check.items.filter(item => item.status === 'passed').length;
+  $('computer-acceptance-summary').textContent = `${check.passed ? '独立检查通过' : '独立检查没通过'}：${passed} / ${check.items.length} 条需求${check.round ? `（第 ${check.round + 1} 轮）` : ''}。这是另一个会话亲自打开页面得出的结论，没有参考执行者的说法。${check.error ? ` ${check.error}` : ''}`;
+  $('computer-acceptance-items').replaceChildren(...check.items.map(item => {
+    const row = element('li', '', `acceptance-${item.status}`);
+    row.append(element('strong', `${ACCEPTANCE_STATES[item.status] ?? item.status}：${item.requirement}`), element('p', item.notes, 'muted'));
+    return row;
+  }));
+  const delivery = $('computer-delivery');
+  delivery.replaceChildren();
+  if (check.previewUrl?.startsWith('https://')) {
+    const link = element('a', '打开交付的预览');
+    link.href = check.previewUrl; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    delivery.append(link);
+  }
+  if (check.sourceArchive) delivery.append(button('下载源码', async () => {
+    const token = getToken();
+    const response = await fetch(`/api/runs/${encodeURIComponent(run.id)}/computer/source`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    if (!response.ok) throw new Error('源码包读不出来');
+    const url = URL.createObjectURL(await response.blob());
+    const link = element('a'); link.href = url; link.download = `${run.id}-source.tar.gz`; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }));
+  delivery.hidden = !delivery.children.length;
+}
 function renderComputerView(run: RunView, view: ComputerView): void {
+  renderAcceptance(run);
   $('computer-state').textContent = COMPUTER_STATES[view.machine.state] ?? '';
   const interrupted = [...(run.events ?? [])].reverse().find(item => item.type.startsWith('machine.'));
   const notice = view.hostWait

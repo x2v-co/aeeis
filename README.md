@@ -244,6 +244,8 @@ Run 页的"电脑"折叠块显示机器状态、最新截图、终端输出、�
 
 配置 `executor`（需要 `sandbox.modelRelay: true` 和 `network: "proxied"`）后，Claude Code 作为 Agent `executor.claude-code` 运行在 Run 的容器里，用授权或计划把它列入可用 Agent。容器里没有真 API key：执行器拿到的是本次会话的令牌，真 key 放在 AEEIS 主机的环境变量 `AEEIS_EXECUTOR_API_KEY`（可用 `executor.apiKeyEnv` 改名）里，会话开始时送进代理容器的内存，结束即忘。代理按授权预算的 90% 截停。请用一把专用并设了消费上限的 key：它在会话期间位于沙箱主机的内存中。结果标记为"执行器自述"，AEEIS 自己采集的改动和用量写在结果里，输出流保存在 `stateDirectory/executor-evidence/<runId>/executor/`。
 
+Run 可以带 `acceptance`（一组能看得出对错的需求，需要配置 `executor`）。进入审核前，AEEIS 用一个全新的、没有编辑工具的 Claude Code 会话亲自打开页面逐条检查，它看不到执行者的报告；声称的截图必须存在，项目不能被它改动。没通过的需求交回修订，最多两次。通过后打包源码、发布预览，并让机器再保留 `executor.keepHours` 小时（默认 4）。结果显示在 Run 页的"电脑"折叠块，指标见 `GET /api/runs/:id/metrics`。
+
 `sandbox.previewPorts` 配合 `sandbox.previewCommand` 可以把开发服务器分享成私有链接：Run 的容器仍在内部网络上，代理把这些端口转进去，并只发布到远程机器的 `127.0.0.1`。工具调用 `process` 的 `{"action":"preview","port":3000}` 运行 `publish` 命令（`{port}` 替换为远程机器上的端口，命令要打印链接），返回链接；Run 释放时运行 `unpublish`。链接会出现在工具结果里。instabox 示例：
 
 ```json

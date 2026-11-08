@@ -554,7 +554,8 @@ try {
     rsiProposalPump.setSynthesis(synthesis);
   }
   if (modelServices) {
-    engine = new AgentEngine(repository, { ...modelServices, maxDerivationDepth, executionLimits: executionLimitsConfig(process.env), actionPolicies, workGrants, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
+    const verifier = localToolkit?.executorTransport();
+    engine = new AgentEngine(repository, { ...modelServices, ...(verifier ? { verifier } : {}), maxDerivationDepth, executionLimits: executionLimitsConfig(process.env), actionPolicies, workGrants, domain, brain, brainPersistence: brainStore, ...(brainSemanticIndex ? { brainSemanticSearcher: brainSemanticIndex } : {}), evolution: rsi, projectSourceCheckpoints, ...(globalBudgetLedger ? { globalBudget: { ledger: globalBudgetLedger, select: createGlobalBudgetSelector(globalBudgetRules) } } : {}), ...(toolkit ? { tools: toolkit } : {}), ...(skills ? { skills } : {}), ...(agents ? { agents } : {}), ...(knowledge ? { knowledge } : {}), ...(projectSources ? { projectSources } : {}), ...(resourceRegistry ? { resourceRegistry } : {}) });
     const threadService = new ThreadService(repository, engine, Number(process.env.AEEIS_THREAD_CONTEXT_BUDGET_BYTES ?? DEFAULT_THREAD_HISTORY_BYTES));
     await new ConversationService(conversationStore, repository, threadService).recover();
     await threadService.recover();

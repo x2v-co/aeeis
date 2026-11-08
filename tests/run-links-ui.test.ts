@@ -603,6 +603,27 @@ describe('the computer panel', () => {
     expect(waiting.doc.getElementById('computer-state')?.textContent).toBe('连不上');
     expect(waiting.doc.getElementById('computer-notice')?.textContent).toContain('工具还没有执行');
   });
+  it('shows the independent check, requirement by requirement, with the delivery', async () => {
+    const run = fixture();
+    Object.assign(run, { status: 'succeeded', review: undefined, error: undefined, events: [], acceptanceChecks: [{ round: 1, passed: true, projectChanged: false, previewUrl: 'https://3000-x.instabox.tech/?_token=t', sourceArchive: 'source.tar.gz', items: [{ requirement: 'The page loads', status: 'passed', notes: '<b>HTTP 200</b>' }] }] });
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/computer')) return response(view({ status: 'succeeded', machine: { state: 'unknown', previews: [] } }));
+      if (String(url) === `/api/runs/${run.id}`) return response({ ...run, canEdit: true });
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('computer-acceptance')?.hidden).toBe(false));
+    expect(doc.getElementById('computer-acceptance-summary')?.textContent).toContain('1 / 1 条需求（第 2 轮）');
+    const row = doc.querySelector('#computer-acceptance-items li')!;
+    expect(row.textContent).toContain('通过：The page loads');
+    expect(row.querySelector('b')).toBeNull();
+    expect(doc.querySelector<HTMLAnchorElement>('#computer-delivery a')?.rel).toBe('noopener noreferrer');
+    expect([...doc.querySelectorAll('#computer-delivery button')].map(item => item.textContent)).toEqual(['下载源码']);
+  });
   it('is not offered to people who can only read the Run', async () => {
     const { doc, calls } = await open('running', () => response(view()), false);
     await new Promise(resolve => setTimeout(resolve, 50));

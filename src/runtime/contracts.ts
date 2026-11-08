@@ -67,6 +67,8 @@ export const requestSchema = z.object({
   externalBudget: externalBudgetSchema.optional(),
   allowedTools: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
   allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
+  /** Requirements someone can check by looking. Each is verified independently before the Run can be accepted. */
+  acceptance: z.array(z.string().trim().min(1).max(500)).min(1).max(30).optional(),
   knowledgeQuery: z.string().trim().min(1).max(2000).optional(),
   knowledgeMaxItems: z.number().int().min(1).max(20).default(8),
   projectSourceQuery: z.string().trim().min(1).max(2000).optional(),
@@ -131,7 +133,7 @@ export const decisionSchema = z.discriminatedUnion('type', [
     ...pdfDecisionSchemas,
   ]),
   z.object({ type: z.literal('capability'), toolId: z.string().trim().min(1).max(200), toolVersion: z.string().trim().min(1).max(100), input: z.unknown(), purpose: z.string().trim().min(1).max(2000) }).strip(),
-  z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(4000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
+  z.object({ type: z.literal('delegate'), agentId: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(8000), expectedOutput: z.string().trim().min(1).max(200), mode: z.enum(['sync', 'async', 'stream']).default('sync') }).strip(),
   z.object({ type: z.literal('question'), question: z.string().min(1).max(2000), missing: z.array(z.string().trim().min(1).max(200)).max(30).optional() }).strip(),
   z.object({ type: z.literal('finish'), title: z.string().min(1).max(200), content: z.string().min(1).max(30000), evidenceRefs: z.array(z.string()).max(100).default([]), artifactType: z.enum(['project-pulse/1', 'website-builder/1', 'fillable-pdf/1']).optional(), structured: z.unknown().optional(), limitations: z.array(z.string().trim().min(1).max(2000)).max(50).optional() }).strip(),
 ]);
@@ -278,6 +280,15 @@ export interface ModelCallUsage {
   };
 }
 export interface ExternalBudget { calls?: number; tokens?: number; moneyUsd?: number }
+export interface AcceptanceItem { requirement: string; status: 'passed' | 'failed' | 'unverified'; notes: string; screenshot?: string }
+/** One independent check of the finished work, by a session that never saw the executor's report. */
+export interface AcceptanceCheck {
+  round: number; at: string; passed: boolean; items: AcceptanceItem[];
+  /** The checker is read-only. If the project changed under it, its verdict does not count. */
+  projectChanged: boolean;
+  cost?: { tokens?: number; money?: number; currency?: string };
+  previewUrl?: string; sourceArchive?: string; error?: string;
+}
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
   /** Exact logical request reserved for this call, before transport callbacks/options. */
@@ -428,6 +439,8 @@ export interface AgentRun {
   question?: { taskId: string; text: string; kind?: 'missing_source' | 'missing_capability' | 'clarification' | 'external_clarification'; missing?: string[] };
   answers: Array<{ taskId: string; question: string; answer: string }>;
   review?: Review;
+  acceptance?: string[];
+  acceptanceChecks?: AcceptanceCheck[];
   error?: string;
   resumeStatus?: RunStatus;
   /** A person paused the Bot to do the work by hand. Handing back writes a note to the unfinished steps and resumes. */

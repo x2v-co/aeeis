@@ -129,6 +129,7 @@ def browse(args, timeout):
                 raise ToolError('Browser step failed: ' + str(error).split('\n')[0][:300], 'failed', {'console': console, 'networkErrors': failures})
             result = {'url': page.url, 'title': page.title()[:300], 'status': response.status if response else None,
                 'text': page.inner_text('body')[:4000] if page.query_selector('body') else '', 'console': console, 'networkErrors': failures}
+            result['layout'] = page.evaluate('({ viewportWidth: window.innerWidth, pageWidth: document.documentElement.scrollWidth })')
             if args.get('screenshot', True):
                 directory = safe_path('artifacts/screenshots/.keep', parents=True).parent
                 name = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{os.urandom(3).hex()}.png"
