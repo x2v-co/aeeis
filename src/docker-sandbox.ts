@@ -67,7 +67,7 @@ export interface HostWait { since: string; message: string; availableAt?: string
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
-const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
+const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
 type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
@@ -562,7 +562,9 @@ export class DockerSandbox {
     await this.relay(state, { action: 'open', token: session.token, key: session.key, upstream: session.upstream, budget: session.budget, seconds: session.seconds });
     this.active.add(state.name);
     try {
-      const started = await this.exchange(state, '__executor_start', { session: session.id, prompt: session.prompt, argv: session.argv, env: session.env }, 30_000);
+      // If the reply is lost the session may be running anyway. Revoking its token ends what it can do.
+      const started = await this.exchange(state, '__executor_start', { session: session.id, prompt: session.prompt, argv: session.argv, env: session.env }, 30_000)
+        .catch(async error => { await this.relay(state, { action: 'close', token: session.token }).catch(() => undefined); throw error; });
       if (started.status !== 'completed') {
         await this.relay(state, { action: 'close', token: session.token }).catch(() => undefined);
         throw new SandboxError(`Could not start the executor: ${JSON.stringify(started.output).slice(0, 300)}`);
@@ -602,6 +604,17 @@ export class DockerSandbox {
     const state = await this.state(runId);
     if (!state) return undefined;
     return (await this.relay(state, { action: 'close', token }).catch(() => undefined)) as RelayUsage | undefined;
+  }
+  /** Keeps a finished Run's machine up, so the preview link it delivered still opens. */
+  async keepMachine(runId: string, hours: number): Promise<void> {
+    const state = await this.state(runId);
+    if (state && !state.released) { state.keepUntil = Date.now() + hours * 3_600_000; await this.save(state); }
+  }
+  /** Copies the Run's artifacts out now, for a session that wrote them outside any tool call. */
+  async snapshotArtifacts(runId: string): Promise<WorkspaceFile[]> {
+    const state = await this.state(runId);
+    if (!state) return [];
+    return (await this.exchange(state, '__snapshot', {}, 30_000)).files ?? [];
   }
   /** Ends the executor's process group, leaving the container and everything else in it running. */
   async stopExecutor(runId: string, pid: number): Promise<void> {
@@ -681,13 +694,13 @@ export class DockerSandbox {
     }
     state.released = true; await this.save(state);
   }
-  async pendingRuns(): Promise<{ runId: string; expired: boolean }[]> {
+  async pendingRuns(): Promise<{ runId: string; expired: boolean; keepUntil?: number }[]> {
     let names: string[];
     try { names = await readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
     const pending = [];
     for (const name of names.filter(name => /^run_[a-f0-9-]{36}\.json$/.test(name))) {
       const state = await this.state(name.slice(0, -5));
-      if (state && !state.released) pending.push({ runId: state.runId, expired: Date.now() - state.createdAt > this.config.maxLifetimeSeconds * 1000 });
+      if (state && !state.released) pending.push({ runId: state.runId, expired: Date.now() - state.createdAt > this.config.maxLifetimeSeconds * 1000, ...(state.keepUntil ? { keepUntil: state.keepUntil } : {}) });
     }
     return pending;
   }

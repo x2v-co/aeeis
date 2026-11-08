@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AgentTransport, AgentTransportResponse, DelegationContext, DelegationReceipt, DelegationRequest } from './agent-gateway.js';
 import type { ExecutorPoll, MachineView, RelayUsage } from './docker-sandbox.js';
 import type { AgentCard, ResultEnvelope } from './protocol.js';
+import type { AcceptanceCheck, AcceptanceItem } from './runtime/contracts.js';
 
 export const EXECUTOR_ENDPOINT = 'aeeis-executor://claude-code';
 export const executorConfigSchema = z.object({
@@ -16,6 +17,12 @@ export const executorConfigSchema = z.object({
   model: z.string().min(1).max(200).optional(),
   tools: z.array(z.enum(['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'])).min(1).default(['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']),
   maxMinutes: z.number().int().min(1).max(480).default(60),
+  /** Share of what the Run has left that one independent check may spend. */
+  verifyShare: z.number().min(0.05).max(0.5).default(0.3),
+  /** How long an accepted Run's machine stays up, so its preview link still opens. */
+  keepHours: z.number().min(0).max(72).default(4),
+  /** The port a delivered preview is shared from. */
+  previewPort: z.number().int().min(1024).max(65535).default(3000),
 }).strict();
 export type ExecutorConfig = z.infer<typeof executorConfigSchema>;
 
@@ -28,6 +35,11 @@ export interface ExecutorSandbox {
   closeRelay(runId: string, token: string): Promise<RelayUsage | undefined>;
   stopExecutor(runId: string, pid: number): Promise<void>;
   observe(runId: string, live: boolean): Promise<MachineView>;
+  exportArtifacts(runId: string): Promise<void>;
+  screenshots(runId: string): Promise<{ name: string }[]>;
+  runShell(runId: string, command: string): Promise<{ ok: boolean; output: unknown }>;
+  preview(runId: string, port: number): Promise<string | undefined>;
+  keepMachine(runId: string, hours: number): Promise<void>;
 }
 
 /** Stops short of the grant so that the call in flight when the limit is reached cannot overrun it. */
@@ -35,6 +47,10 @@ const BUDGET_HEADROOM = 0.9;
 const POLL_MS = 3000;
 const UNREACHABLE_LIMIT_MS = 15 * 60_000;
 const NOT_VERIFIED = 'The executor reports this as done. AEEIS has not verified it.';
+
+function sessionEnv(token: string): Record<string, string> {
+  return { ANTHROPIC_BASE_URL: 'http://aeeis-proxy:3129', ANTHROPIC_API_KEY: token, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', NO_PROXY: 'localhost,127.0.0.1,aeeis-proxy', no_proxy: 'localhost,127.0.0.1,aeeis-proxy' };
+}
 
 function sessionId(idempotencyKey: string): string {
   const hash = createHash('sha256').update(idempotencyKey).digest('hex');
@@ -81,7 +97,7 @@ export class ClaudeCodeTransport implements AgentTransport {
     const token = `aeeis-session-${randomBytes(32).toString('hex')}`;
     await this.sandbox.startExecutor(context.runId, {
       id: session, token, prompt: executorPrompt(request), argv: executorArgv(this.config, session), key, upstream: this.config.upstream, budget: this.budget(request, context), seconds: this.config.maxMinutes * 60,
-      env: { ANTHROPIC_BASE_URL: 'http://aeeis-proxy:3129', ANTHROPIC_API_KEY: token, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', NO_PROXY: 'localhost,127.0.0.1,aeeis-proxy', no_proxy: 'localhost,127.0.0.1,aeeis-proxy' },
+      env: sessionEnv(token),
     }, context.workspace);
     return this.follow(card, request, context, session, token);
   }
@@ -92,27 +108,68 @@ export class ClaudeCodeTransport implements AgentTransport {
     if (!record || record.session !== sessionId(request.idempotencyKey)) return { status: 'unknown', receiptRef: receiptRef(request) };
     return this.follow(card, request, context, record.session, record.token);
   }
+  /** An independent check of finished work. A new session with no edit tools, which never sees the executor's report.
+   * What it says is then held against what AEEIS can see for itself: its screenshots must exist and the project must not have changed. */
+  async verify(input: VerifyInput): Promise<AcceptanceCheck> {
+    const at = new Date().toISOString(), config = { ...this.config, tools: [...verifierTools] };
+    const failed = (error: string): AcceptanceCheck => ({ round: input.round, at, passed: false, projectChanged: false, error, items: input.requirements.map(requirement => ({ requirement, status: 'unverified', notes: error })) });
+    const key = this.apiKey();
+    if (!key) return failed(`Set ${this.config.apiKeyEnv} on the AEEIS host to verify work`);
+    const budget = Math.floor(input.tokens * this.config.verifyShare);
+    if (budget < 2000) return failed('Not enough of the Run budget is left for an independent check');
+    const before = await this.sandbox.observe(input.runId, true).catch(() => undefined);
+    const session = sessionId(`verify:${input.runId}:${input.round}`);
+    const token = `aeeis-session-${randomBytes(32).toString('hex')}`;
+    try {
+      await this.sandbox.startExecutor(input.runId, { id: session, token, prompt: verifierPrompt(input.goal, input.requirements, this.config.previewPort), argv: executorArgv(config, session), key, upstream: this.config.upstream, budget, seconds: this.config.maxMinutes * 60, env: sessionEnv(token) }, input.workspace);
+    } catch (error) { return failed(error instanceof Error ? error.message : 'Could not start the check'); }
+    const directory = join(this.evidenceRoot, input.runId, 'executor');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const end = await this.watch(budget, input.runId, session, token, join(directory, `${session}.jsonl`));
+    const usage = await this.sandbox.closeRelay(input.runId, token);
+    const cost = { ...(usage ? { tokens: usage.tokens } : {}), ...(end.result?.costUsd !== undefined ? { money: end.result.costUsd, currency: 'USD' } : {}) };
+    if (!end.result) return { ...failed(`The check did not finish (${end.kind}). ${end.errors ?? ''}`.trim()), cost };
+    await this.sandbox.exportArtifacts(input.runId).catch(() => undefined);
+    const shots = new Set((await this.sandbox.screenshots(input.runId).catch(() => [])).map(item => item.name));
+    const after = await this.sandbox.observe(input.runId, true).catch(() => undefined);
+    const projectChanged = Boolean(before?.live && after?.live) && JSON.stringify(before!.live!.repository) !== JSON.stringify(after!.live!.repository);
+    const items = readVerdict(end.result.text, input.requirements, shots);
+    const passed = !projectChanged && items.every(item => item.status === 'passed');
+    const check: AcceptanceCheck = { round: input.round, at, passed, items, projectChanged, cost, ...(projectChanged ? { error: 'The checker changed the project, so its verdict does not count.' } : {}) };
+    if (passed && input.deliver) Object.assign(check, await this.deliver(input));
+    return check;
+  }
+  /** Packs the source and shares the running site. Both are best effort: the check has already passed. */
+  private async deliver(input: VerifyInput): Promise<Pick<AcceptanceCheck, 'previewUrl' | 'sourceArchive'>> {
+    // Projects often live under artifacts/, so only what is not source is left out. Say nothing rather than deliver an empty archive.
+    const packed = await this.sandbox.runShell(input.runId, "mkdir -p artifacts && tar czf /tmp/source.tar.gz --exclude='node_modules' --exclude='./artifacts/screenshots' --exclude='./artifacts/source.tar.gz' --exclude='./.previous-artifacts' --exclude='./.git' . && test $(tar tzf /tmp/source.tar.gz | grep -vc '/$') -gt 0 && mv /tmp/source.tar.gz artifacts/source.tar.gz").catch(() => ({ ok: false, output: undefined }));
+    await this.sandbox.exportArtifacts(input.runId).catch(() => undefined);
+    const url = await this.sandbox.preview(input.runId, this.config.previewPort).catch(() => undefined);
+    if (url) await this.sandbox.keepMachine(input.runId, this.config.keepHours).catch(() => undefined);
+    return { ...(packed.ok ? { sourceArchive: 'source.tar.gz' } : {}), ...(url ? { previewUrl: url } : {}) };
+  }
   private async follow(card: AgentCard, request: DelegationRequest, context: DelegationContext, session: string, token: string): Promise<AgentTransportResponse> {
     const directory = join(this.evidenceRoot, context.runId, 'executor');
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const log = join(directory, `${session}.jsonl`);
-    const end = await this.watch(request, context, session, token, log);
+    const end = await this.watch((await this.sandbox.relayUsage(context.runId, token))?.budget ?? this.budget(request, context), context.runId, session, token, log, request);
     const usage = await this.sandbox.closeRelay(context.runId, token);
     const look = await this.sandbox.observe(context.runId, true).catch(() => undefined);
     await writeFile(join(directory, `${session}.evidence.json`), JSON.stringify({ end: end.kind, usage, repository: look?.live?.repository ?? null, files: look?.live?.files ?? [] }, null, 2), { mode: 0o600 });
     if (end.kind === 'stopped' || end.kind === 'lost') return { status: 'unknown', receiptRef: receiptRef(request) };
     return this.outcome(card, request, end, usage, look);
   }
-  private async watch(request: DelegationRequest, context: DelegationContext, session: string, token: string, log: string): Promise<SessionEnd> {
-    const budget = (await this.sandbox.relayUsage(context.runId, token))?.budget ?? this.budget(request, context);
+  private async watch(budget: number, runId: string, session: string, token: string, log: string, request?: DelegationRequest): Promise<SessionEnd> {
     let offset = 0, sequence = 0, working = 0, last = Date.now(), unreachableSince = 0, result: SessionEnd['result'];
     for (;;) {
-      const poll = await this.sandbox.pollExecutor(context.runId, session, offset);
+      // A look that fails is a bad moment, not the end of the session.
+      const poll = await this.sandbox.pollExecutor(runId, session, offset).catch(() => ({ state: 'unreachable' as const, output: '', offset, more: false, exitCode: null, errors: '' }));
       const now = Date.now();
       // A paused Run is not using up its time.
       if (poll.state === 'running') working += now - last;
       last = now;
       if (poll.state === 'stopped' || poll.state === 'missing') return { kind: 'stopped' };
+      const before = offset;
       unreachableSince = poll.state === 'unreachable' ? unreachableSince || now : 0;
       if (unreachableSince && now - unreachableSince > UNREACHABLE_LIMIT_MS) return { kind: 'lost' };
       if (poll.output) {
@@ -123,17 +180,18 @@ export class ClaudeCodeTransport implements AgentTransport {
           if (event?.type === 'result') result = { isError: Boolean(event.is_error), text: String(event.result ?? ''), ...(typeof event.total_cost_usd === 'number' ? { costUsd: event.total_cost_usd } : {}) };
           for (const name of toolNames(event)) {
             sequence += 1;
-            await request.onProgress?.({ schemaVersion: 'agent-progress/1', taskId: request.taskBrief.taskId, agentId: request.agentId, contextVersion: request.contextPack.id, sequence, status: 'running', message: `Using ${name}`, evidenceRefs: [], artifactRefs: [], at: new Date().toISOString() });
+            if (request) await request.onProgress?.({ schemaVersion: 'agent-progress/1', taskId: request.taskBrief.taskId, agentId: request.agentId, contextVersion: request.contextPack.id, sequence, status: 'running', message: `Using ${name}`, evidenceRefs: [], artifactRefs: [], at: new Date().toISOString() });
           }
         }
       }
-      if (poll.more) continue;
+      // Only read straight on while it is actually moving forward.
+      if (poll.more && poll.offset > before) continue;
       if (poll.exitCode !== null) return { kind: 'finished', ...(result ? { result } : {}), errors: poll.errors, exitCode: poll.exitCode };
       if (poll.state === 'running') {
-        const usage = await this.sandbox.relayUsage(context.runId, token);
-        const record = await this.sandbox.executorRecord(context.runId);
+        const usage = await this.sandbox.relayUsage(runId, token);
+        const record = await this.sandbox.executorRecord(runId);
         if ((usage && usage.tokens >= budget) || working > this.config.maxMinutes * 60_000) {
-          if (record) await this.sandbox.stopExecutor(context.runId, record.pid);
+          if (record) await this.sandbox.stopExecutor(runId, record.pid);
           return { kind: usage && usage.tokens >= budget ? 'budget' : 'timeout' };
         }
       }
@@ -159,6 +217,41 @@ export class ClaudeCodeTransport implements AgentTransport {
       },
     };
   }
+}
+
+const verifierTools = ['Bash', 'Read', 'Glob', 'Grep'] as const;
+const verdictSchema = z.object({ items: z.array(z.object({
+  index: z.number().int().min(1), status: z.enum(['passed', 'failed', 'unverified']), notes: z.string().max(1000).default(''), screenshot: z.string().max(300).optional(),
+}).strip()).max(30) }).strip();
+
+export function verifierPrompt(goal: string, requirements: string[], port: number): string {
+  return [
+    'You are checking finished work. You did not build it, and you have not seen any report from whoever did. Decide from what you can observe, and do not change the project: do not edit, create or delete its files.',
+    '', `The request was: ${goal}`, '', 'Requirements to check:', ...requirements.map((item, index) => `${index + 1}. ${item}`), '',
+    `Find how the project runs. If it is not already serving on 0.0.0.0:${port}, start it there in the background so that it stays up after you finish, with: nohup <command> >/tmp/server.log 2>&1 &`,
+    'To look at a page, run this in the shell. It opens the page in Chromium, can click and type, and saves a screenshot under artifacts/screenshots/:',
+    `python3 /opt/aeeis/browse.py '{"url": "http://127.0.0.1:${port}/", "steps": [{"action": "click", "selector": "button"}, {"action": "type", "selector": "input", "text": "x"}, {"action": "press", "key": "Enter"}, {"action": "wait", "ms": 300}], "width": 1280, "height": 800}'`,
+    'It prints the title, HTTP status, visible text, console errors, failed requests, the screenshot path, and layout: compare pageWidth with viewportWidth to check for sideways scrolling. Actually perform each check, including failure cases. A requirement passes only if you saw it pass. If you could not check one, mark it unverified.',
+    '', 'End with only this JSON, in a ```json block:', '{"items": [{"index": 1, "status": "passed|failed|unverified", "notes": "what you did and saw", "screenshot": "artifacts/screenshots/<file>.png"}]}',
+  ].join('\n');
+}
+
+export interface VerifyInput { runId: string; goal: string; requirements: string[]; tokens: number; workspace?: string; round: number; deliver: boolean }
+
+/** Turns the checker's last message into a report. Anything it did not clearly pass counts against the work. */
+export function readVerdict(text: string, requirements: string[], screenshots: Set<string>): AcceptanceItem[] {
+  const block = [...text.matchAll(/```json\s*([\s\S]*?)```/g)].at(-1)?.[1];
+  let items: z.infer<typeof verdictSchema>['items'] = [];
+  try { items = verdictSchema.parse(JSON.parse(block ?? text)).items; } catch { items = []; }
+  return requirements.map((requirement, index) => {
+    const item = items.find(entry => entry.index === index + 1);
+    if (!item) return { requirement, status: 'unverified' as const, notes: 'The checker gave no verdict for this requirement.' };
+    const name = item.screenshot?.split('/').pop();
+    const real = name !== undefined && screenshots.has(name);
+    if (item.status === 'passed' && !item.notes.trim()) return { requirement, status: 'unverified' as const, notes: 'Marked passed with nothing to show for it.' };
+    if (item.status === 'passed' && item.screenshot && !real) return { requirement, status: 'unverified' as const, notes: `Claimed a screenshot that does not exist. ${item.notes}`.trim() };
+    return { requirement, status: item.status, notes: item.notes, ...(real ? { screenshot: `screenshots/${name}` } : {}) };
+  });
 }
 
 function receiptRef(request: DelegationRequest): string { return `executor_${createHash('sha256').update(request.idempotencyKey).digest('hex').slice(0, 32)}`; }

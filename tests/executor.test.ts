@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect, createServer as createNetServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ClaudeCodeTransport, EXECUTOR_ENDPOINT, RoutedAgentTransport, ensureExecutorAdmitted, executorArgv, executorCard, executorConfigSchema, executorPrompt, type ExecutorSandbox } from '../src/executor.js';
+import { ClaudeCodeTransport, EXECUTOR_ENDPOINT, RoutedAgentTransport, ensureExecutorAdmitted, executorArgv, executorCard, executorConfigSchema, executorPrompt, readVerdict, verifierPrompt, type ExecutorSandbox } from '../src/executor.js';
 import { AgentDirectory, AgentGateway, type AgentTransport, type DelegationRequest } from '../src/agent-gateway.js';
 import { InMemoryGrantLedger } from '../src/agent-ledger.js';
 import { createContextPack, type DelegationGrant } from '../src/protocol.js';
@@ -39,6 +39,7 @@ function fakeSandbox(polls: Array<ReturnType<typeof poll>>, tokens = 100) {
     closeRelay: vi.fn<ExecutorSandbox['closeRelay']>(async () => usage(tokens)),
     stopExecutor: vi.fn<ExecutorSandbox['stopExecutor']>(async () => undefined),
     observe: vi.fn<ExecutorSandbox['observe']>(async () => ({ state: 'running', previews: [], live: { foreground: null, processes: [], repository: { status: ' M index.html', diff: '+footer', truncated: false }, files: [] } })),
+    exportArtifacts: vi.fn<ExecutorSandbox['exportArtifacts']>(async () => undefined), screenshots: vi.fn<ExecutorSandbox['screenshots']>(async () => []), runShell: vi.fn<ExecutorSandbox['runShell']>(async () => ({ ok: true, output: {} })), preview: vi.fn<ExecutorSandbox['preview']>(async () => undefined), keepMachine: vi.fn<ExecutorSandbox['keepMachine']>(async () => undefined),
   };
   return sandbox;
 }
@@ -120,6 +121,17 @@ describe('Claude Code as an AEEIS Agent', () => {
     const errored = fakeSandbox([poll({ output: result({ is_error: true, result: 'Credit balance too low' }), offset: 5, exitCode: 1 })]);
     expect(await transport(errored).submit(card, request(), context)).toMatchObject({ status: 'partial' });
   });
+  it('does not spin when a read reports more but makes no progress, and survives a failed look', async () => {
+    const sandbox = fakeSandbox([poll({ more: true, offset: 0 })]);
+    let looks = 0;
+    sandbox.pollExecutor.mockImplementation(async () => {
+      looks += 1;
+      if (looks === 2) throw new Error('Docker operation timed out');
+      return looks < 5 ? poll({ more: true, offset: 0 }) : poll({ output: result(), offset: 9, exitCode: 0 });
+    });
+    expect(await transport(sandbox).submit(card, request(), context)).toMatchObject({ status: 'completed' });
+    expect(sandbox.relayUsage.mock.calls.length).toBeGreaterThanOrEqual(2); // it waited between looks instead of looping
+  });
   it('refuses to start without a key, a budget or a Run', async () => {
     const sandbox = fakeSandbox([poll({})]);
     await expect(new ClaudeCodeTransport(sandbox, config, root, () => undefined).submit(card, request(), context)).rejects.toThrow(/AEEIS_EXECUTOR_API_KEY/);
@@ -161,6 +173,30 @@ describe('Claude Code as an AEEIS Agent', () => {
     directory.revoke(card.agentId);
     await ensureExecutorAdmitted(directory, card);
     expect(() => directory.get(card.agentId)).toThrow();
+  });
+});
+
+describe('reading a session stream (python, no Docker)', () => {
+  const read = (live: string, offset: number) => new Promise<any>((resolve, reject) => {
+    const child = spawn('python3', ['-I', join(process.cwd(), 'sandbox/observe.py'), 'executor', 'abc', String(offset)], { env: { PATH: process.env.PATH!, AEEIS_LIVE_DIR: live } });
+    let out = ''; child.stdout.on('data', chunk => { out += chunk; }); child.on('close', () => resolve(JSON.parse(out))); child.on('error', reject);
+  });
+  const write = async (content: string) => { await mkdir(join(root, 'executor'), { recursive: true }); await writeFile(join(root, 'executor', 'abc.jsonl'), content); };
+  it('moves past a line longer than a whole read, such as a screenshot, instead of asking for it forever', async () => {
+    const huge = `{"type":"user","image":"${'x'.repeat(300 * 1024)}"}\n`;
+    await write(`{"type":"first"}\n${huge}{"type":"last"}\n`);
+    const first = await read(root, 0);
+    expect(first.output).toBe('{"type":"first"}\n');
+    const second = await read(root, first.offset);
+    expect(second.output).toContain('aeeis_line_skipped');
+    expect(second.offset).toBe(first.offset + huge.length);
+    const third = await read(root, second.offset);
+    expect(third.output).toBe('{"type":"last"}\n');
+    expect(third.more).toBe(false);
+  });
+  it('waits for a long line that is still being written', async () => {
+    await write(`{"partial":"${'x'.repeat(300 * 1024)}`);
+    expect(await read(root, 0)).toMatchObject({ offset: 0, output: '', more: false });
   });
 });
 
@@ -297,5 +333,79 @@ describe('model relay (python, no Docker)', () => {
     await new Promise(resolve => setTimeout(resolve, 20));
     expect((await call('session-token')).status).toBe(403);
     expect(seen).toEqual([]);
+  });
+});
+
+describe('the independent check of finished work', () => {
+  const requirements = ['The page loads', 'The form rejects an empty email'];
+  const shot = '20261106T000000-abc123.png';
+  const verdict = (items: unknown[]) => `Done.\n\`\`\`json\n${JSON.stringify({ items })}\n\`\`\``;
+  const both = [{ index: 1, status: 'passed', notes: 'Opened it, HTTP 200', screenshot: `artifacts/screenshots/${shot}` }, { index: 2, status: 'passed', notes: 'Submitted empty, saw an error' }];
+  const sandboxFor = (text: string, repository?: [string, string]) => {
+    const sandbox = { ...fakeSandbox([poll({ output: result({ result: text }), offset: 5, exitCode: 0 })]), exportArtifacts: vi.fn(async () => undefined), screenshots: vi.fn(async () => [{ name: shot }]), runShell: vi.fn(async () => ({ ok: true, output: {} })), preview: vi.fn(async () => 'https://3000-x.instabox.tech/?_token=ibp_s'), keepMachine: vi.fn(async () => undefined) };
+    if (repository) { let n = 0; sandbox.observe.mockImplementation(async () => ({ state: 'running', previews: [], live: { foreground: null, processes: [], repository: { status: '', diff: repository[n++ === 0 ? 0 : 1]!, truncated: false }, files: [] } })); }
+    return sandbox;
+  };
+  const verify = (sandbox: ExecutorSandbox, tokens = 100_000) => transport(sandbox).verify({ runId, goal: 'Build a form', requirements, tokens, round: 0, deliver: true });
+
+  it('runs as a fresh session with no edit tools, which never sees the executor report', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    await verify(sandbox);
+    const session = sandbox.startExecutor.mock.calls[0]![1];
+    const tools = session.argv[session.argv.indexOf('--tools') + 1];
+    expect(tools).toBe('Bash,Read,Glob,Grep');
+    expect(session.prompt).toContain('1. The page loads');
+    expect(session.prompt).toContain('have not seen any report');
+    expect(session.budget).toBe(30_000);
+  });
+  it('passes only when every requirement passed, then delivers the preview and source and keeps the machine up', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    const check = await verify(sandbox);
+    expect(check).toMatchObject({ passed: true, projectChanged: false, previewUrl: expect.stringContaining('https://'), sourceArchive: 'source.tar.gz', cost: { tokens: 100 } });
+    expect(check.items[0]).toMatchObject({ status: 'passed', screenshot: `screenshots/${shot}` });
+    expect(sandbox.keepMachine).toHaveBeenCalledWith(runId, 4);
+    const packing = sandbox.runShell.mock.calls[0]![1];
+    expect(packing).toContain("--exclude='node_modules'");
+    expect(packing).not.toMatch(/--exclude='\.\/artifacts'/); // Projects often live under artifacts/.
+    expect(packing).toContain('grep -vc'); // An archive with no files is not delivered.
+  });
+  it('does not take the checker\'s word: a missing screenshot, an empty note or a skipped requirement fails it', async () => {
+    const claimed = await verify(sandboxFor(verdict([{ ...both[0], screenshot: 'artifacts/screenshots/20261106T000000-ffffff.png' }, both[1]])));
+    expect(claimed).toMatchObject({ passed: false, items: [{ status: 'unverified', notes: expect.stringContaining('does not exist') }, { status: 'passed' }] });
+    expect((await verify(sandboxFor(verdict([{ index: 1, status: 'passed', notes: '  ' }, both[1]])))).items[0]!.status).toBe('unverified');
+    expect((await verify(sandboxFor(verdict([both[0]])))).items[1]).toMatchObject({ status: 'unverified', notes: expect.stringContaining('no verdict') });
+    const unreadable = await verify(sandboxFor('Looks great, ship it!'));
+    expect(unreadable.passed).toBe(false); expect(unreadable.items.every(item => item.status === 'unverified')).toBe(true);
+  });
+  it('does not count a verdict from a checker that changed the project, and delivers nothing', async () => {
+    const sandbox = sandboxFor(verdict(both), ['diff-before', 'diff-after']);
+    expect(await verify(sandbox)).toMatchObject({ passed: false, projectChanged: true, error: expect.stringContaining('changed the project') });
+    expect(sandbox.preview).not.toHaveBeenCalled();
+  });
+  it('delivers nothing when a requirement failed', async () => {
+    const sandbox = sandboxFor(verdict([both[0], { index: 2, status: 'failed', notes: 'Empty email was accepted' }]));
+    expect(await verify(sandbox)).toMatchObject({ passed: false, items: [{ status: 'passed' }, { status: 'failed' }] });
+    expect(sandbox.preview).not.toHaveBeenCalled(); expect(sandbox.keepMachine).not.toHaveBeenCalled();
+  });
+  it('says so when it cannot run at all, without starting a session', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    expect(await verify(sandbox, 1000)).toMatchObject({ passed: false, error: expect.stringContaining('budget') });
+    expect(sandbox.startExecutor).not.toHaveBeenCalled();
+  });
+  it('does not claim a source archive when packing failed', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    sandbox.runShell.mockResolvedValue({ ok: false, output: { error: 'no files' } });
+    expect((await verify(sandbox)).sourceArchive).toBeUndefined();
+  });
+  it('still reports a finished check when delivery fails', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    sandbox.preview.mockRejectedValue(new Error('down')); sandbox.runShell.mockRejectedValue(new Error('down'));
+    const check = await verify(sandbox);
+    expect(check.passed).toBe(true); expect(check.previewUrl).toBeUndefined(); expect(check.sourceArchive).toBeUndefined();
+  });
+  it('tells the checker how to look, and the last json block wins', () => {
+    expect(verifierPrompt('g', ['r'], 3000)).toContain('python3 /opt/aeeis/browse.py');
+    const text = `\`\`\`json\n{"items":[{"index":1,"status":"failed","notes":"draft"}]}\n\`\`\`\nThen:\n${verdict([{ index: 1, status: 'passed', notes: 'final' }])}`;
+    expect(readVerdict(text, ['r'], new Set())[0]).toMatchObject({ status: 'passed', notes: 'final' });
   });
 });

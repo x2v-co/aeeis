@@ -94,6 +94,7 @@ export class LocalToolGateway implements ToolGateway {
   }
   async reap(status: (runId: string) => Promise<string>) {
     for (const run of await this.sandbox.pendingRuns()) {
+      if (run.keepUntil && run.keepUntil > Date.now() && !run.expired) continue;
       if (run.expired || ['succeeded', 'failed', 'cancelled'].includes(await status(run.runId))) await this.release(run.runId);
     }
   }
@@ -111,6 +112,11 @@ export class LocalToolGateway implements ToolGateway {
       executorRecord: runId => sandbox.executorRecord(runId), pollExecutor: (runId, session, offset) => sandbox.pollExecutor(runId, session, offset),
       relayUsage: (runId, token) => sandbox.relayUsage(runId, token), closeRelay: (runId, token) => sandbox.closeRelay(runId, token),
       stopExecutor: (runId, pid) => sandbox.stopExecutor(runId, pid), observe: (runId, live) => sandbox.observe(runId, live),
+      exportArtifacts: async runId => { await this.saveArtifacts(runId, await sandbox.snapshotArtifacts(runId)); },
+      screenshots: runId => this.screenshots(runId),
+      runShell: async (runId, command) => { const response = await sandbox.execute(runId, 'shell', { command }, [], 60_000); return { ok: response.status === 'completed', output: response.output }; },
+      preview: async (runId, port) => { const response = await sandbox.execute(runId, 'process', { action: 'preview', port }, [], 120_000); return response.status === 'completed' ? (response.output as { url?: string }).url : undefined; },
+      keepMachine: (runId, hours) => sandbox.keepMachine(runId, hours),
     }, this.config.executor, join(this.config.stateDirectory, 'executor-evidence'));
   }
   private screenshotDirectory(runId: string) {
@@ -128,6 +134,11 @@ export class LocalToolGateway implements ToolGateway {
       if (info?.isFile()) listed.push({ name, bytes: info.size, capturedAt: info.mtime.toISOString() });
     }
     return listed;
+  }
+  async sourceArchive(runId: string): Promise<Buffer | undefined> {
+    const path = join(this.screenshotDirectory(runId), '..', 'source.tar.gz');
+    const info = await lstat(path).catch(() => undefined);
+    return info?.isFile() ? readFile(path) : undefined;
   }
   async screenshot(runId: string, name: string): Promise<Buffer | undefined> {
     if (!screenshotName.test(name)) return undefined;

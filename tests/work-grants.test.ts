@@ -1,10 +1,12 @@
-import type { AgentRun } from '../src/runtime/contracts.js';
+import type { AcceptanceCheck, AgentRun } from '../src/runtime/contracts.js';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine, delegationContext } from '../src/runtime/engine.js';
+import { runMetrics } from '../src/runtime/run-metrics.js';
+import type { VerifyInput } from '../src/executor.js';
 import type { ModelRequest } from '../src/runtime/model.js';
 import type { ToolGateway } from '../src/integrations.js';
 import { decideAction, type ActionCandidate } from '../src/runtime/action-policy.js';
@@ -59,7 +61,7 @@ describe('action decisions under a work grant', () => {
 });
 
 /** `edit` is confined to the workspace by the gateway's own code; `publish` is not. */
-function harness(options: { calls?: string[]; reject?: boolean } = {}) {
+function harness(options: { calls?: string[]; reject?: boolean; wrongVersionFirst?: boolean; muddledCall?: boolean; verifier?: { verify(input: VerifyInput): Promise<AcceptanceCheck> } } = {}) {
   const repository = new InMemoryRunRepository();
   const grants = new InMemoryWorkGrantStore();
   const interrupt = vi.fn<NonNullable<ToolGateway['interruptRun']>>(async () => ({ confirmed: true }));
@@ -78,7 +80,7 @@ function harness(options: { calls?: string[]; reject?: boolean } = {}) {
     interruptRun: interrupt,
   };
   const sequence = options.calls ?? ['edit'];
-  let plans = 0;
+  let plans = 0, rejecting = false;
   const usage = { inputTokens: 10, outputTokens: 5 };
   const respond = async (request: ModelRequest) => ({ ...(await answer(request)), usage });
   const answer = async (request: ModelRequest): Promise<{ value: unknown }> => {
@@ -86,23 +88,25 @@ function harness(options: { calls?: string[]; reject?: boolean } = {}) {
     if (request.system.includes('Plan a real deliverable')) plans += 1;
     if (request.system.includes('Plan a real deliverable')) return { value: { summary: plans === 1 ? 'Change the site' : 'Change the site and add the footer', nodes: [{ id: 'site', title: 'Change the site', instruction: 'Edit the page', dependsOn: [] }] } };
     if (request.system.includes('Independently review')) {
+      if (rejecting) return { value: { verdict: 'needs_revision', summary: 'Not convinced', issues: ['Not sure about this'] } };
       return { value: options.reject && plans === 1 ? { verdict: 'needs_revision', summary: 'Missing the footer', issues: ['Add the footer'] } : { verdict: 'accepted', summary: 'Checked' } };
     }
     if (request.system.includes('You review one external side effect')) throw new Error('no approval model in this test');
     const next = sequence[input.observations.length];
-    if (next && !input.executionBudget.finalOnly) return { value: { type: 'capability', toolId: next, toolVersion: '1', purpose: `Use ${next}`, input: { step: input.observations.length } } };
+    if (next && options.muddledCall && !input.executionBudget.finalOnly) return { value: { type: 'tool', tool: 'capability', toolId: next, toolVersion: '1', input: { step: 0 } } };
+    if (next && !input.executionBudget.finalOnly) return { value: { type: 'capability', toolId: next, toolVersion: options.wrongVersionFirst && !input.observations.length ? '9' : '1', purpose: `Use ${next}`, input: { step: input.observations.length } } };
     const refs = (input.availableEvidenceRefs as string[]).slice(0, 1);
     return { value: { type: 'finish', title: 'Site', content: `Done. [${refs[0]}]`, evidenceRefs: refs } };
   };
   const complete = vi.fn(respond);
   const model = { pin: { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' }, complete };
-  const engine = new AgentEngine(repository, { model, tools, workGrants: grants, executionLimits: { maxNodeIterations: 4 } });
+  const engine = new AgentEngine(repository, { model, tools, workGrants: grants, executionLimits: { maxNodeIterations: 4 }, ...(options.verifier ? { verifier: options.verifier } : {}) });
   const materials = [{ title: 'Brief', source: 'user-input', content: 'Add a footer to the landing page.' }];
   const settle = async (id: string, stopAt: string[] = ['succeeded', 'failed', 'unknown', 'needs_approval', 'paused']) => {
     for (let i = 0; i < 30; i++) { const status = await engine.advance(id); if (stopAt.includes(status)) return status; }
     return (await repository.get(id)).status;
   };
-  return { repository, grants, invoke, interrupt, engine, materials, settle };
+  return { repository, grants, invoke, interrupt, engine, materials, settle, rejectReviews: () => { rejecting = true; } };
 }
 
 describe('runs under a work grant', () => {
@@ -231,6 +235,106 @@ describe('stopping the work on a Run machine', () => {
     const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
     await h.engine.revokeWorkGrant(grant.grantId, scope);
     expect(h.interrupt).toHaveBeenCalledWith(run.id, 'freeze');
+  });
+});
+
+describe('independent acceptance of finished work', () => {
+  const requirements = ['The page loads', 'The form rejects an empty email'];
+  const check = (round: number, passed: boolean, overrides: Partial<AcceptanceCheck> = {}): AcceptanceCheck => ({
+    round, at: '2026-11-06T00:00:00.000Z', passed, projectChanged: false, cost: { tokens: 50, money: 0.01, currency: 'USD' },
+    items: [{ requirement: requirements[0]!, status: 'passed', notes: 'ok' }, { requirement: requirements[1]!, status: passed ? 'passed' : 'failed', notes: passed ? 'ok' : 'Empty email was accepted' }], ...overrides,
+  });
+  const start = async (verify: (input: VerifyInput) => Promise<AcceptanceCheck>) => {
+    const verifier = { verify: vi.fn(verify) };
+    const h = harness({ verifier });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a form', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements });
+    return { h, verifier, run };
+  };
+  it('checks before the reviewer, tells the work about the requirements, and accepts only after it passes', async () => {
+    const { h, verifier, run } = await start(async () => check(0, true));
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    expect(verifier.verify.mock.calls[0]![0]).toMatchObject({ runId: run.id, goal: 'Add a form', requirements, round: 0, deliver: true, workspace: run.workGrant!.grantId });
+    const done = await h.repository.get(run.id);
+    expect(done.context.sources.some(source => source.content.includes('1. The page loads'))).toBe(true);
+    expect(done.events.map(item => item.type)).toContain('acceptance.checked');
+    expect(done.acceptanceChecks).toHaveLength(1);
+  });
+  it('sends a failure back through the revision loop, and accepts when a later check passes', async () => {
+    const { h, verifier, run } = await start(async input => check(input.round, input.round === 1));
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(verifier.verify.mock.calls.map(call => call[0].round)).toEqual([0, 1]);
+    const done = await h.repository.get(run.id);
+    const revision = done.events.find(item => item.type === 'review.revision_requested')!;
+    expect(JSON.stringify(revision.data)).toContain('Empty email was accepted');
+    expect(runMetrics(done)).toMatchObject({ completed: true, acceptedWithoutRework: false, revisions: 1, humanInterventions: 0 });
+  });
+  it('fails the Run when the work never passes, and does not ask the reviewer to overrule it', async () => {
+    const { h, verifier, run } = await start(async input => check(input.round, false));
+    expect(await h.settle(run.id)).toBe('failed');
+    expect(verifier.verify).toHaveBeenCalledTimes(3);
+    const done = await h.repository.get(run.id);
+    expect(done.review).toMatchObject({ verdict: 'needs_revision' });
+    expect(runMetrics(done)).toMatchObject({ completed: false, acceptedWithoutRework: false });
+  });
+  it('fails plainly when the check itself could not run, without spending revisions on it', async () => {
+    const { h, verifier, run } = await start(async input => ({ ...check(input.round, false), items: requirements.map(requirement => ({ requirement, status: 'unverified' as const, notes: 'host down' })), error: 'Sandbox host unreachable' }));
+    expect(await h.settle(run.id)).toBe('failed');
+    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    expect((await h.repository.get(run.id)).error).toContain('Sandbox host unreachable');
+  });
+  it('counts what checks cost against the Run', async () => {
+    const { h, run } = await start(async () => check(0, true));
+    await h.settle(run.id);
+    const done = await h.repository.get(run.id);
+    expect(delegationContext(done).tokens).toBe(1000 - done.modelUsage!.tokens - 50);
+    expect(runMetrics(done)).toMatchObject({ acceptedWithoutRework: true, externalTokens: 50, humanInterventions: 0 });
+    expect(runMetrics(done).elapsedSeconds).not.toBeNull();
+  });
+  it('keeps a passed check even when the reviewer has doubts, with the doubts on record', async () => {
+    const { h, verifier, run } = await start(async () => check(0, true));
+    h.rejectReviews();
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    const done = await h.repository.get(run.id);
+    expect(done.events.find(item => item.type === 'review.advisory')?.data).toMatchObject({ issues: ['Not sure about this'] });
+    expect(done.events.some(item => item.type === 'review.revision_requested')).toBe(false);
+  });
+  it('tells the planner not to do the check\'s job, only on Runs that have one', async () => {
+    const { h, run } = await start(async () => check(0, true));
+    await h.settle(run.id);
+    const done = await h.repository.get(run.id);
+    expect(done.calls[0]!.modelRequest!.system).toContain('do not plan verification or testing steps');
+    const plain = harness();
+    const other = await plain.engine.create({ goal: 'Add a footer', materials: plain.materials, workGrantId: (await plain.grants.create(scope, grantInput)).grantId, origin: 'channel' });
+    await plain.settle(other.id);
+    expect((await plain.repository.get(other.id)).calls[0]!.modelRequest!.system).not.toContain('do not plan verification');
+  });
+  it('refuses requirements on an AEEIS that cannot check them', async () => {
+    const h = harness();
+    await expect(h.engine.create({ goal: 'Add a form', materials: h.materials, acceptance: requirements, origin: 'channel' })).rejects.toThrow(/executor configured/);
+  });
+});
+
+describe('a slip in naming a tool', () => {
+  it('reads a call that mixes the tool and capability shapes as the tool it names', async () => {
+    const h = harness({ muddledCall: true });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    const outcome = await h.settle(run.id);
+    expect((await h.repository.get(run.id)).error).toBeUndefined();
+    expect(outcome).toBe('succeeded');
+    expect(h.invoke.mock.calls[0]![0].toolId).toBe('edit');
+  });
+  it('lets the model correct a wrong version instead of ending the Run', async () => {
+    const h = harness({ wrongVersionFirst: true, calls: ['edit', 'edit'] });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const slip = (await h.repository.get(run.id)).events.find(item => item.type === 'tool.failed_recoverable');
+    expect(JSON.stringify(slip?.data)).toContain('toolVersion');
+    expect(h.invoke).toHaveBeenCalledTimes(1);
   });
 });
 

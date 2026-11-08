@@ -8,10 +8,10 @@ import sys
 import time
 
 ROOT = Path('/workspace')
-LIVE = Path('/run/aeeis-live')
+LIVE = Path(os.environ.get('AEEIS_LIVE_DIR', '/run/aeeis-live'))
 TAIL = 12000
 DIFF = 24000
-SKIP = {'.git', 'node_modules', '.previous-artifacts', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', 'artifacts'}
+SKIP = {'.git', 'node_modules', '.previous-artifacts', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', 'screenshots'}
 
 
 def tail(path, limit=TAIL):
@@ -82,13 +82,31 @@ def executor(session, offset):
     path = directory / f'{session}.jsonl'
     if not all(c in '0123456789abcdef-' for c in session) or not path.exists():
         return {'found': False}
+    limit = 256 * 1024
     with path.open('rb') as stream:
         stream.seek(offset)
-        chunk = stream.read(256 * 1024)
-    complete = chunk[:chunk.rfind(b'\n') + 1]
+        chunk = stream.read(limit)
+        complete = chunk[:chunk.rfind(b'\n') + 1]
+        consumed = len(complete)
+        full = len(chunk) == limit
+        if full and not complete:
+            # One line longer than a whole read, such as a screenshot as base64. The offset has to move past it,
+            # or the same read would be asked for forever. The image itself is already in artifacts.
+            skipped = limit
+            while True:
+                part = stream.read(1024 * 1024)
+                end = part.find(b'\n')
+                if end >= 0:
+                    consumed = skipped + end + 1
+                    complete = b'{"type":"aeeis_line_skipped","bytes":%d}\n' % consumed
+                    break
+                if not part:
+                    full = False  # Still being written: come back for it.
+                    break
+                skipped += len(part)
     exit_file = directory / f'{session}.exit'
     code = exit_file.read_text().strip() if exit_file.exists() else None
-    return {'found': True, 'offset': offset + len(complete), 'output': complete.decode('utf-8', errors='replace'), 'more': len(chunk) == 256 * 1024,
+    return {'found': True, 'offset': offset + consumed, 'output': complete.decode('utf-8', errors='replace'), 'more': full,
         'exitCode': int(code) if code else None, 'errors': tail(directory / f'{session}.err', 2000) if code else ''}
 
 

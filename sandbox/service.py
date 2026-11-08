@@ -146,8 +146,9 @@ class Handler(socketserver.StreamRequestHandler):
                     response.update(status=error.status, output={'error': str(error), **({'details': error.details} if error.details else {})})
                 except Exception as error:
                     response.update(status='failed', output={'error': str(error)[:1000]})
-                # A failed export does not pretend the command itself never executed.
-                response['files'] = runner.snapshot(limit)
+                # A failed export does not pretend the command itself never executed. Starting a session changes
+                # nothing yet, and its reply should not wait on a copy of every artifact over a slow link.
+                response['files'] = None if message['tool'] == '__executor_start' else runner.snapshot(limit)
             except Exception as error:
                 response.update(status='unknown', output={'error': str(error)[:1000]}, files=None)
             self.wfile.write(json.dumps(response, ensure_ascii=True).encode())

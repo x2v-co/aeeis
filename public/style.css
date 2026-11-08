@@ -1711,3 +1711,9 @@ body.gb.conversation-mode #conversation-status:empty, body.gb.conversation-mode 
 .computer-shot { margin: 10px 0 0; }
 .computer-shot img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line, #d8d8d8); border-radius: 6px; }
 .computer-output { max-height: 280px; overflow: auto; margin: 0; padding: 8px; border-radius: 6px; background: rgba(127, 127, 127, 0.1); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.computer-acceptance { margin-top: 10px; }
+.computer-acceptance ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.computer-acceptance li { padding: 6px 8px; border-left: 3px solid var(--line-strong, #d6d6d6); }
+.computer-acceptance li.acceptance-passed { border-left-color: var(--cyan, #3d6b52); }
+.computer-acceptance li.acceptance-failed, .computer-acceptance li.acceptance-unverified { border-left-color: var(--amber, #8a5a12); }
+.computer-acceptance li p { margin: 2px 0 0; }
