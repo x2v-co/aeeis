@@ -350,10 +350,31 @@ describe('task-local deterministic original retrieval', () => {
     await fixture.engine.reconcileModelCall(current.id, { callId: call.id, inputHash: call.inputHash, idempotencyKey: call.idempotencyKey, outcome: 'completed', output: { type: 'tool', tool: 'context.read', argument: newId }, usage, reason: 'Provider confirmed decision' });
     await fixture.restart().advance(current.id);
     const denied = await fixture.repository.get(current.id);
-    expect(denied.status).toBe('failed');
-    expect(denied.error).toContain('out-of-scope');
+    // Denied without reading: the model is told the ID is not one it may read, and nothing of the original is returned.
+    expect(denied.status).not.toBe('failed');
     expect(denied.workingMemory!.reads).toEqual([]);
-    expect(fixture.complete).toHaveBeenCalledTimes(3);
+    const refused = denied.steps[0]!.observations.filter(observation => observation.tool === 'context.read');
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.result).toMatchObject({ error: { recoverable: true, errorCode: 'context_ref_unknown' } });
+    expect(JSON.stringify(refused)).not.toContain('NEW SECRET');
+    expect(denied.events.some(item => item.type === 'tool.failed_recoverable' && (item.data as any).errorCode === 'context_ref_unknown')).toBe(true);
+  });
+
+  it('lets the model correct a made-up working memory ID instead of failing the Run', async () => {
+    let count = 0;
+    const fixture = await setup({ execute: request => {
+      const input = request.input as any; count++;
+      if (count === 1) return { type: 'tool', tool: 'context.read', argument: 'observations/3', characterOffset: 0 };
+      if (count === 2) {
+        expect(input.observations.at(-1).result.error).toMatchObject({ recoverable: true, errorCode: 'context_ref_unknown' });
+        return { type: 'tool', tool: 'context.search', argument: 'needle-original', limit: 1 };
+      }
+      if (count === 3) return { type: 'tool', tool: 'context.read', argument: input.observations.at(-1).result.results[0].originalId, characterOffset: 0 };
+      return { type: 'finish', title: 'Read original', content: 'The original contains needle-original detail.', evidenceRefs: ['source_original'] };
+    } });
+    const result = await drain(fixture);
+    expect(result.status, result.error).toBe('succeeded');
+    expect(result.workingMemory!.reads).toHaveLength(2);
   });
 
   it.each(['final-only', 'repair'])('denies context lookup during %s turns without emitting original pages', async mode => {
