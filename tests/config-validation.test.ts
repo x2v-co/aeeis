@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { validateRuntimeConfig } from '../src/config-validation.js';
 import { readinessToolsEnvMs } from '../src/runtime/readiness-tools-config.js';
 
@@ -138,6 +141,28 @@ describe('runtime configuration validation', () => {
     for (const extra of [{ AEEIS_ENV: 'production' }, { NODE_ENV: 'production' }, { AEEIS_HOST: '0.0.0.0' }, { AEEIS_RUNNER: 'temporal' }, { AEEIS_PRINCIPAL_TOKENS: '{}' }, { AEEIS_OIDC_ISSUER: 'https://issuer.example' }]) {
       expect(() => validateRuntimeConfig({ ...env, ...extra })).toThrow('AEEIS_LOCAL_TOOLS_CONFIG');
     }
+  });
+
+  it('allows local tools in a single-owner shared runtime only on a separate, proxied sandbox host without web-fetch', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'aeeis-tools-'));
+    const write = (config: unknown) => { const path = join(directory, `${Math.random().toString(16).slice(2)}.json`); writeFileSync(path, JSON.stringify(config)); return path; };
+    const remote = { schemaVersion: 'local-tools/1', tools: ['read', 'shell', 'browser'], sandbox: { ssh: 'instabox-box', network: 'proxied' } };
+    const shared = { ...development, AEEIS_RUNNER: 'temporal', AEEIS_HOST: '0.0.0.0' };
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write(remote) })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write({ ...remote, sandbox: { ...remote.sandbox, network: 'none' } }) })).not.toThrow();
+    for (const [config, reason] of [
+      [{ ...remote, sandbox: { network: 'proxied' } }, 'sandbox.ssh'],
+      [{ ...remote, sandbox: { ssh: 'instabox-box' } }, 'sandbox.network'],
+      [{ ...remote, sandbox: { ssh: 'instabox-box', network: 'bridge' } }, 'sandbox.network'],
+      [{ ...remote, tools: ['read', 'web-fetch'] }, 'web-fetch'],
+    ] as const) {
+      expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write(config) })).toThrow(reason);
+    }
+    const path = write(remote);
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_PRINCIPAL_TOKENS: '{}' })).toThrow('single owner');
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_OIDC_ISSUER: 'https://issuer.example' })).toThrow('single owner');
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: join(directory, 'missing.json') })).toThrow('readable JSON');
+    expect(() => validateRuntimeConfig({ ...production, AEEIS_LOCAL_TOOLS_CONFIG: path })).not.toThrow(/AEEIS_LOCAL_TOOLS_CONFIG/);
   });
 
   it('accepts a longer model timeout and rejects invalid or unbounded deadlines', () => {
