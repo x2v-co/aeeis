@@ -279,8 +279,8 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
 }
 /** Interval callbacks the page registered; tests fire them by hand. */
 let intervals: Array<{ callback: () => void; ms: number }> = [];
-function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string>; setup?: (window: any) => void } = {}) {
-  dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', pretendToBeVisual: true });
+function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string>; setup?: (window: any) => void; path?: string } = {}) {
+  dom = new JSDOM(html, { url: `http://localhost${saved.path ?? '/'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
   if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
   for (const [key, value] of Object.entries(saved.local ?? {})) {
@@ -835,6 +835,22 @@ describe('single-entry conversation workbench', () => {
     // Built-in starter Bots execute on the same chain, so their defaults stay visible too.
     expect(el('entry-defaults').hidden).toBe(false);
     dom.window.localStorage.removeItem('aeeis.execution-review');
+  });
+
+  it('opens a bot\'s private chat when it is chosen on a Run link page', async () => {
+    const run = `run_${'5'.repeat(8)}-5555-4555-8555-${'5'.repeat(12)}`;
+    const linked = harness(undefined, { owned: true });
+    start(linked.fetch, { path: `/runs/${run}` });
+    const row = () => doc().querySelector<HTMLElement>(`[data-bot-id="${ownedBot.id}"]`);
+    await vi.waitFor(() => expect(row()).toBeTruthy());
+    row()!.click();
+    // Chats are off on a link page, so the choice is carried to the chat home.
+    expect(dom.window.localStorage.getItem('aeeis.pending-bot')).toBe(ownedBot.id);
+    const h = harness(undefined, { owned: true });
+    start(h.fetch, { local: { 'aeeis.pending-bot': ownedBot.id } });
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/conversations' && post.body.agentId === ownedBot.id)).toBe(true));
+    await vi.waitFor(() => expect(el('entry-title').textContent).toBe(ownedBot.name));
+    expect(dom.window.localStorage.getItem('aeeis.pending-bot')).toBeNull();
   });
 
   it('sends on Enter, keeps Shift+Enter and IME composition as typing, and ignores Enter mid-send', async () => {

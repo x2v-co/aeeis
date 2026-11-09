@@ -176,6 +176,7 @@ let pendingFollowup: { key: string; body: unknown; signature: string } | undefin
 let followupSubmitting = false;
 let conversationEnabled = false;
 let botDialogueRouting = false;
+let conversationRoutingAvailable = false;
 let canCreateChannels = false;
 const dialogueRoomIds = new Map<string, string>();
 function archivedDialogue(): boolean {
@@ -3477,8 +3478,16 @@ function renameBotGroup(id: string): void {
   renderBotRoster();
   updateConversationControls();
 }
+/** A bot chosen on a Run or Thread link page, opened once the page has reloaded as the chat home. */
+const PENDING_BOT = 'aeeis.pending-bot';
 function selectBot(id: string): void {
   if (!rosterBots().some(bot => bot.id === id)) return;
+  // A link page starts with chats off and cannot switch them on in place, so go home and open the chat there.
+  if (!conversationEnabled && conversationRoutingAvailable && (linkedRunId || linkedThreadId) && !readOnlyShare) {
+    localStorage.setItem(PENDING_BOT, id);
+    window.location.assign('/');
+    return;
+  }
   if (conversationEnabled) {
     void openLifeThread(id).catch(error => message(errorMessage(error)));
     return;
@@ -4811,6 +4820,7 @@ function acceptConversation(view: ConversationView): void {
 async function initializeConversations(status: RuntimeStatus): Promise<void> {
   botDialogueRouting = status.botDialogueRouting === true;
   canCreateChannels = Boolean(status.roles?.includes('owner'));
+  conversationRoutingAvailable = status.conversationRouting === true;
   conversationEnabled = status.conversationRouting === true && !linkedRunId && !linkedThreadId && !readOnlyShare;
   if (!conversationEnabled) { renderConversation(); return; }
   const scope = JSON.stringify([status.mode, status.tenantId ?? '', status.principal ?? '']);
@@ -9257,6 +9267,11 @@ async function initialize(): Promise<void> {
     await initializeConversations(status);
     await refresh(); message('');
     await openLinkedRoom();
+    const pendingBot = localStorage.getItem(PENDING_BOT);
+    if (pendingBot) {
+      localStorage.removeItem(PENDING_BOT);
+      if (conversationEnabled) await openLifeThread(pendingBot).catch(error => message(errorMessage(error)));
+    }
     if (minimalMode && !currentId) window.requestAnimationFrame(() => {
       if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
       else if (quickRunReady) $<HTMLInputElement>('quick-goal').focus();
