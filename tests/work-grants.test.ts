@@ -61,7 +61,7 @@ describe('action decisions under a work grant', () => {
 });
 
 /** `edit` is confined to the workspace by the gateway's own code; `publish` is not. */
-function harness(options: { calls?: string[]; reject?: boolean; wrongVersionFirst?: boolean; muddledCall?: boolean; verifier?: { verify(input: VerifyInput): Promise<AcceptanceCheck> } } = {}) {
+function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boolean; wrongVersionFirst?: boolean; muddledCall?: boolean; verifier?: { verify(input: VerifyInput): Promise<AcceptanceCheck> } } = {}) {
   const repository = new InMemoryRunRepository();
   const grants = new InMemoryWorkGrantStore();
   const interrupt = vi.fn<NonNullable<ToolGateway['interruptRun']>>(async () => ({ confirmed: true }));
@@ -86,6 +86,7 @@ function harness(options: { calls?: string[]; reject?: boolean; wrongVersionFirs
   const answer = async (request: ModelRequest): Promise<{ value: unknown }> => {
     const input = request.input as any;
     if (request.system.includes('Plan a real deliverable')) plans += 1;
+    if (request.system.includes('Plan a real deliverable') && options.twoSteps) return { value: { summary: 'Build, then summarize', nodes: [{ id: 'site', title: 'Change the site', instruction: 'Edit the page', dependsOn: [] }, { id: 'deliver', title: 'Summarize the delivery', instruction: 'Summarize', dependsOn: ['site'] }] } };
     if (request.system.includes('Plan a real deliverable')) return { value: { summary: plans === 1 ? 'Change the site' : 'Change the site and add the footer', nodes: [{ id: 'site', title: 'Change the site', instruction: 'Edit the page', dependsOn: [] }] } };
     if (request.system.includes('Independently review')) {
       if (rejecting) return { value: { verdict: 'needs_revision', summary: 'Not convinced', issues: ['Not sure about this'] } };
@@ -310,6 +311,49 @@ describe('independent acceptance of finished work', () => {
     const other = await plain.engine.create({ goal: 'Add a footer', materials: plain.materials, workGrantId: (await plain.grants.create(scope, grantInput)).grantId, origin: 'channel' });
     await plain.settle(other.id);
     expect((await plain.repository.get(other.id)).calls[0]!.modelRequest!.system).not.toContain('do not plan verification');
+  });
+  describe('when the work stops early as partial', () => {
+    // website-builder/1 needs structured output the fixture never gives, so the delivery step ends with its repair
+    // exhausted after the build step's work, as in production.
+    const stopEarly = async (verify: (input: VerifyInput) => Promise<AcceptanceCheck>) => {
+      const verifier = { verify: vi.fn(verify) };
+      const h = harness({ verifier, twoSteps: true });
+      const grant = await h.grants.create(scope, grantInput);
+      const run = await h.engine.create({ goal: 'Build a timer page', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements, builtinSkill: 'website-builder/1' });
+      return { h, verifier, run };
+    };
+    it('still checks the work, and accepts it when the check passes', async () => {
+      const { h, verifier, run } = await stopEarly(async () => check(0, true));
+      expect(await h.settle(run.id)).toBe('succeeded');
+      const done = await h.repository.get(run.id);
+      expect(done.events.some(item => item.type === 'run.partial')).toBe(true);
+      expect(verifier.verify).toHaveBeenCalledTimes(1);
+      expect(verifier.verify.mock.calls[0]![0]).toMatchObject({ deliver: true, round: 0 });
+      expect(done.acceptanceChecks?.at(-1)?.passed).toBe(true);
+      expect(done.partial).toBe(true);
+    });
+    it('fails the Run when the check finds a requirement unmet, since stopped work has no revision left', async () => {
+      const { h, verifier, run } = await stopEarly(async () => check(0, false));
+      expect(await h.settle(run.id)).toBe('failed');
+      expect(verifier.verify).toHaveBeenCalledTimes(1);
+      const done = await h.repository.get(run.id);
+      expect(done.error).toContain('1 of 2 requirements not met');
+      expect(done.events.some(item => item.type === 'review.revision_requested')).toBe(false);
+      expect(runMetrics(done)).toMatchObject({ completed: false });
+    });
+    it('fails the Run when the check cannot run at all', async () => {
+      const { h, run } = await stopEarly(async () => { throw new Error('Sandbox host unreachable'); });
+      expect(await h.settle(run.id)).toBe('failed');
+      expect((await h.repository.get(run.id)).error).toContain('Sandbox host unreachable');
+    });
+    it('checks even when review after a stop is turned off', async () => {
+      vi.stubEnv('AEEIS_REVIEW_AFTER_STOP', '0');
+      try {
+        const { h, verifier, run } = await stopEarly(async () => check(0, false));
+        expect(await h.settle(run.id)).toBe('failed');
+        expect(verifier.verify).toHaveBeenCalledTimes(1);
+      } finally { vi.unstubAllEnvs(); }
+    });
   });
   it('refuses requirements on an AEEIS that cannot check them', async () => {
     const h = harness();

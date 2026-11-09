@@ -431,7 +431,8 @@ function timeoutText(phase: string, message: string): string {
  * it only replaces "Independent review was not completed" with the actual review result.
  */
 export function queueReviewAfterStop(run: AgentRun, reason: string): boolean {
-  if (process.env.AEEIS_REVIEW_AFTER_STOP === '0' || run.stopReview || run.taskExecution || run.status !== 'succeeded' || !run.artifacts.length) return false;
+  // Acceptance requirements are the owner's own test of the work, so they are checked even when this review is turned off.
+  if ((process.env.AEEIS_REVIEW_AFTER_STOP === '0' && !run.acceptance?.length) || run.stopReview || run.taskExecution || run.status !== 'succeeded' || !run.artifacts.length) return false;
   run.stopReview = 'pending'; run.status = 'reviewing';
   event(run, 'review.requested', { partial: true, afterStop: reason });
   return true;
@@ -468,6 +469,9 @@ export function event(run: AgentRun, type: string, data: Record<string, unknown>
   }
   if (type === 'run.partial' || type === 'run.failed' || type === 'run.cancelled') closeDanglingReview(run, typeof data.reason === 'string' ? data.reason : type);
   run.events.push({ id: id('evt'), seq: run.events.length + 1, type, at: now(), data });
+  // Every early stop passes through here. A Run with acceptance requirements cannot end as succeeded on the Bot's own
+  // account: the independent check still opens the work. An unknown model outcome is left to its reconciliation path.
+  if (type === 'run.partial' && run.acceptance?.length && run.status === 'succeeded' && !run.reconcileDisposition) queueReviewAfterStop(run, typeof data.reason === 'string' ? data.reason : 'Partial answer');
 }
 export class Conflict extends Error {}
 export type CreateRunCheckpoint = <T>(stage: string, operation: () => Promise<T>) => Promise<T>;
@@ -1740,6 +1744,12 @@ export class AgentEngine {
     } catch (error) {
       await this.repository.mutate(runId, async run => {
         if (terminalRunStatuses.has(run.status) || run.status === 'unknown') return;
+        if (run.status === 'reviewing' && run.stopReview === 'pending' && run.acceptance?.length && !run.acceptanceChecks?.some(check => check.passed)) {
+          // Without a passed check, work with acceptance requirements is not accepted.
+          run.stopReview = 'done'; run.status = 'failed'; run.error = `Independent check could not finish: ${failureReason(error, 'Check failed')}`;
+          event(run, 'run.failed', { reason: run.error });
+          return;
+        }
         if (run.status === 'reviewing' && run.stopReview === 'pending') {
           // The extra review of stopped output must never turn retained work into a failure.
           settleReviewAfterStop(run, { accepted: false, note: `Independent review was not completed: ${failureReason(error, 'Review failed')}` });
@@ -3666,12 +3676,22 @@ export class AgentEngine {
       (current.acceptanceChecks ??= []).push(check);
       event(current, 'acceptance.checked', { round, passed: check.passed, failed: check.items.filter(item => item.status !== 'passed').length, ...(check.error ? { error: check.error } : {}) });
       if (check.passed) return;
+      const open = check.items.filter(item => item.status !== 'passed');
       // The check itself did not work, which more revisions cannot fix.
       if (check.error && !check.items.some(item => item.status === 'failed')) {
+        if (current.stopReview === 'pending') current.stopReview = 'done';
         current.status = 'failed'; current.error = `Independent check could not finish: ${check.error}`;
+        if (current.stopReview === 'done') event(current, 'run.failed', { reason: current.error });
         return;
       }
-      const open = check.items.filter(item => item.status !== 'passed');
+      // Work that stopped early has no revision left to make: an unmet requirement fails it rather than letting it pass as partial.
+      if (current.stopReview === 'pending') {
+        current.stopReview = 'done'; current.status = 'failed';
+        current.error = `Independent check after the work stopped early: ${open.length} of ${check.items.length} requirements not met`;
+        event(current, 'review.completed', { verdict: 'needs_revision', issues: open.map(item => `${item.requirement}: ${item.status}. ${item.notes}`.slice(0, 1000)), source: 'acceptance' });
+        event(current, 'run.failed', { reason: current.error });
+        return;
+      }
       current.review = reviewSchema.parse({ verdict: 'needs_revision', summary: `Independent check: ${open.length} of ${check.items.length} requirements not met`, issues: open.map(item => `${item.requirement}: ${item.status}. ${item.notes}`.slice(0, 1000)) });
       event(current, 'review.completed', { verdict: 'needs_revision', issues: current.review.issues, source: 'acceptance' });
       settleReview(current);
