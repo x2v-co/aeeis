@@ -147,6 +147,20 @@ print("verified")` });
 describe('combined tool gateway health', () => {
   const invoke: ToolGateway['invoke'] = async () => { throw new Error('unused'); };
 
+  it('accepts several versions of one tool from one gateway and routes each version to it', async () => {
+    const tool = (id: string, version: string) => ({ id, version, description: id, capabilities: ['read'], inputSchema: {}, outputSchema: {} });
+    const remoteInvoke = vi.fn(async () => ({ status: 'completed' }) as any), localInvoke = vi.fn(async () => ({ status: 'completed' }) as any);
+    const remote: ToolGateway = { listTools: async () => [tool('web-search', '1'), tool('web-search', '2'), tool('uuid', '1')], invoke: remoteInvoke };
+    const local: ToolGateway = { listTools: async () => [tool('shell', '3')], invoke: localInvoke };
+    const combined = new CombinedToolGateway([local, remote]);
+    expect((await combined.listTools()).map(item => `${item.id}@${item.version}`)).toEqual(['shell@3', 'web-search@1', 'web-search@2', 'uuid@1']);
+    await combined.invoke({ toolId: 'web-search', toolVersion: '2' } as any);
+    await combined.invoke({ toolId: 'shell', toolVersion: '3' } as any);
+    expect(remoteInvoke).toHaveBeenCalledTimes(1); expect(localInvoke).toHaveBeenCalledTimes(1);
+    const clash: ToolGateway = { listTools: async () => [tool('uuid', '2')], invoke: localInvoke };
+    await expect(new CombinedToolGateway([clash, remote]).listTools()).rejects.toThrow('Duplicate tool ID across local and remote gateways: uuid');
+  });
+
   it('probes gateways concurrently and lists each gateway at most once', async () => {
     let finish!: () => void;
     const pending = new Promise<void>(resolve => { finish = resolve; });

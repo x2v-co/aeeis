@@ -71,6 +71,14 @@ env_args=(--env-file "$ENV_FILE" --env-file "$candidate")
 echo "deploying $AEEIS_STACK image=$AEEIS_IMAGE build=$AEEIS_BUILD_ID queue=$AEEIS_TASK_QUEUE ns=${TEMPORAL_NAMESPACE:-aeeis}"
 stack_guard
 verify_images
+# Startup gate: the candidate image checks its own settings and tool setup (secret files, startup checks, remote
+# and local tools, default tools, sandbox health) in a one-off container before anything running is replaced.
+# It needs only the namespace holder, which `up` would start anyway.
+echo "startup gate: candidate=$AEEIS_IMAGE"
+dc up -d --no-deps --pull never netns
+if ! dc run --rm --no-deps -T api node scripts/check-tools.mjs; then
+  echo "startup gate: the candidate would not start with these settings; refusing deployment" >&2; exit 3
+fi
 dc up -d --pull never
 wait_http http://127.0.0.1:4324/readyz "j.status==='ready'&&j.workerState==='RUNNING'&&j.buildId==='$AEEIS_BUILD_ID'" "worker readyz" 300
 AEEIS_CURRENT_FILE="$candidate" "$STACK_DIR/bin/promote.sh"

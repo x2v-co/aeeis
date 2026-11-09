@@ -17,7 +17,7 @@ test('production stack deployment, online backup, notifications and systemd path
   }).catch((error: Error & { stdout?: string; stderr?: string }) => {
     throw new Error(`${error.message}\nstdout:\n${error.stdout ?? ''}\nstderr:\n${error.stderr ?? ''}`, { cause: error });
   });
-  expect(output).toContain('replay gate and stack state isolation passed');
+  expect(output).toContain('replay gate, startup gate and stack state isolation passed');
   expect(output).toContain('git commit build, label/tag fallback, env precedence and restart persistence passed');
   expect(output).toContain('post-pull startup metadata and unlabeled image environment preservation passed');
   expect(output).toContain('online atomic backups, failure exits, retention, notifications and configurable systemd paths passed');

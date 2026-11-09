@@ -494,7 +494,10 @@ describe('SSH host paused or unreachable (mocked transport)', () => {
     const error = await sandbox.imageId().catch(value => value);
     expect(error).toBeInstanceOf(SandboxUnreachable);
     expect(error.message).toMatch(/aeeis-test-no-such-host.invalid is unreachable/);
-    expect((await sandbox.health()).detail).toMatch(/unreachable over SSH/);
+    expect((await sandbox.health({ probe: true })).detail).toMatch(/unreachable over SSH/);
+    // Idle, the monitor's routine check leaves the host alone so it can pause.
+    const quiet = await sandbox.health();
+    expect(quiet.ready).toBe(true); expect(quiet.detail).toMatch(/not checked while no Run uses it/);
   }, 30000);
 });
 

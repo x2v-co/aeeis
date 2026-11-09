@@ -44,7 +44,7 @@ from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as f:
     f.write(json.dumps(args) + '\n')
-if args[0] == 'build' or (args[0] == 'compose' and 'up' in args):
+if args[0] == 'build' or (args[0] == 'compose' and 'up' in args and args[-1] != 'netns'):
     commit = os.getenv('AEEIS_GIT_COMMIT')
     if args[0] == 'compose':
         overrides = [a for a in args if a.endswith('/compose.commit.yml')]
@@ -92,6 +92,9 @@ if args[0] == 'compose':
         print('{"events": [{}]}')
     elif 'deployment' in args and 'describe' in args:
         print(json.dumps({'currentVersion': {'buildId': os.environ['AEEIS_BUILD_ID']}}))
+    elif 'run' in args and args[-1] == 'scripts/check-tools.mjs':
+        assert '--no-deps' in args and args[args.index('run') + 1:][-3:] == ['api', 'node', 'scripts/check-tools.mjs'], args
+        if mode == 'startup-gate-fail': print('Error: AEEIS_LOCAL_TOOLS_CONFIG ...', file=sys.stderr); sys.exit(1)
     elif 'run' in args and args[-1] == 'backup':
         assert '--no-deps' in args, args
         if os.getenv('FAKE_COMPOSE_RUN_PULL', '1') == '1':
@@ -251,7 +254,7 @@ pulls=[a[1] for a in calls if a[0]=='pull']
 expected=['ccr.ccs.tencentyun.com/x2v-co/aeeis:test','m.daocloud.io/docker.io/library/aeeis:test']
 if os.environ['FAKE_MODE']=='mirror-fail': expected+=['aeeis:test']
 assert pulls[:len(expected)]==expected, pulls
-up=[a for a in calls if a[0]=='compose' and 'up' in a]
+up=[a for a in calls if a[0]=='compose' and 'up' in a and a[-1]!='netns']
 assert len(up)==1 and up[0][-2:]==['--pull','never'], up
 assert sum(a[:2]==['image','inspect'] for a in calls[:calls.index(up[0])])>=4, calls
 PY
@@ -285,13 +288,26 @@ calls=list(map(json.loads,open(os.environ['FAKE_LOG'])))
 replays=[a for a in calls if a[0]=='run']
 assert len(replays)==4, replays
 assert all('aeeis:test' in a for a in replays), replays
-up=next(a for a in calls if a[0]=='compose' and 'up' in a)
+up=next(a for a in calls if a[0]=='compose' and 'up' in a and a[-1]!='netns')
 assert all(calls.index(a)<calls.index(up) for a in replays)
 PYTEST
 reset_fake
 export FAKE_MODE=no-histories
 deploy > "$test_dir/output" 2>&1
 grep -q 'PASSED checked=0' "$test_dir/output"
+# A candidate that would not start with these settings is refused before any running container is replaced.
+reset_fake
+export FAKE_MODE=startup-gate-fail
+expect_failure deploy
+grep -q 'startup gate: the candidate would not start' "$test_dir/output"
+python3 - <<'PY'
+import json,os
+calls=list(map(json.loads,open(os.environ['FAKE_LOG'])))
+gate=[i for i,a in enumerate(calls) if a[0]=='compose' and a[-1]=='scripts/check-tools.mjs']
+assert len(gate)==1, calls
+assert not any(a[0]=='compose' and 'up' in a and a[-1]!='netns' for a in calls), calls
+assert not any(a[0]=='compose' and any(x in a for x in ['stop','down','restart']) for a in calls), calls
+PY
 # Per-stack selection and backward-compatible legacy reads.
 unset AEEIS_CURRENT_FILE
 printf 'AEEIS_STACK=aeeis-cn-prod\nAEEIS_IMAGE=aeeis:legacy\nAEEIS_BUILD_ID=aeeis-cn-prod-old\n' > "$STACK_DIR/.current.env"
@@ -318,7 +334,7 @@ sed -i.bak 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.curre
 [[ "$(read_image)" == aeeis:prod ]]
 sed -i.bak 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
-echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate and stack state isolation passed'
+echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate, startup gate and stack state isolation passed'
 
 # Release identity: explicit shell > selected env file > image label > hex tag.
 # The old state SHA must never leak into a new --no-build deployment.

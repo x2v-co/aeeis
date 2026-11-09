@@ -4,6 +4,7 @@ import { JsonChannelNoiseStore, PostgresChannelNoiseStore, type ChannelNoiseStor
 import pg from 'pg';
 import { PostgresChangeAuditStore } from './adapters/postgres-change-audit.js';
 import { LocalToolGateway, CombinedToolGateway } from './local-tools.js';
+import { remoteToolGateway } from './toolkit-config.js';
 import { RoutedAgentTransport, ensureExecutorAdmitted, executorCard } from './executor.js';
 import { resolveToolDefaults } from './tool-defaults.js';
 import { collaborationPricesSchema, type CollaborationPrices } from './collaboration-budget.js';
@@ -19,7 +20,7 @@ import { readinessToolsEnvMs } from './runtime/readiness-tools-config.js';
 import { FileBrainStore } from './brain.js';
 import { PostgresBrainStore } from './adapters/postgres-brain-store.js';
 import { PostgresBrainSemanticIndex } from './adapters/postgres-brain-semantic-index.js';
-import { ConfiguredHttpToolGateway, OwnHowCliGovernance, PlanpriceHttpCatalog, ToolkitMcpGateway, ToolkitRegistryGateway } from './integrations.js';
+import { OwnHowCliGovernance, PlanpriceHttpCatalog } from './integrations.js';
 import { PlanpriceV1Catalog, type ProviderMapping } from './planprice-v1-adapter.js';
 import { CatalogModelResolver, HttpCatalogModelFactory, StaticModelResolver, type ModelResolver } from './runtime/model-router.js';
 import { AgentDirectory, AgentGateway, HttpAgentTransport, OAuthClientCredentialsProvider, type AgentDirectoryPort } from './agent-gateway.js';
@@ -360,34 +361,7 @@ let feishuDebateIngress: FeishuDebateIngress | undefined;
 let feishuLife: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string } | undefined;
 let hermesDebateIngress: HermesDebateIngress | undefined;
 try {
-  const remoteToolkit = process.env.AEEIS_TOOLKIT_MCP_URL
-    ? new ToolkitMcpGateway(process.env.AEEIS_TOOLKIT_MCP_URL, process.env.AEEIS_TOOLKIT_TOKEN ?? '', process.env.AEEIS_TOOLKIT_DEFAULT_VERSION ?? 'rolling')
-    : process.env.AEEIS_TOOLKIT_REGISTRY_URL
-    ? new ToolkitRegistryGateway(
-      process.env.AEEIS_TOOLKIT_REGISTRY_URL,
-      process.env.AEEIS_TOOLKIT_TOKEN,
-      {
-        verifySignatures: process.env.AEEIS_TOOLKIT_VERIFY_SIGNATURES === '1' || (process.env.AEEIS_ENV === 'production' && process.env.AEEIS_TOOLKIT_VERIFY_SIGNATURES !== '0'),
-        ...(process.env.AEEIS_TOOLKIT_ROOT_PUBLIC_JWK ? { rootPublicJwk: z.record(z.string(), z.unknown()).parse(JSON.parse(process.env.AEEIS_TOOLKIT_ROOT_PUBLIC_JWK)) } : {}),
-        ...(process.env.AEEIS_TOOLKIT_RECONCILE_URL ? { reconcileUrl: process.env.AEEIS_TOOLKIT_RECONCILE_URL } : {}),
-        ...(process.env.AEEIS_TOOLKIT_PINNED_TOOLS ? {
-          additionalTools: z.array(z.object({
-            id: z.string().trim().min(1).max(200), version: z.string().trim().min(1).max(100), endpoint: z.string().url(),
-            capabilities: z.array(z.string().trim().min(1).max(100)).max(20).optional(), description: z.string().max(4000).optional(),
-            inputSchema: z.unknown().optional(), outputSchema: z.unknown().optional(),
-          }).strict()).max(20).parse(JSON.parse(process.env.AEEIS_TOOLKIT_PINNED_TOOLS)).map(tool => ({
-            id: tool.id, version: tool.version, endpoint: tool.endpoint,
-            ...(tool.capabilities === undefined ? {} : { capabilities: tool.capabilities }),
-            ...(tool.description === undefined ? {} : { description: tool.description }),
-            ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
-            ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
-          })),
-        } : {}),
-      },
-    )
-    : process.env.AEEIS_TOOLKIT_MANIFEST_URL && process.env.AEEIS_TOOLKIT_INVOKE_URL
-    ? new ConfiguredHttpToolGateway(process.env.AEEIS_TOOLKIT_MANIFEST_URL, process.env.AEEIS_TOOLKIT_INVOKE_URL, process.env.AEEIS_TOOLKIT_TOKEN, process.env.AEEIS_TOOLKIT_RECONCILE_URL)
-    : undefined;
+  const remoteToolkit = remoteToolGateway(process.env);
   localToolkit = process.env.AEEIS_LOCAL_TOOLS_CONFIG ? await LocalToolGateway.load(process.env.AEEIS_LOCAL_TOOLS_CONFIG) : undefined;
   if (process.env.AEEIS_RESOURCE_REGISTRY_FILE) resourceRegistry = await FileResourceRegistry.load(process.env.AEEIS_RESOURCE_REGISTRY_FILE);
   const toolkit = localToolkit && remoteToolkit ? new CombinedToolGateway([localToolkit, remoteToolkit]) : localToolkit ?? remoteToolkit;
@@ -615,7 +589,7 @@ try {
   });
   const trustedHosts = process.env.AEEIS_TRUSTED_HOSTS === undefined ? [] : process.env.AEEIS_TRUSTED_HOSTS.split(',').map(host => host.trim()).filter(Boolean);
   const knowledgeMaintenance = knowledge && 'runEmbeddingReindexBatch' in knowledge && 'enqueueEmbeddingReindex' in knowledge && 'getEmbeddingReindexStatus' in knowledge ? knowledge as unknown as KnowledgeEmbeddingMaintenance : undefined;
-  const defaultAllowedTools = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, localToolkit?.config.defaultAllowedTools ?? [], toolkit);
+  const defaultAllowedTools = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, localToolkit?.config.defaultAllowedTools ?? [], remoteToolkit, localToolkit?.toolRefs());
   const sandboxGateway = localToolkit;
   // Every store has migrated: turn on row-level security and check the app role before serving.
   const { secured } = await databaseSecurity.finalize();
