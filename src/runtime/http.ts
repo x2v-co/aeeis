@@ -13,7 +13,8 @@ import { readinessToolsEnvMs } from './readiness-tools-config.js';
 import type { Ownership } from '../security/principal.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import secureJsonParse from 'secure-json-parse';
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { SAVED_SITE_HEADERS, SITE_LINK_SECONDS, siteTicket, siteTicketValid } from '../saved-site.js';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
@@ -93,6 +94,8 @@ interface RunComputer {
   screenshot(runId: string, name: string): Promise<Buffer | undefined>;
   sourceArchive(runId: string): Promise<Buffer | undefined>;
   hostWait(): Promise<HostWait | undefined>;
+  deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
+  savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
 interface Options { runComputer?: RunComputer; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
@@ -170,6 +173,7 @@ function renderHttpMetrics(metrics: HttpMetrics): string[] {
   return [...lines, ...gauges, ...histograms];
 }
 export function buildApp(options: Options) {
+  const siteSecret = randomBytes(32);
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
   const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
@@ -495,10 +499,12 @@ export function buildApp(options: Options) {
     const route = request.routeOptions.url ?? '';
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
     const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
+    const savedSiteRoute = request.method === 'GET' && route === '/saved-site/:runId/:ticket/*';
     const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id')
       && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
-    if (request.headers.origin) {
+    // A saved site runs as an opaque origin, so its own module scripts and styles arrive with Origin: null.
+    if (request.headers.origin && !savedSiteRoute) {
       const origin = request.headers.origin.trim();
       const sameOrigin = isLoopbackHost(host) && origin === `http://${host}`;
       if (!sameOrigin && !trustedOrigins.has(origin)) return reply.code(403).send({ error: 'Cross-origin access denied' });
@@ -2436,8 +2442,24 @@ export function buildApp(options: Options) {
     if (!options.runComputer) return reply.code(404).send({ error: 'This AEEIS has no Run machines' });
     // Each look reaches the host, and on some hosts that counts as activity, so only working Runs are looked at.
     const live = ['queued', 'planning', 'running', 'reviewing', 'needs_input', 'waiting_external', 'paused'].includes(run.status);
-    const [machine, screenshots, hostWait] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait()]);
-    return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}) };
+    const [machine, screenshots, hostWait, delivery] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait(), options.runComputer.deliverables?.(run.id)]);
+    return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}), ...(delivery ? { delivery } : {}) };
+  });
+  // The copy of the site saved when the machine was reclaimed. A browser tab cannot send the owner's token, so the
+  // owner gets a short-lived signed link; the page itself is sandboxed away from this origin.
+  app.get<{ Params: { id: string } }>('/api/runs/:id/computer/site-link', async (request, reply) => {
+    const principal = principalOf(request);
+    const run = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    if (!(await options.runComputer?.deliverables?.(run.id))?.savedSite) return reply.code(404).send({ error: 'No saved site for this Run' });
+    const expiresAt = Math.floor(Date.now() / 1000) + SITE_LINK_SECONDS;
+    return { url: `/saved-site/${run.id}/${siteTicket(siteSecret, run.id, expiresAt)}/`, expiresAt: new Date(expiresAt * 1000).toISOString() };
+  });
+  app.get<{ Params: { runId: string; ticket: string; '*': string } }>('/saved-site/:runId/:ticket/*', async (request, reply) => {
+    const { runId, ticket } = request.params;
+    if (!siteTicketValid(siteSecret, runId, ticket)) return reply.code(404).header('content-type', 'text/plain; charset=utf-8').send('This link has expired. Open the saved site again from the Run.');
+    const file = await options.runComputer?.savedSiteFile?.(runId, request.params['*'] ?? '');
+    if (!file) return reply.code(404).header('content-type', 'text/plain; charset=utf-8').send('Not found');
+    return reply.headers(SAVED_SITE_HEADERS).header('content-type', file.type).send(file.body);
   });
   app.get<{ Params: { id: string } }>('/api/runs/:id/metrics', async request => {
     const principal = principalOf(request);

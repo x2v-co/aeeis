@@ -624,6 +624,41 @@ describe('the computer panel', () => {
     expect(doc.querySelector<HTMLAnchorElement>('#computer-delivery a')?.rel).toBe('noopener noreferrer');
     expect([...doc.querySelectorAll('#computer-delivery button')].map(item => item.textContent)).toEqual(['下载源码']);
   });
+  it('says the preview went with the machine, and offers what was saved instead', async () => {
+    const run = fixture();
+    Object.assign(run, { status: 'succeeded', review: undefined, error: undefined, events: [], acceptanceChecks: [{ round: 0, passed: true, projectChanged: false, previewUrl: 'https://3000-x.instabox.tech/?_token=t', sourceArchive: 'source.tar.gz', items: [{ requirement: 'The page loads', status: 'passed', notes: 'ok' }] }] });
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/computer')) return response(view({ status: 'succeeded', machine: { state: 'released', previews: [] }, delivery: { savedSite: true, sourceArchive: true } }));
+      if (String(url) === `/api/runs/${run.id}`) return response({ ...run, canEdit: true });
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('computer-acceptance')?.hidden).toBe(false));
+    expect(doc.querySelector('#computer-delivery a')).toBeNull();
+    expect(doc.getElementById('computer-delivery')?.textContent).toContain('在线预览已随机器收掉失效');
+    expect([...doc.querySelectorAll('#computer-delivery button')].map(item => item.textContent)).toEqual(['打开保存的网站', '下载源码']);
+  });
+  it('offers what was saved for a Run that was never checked', async () => {
+    const run = fixture();
+    Object.assign(run, { status: 'failed', review: undefined, events: [], acceptanceChecks: undefined });
+    const fetch = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/computer')) return response(view({ status: 'failed', machine: { state: 'released', previews: [] }, delivery: { savedSite: true, sourceArchive: false } }));
+      if (String(url) === `/api/runs/${run.id}`) return response({ ...run, canEdit: true });
+      if (String(url).endsWith('/graphs')) return response(sharedRunView(run).graphs);
+      if (String(url).endsWith('/explanation')) return response(sharedRunView(run).explanation);
+      if (String(url).includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start(`/runs/${run.id}`, fetch);
+    const doc = dom.window.document;
+    await vi.waitFor(() => expect(doc.getElementById('computer-acceptance')?.hidden).toBe(false));
+    expect(doc.getElementById('computer-acceptance-summary')?.textContent).toContain('没有做独立检查');
+    expect([...doc.querySelectorAll('#computer-delivery button')].map(item => item.textContent)).toEqual(['打开保存的网站']);
+  });
   it('is not offered to people who can only read the Run', async () => {
     const { doc, calls } = await open('running', () => response(view()), false);
     await new Promise(resolve => setTimeout(resolve, 50));

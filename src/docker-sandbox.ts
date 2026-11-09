@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import { snapshotSchema, validateSnapshot, type WorkspaceFile } from './sandbox-workspace.js';
+import { PACK_DELIVERABLES } from './saved-site.js';
 
 export const sandboxConfigSchema = z.object({
   runtime: z.literal('docker').default('docker'),
@@ -681,6 +682,8 @@ export class DockerSandbox {
       if (state.ready) {
         // Stop background writers before exporting the final artifact snapshot.
         await this.stop(state.name); await this.start(state);
+        // Keep what the owner reviews: once the machine is gone, the source and site exist only in this export.
+        await this.exchange(state, 'shell', { command: PACK_DELIVERABLES }, 90_000).catch(() => undefined);
         const exported = await this.exchange(state, '__snapshot', {}, 30000);
         if (exported.files === null) throw new SandboxError('Artifact export failed; sandbox retained for recovery', 'unknown');
         await saveArtifacts(exported.files);
