@@ -46,7 +46,7 @@ import { resolveSourceResource, synthesizePdfArtifact, pdfArtifactContent, pdfOu
 import { isBinaryPdf, MAX_RUN_PDF_OUTPUT_BYTES } from './pdf-material.js';
 import { isSourceReadTool, isSourceTool, isStructuredSourceTool, isPdfTool } from './source-tools.js';
 import { boundedExecutorInput, boundedObservations } from './prompt-context.js';
-import { acceptWorkingSummary, captureWorkingOriginals, compactionInput, compactionSystem, isContextTool, lookupWorkingMemory, manifestCurrent, newWorkingMemory, prepareWorkingManifest, workingMemoryGuidance, workingMemoryInput, workingObservations, workingDependencies, workingOriginalIds, WORKING_MEMORY_LIMITS, type WorkingManifest } from './working-memory.js';
+import { acceptWorkingSummary, captureWorkingOriginals, compactionInput, compactionSystem, isContextTool, lookupWorkingMemory, WorkingMemoryLookupRejected, manifestCurrent, newWorkingMemory, prepareWorkingManifest, workingMemoryGuidance, workingMemoryInput, workingObservations, workingDependencies, workingOriginalIds, WORKING_MEMORY_LIMITS, type WorkingManifest } from './working-memory.js';
 import { executionLimitReason, executionLimitsSchema, nodeModelCalls, runSourceReadUsage, sourceReadUsage, type ExecutionLimits } from './execution-limits.js';
 import type { ResourceRegistry, ResourceResolution } from './resources.js';
 import { threadHistoryGuidance, threadHistoryInput, threadHistorySources } from './thread-context.js';
@@ -2669,7 +2669,16 @@ export class AgentEngine {
       if (decision.type === 'tool' && isContextTool(decision.tool)) {
         if (!current.workingMemory || pendingRepair || recovery || limitReason) throw new Error('Task working memory lookup is disallowed in this phase');
         const frozenIds = (executorRequest.input as { workingMemoryOriginalIds?: string[] }).workingMemoryOriginalIds ?? [];
-        const result = lookupWorkingMemory(current, node.id, { ...decision, tool: decision.tool }, frozenIds);
+        let result: unknown;
+        try { result = lookupWorkingMemory(current, node.id, { ...decision, tool: decision.tool }, frozenIds); }
+        catch (error) {
+          if (!(error instanceof WorkingMemoryLookupRejected)) throw error;
+          // A wrong ID or offset is the model's mistake to correct, like a wrong tool version: nothing was read.
+          const message = `Nothing was read: ${error.message}. Use an originalId or slice id given in workingMemory or returned by context.search, with characterOffset inside page.totalChars.`;
+          live.observations.push({ tool: decision.tool, argument: decision.argument.slice(0, 200), result: { error: { recoverable: true, errorCode: 'context_ref_unknown', message } } });
+          event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: decision.tool, errorCode: 'context_ref_unknown', message });
+          return;
+        }
         const nodeReads = sourceReadUsage([live]), totalReads = runSourceReadUsage(current), chars = JSON.stringify(result).length;
         if (nodeReads.pages >= limits.maxNodeSourcePages || totalReads.pages >= limits.maxRunSourcePages ||
           nodeReads.chars + chars > limits.maxNodeSourceChars || totalReads.chars + chars > limits.maxRunSourceChars) throw new Error('Task working memory lookup exceeds the source allowance');
