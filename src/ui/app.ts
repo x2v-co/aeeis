@@ -9305,6 +9305,13 @@ async function initialize(): Promise<void> {
       else if (label) quickSubmit.childNodes[0]!.textContent = '发送 ';
     }
     await initializeConversations(status);
+    // The home page opens on the chat. A Run remembered from an earlier visit would otherwise be reopened over it
+    // on every refresh; Runs are opened from the chat or by their own link.
+    if (conversationEnabled && currentId && !linkedRunId) {
+      currentId = ''; current = undefined;
+      localStorage.removeItem('aeeis.run');
+      setCurrentRunOpen(false);
+    }
     await refresh(); message('');
     await openLinkedRoom();
     const pendingBot = localStorage.getItem(PENDING_BOT);
