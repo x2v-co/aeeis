@@ -961,6 +961,9 @@
 <option value="fillable-pdf/1">PDF 表单 · 根据资料填写</option>
 </select>
 <p class="muted">Project Pulse 可直接使用下方资料，生成带证据的进展、阻塞、风险和下一步。绑定领域目标后，审核通过的下一步会保存为待执行任务。</p>
+<label for="acceptance">验收要求（可选，每行一条）</label>
+<textarea id="acceptance" rows="4" maxlength="15000" placeholder="例如：页面标题是「番茄钟」&#10;打开页面时倒计时显示 25:00"></textarea>
+<p class="muted">填了以后，做完会由另一个会话亲自打开成果逐条检查，全部通过才交付源码和预览。需要 Bot 电脑。只用于下一次执行，创建后清空。</p>
 <label for="goal">你想完成什么？</label>
 <textarea id="goal" rows="4" required="" maxlength="8000" placeholder="例如：根据下面的项目资料，梳理发布风险并提出下一周的具体行动计划">
 </textarea>

@@ -189,17 +189,41 @@ describe('model schema normalization', () => {
     }
   });
 
-  it.each(['project-pulse/1', 'website-builder/1'] as const)('still requires all %s sections and evidence citations', async skill => {
+  it('still requires all project-pulse/1 sections and evidence citations', async () => {
+    const skill = 'project-pulse/1';
     const { run } = await runModel({ skill, executor: ref => ({ type: 'finish', title: 'Report', content: 'Report', evidenceRefs: [ref], artifactType: skill,
       structured: { schemaVersion: skill, progress: [{ text: 'Claim', evidenceRefs: [] }], validation: [{ name: 'Check', status: 'passed', evidenceRefs: [] }], extra: true },
     }) });
-    expect(run.status).toBe(skill === 'project-pulse/1' ? 'succeeded' : 'failed');
-    expect(run.artifacts).toHaveLength(skill === 'project-pulse/1' ? 1 : 0);
-    if (skill === 'project-pulse/1') {
-      expect(run.partial).toBe(true);
-      expect(run.artifacts[0]?.structured).toMatchObject({ progress: [], unknowns: [] });
-    }
+    expect(run.status).toBe('succeeded');
+    expect(run.artifacts).toHaveLength(1);
+    expect(run.partial).toBe(true);
+    expect(run.artifacts[0]?.structured).toMatchObject({ progress: [], unknowns: [] });
     expect(run.calls.find(call => call.phase === 'executor')?.validationErrors?.length).toBeGreaterThan(0);
     expect(run.calls.filter(call => call.phase === 'executor').every(call => call.rawOutput)).toBe(true);
+  });
+  it.each([
+    ['an invalid', { schemaVersion: 'website-builder/1', validation: [{ name: 'Check', status: 'passed', evidenceRefs: [] }], extra: true }],
+    ['no', undefined],
+  ])('replaces %s website-builder/1 summary with one built from receipts, keeping no uncited claim', async (_label, structured) => {
+    const skill = 'website-builder/1';
+    const { run } = await runModel({ skill, executor: ref => ({ type: 'finish', title: 'Report', content: 'Report', evidenceRefs: [ref], ...(structured ? { artifactType: skill, structured } : {}) }) });
+    expect(run.status).toBe('succeeded');
+    expect(run.partial).toBeFalsy();
+    expect(run.artifacts[0]).toMatchObject({ artifactType: skill, structured: { schemaVersion: skill, changedFiles: [], validation: [], artifacts: [], blockers: [], unknowns: [] } });
+    expect(run.events.find(event => event.type === 'artifact.structured_derived')?.data).toMatchObject({ reason: structured ? 'invalid' : 'missing' });
+    expect(run.events.some(event => event.type === 'artifact.repair_requested')).toBe(false);
+  });
+});
+
+describe('the Website Builder summary AEEIS builds itself', () => {
+  const receipt = (n: number, toolId: string, extra: Record<string, unknown> = {}) => ({ schemaVersion: 'receipt/1', receiptId: `receipt_00000000-0000-0000-0000-${String(n).padStart(12, '0')}`, provider: 'aeeis-local-tools', operation: toolId,
+    requestHash: 'a'.repeat(64), inputRefs: [], outputRefs: [], capabilitiesUsed: ['execute', 'read', 'write'], startedAt: '2026-11-09T00:00:00.000Z', status: 'completed',
+    authorization: { toolId, toolVersion: '3', taskId: 'site', capabilityGrant: 'grant', idempotencyKey: `k${n}`, decision: 'authorized' }, ...extra }) as never;
+  it('cites the last process call it could see, and claims only that a preview was attempted', async () => {
+    const { derivedWebsiteSummary } = await import('../src/runtime/engine.js');
+    const receipts = [receipt(1, 'process'), receipt(2, 'process'), receipt(3, 'shell'), receipt(4, 'process', { status: 'failed' }), receipt(5, 'process')];
+    const seen = new Set(receipts.slice(0, 4).map(item => (item as { receiptId: string }).receiptId));
+    expect(derivedWebsiteSummary(receipts, seen)).toEqual({ schemaVersion: 'website-builder/1', changedFiles: [], preview: { status: 'unknown', evidenceRefs: ['receipt_00000000-0000-0000-0000-000000000002'] }, validation: [], artifacts: [], blockers: [], unknowns: [] });
+    expect(derivedWebsiteSummary([receipt(1, 'shell')], new Set(['receipt_00000000-0000-0000-0000-000000000001'])).preview).toBeUndefined();
   });
 });

@@ -318,6 +318,25 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.some(post => post.url === '/api/runs')).toBe(false);
   });
 
+  it('sends the owner\'s acceptance requirements with the next execution only', async () => {
+    const view = fixture('bot'), h = harness(view);
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } }); await ready(); await sendReady();
+    el<HTMLTextAreaElement>('acceptance').value = '标题是「番茄钟」\n\n  打开时显示 25:00  ';
+    el('acceptance').dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    expect(el('entry-defaults-text').textContent).toContain('下一次执行带 2 条验收要求');
+    fill('quick-goal', '做一个番茄钟网页');
+    el('quick-run').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', runOptions: { acceptance: ['标题是「番茄钟」', '打开时显示 25:00'] } });
+    await vi.waitFor(() => expect(el<HTMLTextAreaElement>('acceptance').value).toBe(''));
+    expect(el('entry-defaults-text').textContent).not.toContain('验收要求');
+    await sendReady();
+    fill('quick-goal', '再改一下颜色');
+    el('quick-run').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body.runOptions).not.toHaveProperty('acceptance');
+  });
+
   it('keeps speaking as an OwnedBot as discussion even when its owner can execute', async () => {
     const h = harness(fixture('bot'));
     start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } }); await ready(); await sendReady();
