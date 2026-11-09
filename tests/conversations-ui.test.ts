@@ -856,6 +856,17 @@ describe('single-entry conversation workbench', () => {
     dom.window.localStorage.removeItem('aeeis.execution-review');
   });
 
+  it('opens the home page on the chat, not on a Run remembered from an earlier visit', async () => {
+    const h = harness();
+    start(h.fetch, { local: { 'aeeis.run': runId } });
+    await ready();
+    expect(doc().body.classList.contains('run-open')).toBe(false);
+    expect(el('detail').hidden).toBe(true);
+    expect(dom.window.localStorage.getItem('aeeis.run')).toBeNull();
+    expect(h.fetch.mock.calls.some(([url]: [string]) => url === `/api/runs/${runId}`)).toBe(false);
+    expect(dom.window.location.pathname).toBe('/');
+  });
+
   it('opens a bot\'s private chat when it is chosen on a Run link page', async () => {
     const run = `run_${'5'.repeat(8)}-5555-4555-8555-${'5'.repeat(12)}`;
     const linked = harness(undefined, { owned: true });
@@ -1858,7 +1869,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁' });
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
     const calls = h.fetch.mock.calls.length;
-    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    intervals.find(item => item.ms === 2000)!.callback();
     await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
     el('gb-new-group').click();
@@ -1877,7 +1888,7 @@ describe('entry bots and group chats', () => {
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
     expect(el('bots').textContent).not.toContain('纪要');
     const calls = h.fetch.mock.calls.length;
-    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    intervals.find(item => item.ms === 2000)!.callback();
     await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
   });
@@ -1891,7 +1902,7 @@ describe('entry bots and group chats', () => {
     expect(el('bot-local-note').textContent).toContain('上一个账号');
     expect(el('bot-local-claim').hidden).toBe(true);
     const calls = h.fetch.mock.calls.length;
-    doc().dispatchEvent(new dom.window.Event('visibilitychange'));
+    intervals.find(item => item.ms === 2000)!.callback();
     await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(0);
   });
