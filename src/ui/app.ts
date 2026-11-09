@@ -8383,6 +8383,8 @@ interface ComputerView {
   machine: { state: string; detail?: string; live?: ComputerObservation; previews: { port: number; url: string }[] };
   screenshots: { name: string; bytes: number; capturedAt: string }[];
   hostWait?: { since: string; message: string; availableAt?: string };
+  /** What the Run left on the AEEIS host. It outlives the machine. */
+  delivery?: { savedSite: boolean; sourceArchive: boolean };
 }
 const COMPUTER_POLL_MS = 5000;
 /** Each look reaches the sandbox host, and on some hosts that counts as activity. Only work in progress is followed. */
@@ -8442,25 +8444,42 @@ async function showComputerScreenshot(runId: string, shot: ComputerView['screens
 }
 interface AcceptanceView { round: number; passed: boolean; projectChanged: boolean; error?: string; items: { requirement: string; status: string; notes: string; screenshot?: string }[]; previewUrl?: string; sourceArchive?: string }
 const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '没通过', unverified: '没能确认' };
-function renderAcceptance(run: RunView): void {
+/** A machine in these states still serves the preview link it delivered. */
+const MACHINE_UP = ['running', 'frozen', 'unknown', 'unreachable'];
+function renderAcceptance(run: RunView, view: ComputerView): void {
   const check = ((run as RunView & { acceptanceChecks?: AcceptanceView[] }).acceptanceChecks ?? []).at(-1);
-  $('computer-acceptance').hidden = !check;
-  if (!check) return;
-  const passed = check.items.filter(item => item.status === 'passed').length;
-  $('computer-acceptance-summary').textContent = `${check.passed ? '独立检查通过' : '独立检查没通过'}：${passed} / ${check.items.length} 条需求${check.round ? `（第 ${check.round + 1} 轮）` : ''}。这是另一个会话亲自打开页面得出的结论，没有参考执行者的说法。${check.error ? ` ${check.error}` : ''}`;
-  $('computer-acceptance-items').replaceChildren(...check.items.map(item => {
+  const saved = view.delivery;
+  $('computer-acceptance').hidden = !check && !saved?.savedSite && !saved?.sourceArchive;
+  if (check) {
+    const passed = check.items.filter(item => item.status === 'passed').length;
+    $('computer-acceptance-summary').textContent = `${check.passed ? '独立检查通过' : '独立检查没通过'}：${passed} / ${check.items.length} 条需求${check.round ? `（第 ${check.round + 1} 轮）` : ''}。这是另一个会话亲自打开页面得出的结论，没有参考执行者的说法。${check.error ? ` ${check.error}` : ''}`;
+  } else $('computer-acceptance-summary').textContent = '这次没有做独立检查。机器收掉前保存了下面的成果，可以自己看一遍再决定。';
+  $('computer-acceptance-items').replaceChildren(...(check?.items ?? []).map(item => {
     const row = element('li', '', `acceptance-${item.status}`);
     row.append(element('strong', `${ACCEPTANCE_STATES[item.status] ?? item.status}：${item.requirement}`), element('p', item.notes, 'muted'));
     return row;
   }));
   const delivery = $('computer-delivery');
   delivery.replaceChildren();
-  if (check.previewUrl?.startsWith('https://')) {
-    const link = element('a', '打开交付的预览');
-    link.href = check.previewUrl; link.target = '_blank'; link.rel = 'noopener noreferrer';
-    delivery.append(link);
+  if (check?.previewUrl?.startsWith('https://')) {
+    if (MACHINE_UP.includes(view.machine.state)) {
+      const link = element('a', '打开交付的预览');
+      link.href = check.previewUrl; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      delivery.append(link);
+    } else delivery.append(element('span', '在线预览已随机器收掉失效。', 'muted'));
   }
-  if (check.sourceArchive) delivery.append(button('下载源码', async () => {
+  if (saved?.savedSite) delivery.append(button('打开保存的网站', async () => {
+    // Opened before the request, so the browser does not treat it as an unrequested popup.
+    const tab = window.open('', '_blank');
+    try {
+      const token = getToken();
+      const response = await fetch(`/api/runs/${encodeURIComponent(run.id)}/computer/site-link`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!response.ok) throw new Error('保存的网站打不开');
+      const { url } = await response.json() as { url: string };
+      if (tab) { tab.opener = null; tab.location.href = url; } else window.location.href = url;
+    } catch (error) { tab?.close(); throw error; }
+  }));
+  if (check?.sourceArchive || saved?.sourceArchive) delivery.append(button('下载源码', async () => {
     const token = getToken();
     const response = await fetch(`/api/runs/${encodeURIComponent(run.id)}/computer/source`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
     if (!response.ok) throw new Error('源码包读不出来');
@@ -8471,7 +8490,7 @@ function renderAcceptance(run: RunView): void {
   delivery.hidden = !delivery.children.length;
 }
 function renderComputerView(run: RunView, view: ComputerView): void {
-  renderAcceptance(run);
+  renderAcceptance(run, view);
   $('computer-state').textContent = COMPUTER_STATES[view.machine.state] ?? '';
   const interrupted = [...(run.events ?? [])].reverse().find(item => item.type.startsWith('machine.'));
   const notice = view.hostWait

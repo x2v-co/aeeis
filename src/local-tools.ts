@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { savedSiteFile } from './saved-site.js';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord } from './docker-sandbox.js';
@@ -140,6 +141,13 @@ export class LocalToolGateway implements ToolGateway {
     const info = await lstat(path).catch(() => undefined);
     return info?.isFile() ? readFile(path) : undefined;
   }
+  /** What a finished Run left on this host. It outlives the machine, unlike the live preview. */
+  async deliverables(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }> {
+    const artifacts = join(this.screenshotDirectory(runId), '..');
+    const [site, source] = await Promise.all([lstat(join(artifacts, 'site', 'index.html')).catch(() => undefined), lstat(join(artifacts, 'source.tar.gz')).catch(() => undefined)]);
+    return { savedSite: Boolean(site?.isFile()), sourceArchive: Boolean(source?.isFile()) };
+  }
+  savedSiteFile(runId: string, path: string) { return savedSiteFile(this.config.workspaceRoot, runId, path); }
   async screenshot(runId: string, name: string): Promise<Buffer | undefined> {
     if (!screenshotName.test(name)) return undefined;
     const path = join(this.screenshotDirectory(runId), name);
