@@ -5267,6 +5267,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (epoch !== conversationEpoch) return;
     if (!result.conversation || result.conversation.id !== attempt.conversationId || !Array.isArray(result.conversation.messages) || !result.message || typeof result.response !== 'string') throw new Error('服务端回执不完整');
     conversationAttempt = undefined; saveConversationAttempt(); conversationReplyId = undefined; conversationCorrectionId = undefined;
+    if ((JSON.parse(attempt.body) as { runOptions?: { acceptance?: unknown } }).runOptions?.acceptance) clearAcceptance();
     $<HTMLFormElement>('conversation-composer').reset();
     acceptConversation(result.conversation);
     $('conversation-status').textContent = `系统回执：${result.response}`;
@@ -5288,7 +5289,7 @@ $('conversation-text').addEventListener('keydown', event => {
   if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
 });
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
-for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy']) {
+for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());
   $(id)?.addEventListener('change', () => syncEntryDefaults());
 }
@@ -7699,10 +7700,14 @@ function executionReviewNote(): string {
   return `${gate}${shape}`;
 }
 /** One line under the entry composer: what the next run will use, read from the Settings fields it is sent with. */
+function acceptanceNote(): string {
+  const count = ($<HTMLTextAreaElement>('acceptance')?.value ?? '').split('\n').filter(line => line.trim()).length;
+  return count ? ` · 下一次执行带 ${count} 条验收要求` : '';
+}
 function entryDefaultsText(): string {
   const review = executionReviewValue();
   const grant = selectedWorkGrant();
-  if (grant) return `默认：授权「${grant.title}」 · ${workGrantSummary(grant)}`;
+  if (grant) return `默认：授权「${grant.title}」 · ${workGrantSummary(grant)}${acceptanceNote()}`;
   const parts = [review === 'yolo' ? '计划不停，直接执行' : review === 'auto' ? '自动审核' : '每份计划都要你批准'];
   const money = $<HTMLInputElement>('model-budget-usd')?.value.trim();
   const tokens = $<HTMLInputElement>('model-budget-tokens')?.value.trim();
@@ -7712,7 +7717,7 @@ function entryDefaultsText(): string {
   parts.push(!tools.length ? '不调用工具' : tools.length <= 2 ? `工具：${tools.join('、')}` : `工具：${tools.slice(0, 2).join('、')} 等 ${tools.length} 个`);
   const privacy = $<HTMLSelectElement>('privacy');
   if (privacy) parts.push(`隐私：${privacy.selectedOptions[0]?.textContent ?? privacy.value}`);
-  return `默认：${parts.join(' · ')}`;
+  return `默认：${parts.join(' · ')}${acceptanceNote()}`;
 }
 function syncEntryDefaults(): void {
   const line = $('entry-defaults');
@@ -7725,8 +7730,21 @@ function goalExecutionOptions(): Record<string, unknown> {
   const { workGrantId: _grant, allowedTools: _tools, ...options } = runOptions(false);
   return { ...options, allowedTools: listedIds('allowed-tools'), executionReview: 'required' };
 }
+/** The owner's own test of the next Run's work. One requirement per line. */
+function acceptanceRequirements(): string[] {
+  const lines = ($<HTMLTextAreaElement>('acceptance')?.value ?? '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length > 30) throw new Error('验收要求最多 30 条');
+  if (lines.some(line => line.length > 500)) throw new Error('每条验收要求最多 500 个字');
+  return lines;
+}
+/** Requirements are for one Run: once it exists they would only surprise the next, unrelated one. */
+function clearAcceptance(): void {
+  const field = $<HTMLTextAreaElement>('acceptance');
+  if (field?.value) { field.value = ''; syncEntryDefaults(); }
+}
 function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
+  const acceptance = includeProjectQuery ? acceptanceRequirements() : [];
   const knowledgeQuery = $<HTMLInputElement>('knowledge-query').value.trim();
   const allowedTools = listedIds('allowed-tools');
   const allowedAgents = listedIds('allowed-agents');
@@ -7757,7 +7775,7 @@ function runOptions(includeProjectQuery = true, goal = ''): Record<string, unkno
   const scope = grant
     ? { workGrantId: grant.grantId, allowedTools: [] as string[] }
     : { executionReview: executionReviewValue(), allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}) };
-  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), ...(acceptance.length ? { acceptance } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -9148,6 +9166,7 @@ $('new-run').onsubmit = event => {
     return api<{ id: string }>('/runs', { goal, ...(goalId ? { goalId } : {}), ...options });
   })
     .then(async result => {
+      clearAcceptance();
       setCurrentRunOpen(true);
       currentId = result.id;
       current = undefined;

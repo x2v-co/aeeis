@@ -97,6 +97,8 @@ function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boole
     if (next && options.muddledCall && !input.executionBudget.finalOnly) return { value: { type: 'tool', tool: 'capability', toolId: next, toolVersion: '1', input: { step: 0 } } };
     if (next && !input.executionBudget.finalOnly) return { value: { type: 'capability', toolId: next, toolVersion: options.wrongVersionFirst && !input.observations.length ? '9' : '1', purpose: `Use ${next}`, input: { step: input.observations.length } } };
     const refs = (input.availableEvidenceRefs as string[]).slice(0, 1);
+    // In two steps, the summary never becomes valid, so its repair runs out after the build step's work.
+    if (options.twoSteps && input.task?.id === 'deliver') return { value: { type: 'finish', title: '', content: '' } };
     return { value: { type: 'finish', title: 'Site', content: `Done. [${refs[0]}]`, evidenceRefs: refs } };
   };
   const complete = vi.fn(respond);
@@ -313,8 +315,8 @@ describe('independent acceptance of finished work', () => {
     expect((await plain.repository.get(other.id)).calls[0]!.modelRequest!.system).not.toContain('do not plan verification');
   });
   describe('when the work stops early as partial', () => {
-    // website-builder/1 needs structured output the fixture never gives, so the delivery step ends with its repair
-    // exhausted after the build step's work, as in production.
+    // The delivery step's output never becomes valid, so it ends with its repair exhausted after the build step's
+    // work, as in production.
     const stopEarly = async (verify: (input: VerifyInput) => Promise<AcceptanceCheck>) => {
       const verifier = { verify: vi.fn(verify) };
       const h = harness({ verifier, twoSteps: true });
