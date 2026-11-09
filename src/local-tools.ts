@@ -160,6 +160,8 @@ export class LocalToolGateway implements ToolGateway {
     if (inside(config.workspaceRoot, config.stateDirectory) || inside(config.stateDirectory, config.workspaceRoot)) throw new Error('Local tool state and workspaces must use separate directories');
     return new LocalToolGateway(config);
   }
+  /** The configured tools and versions, without reaching the sandbox host. */
+  toolRefs(): { id: string; version: string }[] { return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3' })); }
   async listTools(): Promise<ToolDescriptor[]> {
     const image = this.config.tools.some(id => id !== 'web-fetch') ? await this.sandbox.imageId() : null;
     return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}${runsCode(id) ? this.networkNote() : ''}`, capabilities: this.capabilities(id), inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
@@ -181,8 +183,8 @@ export class LocalToolGateway implements ToolGateway {
     const confined = this.config.sandbox.network !== 'bridge';
     return this.config.tools.filter(id => id !== 'web-fetch' && (!runsCode(id) || confined));
   }
-  async health() {
-    if (this.config.tools.some(id => id !== 'web-fetch')) return this.sandbox.health();
+  async health(options: { probe?: boolean } = {}) {
+    if (this.config.tools.some(id => id !== 'web-fetch')) return this.sandbox.health(options);
     return { ready: !this.closing, detail: 'Allowlisted HTTPS tools ready', checkedAt: new Date().toISOString() };
   }
 
@@ -296,10 +298,15 @@ export class LocalToolGateway implements ToolGateway {
 /** Keeps remote tools available alongside local tools, rejecting ambiguous IDs. */
 export class CombinedToolGateway implements ToolGateway {
   constructor(private readonly gateways: ToolGateway[]) {}
+  /** One gateway may offer several versions of a tool; two gateways offering the same ID would make routing ambiguous. */
   async listTools(): Promise<ToolDescriptor[]> {
-    const tools = (await Promise.all(this.gateways.map(gateway => gateway.listTools()))).flat();
-    if (new Set(tools.map(tool => tool.id)).size !== tools.length) throw new Error('Duplicate tool IDs across local and remote gateways');
-    return tools;
+    const lists = await Promise.all(this.gateways.map(gateway => gateway.listTools()));
+    const owner = new Map<string, number>();
+    lists.forEach((tools, index) => { for (const tool of tools) {
+      if ((owner.get(tool.id) ?? index) !== index) throw new Error(`Duplicate tool ID across local and remote gateways: ${tool.id}`);
+      owner.set(tool.id, index);
+    } });
+    return lists.flat();
   }
   private async gateway(request: ToolInvocation) {
     await this.listTools();

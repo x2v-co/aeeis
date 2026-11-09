@@ -261,7 +261,12 @@ export class DockerSandbox {
     this.pinnedImage = match[1]!;
     return this.pinnedImage;
   }
-  async health() {
+  /** A remote host is only contacted while a Run uses it, unless `probe` asks: the readiness monitor calls this every
+   * minute, and contacting a host that pauses when idle (instabox) would keep it awake until it hits its run limit. */
+  async health(options: { probe?: boolean } = {}) {
+    if (this.config.ssh && !options.probe && !(await this.pendingRuns().catch(() => [{}])).length) {
+      return { ready: true, detail: `Remote sandbox on ${this.config.ssh}, not checked while no Run uses it (so it can pause when idle)`, checkedAt: new Date().toISOString() };
+    }
     try {
       const image = await this.imageId();
       const probe = await this.command(['info', '--format', '{{.OSType}}'], 3000);

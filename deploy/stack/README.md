@@ -128,6 +128,15 @@ certificate; a paused or cooling-down machine is waited for up to
 and to the npm registry for the pinned `instabox` CLI. The Anthropic key never
 enters the Bot's container: the per-Run relay holds it.
 
+Production allows local tools only in this shape: `sandbox.ssh` set, network
+`proxied` or `none`, no `web-fetch`, and a single owner (no
+`AEEIS_PRINCIPAL_TOKENS` or `AEEIS_OIDC_ISSUER`). `bin/deploy.sh` runs a startup
+gate (`scripts/check-tools.mjs`) in a one-off container before replacing anything:
+startup checks, Toolkit plus local tools, and default tools must pass, and the
+sandbox host is reported but not required. AEEIS starts without the sandbox
+host, and its readiness check leaves the host alone while no Run uses it, so an
+idle Instabox machine can pause.
+
 ## Network and trust
 
 `netns` owns a stable network namespace shared by API and worker. Worker → API
