@@ -8590,7 +8590,9 @@ function render(run: RunView): void {
   document.body.classList.toggle('run-open', currentRunOpen);
   const shareResult = $('run-share-result');
   if (shareResult.dataset.runId !== run.id) { shareResult.replaceChildren(); shareResult.dataset.runId = run.id; }
-  if (!readOnlyShare && !linkedThreadId && !conversationEnabled && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
+  // Only a page opened as a Run link follows the Run in its address. The home page keeps "/": rewriting it (chats
+  // are off until the status arrives) turned the next load into a Run link, with chats off for good.
+  if (linkedRunId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
   $('create-run-share').hidden = readOnlyShare || run.canEdit === false;
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;

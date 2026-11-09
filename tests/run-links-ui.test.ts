@@ -286,6 +286,21 @@ describe('run link workbench', () => {
     expect(doc.getElementById('decision-next-button')?.hidden).toBe(true);
     expect(dom.window.getComputedStyle(doc.getElementById('create-run-share')!).display).toBe('none');
   });
+  it('keeps the home page at "/" while it shows a Run remembered from an earlier visit', async () => {
+    // Rewriting the address here turned the next load into a Run link, which keeps chats off for good.
+    const run = fixture();
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/api/status') return response({ modelConfigured: false, runner: 'unconfigured', mode: 'single-owner-local' });
+      if (url === `/api/runs/${run.id}`) return response(run);
+      if (url === `/api/runs/${run.id}/graphs`) return response(sharedRunView(run).graphs);
+      if (url === `/api/runs/${run.id}/explanation`) return response(sharedRunView(run).explanation);
+      if (url.includes('/page?')) return response({ items: [], goals: [] });
+      return response([]);
+    });
+    start('/', fetch, undefined, window => window.localStorage.setItem('aeeis.run', run.id));
+    await vi.waitFor(() => expect(dom.window.document.getElementById('run-title')?.textContent).toBe(run.goal));
+    expect(dom.window.location.pathname).toBe('/');
+  });
   it('selects the run in the URL over saved state and expands the workbench', async () => {
     const run = fixture();
     const fetch = vi.fn(async (url: string) => {
