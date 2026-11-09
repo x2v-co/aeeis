@@ -4,6 +4,7 @@ import { readinessToolsEnvMs } from './runtime/readiness-tools-config.js';
 import { DEFAULT_THREAD_HISTORY_BYTES, MAX_THREAD_HISTORY_BYTES } from './runtime/thread-history.js';
 import { validateInternalEndpoint } from './internal-endpoint.js';
 import { createPublicKey } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 function parseConfigRecord(raw: string | undefined, label: string, allowEmpty = false): Record<string, string> {
   if (!raw) throw new Error(`${label} is required when Planprice model routing is enabled`);
@@ -175,16 +176,34 @@ function validatePrivacyList(raw: string | undefined, label: string): void {
   }
 }
 
+/** Local tools run code for the Bot. On a loopback development runtime anything goes. A shared or production
+ * runtime may use them only when every tool runs on a separate sandbox host behind the Run's proxy (or with no
+ * network) and one owner holds the deployment: tool calls share one queue and one sandbox host, with no per-owner
+ * limits yet. Anything else needs an isolated remote tool gateway. */
+function validateLocalTools(env: NodeJS.ProcessEnv): void {
+  const path = env.AEEIS_LOCAL_TOOLS_CONFIG;
+  if (!path) return;
+  const multiOwner = env.AEEIS_PRINCIPAL_TOKENS !== undefined || Boolean(env.AEEIS_OIDC_ISSUER);
+  const shared = (env.AEEIS_ENV ?? env.NODE_ENV) === 'production' || env.AEEIS_RUNNER === 'temporal'
+    || !['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1');
+  if (!multiOwner && !shared) return;
+  const refuse = (reason: string): never => {
+    throw new Error(`AEEIS_LOCAL_TOOLS_CONFIG outside a loopback development runtime ${reason}; otherwise use an isolated remote tool gateway`);
+  };
+  if (multiOwner) refuse('needs a single owner (no AEEIS_PRINCIPAL_TOKENS or AEEIS_OIDC_ISSUER)');
+  let config: { tools?: unknown; sandbox?: { ssh?: unknown; network?: unknown } };
+  try { config = JSON.parse(readFileSync(path, 'utf8')) as typeof config; }
+  catch { return refuse('needs a readable JSON tools config'); }
+  if (typeof config?.sandbox?.ssh !== 'string' || !config.sandbox.ssh) refuse('needs sandbox.ssh: the sandbox must run on a separate host');
+  if (!['proxied', 'none'].includes(String(config.sandbox?.network ?? 'bridge'))) refuse('needs sandbox.network "proxied" or "none"');
+  if (Array.isArray(config.tools) && config.tools.includes('web-fetch')) refuse('cannot enable web-fetch, which runs on this host');
+}
+
 /** Startup checks for deployment-level invariants. Keep this module free of
  * stores and network calls so CI and deployment tooling can validate config
  * before opening locks or connecting to external systems. */
 export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): void {
-  if (env.AEEIS_LOCAL_TOOLS_CONFIG) {
-    if ((env.AEEIS_ENV ?? env.NODE_ENV) === 'production' || env.AEEIS_PRINCIPAL_TOKENS !== undefined || env.AEEIS_OIDC_ISSUER || env.AEEIS_RUNNER === 'temporal'
-      || !['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1')) {
-      throw new Error('AEEIS_LOCAL_TOOLS_CONFIG requires a loopback, single-owner, local development runtime; use an isolated remote tool gateway for shared deployments');
-    }
-  }
+  validateLocalTools(env);
 
   // AEEIS_ENV is the deployment intent. An explicit development value is
   // allowed inside a production-built image (for example the local Compose
