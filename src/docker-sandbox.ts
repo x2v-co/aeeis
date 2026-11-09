@@ -77,6 +77,9 @@ export class SandboxError extends Error {
 export class SandboxUnreachable extends SandboxError {
   /** ssh's own "Permission denied (publickey,…)": authentication failed, so no remote command started. */
   readonly loginRefused: boolean;
+  /** ssh could not resolve the host name. With an alias that sshLoginCommand writes (a fresh deployment has none
+   * yet) running the login command fixes it; otherwise it is a name-service outage and is waited on. */
+  readonly unresolved: boolean;
   /** When the host says it will accept connections again, e.g. instabox's "cooling down until <time>". */
   readonly availableAt: number | undefined;
   constructor(host: string, stderr: string) {
@@ -87,6 +90,7 @@ export class SandboxUnreachable extends SandboxError {
       ? `Sandbox host ${host} refused the SSH login; its certificate may have expired`
       : `Sandbox host ${host} is unreachable over SSH; it may be paused or stopped`);
     this.loginRefused = refused;
+    this.unresolved = /Could not resolve hostname/i.test(stderr);
     this.availableAt = Number.isNaN(availableAt) ? undefined : availableAt;
   }
 }
@@ -191,8 +195,8 @@ export class DockerSandbox {
   private async command(args: string[], timeoutMs: number, input?: string, maxBytes = 64_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
     try { return await this.transport(args, timeoutMs, input, maxBytes); }
     catch (error) {
-      if (!(error instanceof SandboxUnreachable) || !error.loginRefused || !this.config.sshLoginCommand) throw error;
-      // A refused login ran nothing remotely, so renewing the login and trying once more is safe for any command.
+      if (!(error instanceof SandboxUnreachable) || !(error.loginRefused || error.unresolved) || !this.config.sshLoginCommand) throw error;
+      // A refused login or an unknown host ran nothing remotely, so logging in and trying once more is safe for any command.
       if (!await this.refreshLogin()) throw error;
       return this.transport(args, timeoutMs, input, maxBytes);
     }
