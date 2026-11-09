@@ -165,29 +165,43 @@ describe('task scoped working memory through the durable engine', () => {
     expect(current.modelUsage).toMatchObject({ tokens: 20, unreportedCalls: 1 });
   });
 
-  it.each([ModelOutcomeUnknown, ModelTimeout])('requires explicit reconciliation for unknown summary outcomes (%s), without artifacts or timeout retries', async ErrorType => {
+  it.each([ModelOutcomeUnknown, ModelTimeout])('goes on without a summary whose outcome is unknown (%s), leaving only its billing to reconcile', async ErrorType => {
     const fixture = await setup({ compact: () => { throw new ErrorType('summary provider outcome unknown'); } });
-    expect(await fixture.engine.advance(fixture.run.id)).toBe('unknown');
+    expect(await fixture.engine.advance(fixture.run.id)).toBe('running');
     let current = await fixture.repository.get(fixture.run.id);
-    const call = current.calls.at(-1)!;
-    expect(call).toMatchObject({ phase: 'compaction', state: 'unknown' });
+    const call = current.calls.find(item => item.phase === 'compaction')!;
+    expect(call).toMatchObject({ state: 'unknown' });
+    expect(current).toMatchObject({ status: 'running' });
+    expect(current.reconcileDisposition).toBeUndefined();
+    expect(current.error).toBeUndefined();
     expect(current.artifacts).toEqual([]);
     expect(current.steps[0]!.timeoutRetried).toBeUndefined();
     expect(current.events.some(event => event.type === 'model.timeout_retry')).toBe(false);
     expect(current.events.find(event => event.type === 'model.unknown')?.data).not.toHaveProperty('rawOutput');
-    const restarted = fixture.restart();
-    await restarted.recover();
-    await restarted.advance(current.id);
-    expect(fixture.complete).toHaveBeenCalledTimes(2);
-    const output = summary({ ...call.modelRequest!, input: call.modelRequest!.input }).value;
-    await restarted.reconcileModelCall(current.id, { callId: call.id, idempotencyKey: call.idempotencyKey, inputHash: call.inputHash, outcome: 'completed', output, usage, reason: 'Provider confirmed original result' });
+    expect(current.events.map(event => event.type)).toEqual(expect.arrayContaining(['context.summary_failed', 'context.summary_skipped']));
+    // The task carries on, and the lost summary is never asked for again.
     await fixture.restart().advance(current.id);
     current = await fixture.repository.get(current.id);
-    expect(current.status).toBe('running');
-    expect(current.calls).toHaveLength(2);
-    expect(current.calls[1]).toMatchObject({ state: 'completed', inputHash: call.inputHash, modelRequest: call.modelRequest, usage });
-    expect(current.workingMemory!.summaries[0]!.status).toBe('active');
-    expect(fixture.complete).toHaveBeenCalledTimes(2);
+    expect(current.calls.filter(item => item.phase === 'compaction')).toHaveLength(1);
+    expect(current.calls.some(item => item.phase === 'executor')).toBe(true);
+    // Reconciling it later settles billing only: the Run is not reopened, and the late summary is not used.
+    const output = summary({ ...call.modelRequest!, input: call.modelRequest!.input }).value;
+    await fixture.restart().reconcileModelCall(current.id, { callId: call.id, idempotencyKey: call.idempotencyKey, inputHash: call.inputHash, outcome: 'completed', output, usage, reason: 'Provider confirmed original result' });
+    const settled = await fixture.repository.get(current.id);
+    expect(settled.calls.find(item => item.id === call.id)).toMatchObject({ state: 'discarded', usage });
+    expect(settled.status).toBe(current.status);
+    expect(settled.workingMemory!.summaries.some(item => item.status === 'active')).toBe(false);
+  });
+
+  it('settles a lost summary reported as failed without failing the Run that went on', async () => {
+    const fixture = await setup({ compact: () => { throw new ModelTimeout('summary timed out'); } });
+    await fixture.engine.advance(fixture.run.id);
+    const current = await fixture.repository.get(fixture.run.id);
+    const call = current.calls.find(item => item.phase === 'compaction')!;
+    await fixture.restart().reconcileModelCall(current.id, { callId: call.id, idempotencyKey: call.idempotencyKey, inputHash: call.inputHash, outcome: 'failed', usage, reason: 'Provider has no record' });
+    const settled = await fixture.repository.get(current.id);
+    expect(settled.calls.find(item => item.id === call.id)?.state).toBe('failed');
+    expect(settled.status).toBe('running');
   });
 
   it('fences two engines on the same Run while independent Runs progress concurrently', async () => {

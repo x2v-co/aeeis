@@ -1873,7 +1873,9 @@ export class AgentEngine {
       if (currentCall.inputHash !== body.inputHash) throw new Conflict('Model reconciliation input hash does not match the durable call');
       // A partial deliverable may already have been returned. Reconcile its
       // billing receipt without reopening execution or replacing the artifact.
-      if (current.status === 'succeeded' || current.status === 'failed' || current.steps.some(step => step.status === 'succeeded' && step.finalCallId === currentCall.id)) {
+      // A summary the Run already went on without is billing only, too: its late result is never used.
+      if (current.status === 'succeeded' || current.status === 'failed' || current.steps.some(step => step.status === 'succeeded' && step.finalCallId === currentCall.id)
+        || (currentCall.phase === 'compaction' && current.status !== 'unknown')) {
         currentCall.state = body.outcome === 'completed' ? 'discarded' : 'failed';
         currentCall.endedAt = now();
         if (body.outcome === 'completed') currentCall.outputHash = digest(body.output);
@@ -2201,9 +2203,15 @@ export class AgentEngine {
         if (error instanceof ModelResponseRejected && error.rawOutput !== undefined) call.rawOutput = modelRawOutput(error.rawOutput);
         event(current, call.state === 'unknown' ? 'model.unknown' : 'model.failed', { callId, ...(phase === 'compaction' ? {} : { rawOutput: call.rawOutput }), validation: { issues: call.validationErrors } });
         if (phase === 'compaction') {
-          // A summary is not task execution. Unknown billing must reconcile;
-          // never synthesize partial artifacts or auto-retry a summary timeout.
+          // A summary is not task execution, so losing one must not stop the work: the task goes on with its usual
+          // trimming. The call itself stays unknown until its billing is reconciled, and it is never retried.
           event(current, 'context.summary_failed', { taskId: taskId ?? null, callId, outcome: call.state });
+          if (current.status === 'unknown' && current.reconcileDisposition && current.reconcileDisposition !== 'cancelled') {
+            if (current.reconcileDisposition === 'paused') current.status = 'paused';
+            else { current.status = current.resumeStatus && runnable.has(current.resumeStatus) ? current.resumeStatus : 'running'; delete current.resumeStatus; }
+            delete current.error; delete current.reconcileDisposition;
+            event(current, 'context.summary_skipped', { taskId: taskId ?? null, callId, reason: 'The summary did not arrive; the task continues without it' });
+          }
           return;
         }
         if (phase === 'action_review') {
@@ -2280,7 +2288,7 @@ export class AgentEngine {
       if (staleCompaction) return;
       if (error instanceof ModelResponseRejected) await this.settleModelGlobal(failed, callId, error.usage);
       if (error instanceof ModelOutcomeUnknown) await this.markModelGlobalUnknown(failed, callId);
-      if (phase === 'compaction' && error instanceof ModelResponseRejected) return;
+      if (phase === 'compaction') return;
       if (phase === 'action_review') return;
       if (failed.status === 'reviewing' && failed.stopReview === 'pending') return;
       if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
@@ -2464,9 +2472,12 @@ export class AgentEngine {
     });
   }
   private async compactWorkingMemory(run: AgentRun, model: ModelAdapter, manifest: WorkingManifest): Promise<void> {
+    const resumedTimeoutMs = run.resumeModelCallId ? run.calls.find(call => call.id === run.resumeModelCallId)?.modelRequest?.timeoutMs : undefined;
     if (!run.workingMemory!.manifests.some(item => item.id === manifest.id)) run.workingMemory!.manifests.push(manifest);
     const request = this.requestForCall(run, 'compaction', { system: compactionSystem, input: compactionInput(run, manifest),
-      maxTokens: 2048, maxResponseBytes: WORKING_MEMORY_LIMITS.responseBytes, timeoutMs: 60_000, disableRetries: true }, manifest.taskId);
+      // Slow providers took 50s for one summary; at 60s the next one ran out of time. A call being resumed keeps the
+      // limit it was made with: its durable request hash covers it.
+      maxTokens: 2048, maxResponseBytes: WORKING_MEMORY_LIMITS.responseBytes, timeoutMs: resumedTimeoutMs ?? 120_000, disableRetries: true }, manifest.taskId);
     await this.call(run, model, 'compaction', request, (current, value) => {
       const call = current.calls.find(item => item.phase === 'compaction' && item.taskId === manifest.taskId &&
         (item.modelRequest?.input as { manifestId?: string } | undefined)?.manifestId === manifest.id)!;
