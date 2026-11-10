@@ -348,6 +348,21 @@ describe('the independent check of finished work', () => {
   };
   const verify = (sandbox: ExecutorSandbox, tokens = 100_000) => transport(sandbox).verify({ runId, goal: 'Build a form', requirements, tokens, round: 0, deliver: true });
 
+  it('starts each attempt at a round in a session of its own, and follows an interrupted one only for its cost', async () => {
+    const sandbox = sandboxFor(verdict(both));
+    const t = transport(sandbox);
+    await t.verify({ runId, goal: 'Build a form', requirements, tokens: 100_000, round: 0, attempt: '0', deliver: false });
+    await t.verify({ runId, goal: 'Build a form', requirements, tokens: 100_000, round: 0, attempt: '1', deliver: false });
+    const [first, second] = sandbox.startExecutor.mock.calls.map(call => call[1].id);
+    expect(first).not.toBe(second);
+    // A dead check: the sandbox still knows its session. It is followed to its end, never started again.
+    sandbox.executorRecord.mockResolvedValue({ session: first!, token: 'token', pid: 42 });
+    const followed = await t.resume({ runId, goal: 'Build a form', requirements, tokens: 100_000, round: 0, attempt: '0', deliver: false });
+    expect(sandbox.startExecutor).toHaveBeenCalledTimes(2);
+    expect(followed).toMatchObject({ passed: false, cost: { tokens: 100 }, error: expect.stringContaining('interrupted') });
+    // The sandbox has moved on to another session: nothing to follow.
+    expect(await t.resume({ runId, goal: 'Build a form', requirements, tokens: 100_000, round: 0, attempt: '2', deliver: false })).toBeUndefined();
+  });
   it('runs as a fresh session with no edit tools, which never sees the executor report', async () => {
     const sandbox = sandboxFor(verdict(both));
     await verify(sandbox);

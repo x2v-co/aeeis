@@ -379,11 +379,94 @@ describe('independent acceptance of finished work', () => {
     const stopped = await h.repository.get(run.id);
     expect(stopped.status).toBe('cancelled');
     expect(stopped.pendingAcceptance).toBeUndefined();
-    expect(stopped.acceptanceChecks).toEqual([expect.objectContaining({ afterStop: true, cost: expect.objectContaining({ tokens: 50 }) })]);
+    expect(stopped.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'stopped', cost: expect.objectContaining({ tokens: 50 }) })]);
     expect(stopped.events.map(item => item.type)).toContain('acceptance.checked_after_stop');
     expect(stopped.events.map(item => item.type)).not.toContain('acceptance.checked');
     const settled = (await h.engine.settleWorkGrant(run.workGrant!.grantId, scope)).allocations[0]!;
     expect(settled).toMatchObject({ tokens: stopped.calls.length * 15 + 50, settledAt: expect.any(String) });
+  });
+  const reviewing = async (h: Awaited<ReturnType<typeof start>>['h'], id: string) => {
+    expect(await h.settle(id, ['reviewing', 'succeeded', 'failed'])).toBe('reviewing');
+    return h.repository.get(id);
+  };
+  it('does not start a check for a Run that was cancelled and settled while its tick was held up', async () => {
+    const { h, verifier, run } = await start(async () => check(0, true));
+    const stale = await reviewing(h, run.id);
+    await h.engine.command(run.id, 'cancel', {});
+    expect((await h.engine.settleWorkGrant(run.workGrant!.grantId, scope)).allocations[0]!.settledAt).toEqual(expect.any(String));
+    expect(await (h.engine as unknown as { checkAcceptance(run: AgentRun): Promise<boolean> }).checkAcceptance(stale)).toBe(false);
+    expect(verifier.verify).not.toHaveBeenCalled();
+    expect((await h.repository.get(run.id)).pendingAcceptance).toBeUndefined();
+  });
+  it('leaves a check that is out alone, then follows a stale one for its cost before checking afresh', async () => {
+    const resume = vi.fn(async (input: VerifyInput) => check(input.round, true, { cost: { tokens: 70 } }));
+    const verifier = { verify: vi.fn(async (input: VerifyInput) => check(input.round, true)), resume };
+    const h = harness({ verifier });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a form', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements });
+    await reviewing(h, run.id);
+    // Another Engine holds a live claim: this one neither replaces nor clears it, and starts nothing.
+    await h.repository.mutate(run.id, current => { current.pendingAcceptance = { round: 0, attempt: '0', claim: 'other', at: new Date().toISOString() }; });
+    expect(await h.engine.advance(run.id)).toBe('reviewing');
+    expect(verifier.verify).not.toHaveBeenCalled();
+    expect((await h.repository.get(run.id)).pendingAcceptance).toMatchObject({ claim: 'other', attempt: '0' });
+    // Its process died: the claim stops being renewed, and the next tick follows the same session for what it cost.
+    await h.repository.mutate(run.id, current => { current.pendingAcceptance!.at = new Date(Date.now() - 10 * 60_000).toISOString(); });
+    expect(await h.engine.advance(run.id)).toBe('reviewing');
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ round: 0, attempt: '0' }));
+    const followed = await h.repository.get(run.id);
+    expect(followed.pendingAcceptance).toBeUndefined();
+    expect(followed.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'interrupted', cost: { tokens: 70 } })]);
+    // Its verdict decided nothing: a fresh check, in a session of its own, does.
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    expect(verifier.verify.mock.calls[0]![0]).toMatchObject({ round: 0, attempt: '1' });
+    const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
+    const done = await h.repository.get(run.id);
+    expect(settled.tokens).toBe(done.modelUsage!.tokens + 70 + 50);
+  });
+  it('keeps the cost of a result whose claim was taken over, but lets it decide nothing', async () => {
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    ctx = await start(async () => {
+      await ctx.h.repository.mutate(ctx.run.id, current => { current.pendingAcceptance = { ...current.pendingAcceptance!, claim: 'other' }; });
+      return check(0, true);
+    });
+    await reviewing(ctx.h, ctx.run.id);
+    expect(await ctx.h.engine.advance(ctx.run.id)).toBe('reviewing');
+    const after = await ctx.h.repository.get(ctx.run.id);
+    expect(after.pendingAcceptance).toMatchObject({ claim: 'other' });
+    expect(after.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'duplicate', cost: expect.objectContaining({ tokens: 50 }) })]);
+    expect(after.events.map(item => item.type)).not.toContain('acceptance.checked');
+  });
+  it('checks again after a pause, ignoring what came back while it was paused', async () => {
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    ctx = await start(async input => {
+      if (input.attempt === '0') { await ctx.h.engine.command(ctx.run.id, 'pause', {}); return check(input.round, false); }
+      return check(input.round, true);
+    });
+    expect(await ctx.h.settle(ctx.run.id)).toBe('paused');
+    await ctx.h.engine.command(ctx.run.id, 'resume', {});
+    expect(await ctx.h.settle(ctx.run.id)).toBe('succeeded');
+    expect(ctx.verifier.verify.mock.calls.map(call => call[0].attempt)).toEqual(['0', '1']);
+    const done = await ctx.h.repository.get(ctx.run.id);
+    expect(done.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'stopped', passed: false }), expect.objectContaining({ passed: true })]);
+    expect(done.acceptanceChecks![1]!.ignored).toBeUndefined();
+  });
+  it('follows a dead check on a cancelled Run for its cost before refunding the grant', async () => {
+    const resume = vi.fn(async (input: VerifyInput) => check(input.round, false, { cost: { tokens: 40 } }));
+    const verifier = { verify: vi.fn(async (input: VerifyInput) => check(input.round, true)), resume };
+    const h = harness({ verifier });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a form', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements });
+    await reviewing(h, run.id);
+    await h.repository.mutate(run.id, current => { current.pendingAcceptance = { round: 0, attempt: '0', claim: 'dead', at: new Date(Date.now() - 10 * 60_000).toISOString() }; });
+    await h.engine.command(run.id, 'cancel', {});
+    expect((await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!.settledAt).toBeUndefined();
+    await vi.waitFor(async () => expect((await h.repository.get(run.id)).pendingAcceptance).toBeUndefined());
+    const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
+    const done = await h.repository.get(run.id);
+    expect(done.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'interrupted', cost: { tokens: 40 } })]);
+    expect(settled).toMatchObject({ tokens: done.modelUsage!.tokens + 40, settledAt: expect.any(String) });
   });
   it('counts what checks cost against the Run', async () => {
     const { h, run } = await start(async () => check(0, true));

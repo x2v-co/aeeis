@@ -288,8 +288,9 @@ export interface AcceptanceCheck {
   projectChanged: boolean;
   cost?: { tokens?: number; money?: number; currency?: string };
   previewUrl?: string; sourceArchive?: string; error?: string;
-  /** Came back after the Run had stopped (for example cancelled). Kept for its cost; it decided nothing. */
-  afterStop?: true;
+  /** Kept only for its cost; it decides nothing. 'stopped': it came back after the Run had stopped (cancelled, paused).
+   * 'duplicate': another attempt already settled this round. 'interrupted': its process died, and the check was followed to its end only to learn what it cost. */
+  ignored?: 'stopped' | 'duplicate' | 'interrupted';
 }
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
@@ -444,7 +445,9 @@ export interface AgentRun {
   acceptance?: string[];
   acceptanceChecks?: AcceptanceCheck[];
   /** An independent check sent and not yet back. It may still be billed, so the Run's grant reservation stays until it lands. */
-  pendingAcceptance?: { round: number; at: string };
+  /** An independent check that is out. Only the holder of `claim` may finish it; it renews `at` while it waits, and a
+   * claim left stale (its process died) is taken over by following the same session (`attempt`) to its end. */
+  pendingAcceptance?: { round: number; attempt: string; claim: string; at: string };
   error?: string;
   resumeStatus?: RunStatus;
   /** A person paused the Bot to do the work by hand. Handing back writes a note to the unfinished steps and resumes. */

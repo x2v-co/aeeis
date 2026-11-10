@@ -513,7 +513,20 @@ function toolProviderRequest(pending: ExternalToolInvocation): ToolInvocation {
   };
 }
 
-export interface AcceptanceVerifier { verify(input: VerifyInput): Promise<AcceptanceCheck> }
+export interface AcceptanceVerifier {
+  verify(input: VerifyInput): Promise<AcceptanceCheck>;
+  /** Follows a check whose process died to its end, for its cost. Undefined when its session cannot be found. */
+  resume?(input: VerifyInput): Promise<AcceptanceCheck | undefined>;
+}
+/** A claim on a check is renewed every minute while it is watched; one not renewed for five belongs to a process that died. */
+const ACCEPTANCE_RENEW_MS = 60_000, ACCEPTANCE_LEASE_MS = 5 * 60_000;
+function acceptanceClaimStale(out: NonNullable<AgentRun['pendingAcceptance']>): boolean {
+  return !(Date.parse(out.at) > Date.now() - ACCEPTANCE_LEASE_MS);
+}
+/** The checks that decide something, leaving out those kept only for what they cost. */
+function decidingChecks(run: AgentRun): AcceptanceCheck[] {
+  return (run.acceptanceChecks ?? []).filter(item => !item.ignored);
+}
 /** Tokens a delegation may still spend. Under a Work Grant the budget is the Run's model budget, so what the planner
  * and executor already used comes off it: one allocation must not be spendable twice. */
 export function delegationContext(run: AgentRun) {
@@ -1774,7 +1787,7 @@ export class AgentEngine {
     } catch (error) {
       await this.repository.mutate(runId, async run => {
         if (terminalRunStatuses.has(run.status) || run.status === 'unknown') return;
-        if (run.status === 'reviewing' && run.stopReview === 'pending' && run.acceptance?.length && !run.acceptanceChecks?.some(check => check.passed)) {
+        if (run.status === 'reviewing' && run.stopReview === 'pending' && run.acceptance?.length && !decidingChecks(run).some(check => check.passed)) {
           // Without a passed check, work with acceptance requirements is not accepted.
           run.stopReview = 'done'; run.status = 'failed'; run.error = `Independent check could not finish: ${failureReason(error, 'Check failed')}`;
           event(run, 'run.failed', { reason: run.error });
@@ -3716,24 +3729,35 @@ export class AgentEngine {
   /** Looks at the finished work independently, before anyone reads the Bot's account of it. True when it may go on to review. */
   private async checkAcceptance(run: AgentRun): Promise<boolean> {
     const round = run.events.filter(item => item.type === 'review.revision_requested').length;
-    const known = run.acceptanceChecks?.find(item => item.round === round);
+    const known = decidingChecks(run).find(item => item.round === round);
     if (known?.passed) return true;
     if (known) return false;
-    const tokens = delegationContext(run).tokens ?? 0;
-    // Durable before dispatch: a cancel while the check runs must not let the grant refund what the check may yet bill.
-    // If verify throws, the marker stays (its spend is unknown); a later attempt replaces it.
-    await this.repository.mutate(run.id, current => { current.pendingAcceptance = { round, at: now() }; });
-    const check = await this.verifier!.verify({ runId: run.id, goal: run.goal, requirements: run.acceptance!, tokens, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round, deliver: true });
+    // Claimed under the Run lock, and only while it is still under review: a tick that was held up while the Run was
+    // cancelled and settled must not start a check that could bill afterwards. Only one check may be out at a time.
+    const claim = randomUUID();
+    let taken = undefined as { attempt: string; round: number; resume: boolean } | undefined;
     await this.repository.mutate(run.id, current => {
-      if (current.pendingAcceptance?.round === round) delete current.pendingAcceptance;
-      if (current.acceptanceChecks?.some(item => item.round === round)) return;
-      if (current.status !== 'reviewing') {
-        // The Run stopped while the check ran. Its result decides nothing now, but what it cost still counts.
-        (current.acceptanceChecks ??= []).push({ ...check, afterStop: true });
-        event(current, 'acceptance.checked_after_stop', { round, status: current.status, ...(check.cost ? { cost: check.cost } : {}) });
+      if (current.status !== 'reviewing') return;
+      const out = current.pendingAcceptance;
+      if (out) {
+        if (!acceptanceClaimStale(out)) return;
+        current.pendingAcceptance = { ...out, claim, at: now() };
+        event(current, 'acceptance.claim_taken_over', { round: out.round, attempt: out.attempt });
+        taken = { attempt: out.attempt, round: out.round, resume: true };
         return;
       }
-      (current.acceptanceChecks ??= []).push(check);
+      const attempt = String((current.acceptanceChecks ?? []).filter(item => item.round === round).length);
+      current.pendingAcceptance = { round, attempt, claim, at: now() };
+      taken = { attempt, round, resume: false };
+    });
+    if (!taken) return false;
+    const input: VerifyInput = { runId: run.id, goal: run.goal, requirements: run.acceptance!, tokens: delegationContext(run).tokens ?? 0, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round: taken.round, attempt: taken.attempt, deliver: true };
+    // If this throws, the claim stays and stops being renewed: its spend is unknown until a later tick takes it over.
+    const check = await this.holdingClaim(run.id, claim, () => taken!.resume ? this.followInterrupted(input) : this.verifier!.verify(input));
+    let decides = false;
+    await this.repository.mutate(run.id, current => {
+      if (!this.recordAcceptance(current, claim, check)) return;
+      decides = true;
       event(current, 'acceptance.checked', { round, passed: check.passed, failed: check.items.filter(item => item.status !== 'passed').length, ...(check.error ? { error: check.error } : {}) });
       if (check.passed) return;
       const open = check.items.filter(item => item.status !== 'passed');
@@ -3756,7 +3780,53 @@ export class AgentEngine {
       event(current, 'review.completed', { verdict: 'needs_revision', issues: current.review.issues, source: 'acceptance' });
       settleReview(current);
     });
-    return check.passed;
+    return decides && check.passed;
+  }
+  /** Runs `work` while renewing the claim, so nobody takes over a check that is still being watched. */
+  private async holdingClaim<T>(runId: string, claim: string, work: () => Promise<T>, scope?: Ownership): Promise<T> {
+    const renew = setInterval(() => {
+      void this.repository.mutate(runId, current => { if (current.pendingAcceptance?.claim === claim) current.pendingAcceptance.at = now(); }, scope).catch(() => undefined);
+    }, ACCEPTANCE_RENEW_MS);
+    renew.unref?.();
+    try { return await work(); } finally { clearInterval(renew); }
+  }
+  /** A check whose process died: follow its session to the end for what it cost. Unknown cost when it cannot be found. */
+  private async followInterrupted(input: VerifyInput): Promise<AcceptanceCheck> {
+    const followed = await this.verifier!.resume?.(input);
+    const error = 'The check was interrupted and its session could not be found, so what it cost is unknown';
+    return { ...(followed ?? { round: input.round, at: now(), passed: false, projectChanged: false, error, cost: {}, items: input.requirements.map(requirement => ({ requirement, status: 'unverified' as const, notes: error })) }), ignored: 'interrupted' };
+  }
+  /**
+   * Saves a check's result. Every result is kept for its cost; it decides the round only when this claim still holds
+   * it, the Run is still under review and nothing else decided the round. True when it decides.
+   */
+  private recordAcceptance(current: AgentRun, claim: string, check: AcceptanceCheck): boolean {
+    const mine = current.pendingAcceptance?.claim === claim;
+    if (mine) delete current.pendingAcceptance;
+    const ignored = check.ignored ?? (!mine || decidingChecks(current).some(item => item.round === check.round) ? 'duplicate' : current.status !== 'reviewing' ? 'stopped' : undefined);
+    if (!ignored) { (current.acceptanceChecks ??= []).push(check); return true; }
+    (current.acceptanceChecks ??= []).push({ ...check, ignored });
+    event(current, ignored === 'stopped' ? 'acceptance.checked_after_stop' : 'acceptance.check_ignored', { round: check.round, reason: ignored, status: current.status, ...(check.cost ? { cost: check.cost } : {}) });
+    return false;
+  }
+  /** A stopped Run whose check's process died keeps its whole reservation until someone follows that check for its cost. */
+  private async reclaimAcceptance(runId: string, scope: Ownership): Promise<void> {
+    if (!this.verifier) return;
+    const claim = randomUUID();
+    let out = undefined as AgentRun['pendingAcceptance'];
+    let seen = undefined as AgentRun | undefined;
+    await this.repository.mutate(runId, current => {
+      if (!terminalRunStatuses.has(current.status) || !current.pendingAcceptance || !acceptanceClaimStale(current.pendingAcceptance)) return;
+      out = current.pendingAcceptance;
+      current.pendingAcceptance = { ...out, claim, at: now() };
+      event(current, 'acceptance.claim_taken_over', { round: out.round, attempt: out.attempt });
+      seen = structuredClone(current);
+    }, scope);
+    if (!out || !seen) return;
+    const run = seen as AgentRun, held = out as NonNullable<AgentRun['pendingAcceptance']>;
+    const input: VerifyInput = { runId, goal: run.goal, requirements: run.acceptance ?? [], tokens: delegationContext(run).tokens ?? 0, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round: held.round, attempt: held.attempt, deliver: false };
+    const check = await this.holdingClaim(runId, claim, () => this.followInterrupted(input), scope);
+    await this.repository.mutate(runId, current => { this.recordAcceptance(current, claim, check); }, scope);
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
     await this.verifyResources(run);
@@ -3791,11 +3861,11 @@ export class AgentEngine {
     const currentSystem = legacyRequest.system + (run.partial ? '\nThis run exhausted its execution/evidence allowance. Review it as an explicitly partial answer: assess received evidence and honest limitations, and do not require exhaustive source scans.' : '');
     legacyRequests.push({ system: currentSystem, input: { partial: run.partial ?? false, ...legacyRequest.input } });
     const reviewRepair = run.reviewRepair ? redactRunData(run.reviewRepair) : undefined;
-    const reviewContext = (run.acceptanceChecks?.length ? '\nindependentCheck in the input is the result of a separate session that opened the running work and tested each requirement itself. Treat it as direct evidence that overrides any earlier statement that something was unverified, and do not report those requirements as unchecked.' : '') + '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Artifacts carrying artifactType/structured are already schema-validated. Intermediate task artifacts may be plain text when they contain no inferences. Judge content and evidence support using the shared source fidelity rules.';
+    const reviewContext = (decidingChecks(run).length ? '\nindependentCheck in the input is the result of a separate session that opened the running work and tested each requirement itself. Treat it as direct evidence that overrides any earlier statement that something was unverified, and do not report those requirements as unchecked.' : '') + '\nReview context: input.clock is the trusted system clock at Run start; dates such as "as of today/截至今天" that match clock need no source evidence. Artifacts are presented after the runtime unwrapped and validated the executor finish decision: the {"type":"finish",...} envelope is intentionally absent, so never flag a missing finish wrapper or top-level envelope. Artifacts carrying artifactType/structured are already schema-validated. Intermediate task artifacts may be plain text when they contain no inferences. Judge content and evidence support using the shared source fidelity rules.';
     const reviewSystem = currentSystem + sourceFidelityGuidance + reviewContext + '\nThe runtime has already labelled cue-bearing sentences absent verbatim from evidence with "推断：" deterministically. Judge whether each labelled inference is supported by its cited evidence; labels do not establish support. Reject unsupported assertions presented as fact, including unlabelled assertions absent from evidence, and forbidden general assumptions. 不能让无依据的断言冒充事实。Do not require revision solely for inference label wording or format. input.fidelityNotes lists auto-labelled paths.' + (reviewRepair ? '\nYour previous review failed schema validation (see reviewRepair.issues). Return corrected JSON only: verdict, summary, issues (array of strings), optional confidence (0-1) and optional improvement object. Omit optional fields you cannot fill correctly.' : '');
     const fidelityWarnings = run.steps.flatMap(step => step.observations.filter(observation => observation.tool === 'output.warning').map(observation => observation.result));
     const fidelityNotes = run.steps.flatMap(step => step.observations.filter(observation => observation.tool === 'output.fidelity').map(observation => observation.result));
-    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, ...(run.acceptanceChecks?.length ? { independentCheck: run.acceptanceChecks.at(-1)!.items } : {}), ...(fidelityWarnings.length ? { fidelityWarnings } : {}), ...(fidelityNotes.length ? { fidelityNotes } : {}), sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
+    await this.call(run, model, 'reviewer', { system: reviewSystem, input: { clock: runClock(run), partial: run.partial ?? false, ...legacyRequest.input, ...(decidingChecks(run).length ? { independentCheck: decidingChecks(run).at(-1)!.items } : {}), ...(fidelityWarnings.length ? { fidelityWarnings } : {}), ...(fidelityNotes.length ? { fidelityNotes } : {}), sources: presentedMaterials(run.context.sources, [], sourcePromptChars), ...(reviewRepair ? { reviewRepair } : {}) } }, (current, value) => {
       try { current.review = parseReviewDecision(value); }
       catch (error) {
         const issues = validationDetails(error)?.issues;
@@ -3810,7 +3880,7 @@ export class AgentEngine {
       }
       delete current.reviewRepair;
       // The check opened the running work; the reviewer read about it. Its concerns stay on record but cannot undo that.
-      if (current.review.verdict !== 'accepted' && current.acceptanceChecks?.at(-1)?.passed) {
+      if (current.review.verdict !== 'accepted' && decidingChecks(current).at(-1)?.passed) {
         event(current, 'review.advisory', { summary: current.review.summary, issues: current.review.issues });
         current.review = { ...current.review, verdict: 'accepted' };
       }
@@ -3933,6 +4003,8 @@ export class AgentEngine {
     for (const allocation of grant.allocations) {
       if (allocation.settledAt) continue;
       const seen = await this.repository.get(allocation.runId, scope).catch(() => undefined);
+      // A stopped Run held up only by a check whose process died: follow that check for its cost, in the background.
+      if (seen && terminalRunStatuses.has(seen.status) && seen.pendingAcceptance && acceptanceClaimStale(seen.pendingAcceptance)) void this.reclaimAcceptance(seen.id, scope).catch(() => undefined);
       if (!seen || !workGrantSettleable(seen)) continue;
       // Under the Run's lock, so a retry or replan (which reopens the reservation under the same lock) cannot interleave.
       await this.repository.mutate(seen.id, async run => {

@@ -8509,7 +8509,7 @@ const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '�
 const MACHINE_UP = ['running', 'frozen', 'unknown', 'unreachable'];
 function renderAcceptance(run: RunView, view: ComputerView): void {
   // A check that came back after the Run stopped is kept for its cost only; it is not the Run's verdict.
-  const check = ((run as RunView & { acceptanceChecks?: (AcceptanceView & { afterStop?: true })[] }).acceptanceChecks ?? []).filter(item => !item.afterStop).at(-1);
+  const check = ((run as RunView & { acceptanceChecks?: (AcceptanceView & { ignored?: string })[] }).acceptanceChecks ?? []).filter(item => !item.ignored).at(-1);
   const saved = view.delivery;
   $('computer-acceptance').hidden = !check && !saved?.savedSite && !saved?.sourceArchive;
   if (check) {

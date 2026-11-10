@@ -27,7 +27,7 @@ export function runMetrics(run: AgentRun): RunMetrics {
   const modelMoney = run.modelUsage?.moneyUsd;
   return {
     runId: run.id, status: run.status, completed: run.status === 'succeeded',
-    acceptedWithoutRework: run.status === 'succeeded' && revisions === 0 && checks.length > 0 && checks.every(item => item.passed),
+    acceptedWithoutRework: run.status === 'succeeded' && revisions === 0 && checks.some(item => !item.ignored) && checks.filter(item => !item.ignored).every(item => item.passed),
     revisions, humanInterventions: asked + approvedByPerson + actionApprovals,
     elapsedSeconds: Number.isNaN(started) || Number.isNaN(ended) ? null : Math.round((ended - started) / 1000),
     modelTokens: run.modelUsage?.tokens ?? 0,
