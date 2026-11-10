@@ -149,6 +149,45 @@ describe('runs under a work grant', () => {
     expect((await h.engine.settleWorkGrant(grant.grantId, scope)).revision).toBe(settled.revision);
   });
 
+  it('takes the whole reservation back before a failed Run is retried, and refuses when others used the refund', async () => {
+    const h = harness();
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    await h.repository.mutate(run.id, current => { current.status = 'failed'; current.error = 'fixture failure'; });
+    const settled = await h.engine.settleWorkGrant(grant.grantId, scope);
+    const spent = settled.allocations[0]!.tokens!;
+    expect(spent).toBeLessThan(1000);
+    expect((await h.repository.get(run.id)).events.some(item => item.type === 'work_grant.settled')).toBe(true);
+    // With room left, a retry reserves the full cap again and the Run is no longer settled.
+    const retried = await h.engine.command(run.id, 'retry', {});
+    expect(retried.status).not.toBe('failed');
+    const reopened = await h.grants.get(scope, grant.grantId);
+    expect(reopened.allocations[0]).toEqual(expect.objectContaining({ tokens: 1000 }));
+    expect(reopened.allocations[0]).not.toHaveProperty('settledAt');
+    expect(workGrantRemaining(reopened)).toEqual({ tokens: 1500 });
+
+    // Settled again, then two other Runs take what came back: a retry or replan is refused rather than overspending.
+    await h.repository.mutate(run.id, current => { current.status = 'failed'; current.error = 'fixture failure'; });
+    await h.engine.settleWorkGrant(grant.grantId, scope);
+    await h.engine.create({ goal: 'Add a header', materials: h.materials, workGrantId: grant.grantId });
+    await h.engine.create({ goal: 'Add a menu', materials: h.materials, workGrantId: grant.grantId });
+    await expect(h.engine.command(run.id, 'retry', {})).rejects.toThrow(/不够/);
+    await expect(h.engine.command(run.id, 'replan', {})).rejects.toThrow(/不够/);
+    expect((await h.repository.get(run.id)).status).toBe('failed');
+    expect(workGrantRemaining(await h.grants.get(scope, grant.grantId)).tokens).toBeGreaterThanOrEqual(0);
+  });
+
+  it('keeps the reservation of a cancelled Run while a call it made may still be billed', async () => {
+    const h = harness();
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId });
+    await h.repository.mutate(run.id, current => { current.status = 'cancelled'; current.pendingTool = { toolId: 'edit', toolVersion: '1' } as never; });
+    expect((await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]).not.toHaveProperty('settledAt');
+    await h.repository.mutate(run.id, current => { delete current.pendingTool; });
+    expect((await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]).toHaveProperty('settledAt');
+  });
+
   it('still asks before an action whose effect reaches outside the workspace', async () => {
     const h = harness({ calls: ['publish'] });
     const grant = await h.grants.create(scope, grantInput);

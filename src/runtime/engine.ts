@@ -16,7 +16,7 @@ import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSch
 import { automaticReviewCanClear, directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
 import { actionRef, approveActionSchema, decideAction, normalizeActionPolicy, withActionDecision, type ActionCandidate, type ActionVerdict } from './action-policy.js';
 import { actionPolicyDigest, frozenRunPolicy, type ActionPolicyStore } from '../action-policy-store.js';
-import { workGrantDigest, workGrantRemaining, workGrantState, type WorkGrant, type WorkGrantStore } from '../work-grant-store.js';
+import { WorkGrantConflict, workGrantDigest, workGrantRemaining, workGrantState, type WorkGrant, type WorkGrantStore } from '../work-grant-store.js';
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
@@ -209,6 +209,27 @@ function frozenRunCanClear(current: AgentRun): boolean {
     skillRuntime: current.skillRuntime,
     planText,
   });
+}
+class SettleSkipped extends Error {}
+/**
+ * An ended Run whose spend is final. A tool call, delegation or model call still out may yet be billed (a cancel does
+ * not wait for it), so its Run keeps the whole reservation until that settles.
+ */
+function workGrantSettleable(run: AgentRun): boolean {
+  if (!terminalRunStatuses.has(run.status) || run.pendingTool || run.pendingDelegation) return false;
+  return !run.calls.some(call => call.state === 'started' || call.state === 'unknown') && !(run.toolReceipts ?? []).some(receipt => receipt.status === 'unknown');
+}
+/** What an ended Run spent from its grant. A dimension with unreported usage is left out, so its reservation stays. */
+function workGrantSpend(run: AgentRun): { tokens?: number; moneyUsd?: number } {
+  const model = deriveModelUsage(run), external = deriveExternalUsage(run);
+  // This host's own sandbox tools spend no tokens or money, so their receipts carry no cost; that is not missing usage.
+  const local = (run.toolReceipts ?? []).filter(receipt => receipt.provider === 'aeeis-local-tools');
+  const cost = (receipt: (typeof local)[number]) => (receipt.cost && typeof receipt.cost === 'object' ? receipt.cost as Record<string, unknown> : {});
+  const unknownTokens = external.unreportedTokenCalls - local.filter(receipt => !validExternalTokens(cost(receipt).tokens)).length;
+  const unknownMoney = external.unreportedMoneyCalls - local.filter(receipt => !validExternalMoneyUsd(receipt.cost)).length;
+  const tokens = model.unreportedCalls || unknownTokens > 0 ? undefined : model.tokens + external.tokens;
+  const moneyUsd = model.unreportedCalls || unknownMoney > 0 || model.moneyUsd === undefined ? undefined : model.moneyUsd + (external.moneyUsd ?? 0);
+  return { ...(tokens === undefined ? {} : { tokens }), ...(moneyUsd === undefined ? {} : { moneyUsd }) };
 }
 /** Per dimension the grant limits: the smallest of the request, the per-Run cap and what is left. */
 function grantedModelBudget(grant: WorkGrant, requested: TaskRequest['modelBudget']): TaskRequest['modelBudget'] {
@@ -1680,6 +1701,7 @@ export class AgentEngine {
           assertModelBudget(run, reusingUnknownModelCall ? run.resumeModelCallId : undefined);
         }
         if (action !== 'reconcile') assertExternalSettlement(run);
+        if (action === 'retry') await this.reopenWorkGrant(run, scope);
         run.status = run.plans.length === 0 ? 'queued' : run.steps.every(s => s.status === 'succeeded') ? 'reviewing' : 'running';
         for (const step of run.steps) { delete step.error; delete step.failureReason; }
         delete run.error; event(run, 'run.retry_requested');
@@ -1692,6 +1714,7 @@ export class AgentEngine {
         assertModelBudget(run);
         assertExternalSettlement(run);
         const reason = z.object({ reason: z.string().trim().min(1).max(2000).optional() }).strict().parse(body).reason;
+        await this.reopenWorkGrant(run, scope);
         run.status = 'planning';
         delete run.error; delete run.approval; delete run.question; delete run.resumeStatus;
         event(run, 'plan.revision_requested', { reason: reason ?? 'Owner requested a revised plan' });
@@ -3894,23 +3917,32 @@ export class AgentEngine {
    */
   async settleWorkGrant(grantId: string, scope: Ownership): Promise<WorkGrant> {
     if (!this.workGrants) throw new Conflict('Work grants are not configured on this AEEIS');
-    let grant = await this.workGrants.get(scope, grantId);
-    if (!this.workGrants.settle) return grant;
+    const store = this.workGrants;
+    let grant = await store.get(scope, grantId);
+    if (!store.settle) return grant;
     for (const allocation of grant.allocations) {
       if (allocation.settledAt) continue;
-      const run = await this.repository.get(allocation.runId, scope).catch(() => undefined);
-      if (!run || !terminalRunStatuses.has(run.status)) continue;
-      const model = deriveModelUsage(run), external = deriveExternalUsage(run);
-      // This host's own sandbox tools spend no tokens or money, so their receipts carry no cost; that is not missing usage.
-      const local = (run.toolReceipts ?? []).filter(receipt => receipt.provider === 'aeeis-local-tools');
-      const cost = (receipt: (typeof local)[number]) => (receipt.cost && typeof receipt.cost === 'object' ? receipt.cost as Record<string, unknown> : {});
-      const unknownTokens = external.unreportedTokenCalls - local.filter(receipt => !validExternalTokens(cost(receipt).tokens)).length;
-      const unknownMoney = external.unreportedMoneyCalls - local.filter(receipt => !validExternalMoneyUsd(receipt.cost)).length;
-      const tokens = model.unreportedCalls || unknownTokens > 0 ? undefined : model.tokens + external.tokens;
-      const moneyUsd = model.unreportedCalls || unknownMoney > 0 || model.moneyUsd === undefined ? undefined : model.moneyUsd + (external.moneyUsd ?? 0);
-      grant = await this.workGrants.settle(scope, grantId, run.id, { ...(tokens === undefined ? {} : { tokens }), ...(moneyUsd === undefined ? {} : { moneyUsd }) });
+      const seen = await this.repository.get(allocation.runId, scope).catch(() => undefined);
+      if (!seen || !workGrantSettleable(seen)) continue;
+      // Under the Run's lock, so a retry or replan (which reopens the reservation under the same lock) cannot interleave.
+      await this.repository.mutate(seen.id, async run => {
+        if (!workGrantSettleable(run) || run.workGrant?.grantId !== grantId) throw new SettleSkipped();
+        const spent = workGrantSpend(run);
+        grant = await store.settle!(scope, grantId, run.id, spent);
+        event(run, 'work_grant.settled', { grantId, spent });
+      }, scope).catch(error => { if (!(error instanceof SettleSkipped)) throw error; });
     }
-    return grant;
+    return store.get(scope, grantId);
+  }
+  /** Before a failed Run spends again, its settled reservation comes back in full; refused if the grant no longer has it. */
+  private async reopenWorkGrant(run: AgentRun, scope?: Ownership): Promise<void> {
+    if (!run.workGrant || !this.workGrants?.reopen) return;
+    const owner = scope ?? { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+    const grant = await this.workGrants.get(owner, run.workGrant.grantId);
+    if (!grant.allocations.find(item => item.runId === run.id)?.settledAt) return;
+    try { await this.workGrants.reopen(owner, run.workGrant.grantId, run.id, run.workGrant.allocation ?? {}); }
+    catch (error) { if (error instanceof WorkGrantConflict) throw new Conflict(error.message); throw error; }
+    event(run, 'work_grant.reopened', { grantId: run.workGrant.grantId });
   }
   /** Reserves this Run's share of the grant budget and freezes the grant. Only granted tools that the gateway's own
    * code confines to the Run workspace are recorded as contained. */

@@ -577,6 +577,34 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'], runOptions: { executionReview: 'required', allowedTools: ['read'], externalBudget: { calls: 2 } } });
   });
 
+  it('answers a greeting without the selected grant, which would fill in tools a one-step reply cannot have', async () => {
+    const grantId = `wg_${'a'.repeat(32)}`;
+    const grant = { grantId, title: '站点', tools: ['read'], agents: [], expiresAt: '2099-01-01T00:00:00.000Z', runCount: 0, state: 'active', remaining: { tokens: 5000 } };
+    const h = harness(undefined, { handler: url => url === '/api/work-grants' ? response({ grants: [grant] }) : undefined });
+    start(h.fetch, { local: { 'aeeis.execution-review': `grant:${grantId}` } }); await ready();
+    await vi.waitFor(() => expect(el<HTMLSelectElement>('execution-review').value).toBe(`grant:${grantId}`));
+    fill('conversation-text', '谢谢'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    const options = messagePosts(h)[0]?.body.runOptions;
+    expect(options).toMatchObject({ executionReview: 'auto', planning: 'direct', allowedTools: [] });
+    expect(options).not.toHaveProperty('workGrantId');
+    // Work still goes under the grant.
+    await sendReady();
+    fill('conversation-text', '核对发布'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body.runOptions).toMatchObject({ workGrantId: grantId });
+  });
+
+  it('only records a greeting sent with the record-only button', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    fill('conversation-text', '你好');
+    el<HTMLButtonElement>('conversation-note').click();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss' });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
+  });
+
   it('keeps a saved review choice instead of the auto default', async () => {
     const h = harness(); start(h.fetch, { local: { 'aeeis.execution-review': 'required' } }); await ready();
     expect(el<HTMLSelectElement>('execution-review').value).toBe('required');

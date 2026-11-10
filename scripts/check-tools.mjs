@@ -9,7 +9,7 @@ import { loadFileEnvironment } from '../dist/config-secrets.js';
 import { validateRuntimeConfig } from '../dist/config-validation.js';
 import { CombinedToolGateway, LocalToolGateway } from '../dist/local-tools.js';
 import { remoteToolGateway } from '../dist/toolkit-config.js';
-import { resolveToolDefaults } from '../dist/tool-defaults.js';
+import { resolveToolDefaults, toolkitUnreachable } from '../dist/tool-defaults.js';
 
 loadFileEnvironment();
 validateRuntimeConfig();
@@ -24,7 +24,11 @@ try {
   // Combining local and remote tools must succeed for every Run. The server starts without reaching the remote Toolkit,
   // so its outage is reported, not enforced; a reachable Toolkit is still checked against the local tools.
   if (local && remote) {
-    const reachable = await remote.listTools().then(() => true, error => { console.log(`remote Toolkit: NOT REACHABLE (warning only) - ${error instanceof Error ? error.message : error}`); return false; });
+    // Only an outage is tolerated; a Toolkit that answers but is misconfigured (auth, manifest, signature) still fails.
+    const reachable = await remote.listTools().then(() => true, error => {
+      if (!toolkitUnreachable(error)) throw error;
+      console.log(`remote Toolkit: NOT REACHABLE (warning only) - ${error.message}`); return false;
+    });
     if (reachable) console.log(`tools: ${(await toolkit.listTools()).length} (local and remote)`);
   }
   if (local) {

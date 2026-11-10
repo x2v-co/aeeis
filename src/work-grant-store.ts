@@ -84,6 +84,8 @@ export interface WorkGrantStore {
   allocate(scope: Ownership, grantId: string, runId: string, requested: WorkGrantBudget | undefined, now?: string): Promise<{ grant: WorkGrant; allocation: WorkGrantAllocation }>;
   /** Shrinks an ended Run's reservation to what it spent. Settling twice keeps the first settlement. */
   settle?(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now?: string): Promise<WorkGrant>;
+  /** Restores a settled Run's reservation before it runs again. */
+  reopen?(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend): Promise<WorkGrant>;
   close?(): Promise<void>;
 }
 
@@ -157,6 +159,24 @@ export function settleWorkGrant(grant: WorkGrant, runId: string, spent: WorkGran
   return { ...grant, allocations, revision: grant.revision + 1 };
 }
 
+/**
+ * Puts a settled Run's whole reservation back, for a retry or replan that will spend again. Refused when what the
+ * settlement returned has since been reserved by other Runs.
+ */
+export function reopenWorkGrant(grant: WorkGrant, runId: string, reserved: WorkGrantSpend): WorkGrant {
+  const index = grant.allocations.findIndex(item => item.runId === runId);
+  const current = grant.allocations[index];
+  if (!current?.settledAt) return grant;
+  const remaining = workGrantRemaining(grant);
+  for (const key of ['tokens', 'moneyUsd'] as const) {
+    const extra = (reserved[key] ?? 0) - (current[key] ?? 0);
+    if (extra > 0 && remaining[key] !== undefined && extra > remaining[key]! + 1e-9) throw new WorkGrantConflict('这份授权剩下的预算不够这件 Run 再做一次');
+  }
+  const reopened = allocationSchema.parse({ runId, ...(reserved.tokens ? { tokens: reserved.tokens } : {}), ...(reserved.moneyUsd ? { moneyUsd: reserved.moneyUsd } : {}), at: current.at });
+  const allocations = [...grant.allocations]; allocations[index] = reopened;
+  return { ...grant, allocations, revision: grant.revision + 1 };
+}
+
 function roundUsd(value: number): number { return Math.round(value * 1e6) / 1e6; }
 function owned(grant: WorkGrant | undefined, scope: Ownership, grantId: string): WorkGrant {
   if (!grant || grant.owner !== scope.owner || grant.tenantId !== scope.tenantId) throw new WorkGrantNotFound(`Work grant not found: ${grantId}`);
@@ -179,6 +199,10 @@ export class InMemoryWorkGrantStore implements WorkGrantStore {
   }
   async settle(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now = new Date().toISOString()) {
     const next = settleWorkGrant(owned(this.grants.get(grantId), scope, grantId), runId, spent, now);
+    this.grants.set(grantId, next); return structuredClone(next);
+  }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    const next = reopenWorkGrant(owned(this.grants.get(grantId), scope, grantId), runId, reserved);
     this.grants.set(grantId, next); return structuredClone(next);
   }
 }
@@ -246,6 +270,14 @@ export class JsonWorkGrantStore implements WorkGrantStore {
       return structuredClone(next);
     });
   }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    return this.serial(async () => {
+      const current = owned(this.grants.find(item => item.grantId === grantId), scope, grantId);
+      const next = reopenWorkGrant(current, runId, reserved);
+      if (next !== current) this.replace(next);
+      return structuredClone(next);
+    });
+  }
   async close(): Promise<void> {
     if (this.lockOwned) { try { unlinkSync(`${this.filePath}.lock`); } catch { /* already gone */ } this.lockOwned = false; }
     this.loaded = false;
@@ -302,6 +334,9 @@ export class PostgresWorkGrantStore implements WorkGrantStore {
   }
   async settle(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now = new Date().toISOString()) {
     return this.change(scope, grantId, current => { const next = settleWorkGrant(current, runId, spent, now); return { next, result: next }; });
+  }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    return this.change(scope, grantId, current => { const next = reopenWorkGrant(current, runId, reserved); return { next, result: next }; });
   }
   async close(): Promise<void> { await this.pool.end(); }
   private async change<T>(scope: Ownership, grantId: string, apply: (current: WorkGrant) => { next: WorkGrant; result: T }): Promise<T> {

@@ -1172,7 +1172,7 @@ function setQuickRunBusy(busy: boolean, text = ''): void {
     if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
     if (!localBotCanExecute()) { message('这位成员不支持本地执行。'); return; }
     $<HTMLTextAreaElement>('conversation-text').value = $<HTMLInputElement>('quick-goal').value;
-    void sendConversation(conversationSendIntent()).catch(error => message(errorMessage(error)));
+    void sendConversation(conversationSendIntent(), false, true).catch(error => message(errorMessage(error)));
     return;
   }
   if (entryShowsBot() && activeBotId() !== 'aeeis') { message('请先连接对话服务，再给这位 Bot 派活。'); return; }
@@ -1375,10 +1375,12 @@ function smallTalk(text: string): boolean {
   if (!line || line.length > 24 || line.includes('\n')) return false;
   return /^(?:(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯+|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)[\s,，!！]*)+(?:你是谁|你能做什么|你会做什么|你可以做什么)?$|^(?:你是谁|你能做什么|你会做什么|你可以做什么|who are you|what can you do)$/iu.test(line);
 }
-/** Run options for a small-talk reply: one direct step, never the side panel's work settings. */
+/**
+ * Run options for a small-talk reply: one direct step, never the side panel's work settings. Never under a grant
+ * either: a grant fills in its own tools, which a one-step reply may not have, and a reply needs nothing it covers.
+ */
 function chatRunOptions(): Record<string, unknown> {
-  const grant = selectedWorkGrant();
-  return { ...(grant ? { workGrantId: grant.grantId } : { executionReview: 'auto' }), allowedTools: [], planning: 'direct', materials: [], privacy: $<HTMLSelectElement>('privacy').value };
+  return { executionReview: 'auto', allowedTools: [], planning: 'direct', materials: [], privacy: $<HTMLSelectElement>('privacy').value };
 }
 /** A new task named after the message, for a send that names no task. Titles need at least two characters. */
 function autoTaskTitle(text: string): string {
@@ -5258,7 +5260,8 @@ async function saveStandingInstruction(text: string): Promise<void> {
     if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
   }
 }
-async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
+/** `send` is the ordinary send. 「只记下来」 and retries pass false, so a record-only greeting is never turned into a Run. */
+async function sendConversation(intent: 'discuss' | 'execute', retry = false, send = false): Promise<void> {
   const surface = rosterView();
   if (surface !== 'entry' && surface !== 'bot') return;
   if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
@@ -5271,7 +5274,7 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     const lifeSpeaker = selectedLifeSpeaker();
     const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
     // Small talk gets its own quick reply, even while another task holds the focus, and never takes the focus.
-    const chat = !conversationCorrectionId && !target && !conversationReplyId && !lifeSpeaker && quickRunReady && localBotCanExecute(lifeAgent(conversation)) && smallTalk(text) && autoTaskTitle(text).length >= 2;
+    const chat = send && !conversationCorrectionId && !target && !conversationReplyId && !lifeSpeaker && quickRunReady && localBotCanExecute(lifeAgent(conversation)) && smallTalk(text) && autoTaskTitle(text).length >= 2;
     if (chat) intent = 'execute';
     // A send that names no task starts a new one and makes it the focus, so the next message (a change to the plan, a follow-up) lands on it.
     const autoTitle = intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId ? autoTaskTitle(text) : '';
@@ -5318,7 +5321,7 @@ $('conversation-text').addEventListener('keydown', event => {
   event.preventDefault();
   if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
 });
-$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent(), false, true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());
   $(id)?.addEventListener('change', () => syncEntryDefaults());
