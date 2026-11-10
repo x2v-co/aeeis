@@ -291,6 +291,8 @@ export interface AcceptanceCheck {
   /** Kept only for its cost; it decides nothing. 'stopped': it came back after the Run had stopped (cancelled, paused).
    * 'duplicate': another attempt already settled this round. 'interrupted': its process died, and the check was followed to its end only to learn what it cost. */
   ignored?: 'stopped' | 'duplicate' | 'interrupted';
+  /** Which try at the round, so two reports of one session are recorded once. */
+  attempt?: string;
 }
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {

@@ -468,6 +468,57 @@ describe('independent acceptance of finished work', () => {
     expect(done.acceptanceChecks).toEqual([expect.objectContaining({ ignored: 'interrupted', cost: { tokens: 40 } })]);
     expect(settled).toMatchObject({ tokens: done.modelUsage!.tokens + 40, settledAt: expect.any(String) });
   });
+  type Checking = { checkAcceptance(run: AgentRun): Promise<boolean> };
+  it('records one session once when a takeover and the original watcher both see it end', async () => {
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    const resume = vi.fn(async (input: VerifyInput) => check(input.round, true, { cost: { tokens: 50, money: 0.01, currency: 'USD' } }));
+    const verify = vi.fn(async (input: VerifyInput) => {
+      if (input.attempt !== '0') return check(input.round, true);
+      // The original watcher stalls: its claim goes stale, another tick takes over, follows the session and closes the relay first.
+      await ctx.h.repository.mutate(ctx.run.id, current => { current.pendingAcceptance!.at = new Date(Date.now() - 10 * 60_000).toISOString(); });
+      expect(await (ctx.h.engine as unknown as Checking).checkAcceptance(await ctx.h.repository.get(ctx.run.id))).toBe(false);
+      // Then the original returns: the same money, and no tokens, since the relay was already closed.
+      return check(input.round, true, { cost: { money: 0.01, currency: 'USD' } });
+    });
+    const verifier = { verify, resume };
+    const h = harness({ verifier });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a form', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements });
+    ctx = { h, verifier, run } as unknown as Awaited<ReturnType<typeof start>>;
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const done = await h.repository.get(run.id);
+    expect(done.acceptanceChecks).toEqual([
+      expect.objectContaining({ attempt: '0', ignored: 'interrupted', cost: { tokens: 50, money: 0.01, currency: 'USD' } }),
+      expect.objectContaining({ attempt: '1', passed: true }),
+    ]);
+    expect(verify.mock.calls.map(call => call[0].attempt)).toEqual(['0', '1']);
+    const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
+    expect(settled.tokens).toBe(done.modelUsage!.tokens + 50 + 50);
+  });
+  it('does not start another paid check from a stale snapshot once the round is decided', async () => {
+    const { h, verifier, run } = await start(async input => check(input.round, true));
+    const stale = await reviewing(h, run.id);
+    // Engine A decides the round; Engine B was held up with the snapshot from before.
+    expect(await (h.engine as unknown as Checking).checkAcceptance(await h.repository.get(run.id))).toBe(true);
+    expect(await (h.engine as unknown as Checking).checkAcceptance(stale)).toBe(false);
+    expect(verifier.verify).toHaveBeenCalledTimes(1);
+    expect((await h.repository.get(run.id)).pendingAcceptance).toBeUndefined();
+  });
+  it('checks afresh after a pause when what passed came back while paused, and the reviewer\'s doubts then stand', async () => {
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    ctx = await start(async input => {
+      if (input.round === 0 && input.attempt === '0') { await ctx.h.engine.command(ctx.run.id, 'pause', {}); return check(input.round, true); }
+      return check(input.round, false);
+    });
+    ctx.h.rejectReviews();
+    expect(await ctx.h.settle(ctx.run.id)).toBe('paused');
+    await ctx.h.engine.command(ctx.run.id, 'resume', {});
+    expect(await ctx.h.settle(ctx.run.id)).toBe('failed');
+    expect(ctx.verifier.verify.mock.calls[1]![0]).toMatchObject({ round: 0, attempt: '1' });
+    const done = await ctx.h.repository.get(ctx.run.id);
+    expect(done.acceptanceChecks![0]).toMatchObject({ ignored: 'stopped', passed: true });
+    expect(done.events.map(item => item.type)).not.toContain('review.advisory');
+  });
   it('counts what checks cost against the Run', async () => {
     const { h, run } = await start(async () => check(0, true));
     await h.settle(run.id);

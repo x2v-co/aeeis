@@ -523,6 +523,13 @@ const ACCEPTANCE_RENEW_MS = 60_000, ACCEPTANCE_LEASE_MS = 5 * 60_000;
 function acceptanceClaimStale(out: NonNullable<AgentRun['pendingAcceptance']>): boolean {
   return !(Date.parse(out.at) > Date.now() - ACCEPTANCE_LEASE_MS);
 }
+/** What one check session cost, from two reports of it: each dimension from whichever report knew it, never both. */
+function mergeCheckCost(first: AcceptanceCheck['cost'], second: AcceptanceCheck['cost']): AcceptanceCheck['cost'] {
+  if (!first || !second) return first ?? second;
+  const tokens = validExternalTokens(first.tokens) ? first.tokens : second.tokens;
+  const money = validExternalMoneyUsd(first) ? first : validExternalMoneyUsd(second) ? second : undefined;
+  return { ...(tokens !== undefined ? { tokens } : {}), ...(money ? { money: money.money!, currency: 'USD' } : {}) };
+}
 /** The checks that decide something, leaving out those kept only for what they cost. */
 function decidingChecks(run: AgentRun): AcceptanceCheck[] {
   return (run.acceptanceChecks ?? []).filter(item => !item.ignored);
@@ -3735,25 +3742,29 @@ export class AgentEngine {
     // Claimed under the Run lock, and only while it is still under review: a tick that was held up while the Run was
     // cancelled and settled must not start a check that could bill afterwards. Only one check may be out at a time.
     const claim = randomUUID();
-    let taken = undefined as { attempt: string; round: number; resume: boolean } | undefined;
+    let taken = undefined as { input: VerifyInput; resume: boolean } | undefined;
     await this.repository.mutate(run.id, current => {
       if (current.status !== 'reviewing') return;
+      // Read again under the lock: another Engine may have decided this round, or spent budget, since this tick's snapshot.
+      const at = current.events.filter(item => item.type === 'review.revision_requested').length;
       const out = current.pendingAcceptance;
+      const input = (round: number, attempt: string): VerifyInput => ({ runId: current.id, goal: current.goal, requirements: current.acceptance!, tokens: delegationContext(current).tokens ?? 0, ...(current.workGrant ? { workspace: current.workGrant.grantId } : {}), round, attempt, deliver: true });
       if (out) {
         if (!acceptanceClaimStale(out)) return;
         current.pendingAcceptance = { ...out, claim, at: now() };
         event(current, 'acceptance.claim_taken_over', { round: out.round, attempt: out.attempt });
-        taken = { attempt: out.attempt, round: out.round, resume: true };
+        taken = { input: input(out.round, out.attempt), resume: true };
         return;
       }
-      const attempt = String((current.acceptanceChecks ?? []).filter(item => item.round === round).length);
+      if (at !== round || decidingChecks(current).some(item => item.round === round)) return;
+      const attempt = String(new Set((current.acceptanceChecks ?? []).filter(item => item.round === round).map(item => item.attempt ?? '')).size);
       current.pendingAcceptance = { round, attempt, claim, at: now() };
-      taken = { attempt, round, resume: false };
+      taken = { input: input(round, attempt), resume: false };
     });
     if (!taken) return false;
-    const input: VerifyInput = { runId: run.id, goal: run.goal, requirements: run.acceptance!, tokens: delegationContext(run).tokens ?? 0, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round: taken.round, attempt: taken.attempt, deliver: true };
+    const input = taken.input;
     // If this throws, the claim stays and stops being renewed: its spend is unknown until a later tick takes it over.
-    const check = await this.holdingClaim(run.id, claim, () => taken!.resume ? this.followInterrupted(input) : this.verifier!.verify(input));
+    const check: AcceptanceCheck = { ...await this.holdingClaim(run.id, claim, () => taken!.resume ? this.followInterrupted(input) : this.verifier!.verify(input)), attempt: input.attempt! };
     let decides = false;
     await this.repository.mutate(run.id, current => {
       if (!this.recordAcceptance(current, claim, check)) return;
@@ -3803,6 +3814,15 @@ export class AgentEngine {
   private recordAcceptance(current: AgentRun, claim: string, check: AcceptanceCheck): boolean {
     const mine = current.pendingAcceptance?.claim === claim;
     if (mine) delete current.pendingAcceptance;
+    // One record per session: a takeover and the original watcher can both see the same session end. The second only
+    // fills in what the first could not learn (the relay hands its token count to whoever closes it first).
+    const same = (current.acceptanceChecks ?? []).find(item => item.round === check.round && item.attempt === check.attempt);
+    if (same) {
+      const cost = mergeCheckCost(same.cost, check.cost);
+      if (cost) same.cost = cost;
+      event(current, 'acceptance.check_ignored', { round: check.round, attempt: check.attempt, reason: 'same_session', status: current.status });
+      return false;
+    }
     const ignored = check.ignored ?? (!mine || decidingChecks(current).some(item => item.round === check.round) ? 'duplicate' : current.status !== 'reviewing' ? 'stopped' : undefined);
     if (!ignored) { (current.acceptanceChecks ??= []).push(check); return true; }
     (current.acceptanceChecks ??= []).push({ ...check, ignored });
@@ -3825,7 +3845,7 @@ export class AgentEngine {
     if (!out || !seen) return;
     const run = seen as AgentRun, held = out as NonNullable<AgentRun['pendingAcceptance']>;
     const input: VerifyInput = { runId, goal: run.goal, requirements: run.acceptance ?? [], tokens: delegationContext(run).tokens ?? 0, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round: held.round, attempt: held.attempt, deliver: false };
-    const check = await this.holdingClaim(runId, claim, () => this.followInterrupted(input), scope);
+    const check: AcceptanceCheck = { ...await this.holdingClaim(runId, claim, () => this.followInterrupted(input), scope), attempt: held.attempt };
     await this.repository.mutate(runId, current => { this.recordAcceptance(current, claim, check); }, scope);
   }
   private async review(run: AgentRun, model: ModelAdapter): Promise<void> {
