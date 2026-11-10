@@ -1365,6 +1365,36 @@ describe('single-entry conversation workbench', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus') || post.url.endsWith('/approve'))).toHaveLength(0);
   });
+
+  it('cancels any task whose run has not ended from the task row, after asking', async () => {
+    const waitingId = 'run_00000000-0000-4000-8000-000000000006';
+    const doneId = 'run_00000000-0000-4000-8000-000000000007';
+    const view = fixture();
+    view.tasks = [
+      { id: 'task_a', title: '发布方案', threadId: 'thread_a', status: 'needs_approval', runId: waitingId, latestRunId: waitingId, pendingApproval: { summary: '回一句问候' } },
+      { id: 'task_b', title: '番茄钟', threadId: 'thread_b', status: 'succeeded', latestRunId: doneId },
+    ];
+    view.focusTaskId = 'task_a';
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url.endsWith('/cancel')) { view.tasks[0]!.status = 'cancelled'; delete view.tasks[0]!.pendingApproval; view.revision++; return response({ id: waitingId, status: 'cancelled' }); }
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-task-id="task_a"]')!;
+    expect(row().querySelector('[data-run-cancel]')).not.toBeNull();
+    expect(doc().querySelector('[data-task-id="task_b"] [data-run-cancel]')).toBeNull();
+    const asked: string[] = [];
+    dom.window.confirm = (text?: string) => { asked.push(text ?? ''); return false; };
+    row().querySelector<HTMLButtonElement>('[data-run-cancel]')!.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(asked[0]).toContain('发布方案');
+    expect(h.posts.some(post => post.url.endsWith('/cancel'))).toBe(false);
+    dom.window.confirm = () => true;
+    row().querySelector<HTMLButtonElement>('[data-run-cancel]')!.click();
+    await vi.waitFor(() => expect(row().querySelector('[data-run-cancel]')).toBeNull());
+    expect(h.posts.find(post => post.url === `/api/runs/${waitingId}/cancel`)?.body).toEqual({ reason: '在任务列表里选择了“取消任务”' });
+    expect(el('conversation-status').textContent).toContain('已取消「发布方案」');
+  });
 });
 
 describe('entry bots and group chats', () => {
