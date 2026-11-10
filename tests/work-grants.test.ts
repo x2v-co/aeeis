@@ -31,6 +31,26 @@ describe('work grant store', () => {
     expect(() => createWorkGrantSchema.parse({ ...grantInput, durationHours: 24 * 8 })).toThrow();
   });
 
+  it('keeps a settlement and a reopening on disk, and refuses a reopening the grant cannot cover', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'aeeis-grants-')), 'work-grants.json');
+    let store = new JsonWorkGrantStore(file); await store.init();
+    const grant = await store.create(scope, grantInput);
+    await store.allocate(scope, grant.grantId, 'run_a', undefined);
+    await store.settle(scope, grant.grantId, 'run_a', { tokens: 120 });
+    await store.close(); store = new JsonWorkGrantStore(file); await store.init();
+    expect((await store.get(scope, grant.grantId)).allocations[0]).toMatchObject({ runId: 'run_a', tokens: 120, settledAt: expect.any(String) });
+    // Settling again keeps the first settlement.
+    expect((await store.settle(scope, grant.grantId, 'run_a', { tokens: 5 })).allocations[0]!.tokens).toBe(120);
+    await store.allocate(scope, grant.grantId, 'run_b', undefined);
+    await store.allocate(scope, grant.grantId, 'run_c', undefined);
+    await expect(store.reopen(scope, grant.grantId, 'run_a', { tokens: 1000 })).rejects.toThrow(WorkGrantConflict);
+    await store.settle(scope, grant.grantId, 'run_b', { tokens: 100 });
+    const reopened = await store.reopen(scope, grant.grantId, 'run_a', { tokens: 1000 });
+    expect(reopened.allocations[0]).toEqual({ runId: 'run_a', tokens: 1000, at: expect.any(String) });
+    expect(workGrantRemaining(reopened)).toEqual({ tokens: 2500 - 1000 - 100 - 1000 });
+    await store.close();
+  });
+
   it('reports expiry from the clock without rewriting the record', async () => {
     const store = new InMemoryWorkGrantStore();
     const grant = await store.create(scope, grantInput, '2026-11-05T00:00:00.000Z');
@@ -342,6 +362,28 @@ describe('independent acceptance of finished work', () => {
     expect(await h.settle(run.id)).toBe('failed');
     expect(verifier.verify).toHaveBeenCalledTimes(1);
     expect((await h.repository.get(run.id)).error).toContain('Sandbox host unreachable');
+  });
+  it('keeps the reservation while a check is out after a cancel, then counts its late bill', async () => {
+    let held: { tokens?: number; settled: boolean } | undefined;
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    ctx = await start(async () => {
+      // The owner cancels while the check runs, and someone lists the grant before the check comes back.
+      await ctx.h.engine.command(ctx.run.id, 'cancel', {});
+      const during = (await ctx.h.engine.settleWorkGrant(ctx.run.workGrant!.grantId, scope)).allocations[0]!;
+      held = { ...(during.tokens === undefined ? {} : { tokens: during.tokens }), settled: Boolean(during.settledAt) };
+      return check(0, true);
+    });
+    const { h, run } = ctx;
+    await h.settle(run.id, ['succeeded', 'failed', 'cancelled', 'unknown', 'needs_approval', 'paused']);
+    expect(held).toEqual({ tokens: 1000, settled: false });
+    const stopped = await h.repository.get(run.id);
+    expect(stopped.status).toBe('cancelled');
+    expect(stopped.pendingAcceptance).toBeUndefined();
+    expect(stopped.acceptanceChecks).toEqual([expect.objectContaining({ afterStop: true, cost: expect.objectContaining({ tokens: 50 }) })]);
+    expect(stopped.events.map(item => item.type)).toContain('acceptance.checked_after_stop');
+    expect(stopped.events.map(item => item.type)).not.toContain('acceptance.checked');
+    const settled = (await h.engine.settleWorkGrant(run.workGrant!.grantId, scope)).allocations[0]!;
+    expect(settled).toMatchObject({ tokens: stopped.calls.length * 15 + 50, settledAt: expect.any(String) });
   });
   it('counts what checks cost against the Run', async () => {
     const { h, run } = await start(async () => check(0, true));

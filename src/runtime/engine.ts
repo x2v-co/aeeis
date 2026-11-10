@@ -216,7 +216,7 @@ class SettleSkipped extends Error {}
  * not wait for it), so its Run keeps the whole reservation until that settles.
  */
 function workGrantSettleable(run: AgentRun): boolean {
-  if (!terminalRunStatuses.has(run.status) || run.pendingTool || run.pendingDelegation) return false;
+  if (!terminalRunStatuses.has(run.status) || run.pendingTool || run.pendingDelegation || run.pendingAcceptance) return false;
   return !run.calls.some(call => call.state === 'started' || call.state === 'unknown') && !(run.toolReceipts ?? []).some(receipt => receipt.status === 'unknown');
 }
 /** What an ended Run spent from its grant. A dimension with unreported usage is left out, so its reservation stays. */
@@ -3720,9 +3720,19 @@ export class AgentEngine {
     if (known?.passed) return true;
     if (known) return false;
     const tokens = delegationContext(run).tokens ?? 0;
+    // Durable before dispatch: a cancel while the check runs must not let the grant refund what the check may yet bill.
+    // If verify throws, the marker stays (its spend is unknown); a later attempt replaces it.
+    await this.repository.mutate(run.id, current => { current.pendingAcceptance = { round, at: now() }; });
     const check = await this.verifier!.verify({ runId: run.id, goal: run.goal, requirements: run.acceptance!, tokens, ...(run.workGrant ? { workspace: run.workGrant.grantId } : {}), round, deliver: true });
     await this.repository.mutate(run.id, current => {
-      if (current.status !== 'reviewing' || current.acceptanceChecks?.some(item => item.round === round)) return;
+      if (current.pendingAcceptance?.round === round) delete current.pendingAcceptance;
+      if (current.acceptanceChecks?.some(item => item.round === round)) return;
+      if (current.status !== 'reviewing') {
+        // The Run stopped while the check ran. Its result decides nothing now, but what it cost still counts.
+        (current.acceptanceChecks ??= []).push({ ...check, afterStop: true });
+        event(current, 'acceptance.checked_after_stop', { round, status: current.status, ...(check.cost ? { cost: check.cost } : {}) });
+        return;
+      }
       (current.acceptanceChecks ??= []).push(check);
       event(current, 'acceptance.checked', { round, passed: check.passed, failed: check.items.filter(item => item.status !== 'passed').length, ...(check.error ? { error: check.error } : {}) });
       if (check.passed) return;
