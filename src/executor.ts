@@ -118,7 +118,7 @@ export class ClaudeCodeTransport implements AgentTransport {
     const budget = Math.floor(input.tokens * this.config.verifyShare);
     if (budget < 2000) return failed('Not enough of the Run budget is left for an independent check');
     const before = await this.sandbox.observe(input.runId, true).catch(() => undefined);
-    const session = sessionId(`verify:${input.runId}:${input.round}`);
+    const session = verifySession(input);
     const token = `aeeis-session-${randomBytes(32).toString('hex')}`;
     try {
       await this.sandbox.startExecutor(input.runId, { id: session, token, prompt: verifierPrompt(input.goal, input.requirements, this.config.previewPort), argv: executorArgv(config, session), key, upstream: this.config.upstream, budget, seconds: this.config.maxMinutes * 60, env: sessionEnv(token) }, input.workspace);
@@ -138,6 +138,22 @@ export class ClaudeCodeTransport implements AgentTransport {
     const check: AcceptanceCheck = { round: input.round, at, passed, items, projectChanged, cost, ...(projectChanged ? { error: 'The checker changed the project, so its verdict does not count.' } : {}) };
     if (passed && input.deliver) Object.assign(check, await this.deliver(input));
     return check;
+  }
+  /** A check whose process died while it ran. Its session may still be going: follow it to its end, only to learn what it
+   * cost. Its verdict is not used, since nothing saw the project before it started. Undefined when no such session exists. */
+  async resume(input: VerifyInput): Promise<AcceptanceCheck | undefined> {
+    const session = verifySession(input);
+    const record = await this.sandbox.executorRecord(input.runId).catch(() => undefined);
+    if (!record || record.session !== session) return undefined;
+    const directory = join(this.evidenceRoot, input.runId, 'executor');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const budget = (await this.sandbox.relayUsage(input.runId, record.token))?.budget ?? Math.floor(input.tokens * this.config.verifyShare);
+    const end = await this.watch(budget, input.runId, session, record.token, join(directory, `${session}.jsonl`));
+    const usage = await this.sandbox.closeRelay(input.runId, record.token);
+    const error = `The check was interrupted (${end.kind}), so its verdict does not count`;
+    return { round: input.round, at: new Date().toISOString(), passed: false, projectChanged: false, error,
+      items: input.requirements.map(requirement => ({ requirement, status: 'unverified', notes: error })),
+      cost: { ...(usage ? { tokens: usage.tokens } : {}), ...(end.result?.costUsd !== undefined ? { money: end.result.costUsd, currency: 'USD' } : {}) } };
   }
   /** Packs the source and shares the running site. Both are best effort: the check has already passed. */
   private async deliver(input: VerifyInput): Promise<Pick<AcceptanceCheck, 'previewUrl' | 'sourceArchive'>> {
@@ -236,7 +252,11 @@ export function verifierPrompt(goal: string, requirements: string[], port: numbe
   ].join('\n');
 }
 
-export interface VerifyInput { runId: string; goal: string; requirements: string[]; tokens: number; workspace?: string; round: number; deliver: boolean }
+/** `attempt` names this try at the round: a second try (after a pause, or a restart) gets its own session, since the sandbox never starts one twice. */
+export interface VerifyInput { runId: string; goal: string; requirements: string[]; tokens: number; workspace?: string; round: number; attempt?: string; deliver: boolean }
+function verifySession(input: Pick<VerifyInput, 'runId' | 'round' | 'attempt'>): string {
+  return sessionId(`verify:${input.runId}:${input.round}${input.attempt ? `:${input.attempt}` : ''}`);
+}
 
 /** Turns the checker's last message into a report. Anything it did not clearly pass counts against the work. */
 export function readVerdict(text: string, requirements: string[], screenshots: Set<string>): AcceptanceItem[] {

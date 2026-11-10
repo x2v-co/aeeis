@@ -29,6 +29,11 @@ const allocationSchema = z.object({
   tokens: z.number().int().positive().optional(),
   moneyUsd: z.number().positive().optional(),
   at: z.string().datetime({ offset: true }),
+  /** Set once the Run has ended: tokens and moneyUsd then hold what it spent, not what it reserved. */
+  settledAt: z.string().datetime({ offset: true }).optional(),
+  /** Dimensions whose spend was not known when it settled, so their whole reservation stayed. A later settlement that
+   * knows them shrinks them then; nothing else about a settled allocation changes. */
+  held: z.array(z.enum(['tokens', 'moneyUsd'])).min(1).max(2).optional(),
 }).strict();
 export type WorkGrantAllocation = z.infer<typeof allocationSchema>;
 
@@ -41,7 +46,7 @@ export const workGrantSchema = z.object({
   tools: z.array(ref).max(50),
   agents: z.array(ref).max(20),
   /** `perRun` caps one Run; `total` is shared by every Run under this grant. Each Run reserves its cap when it is
-   * created, and the reservation counts against `total` whether or not it is spent. */
+   * created; once the Run ends, the reservation shrinks to what it spent and the rest returns to `total`. */
   budget: z.object({ perRun: budgetSchema, total: budgetSchema }).strict(),
   createdAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
@@ -80,6 +85,10 @@ export interface WorkGrantStore {
   revoke(scope: Ownership, grantId: string, now?: string): Promise<WorkGrant>;
   /** Reserves one Run's budget. Repeating it for the same Run returns the first reservation. */
   allocate(scope: Ownership, grantId: string, runId: string, requested: WorkGrantBudget | undefined, now?: string): Promise<{ grant: WorkGrant; allocation: WorkGrantAllocation }>;
+  /** Shrinks an ended Run's reservation to what it spent. Settling again only fills in dimensions it held as unknown. */
+  settle?(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now?: string): Promise<WorkGrant>;
+  /** Restores a settled Run's reservation before it runs again. */
+  reopen?(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend): Promise<WorkGrant>;
   close?(): Promise<void>;
 }
 
@@ -139,6 +148,45 @@ export function allocateWorkGrant(grant: WorkGrant, runId: string, requested: Wo
   return { grant: { ...grant, allocations: [...grant.allocations, allocation], revision: grant.revision + 1 }, allocation };
 }
 
+/** What an ended Run spent. A dimension left out was not reported, so that part of the reservation stays. */
+export interface WorkGrantSpend { tokens?: number; moneyUsd?: number }
+export function settleWorkGrant(grant: WorkGrant, runId: string, spent: WorkGrantSpend, now: string): WorkGrant {
+  const index = grant.allocations.findIndex(item => item.runId === runId);
+  const current = grant.allocations[index];
+  if (!current || (current.settledAt && !current.held)) return grant;
+  const known = (used: number | undefined) => used !== undefined && Number.isFinite(used) && used >= 0;
+  // Settled already: only a dimension it held can still change, and only once its spend is known.
+  const open = (key: 'tokens' | 'moneyUsd') => !current.settledAt || Boolean(current.held?.includes(key));
+  const shrink = (key: 'tokens' | 'moneyUsd', round: (value: number) => number) => {
+    const reserved = current[key], used = spent[key];
+    return reserved === undefined || !open(key) || !known(used) ? reserved : round(Math.min(reserved, used!));
+  };
+  const tokens = shrink('tokens', Math.ceil), moneyUsd = shrink('moneyUsd', value => Math.ceil(value * 1e6) / 1e6);
+  const held = (['tokens', 'moneyUsd'] as const).filter(key => current[key] !== undefined && open(key) && !known(spent[key]));
+  if (current.settledAt && held.length === current.held!.length) return grant;
+  const settled = allocationSchema.parse({ runId, ...(tokens ? { tokens } : {}), ...(moneyUsd ? { moneyUsd } : {}), at: current.at, settledAt: current.settledAt ?? now, ...(held.length ? { held } : {}) });
+  const allocations = [...grant.allocations]; allocations[index] = settled;
+  return { ...grant, allocations, revision: grant.revision + 1 };
+}
+
+/**
+ * Puts a settled Run's whole reservation back, for a retry or replan that will spend again. Refused when what the
+ * settlement returned has since been reserved by other Runs.
+ */
+export function reopenWorkGrant(grant: WorkGrant, runId: string, reserved: WorkGrantSpend): WorkGrant {
+  const index = grant.allocations.findIndex(item => item.runId === runId);
+  const current = grant.allocations[index];
+  if (!current?.settledAt) return grant;
+  const remaining = workGrantRemaining(grant);
+  for (const key of ['tokens', 'moneyUsd'] as const) {
+    const extra = (reserved[key] ?? 0) - (current[key] ?? 0);
+    if (extra > 0 && remaining[key] !== undefined && extra > remaining[key]! + 1e-9) throw new WorkGrantConflict('这份授权剩下的预算不够这件 Run 再做一次');
+  }
+  const reopened = allocationSchema.parse({ runId, ...(reserved.tokens ? { tokens: reserved.tokens } : {}), ...(reserved.moneyUsd ? { moneyUsd: reserved.moneyUsd } : {}), at: current.at });
+  const allocations = [...grant.allocations]; allocations[index] = reopened;
+  return { ...grant, allocations, revision: grant.revision + 1 };
+}
+
 function roundUsd(value: number): number { return Math.round(value * 1e6) / 1e6; }
 function owned(grant: WorkGrant | undefined, scope: Ownership, grantId: string): WorkGrant {
   if (!grant || grant.owner !== scope.owner || grant.tenantId !== scope.tenantId) throw new WorkGrantNotFound(`Work grant not found: ${grantId}`);
@@ -158,6 +206,14 @@ export class InMemoryWorkGrantStore implements WorkGrantStore {
   async allocate(scope: Ownership, grantId: string, runId: string, requested: WorkGrantBudget | undefined, now = new Date().toISOString()) {
     const result = allocateWorkGrant(owned(this.grants.get(grantId), scope, grantId), runId, requested, now);
     this.grants.set(grantId, result.grant); return structuredClone(result);
+  }
+  async settle(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now = new Date().toISOString()) {
+    const next = settleWorkGrant(owned(this.grants.get(grantId), scope, grantId), runId, spent, now);
+    this.grants.set(grantId, next); return structuredClone(next);
+  }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    const next = reopenWorkGrant(owned(this.grants.get(grantId), scope, grantId), runId, reserved);
+    this.grants.set(grantId, next); return structuredClone(next);
   }
 }
 
@@ -216,6 +272,22 @@ export class JsonWorkGrantStore implements WorkGrantStore {
       return structuredClone(result);
     });
   }
+  async settle(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now = new Date().toISOString()) {
+    return this.serial(async () => {
+      const current = owned(this.grants.find(item => item.grantId === grantId), scope, grantId);
+      const next = settleWorkGrant(current, runId, spent, now);
+      if (next !== current) this.replace(next);
+      return structuredClone(next);
+    });
+  }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    return this.serial(async () => {
+      const current = owned(this.grants.find(item => item.grantId === grantId), scope, grantId);
+      const next = reopenWorkGrant(current, runId, reserved);
+      if (next !== current) this.replace(next);
+      return structuredClone(next);
+    });
+  }
   async close(): Promise<void> {
     if (this.lockOwned) { try { unlinkSync(`${this.filePath}.lock`); } catch { /* already gone */ } this.lockOwned = false; }
     this.loaded = false;
@@ -269,6 +341,12 @@ export class PostgresWorkGrantStore implements WorkGrantStore {
   }
   async allocate(scope: Ownership, grantId: string, runId: string, requested: WorkGrantBudget | undefined, now = new Date().toISOString()) {
     return this.change(scope, grantId, current => { const result = allocateWorkGrant(current, runId, requested, now); return { next: result.grant, result }; });
+  }
+  async settle(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now = new Date().toISOString()) {
+    return this.change(scope, grantId, current => { const next = settleWorkGrant(current, runId, spent, now); return { next, result: next }; });
+  }
+  async reopen(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend) {
+    return this.change(scope, grantId, current => { const next = reopenWorkGrant(current, runId, reserved); return { next, result: next }; });
   }
   async close(): Promise<void> { await this.pool.end(); }
   private async change<T>(scope: Ownership, grantId: string, apply: (current: WorkGrant) => { next: WorkGrant; result: T }): Promise<T> {

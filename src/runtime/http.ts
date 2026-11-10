@@ -1340,7 +1340,10 @@ export function buildApp(options: Options) {
   const workGrantStore = () => { if (!options.workGrants) throw new Conflict('Work grant store is not configured'); return options.workGrants; };
   app.get('/api/work-grants', async request => {
     const principal = principalOf(request);
-    const grants = await workGrantStore().list({ owner: principal.id, tenantId: principal.tenantId });
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const listed = await workGrantStore().list(scope);
+    // Ended Runs give back what they did not spend before the remaining budget is shown.
+    const grants = options.engine ? await Promise.all(listed.map(grant => grant.allocations.some(item => !item.settledAt || item.held) ? options.engine!.settleWorkGrant(grant.grantId, scope).catch(() => grant) : grant)) : listed;
     return { grants: grants.map(grantView).reverse() };
   });
   app.post('/api/work-grants', async (request, reply) => {

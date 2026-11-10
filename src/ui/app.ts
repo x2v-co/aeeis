@@ -1172,7 +1172,7 @@ function setQuickRunBusy(busy: boolean, text = ''): void {
     if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
     if (!localBotCanExecute()) { message('这位成员不支持本地执行。'); return; }
     $<HTMLTextAreaElement>('conversation-text').value = $<HTMLInputElement>('quick-goal').value;
-    void sendConversation(conversationSendIntent()).catch(error => message(errorMessage(error)));
+    void sendConversation(conversationSendIntent(), false, true).catch(error => message(errorMessage(error)));
     return;
   }
   if (entryShowsBot() && activeBotId() !== 'aeeis') { message('请先连接对话服务，再给这位 Bot 派活。'); return; }
@@ -1365,6 +1365,22 @@ function conversationSendIntent(): 'discuss' | 'execute' {
   const preparing = Boolean(task && task.status === 'preparing' && !task.runId && !task.latestRunId);
   const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
   return preparing || active ? 'discuss' : 'execute';
+}
+/**
+ * A greeting, a thanks or a question about the Bot itself. It needs a reply, not a plan: it is sent as one read-only step
+ * without the side panel's tools, agents, skill or budget, so automatic review lets it through instead of asking.
+ */
+function smallTalk(text: string): boolean {
+  const line = text.trim().replace(/[\s!！?？。.,，~～、…]+$/u, '').trim();
+  if (!line || line.length > 24 || line.includes('\n')) return false;
+  return /^(?:(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯+|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)[\s,，!！]*)+(?:你是谁|你能做什么|你会做什么|你可以做什么)?$|^(?:你是谁|你能做什么|你会做什么|你可以做什么|who are you|what can you do)$/iu.test(line);
+}
+/**
+ * Run options for a small-talk reply: one direct step, never the side panel's work settings. Never under a grant
+ * either: a grant fills in its own tools, which a one-step reply may not have, and a reply needs nothing it covers.
+ */
+function chatRunOptions(): Record<string, unknown> {
+  return { executionReview: 'auto', allowedTools: [], planning: 'direct', materials: [], privacy: $<HTMLSelectElement>('privacy').value };
 }
 /** A new task named after the message, for a send that names no task. Titles need at least two characters. */
 function autoTaskTitle(text: string): string {
@@ -1706,8 +1722,12 @@ function pinLastDelivery(): void {
   $('conversation-error').textContent = '';
   updateConversationControls();
 }
+/** An admitted Agent that is someone to talk to. AEEIS's own executor (Claude Code) does work inside Runs and is not a Bot. */
+function rosterAgent(agent: AgentSummary): boolean {
+  return agent.status === 'admitted' && agent.card.owner !== 'aeeis';
+}
 function usingDemoBots(): boolean {
-  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
+  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(rosterAgent);
 }
 function reservedBotName(name: string): boolean {
   const normalized = name.normalize('NFKC').trim();
@@ -1766,7 +1786,7 @@ function botDutyLine(bot: RosterBot | undefined): string {
   return '职责还没有单独写下。';
 }
 function rosterBots(): RosterBot[] {
-  const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
+  const admitted = agentSummaries.filter(rosterAgent).map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
   return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
@@ -5240,7 +5260,8 @@ async function saveStandingInstruction(text: string): Promise<void> {
     if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
   }
 }
-async function sendConversation(intent: 'discuss' | 'execute', retry = false): Promise<void> {
+/** `send` is the ordinary send. 「只记下来」 and retries pass false, so a record-only greeting is never turned into a Run. */
+async function sendConversation(intent: 'discuss' | 'execute', retry = false, send = false): Promise<void> {
   const surface = rosterView();
   if (surface !== 'entry' && surface !== 'bot') return;
   if (!conversation || conversationBusy || (!retry && (conversationAttempt || conversationNeedsRefresh))) return;
@@ -5252,10 +5273,15 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
     const lifeSpeaker = selectedLifeSpeaker();
     const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
+    // Small talk gets its own quick reply, even while another task holds the focus, and never takes the focus.
+    const chat = send && !conversationCorrectionId && !target && !conversationReplyId && !lifeSpeaker && quickRunReady && localBotCanExecute(lifeAgent(conversation)) && smallTalk(text) && autoTaskTitle(text).length >= 2;
+    if (chat) intent = 'execute';
     // A send that names no task starts a new one and makes it the focus, so the next message (a change to the plan, a follow-up) lands on it.
     const autoTitle = intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId ? autoTaskTitle(text) : '';
     if (intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId && autoTitle.length < 2) intent = 'discuss';
-    const body = conversationCorrectionId
+    const body = chat
+      ? { text, expectedRevision: conversation.revision, newTask: { title: autoTaskTitle(text) }, focus: 'keep', intent, runOptions: chatRunOptions() }
+      : conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text, expectedRevision: conversation.revision,
         ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
@@ -5295,7 +5321,7 @@ $('conversation-text').addEventListener('keydown', event => {
   event.preventDefault();
   if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
 });
-$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent()).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
+$('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent(), false, true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
 for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());
   $(id)?.addEventListener('change', () => syncEntryDefaults());
@@ -8482,7 +8508,8 @@ const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '�
 /** A machine in these states still serves the preview link it delivered. */
 const MACHINE_UP = ['running', 'frozen', 'unknown', 'unreachable'];
 function renderAcceptance(run: RunView, view: ComputerView): void {
-  const check = ((run as RunView & { acceptanceChecks?: AcceptanceView[] }).acceptanceChecks ?? []).at(-1);
+  // A check that came back after the Run stopped is kept for its cost only; it is not the Run's verdict.
+  const check = ((run as RunView & { acceptanceChecks?: (AcceptanceView & { ignored?: string })[] }).acceptanceChecks ?? []).filter(item => !item.ignored).at(-1);
   const saved = view.delivery;
   $('computer-acceptance').hidden = !check && !saved?.savedSite && !saved?.sourceArchive;
   if (check) {

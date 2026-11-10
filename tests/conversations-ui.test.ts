@@ -561,6 +561,50 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('把发布流程整理成每周可审批的自动化'));
   });
 
+  it('answers a greeting as one quick step without the work settings, and leaves the focus alone', async () => {
+    const h = harness(); start(h.fetch, { local: { 'aeeis.execution-review': 'required' } }); await ready();
+    fill('allowed-tools', 'read'); fill('model-budget-tokens', '1200'); fill('materials', '项目资料'); fill('external-budget-calls', '2');
+    fill('conversation-text', '你好！'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    const body = messagePosts(h)[0]?.body;
+    expect(body).toMatchObject({ intent: 'execute', focus: 'keep', newTask: { title: '你好！' }, runOptions: { executionReview: 'auto', planning: 'direct', allowedTools: [], materials: [] } });
+    expect(body).not.toHaveProperty('taskIds');
+    for (const key of ['allowedAgents', 'modelBudget', 'externalBudget', 'builtinSkill', 'acceptance']) expect(body.runOptions).not.toHaveProperty(key);
+    // Real work still carries the settings and goes to the focused task.
+    await sendReady();
+    fill('conversation-text', '你好，帮我核对发布'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'], runOptions: { executionReview: 'required', allowedTools: ['read'], externalBudget: { calls: 2 } } });
+  });
+
+  it('answers a greeting without the selected grant, which would fill in tools a one-step reply cannot have', async () => {
+    const grantId = `wg_${'a'.repeat(32)}`;
+    const grant = { grantId, title: '站点', tools: ['read'], agents: [], expiresAt: '2099-01-01T00:00:00.000Z', runCount: 0, state: 'active', remaining: { tokens: 5000 } };
+    const h = harness(undefined, { handler: url => url === '/api/work-grants' ? response({ grants: [grant] }) : undefined });
+    start(h.fetch, { local: { 'aeeis.execution-review': `grant:${grantId}` } }); await ready();
+    await vi.waitFor(() => expect(el<HTMLSelectElement>('execution-review').value).toBe(`grant:${grantId}`));
+    fill('conversation-text', '谢谢'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    const options = messagePosts(h)[0]?.body.runOptions;
+    expect(options).toMatchObject({ executionReview: 'auto', planning: 'direct', allowedTools: [] });
+    expect(options).not.toHaveProperty('workGrantId');
+    // Work still goes under the grant.
+    await sendReady();
+    fill('conversation-text', '核对发布'); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(2));
+    expect(messagePosts(h)[1]?.body.runOptions).toMatchObject({ workGrantId: grantId });
+  });
+
+  it('only records a greeting sent with the record-only button', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    fill('conversation-text', '你好');
+    el<HTMLButtonElement>('conversation-note').click();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'discuss' });
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('runOptions');
+    expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
+  });
+
   it('keeps a saved review choice instead of the auto default', async () => {
     const h = harness(); start(h.fetch, { local: { 'aeeis.execution-review': 'required' } }); await ready();
     expect(el<HTMLSelectElement>('execution-review').value).toBe('required');
@@ -4044,6 +4088,14 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(doc().querySelector('[data-column="capture"]')?.textContent).toContain('频道取消'));
     expect(doc().querySelector('[data-board-task="task_cancel"]')?.textContent).not.toContain('已在频道里取消');
     expect(h.posts.some(post => /\/runs\/[^/]+\/cancel$|\/approve$|\/focus$/.test(post.url))).toBe(false);
+  });
+  it('leaves AEEIS\'s own executor off the bot list', async () => {
+    const agent = (agentId: string, name: string, owner: string) => ({ agentId, status: 'admitted', card: { name, owner, capabilities: [] as string[], cardVersion: '1' }, discoveredAt: date, reputation: { samples: 0, dimensions: {} } });
+    const h = harness(undefined, { handler: url => url === '/api/agents?limit=50' ? response([agent('aeeis.executor.claude-code', 'Claude Code', 'aeeis'), agent('bot.cto', 'cto', 'owner')]) : undefined });
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(doc().querySelector('#bots [data-bot-id="bot.cto"]')).not.toBeNull());
+    expect(doc().querySelector('#bots [data-bot-id="aeeis.executor.claude-code"]')).toBeNull();
+    expect(el('bots').textContent).not.toContain('Claude Code');
   });
   it('counts in-progress channel work by bot id when display names match', async () => {
     const agent = (agentId: string) => ({ agentId, status: 'admitted', card: { name: '同名', owner: 'owner', capabilities: [] as string[], cardVersion: '1' }, discoveredAt: date, reputation: { samples: 0, dimensions: {} } });
