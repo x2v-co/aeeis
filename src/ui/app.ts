@@ -93,7 +93,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] } }
+interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
 interface ConversationReply { text: string; artifactId: string; truncated?: true }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
@@ -4438,7 +4438,7 @@ function taskActivity(task: ConversationTaskView): string {
     case 'reviewing': return '在复核结果。';
     case 'paused': return `已暂停${at ? `，停在${at}` : ''}。`;
     case 'succeeded': return evidence ? `做完了，留下 ${evidence} 份证据。` : '做完了。';
-    case 'failed': return `在${at || '执行中'}卡住了。可以重试，或打开工作台看原因。`;
+    case 'failed': return task.failure ?? `在${at || '执行中'}卡住了。可以重试，或打开工作台看原因。`;
     case 'unknown': return '有一次调用结果未知，需要你核查后才能继续。';
     case 'cancelled': return '已取消，不会再执行。';
     default: return '';

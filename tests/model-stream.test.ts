@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpModelAdapter, ModelOutcomeUnknown, modelTransportConfig } from '../src/runtime/model.js';
+import { HttpModelAdapter, ModelAccountRefused, ModelOutcomeUnknown, accountRefusalCode, modelAccountCode, modelAccountNotice, modelTransportConfig } from '../src/runtime/model.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 const chunk = (content: string, reason: string | null = null) => ({ choices: [{ index: 0, delta: { content }, finish_reason: reason }], usage: null });
@@ -190,6 +190,39 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ status: 400, retryable: true, willRetry: true, retryDecision: 'thinking-unsupported', thinkingUnsupported: true, retryDelayMs: 0 });
   });
 
+  it('stops at once when the provider refuses the account, without switching thinking off', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const body = '{"error":{"code":"InvalidSubscription","message":"Your account (2101124974) does not have a valid CodingPlan subscription"}}';
+    const fetch = vi.fn(async () => new Response(body, { status: 400 })); vi.stubGlobal('fetch', fetch);
+    const model = adapter({ thinking: 'enabled', reasoningEffort: 'high' });
+    const onThinkingUnsupported = vi.fn();
+    const failure = await model.complete({ system: 's', input: {}, thinking: 'enabled', reasoningEffort: 'high', idempotencyKey: 'k', onThinkingUnsupported }).catch(error => error);
+    expect(failure).toBeInstanceOf(ModelAccountRefused);
+    expect(failure).toMatchObject({ providerCode: 'InvalidSubscription', httpStatus: 400, usage: { inputTokens: 0, outputTokens: 0 } });
+    // The provider's own text (here with an account number) stays out of the Run.
+    expect(failure.message).toBe('Model provider refused the account (InvalidSubscription, HTTP 400)');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(onThinkingUnsupported).not.toHaveBeenCalled();
+    expect(model.requestDefaults()).toMatchObject({ thinking: 'enabled', reasoningEffort: 'high' });
+    expect(JSON.parse(errors.mock.calls[0]![0])).toMatchObject({ status: 400, errorCode: 'InvalidSubscription', willRetry: false, retryDecision: 'not-retryable' });
+  });
+  it('treats a bad key on any OpenAI-compatible provider the same way, and leaves other 4xx alone', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn().mockResolvedValueOnce(new Response('{"error":{"code":"invalid_api_key"}}', { status: 401 }))
+      .mockResolvedValueOnce(new Response('{"error":{"code":"context_length_exceeded"}}', { status: 400 })); vi.stubGlobal('fetch', fetch);
+    const model = new HttpModelAdapter('https://other.example/v1', 'model', 'key', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0 });
+    await expect(model.complete({ system: 's', input: {} })).rejects.toMatchObject({ providerCode: 'invalid_api_key', httpStatus: 401 });
+    const other = await model.complete({ system: 's', input: {} }).catch(error => error);
+    expect(other).not.toBeInstanceOf(ModelAccountRefused);
+    expect(other.message).toBe('Model provider returned HTTP 400');
+  });
+  it('turns a refused account into one plain sentence the owner can act on', () => {
+    expect(['InvalidSubscription', 'AccountOverdueError', 'AuthenticationError', 'insufficient_quota', 'ModelNotOpen'].every(accountRefusalCode)).toBe(true);
+    expect(['UnsupportedParameter', 'context_length_exceeded', 'InvalidParameter', undefined].some(accountRefusalCode)).toBe(false);
+    expect(modelAccountCode('Model provider refused the account (InvalidSubscription, HTTP 400)')).toBe('InvalidSubscription');
+    expect(modelAccountCode('Model provider returned HTTP 400')).toBeUndefined();
+    expect(modelAccountNotice('InvalidSubscription')).toContain('续订或更换密钥');
+  });
   it('records a cached downgrade for an older frozen request before dispatch', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetch = vi.fn().mockResolvedValueOnce(new Response('unsupported', { status: 400 }))

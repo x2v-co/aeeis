@@ -20,7 +20,7 @@ import { WorkGrantConflict, workGrantDigest, workGrantRemaining, workGrantState,
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
-import { ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected } from './model.js';
+import { ModelAccountRefused, ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected, modelAccountNotice } from './model.js';
 import { BotBackgroundError, composeBotBackground } from '../bot-background.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
@@ -1157,6 +1157,10 @@ export class AgentEngine {
       if (error instanceof ModelOutcomeUnknown) {
         await account(undefined, 'unknown');
         throw new Conflict(`结果不明，${words.thing}没有留下`);
+      }
+      if (error instanceof ModelAccountRefused) {
+        await account(error.usage, 'settled');
+        throw new Conflict(modelAccountNotice(error.providerCode));
       }
       if (error instanceof ModelResponseRejected) {
         await account(error.usage, 'settled');
