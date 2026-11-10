@@ -196,10 +196,36 @@ function executionView(run: AgentRun | undefined): { steps: Array<{ title: strin
 /** The answer of a succeeded Run, shown to its owner as the Bot's reply in the chat: the last artifact's text, clipped. The full artifact stays on the Run. */
 const REPLY_LIMIT = 2000;
 const REPLY_RUNS = 20;
+/** Where a machine summary the text opens with ends, such as a structured summary the model also pasted into its
+ * prose. Only a block that names its schema counts: JSON an owner asked for is the answer itself. Earlier processing can
+ * leave such a block invalid (empty lists lose their brackets), so it is matched by its braces, not parsed. */
+function leadingSummaryEnd(text: string): number | undefined {
+  if (!/^\{\s*"schemaVersion"\s*:/.test(text)) return;
+  let depth = 0, quoted = false, escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+    if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) return index + 1;
+  }
+  return;
+}
+const EVIDENCE_GROUP = /[ \t]*[\[【](?:\s*(?:receipt|executor|source|artifact|model|ctx|context|wm_slice|evidence)_[A-Za-z0-9_-]+\s*[,，;；、]?)+\s*[\]】]/g;
+const TOKENED_LINK = /https?:\/\/[^\s<>()\[\]"'，。]*[?&](?:_token|token|access_token|sig|signature)=[^\s<>()\[\]"'，。]*/gi;
+/** What the chat shows of a Run's answer: the prose a person reads. The Run keeps the full text with its evidence IDs;
+ * a link carrying an access token is never shown in a message, which can be copied or forwarded. */
+export function readableReply(text: string): string {
+  let out = text.trim();
+  const summary = leadingSummaryEnd(out);
+  if (summary !== undefined) out = out.slice(summary);
+  out = out.replace(EVIDENCE_GROUP, '').replace(TOKENED_LINK, '（预览链接见详情）').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  return out || text.replace(TOKENED_LINK, '（预览链接见详情）').trim();
+}
 function runReply(run: AgentRun | undefined): { text: string; artifactId: string; truncated?: true } | undefined {
   if (run?.status !== 'succeeded') return;
   const artifact = run.artifacts.at(-1);
-  const text = artifact?.content.trim();
+  const text = artifact ? readableReply(artifact.content) : undefined;
   if (!artifact || !text) return;
   return text.length > REPLY_LIMIT ? { text: `${text.slice(0, REPLY_LIMIT).trimEnd()}…`, artifactId: artifact.id, truncated: true } : { text, artifactId: artifact.id };
 }
