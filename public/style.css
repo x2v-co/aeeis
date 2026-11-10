@@ -349,6 +349,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid rgba(23, 23, 23, .35)
 .decision-review-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .decision-primary { color: #fff; border-color: var(--ink); background: var(--ink); box-shadow: none; }
 .decision-primary:hover { color: #fff; border-color: var(--blue); background: var(--blue); }
+.decision-danger { color: #b42318; border-color: #f1c4bf; }
+.decision-danger:hover { color: #fff; border-color: #b42318; background: #b42318; }
 .run-activity[data-status="succeeded"] { border-color: #b7d4c4; background: transparent; }
 .run-activity[data-status="succeeded"] .activity-signal i, .run-activity[data-status="succeeded"] .activity-scan { background: var(--cyan); }
 .run-activity[data-status="failed"], .run-activity[data-status="cancelled"] { border-color: #e4c4be; background: transparent; }

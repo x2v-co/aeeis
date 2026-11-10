@@ -4573,19 +4573,21 @@ async function decideConversationAction(task: ConversationTaskView, decision: 'o
     if (error instanceof ApiError && error.status === 409) await refreshConversation(false, true).catch(() => undefined);
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
-async function cancelConversationTask(task: ConversationTaskView): Promise<void> {
-  if (!conversation || !task.runId || conversationBusy || conversationAttempt) return;
-  const epoch = conversationEpoch, runId = task.runId;
+async function cancelConversationTask(task: ConversationTaskView, from: 'plan' | 'list' = 'plan'): Promise<void> {
+  const runId = task.runId ?? task.latestRunId;
+  if (!conversation || !runId || conversationBusy || conversationAttempt) return;
+  if (from === 'list' && !window.confirm(`取消「${task.title}」？这件 Run 会停下，不能再继续；已经做出的东西还在，机器会收掉。`)) return;
+  const epoch = conversationEpoch;
   conversationBusy = true; updateConversationControls();
   try {
-    await api(`/runs/${encodeURIComponent(runId)}/cancel`, { reason: '在计划卡片上选择了“算了”' });
+    await api(`/runs/${encodeURIComponent(runId)}/cancel`, { reason: from === 'plan' ? '在计划卡片上选择了“算了”' : '在任务列表里选择了“取消任务”' });
     if (epoch !== conversationEpoch) return;
     await refreshConversation(false, true);
     if (epoch !== conversationEpoch) return;
     if (currentId === runId) await refresh();
     void refreshHandoffViews();
     if (epoch !== conversationEpoch) return;
-    $('conversation-status').textContent = `已取消「${task.title}」，这份计划不会执行。`;
+    $('conversation-status').textContent = from === 'plan' ? `已取消「${task.title}」，这份计划不会执行。` : `已取消「${task.title}」。`;
     $('conversation-error').textContent = '';
   } catch (error) {
     if (epoch !== conversationEpoch) return;
@@ -4715,6 +4717,11 @@ function renderConversation(): void {
         const submit = dashboardButton('提交核查并继续', () => controlConversationRun(task, 'reconcile', { reason: field.value.trim() }));
         submit.dataset.reconcileSubmit = task.id;
         actions.append(field, submit);
+      }
+      if (runId && !['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+        const cancel = dashboardButton('取消任务', () => cancelConversationTask(task, 'list'));
+        cancel.dataset.runCancel = task.id; cancel.className = 'decision-danger';
+        actions.append(cancel);
       }
       if (runId) { const view = button('查看运行', async () => openConversationRun(runId)); view.type = 'button'; actions.append(view); }
       if (runId && task.memory?.activeSummaries) { const memory = button('查看任务记忆', async () => openConversationMemory(runId)); memory.type = 'button'; actions.append(memory); }
