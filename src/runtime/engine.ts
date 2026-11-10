@@ -4033,9 +4033,11 @@ export class AgentEngine {
       await this.repository.mutate(seen.id, async run => {
         if (!workGrantSettleable(run) || run.workGrant?.grantId !== grantId || (allocation.held && !fillsHeld(run))) throw new SettleSkipped();
         const spent = workGrantSpend(run);
+        // Read again under the lock: a concurrent caller may already have made this change, and must not record it twice.
+        const prior = (await store.get(scope, grantId)).allocations.find(item => item.runId === run.id);
         grant = await store.settle!(scope, grantId, run.id, spent);
-        if (JSON.stringify(grant.allocations.find(item => item.runId === run.id)) === JSON.stringify(allocation)) throw new SettleSkipped();
-        event(run, allocation.settledAt ? 'work_grant.reconciled' : 'work_grant.settled', { grantId, spent });
+        if (JSON.stringify(grant.allocations.find(item => item.runId === run.id)) === JSON.stringify(prior)) throw new SettleSkipped();
+        event(run, prior?.settledAt ? 'work_grant.reconciled' : 'work_grant.settled', { grantId, spent });
       }, scope).catch(error => { if (!(error instanceof SettleSkipped)) throw error; });
     }
     return store.get(scope, grantId);

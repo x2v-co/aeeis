@@ -533,9 +533,11 @@ describe('independent acceptance of finished work', () => {
     expect(held).toMatchObject({ tokens: 1000, held: ['tokens'], settledAt: expect.any(String) });
     const done = await h.repository.get(run.id);
     expect(done.acceptanceChecks).toEqual([expect.objectContaining({ attempt: '0', cost: { tokens: 50, money: 0.01, currency: 'USD' } })]);
-    const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
+    // Many callers at once (several people opening the grants page): one change, recorded once.
+    await Promise.all(Array.from({ length: 12 }, () => h.engine.settleWorkGrant(grant.grantId, scope)));
+    const settled = (await h.grants.get(scope, grant.grantId)).allocations[0]!;
     expect(settled).toEqual({ runId: run.id, tokens: done.modelUsage!.tokens + 50, at: expect.any(String), settledAt: (held as { settledAt: string }).settledAt });
-    expect((await h.repository.get(run.id)).events.map(item => item.type)).toContain('work_grant.reconciled');
+    expect((await h.repository.get(run.id)).events.filter(item => item.type === 'work_grant.reconciled')).toHaveLength(1);
     // Nothing more to learn: settling again changes nothing.
     expect((await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]).toEqual(settled);
   });
