@@ -93,9 +93,19 @@ export class LocalToolGateway implements ToolGateway {
     const result = this.queue.then(() => this.sandbox.release(runId, files => this.saveArtifacts(runId, files)));
     this.queue = result.catch(() => undefined); return result;
   }
+  /** When each kept machine was last woken; a machine's own idle timer would otherwise end it before its keep does. */
+  private readonly touched = new Map<string, number>();
   async reap(status: (runId: string) => Promise<string>) {
     for (const run of await this.sandbox.pendingRuns()) {
-      if (run.keepUntil && run.keepUntil > Date.now() && !run.expired) continue;
+      if (run.keepUntil && run.keepUntil > Date.now() && !run.expired) {
+        const last = this.touched.get(run.runId) ?? 0;
+        if (Date.now() - last >= Math.min(600, this.config.sandbox.idleSeconds / 3) * 1000) {
+          this.touched.set(run.runId, Date.now());
+          await this.sandbox.touch(run.runId).catch(() => false);
+        }
+        continue;
+      }
+      this.touched.delete(run.runId);
       if (run.expired || ['succeeded', 'failed', 'cancelled'].includes(await status(run.runId))) await this.release(run.runId);
     }
   }

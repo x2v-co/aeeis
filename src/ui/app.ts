@@ -1366,6 +1366,20 @@ function conversationSendIntent(): 'discuss' | 'execute' {
   const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
   return preparing || active ? 'discuss' : 'execute';
 }
+/**
+ * A greeting, a thanks or a question about the Bot itself. It needs a reply, not a plan: it is sent as one read-only step
+ * without the side panel's tools, agents, skill or budget, so automatic review lets it through instead of asking.
+ */
+function smallTalk(text: string): boolean {
+  const line = text.trim().replace(/[\s!！?？。.,，~～、…]+$/u, '').trim();
+  if (!line || line.length > 24 || line.includes('\n')) return false;
+  return /^(?:(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯+|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)[\s,，!！]*)+(?:你是谁|你能做什么|你会做什么|你可以做什么)?$|^(?:你是谁|你能做什么|你会做什么|你可以做什么|who are you|what can you do)$/iu.test(line);
+}
+/** Run options for a small-talk reply: one direct step, never the side panel's work settings. */
+function chatRunOptions(): Record<string, unknown> {
+  const grant = selectedWorkGrant();
+  return { ...(grant ? { workGrantId: grant.grantId } : { executionReview: 'auto' }), allowedTools: [], planning: 'direct', materials: [], privacy: $<HTMLSelectElement>('privacy').value };
+}
 /** A new task named after the message, for a send that names no task. Titles need at least two characters. */
 function autoTaskTitle(text: string): string {
   const line = text.split('\n').map(part => part.trim()).find(Boolean) ?? '';
@@ -1706,8 +1720,12 @@ function pinLastDelivery(): void {
   $('conversation-error').textContent = '';
   updateConversationControls();
 }
+/** An admitted Agent that is someone to talk to. AEEIS's own executor (Claude Code) does work inside Runs and is not a Bot. */
+function rosterAgent(agent: AgentSummary): boolean {
+  return agent.status === 'admitted' && agent.card.owner !== 'aeeis';
+}
 function usingDemoBots(): boolean {
-  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(agent => agent.status === 'admitted');
+  return agentsLoaded && localStorage.getItem('aeeis.demo-roster') !== '0' && ownedBotRecords.length === 0 && loadCustomBots().length === 0 && !agentSummaries.some(rosterAgent);
 }
 function reservedBotName(name: string): boolean {
   const normalized = name.normalize('NFKC').trim();
@@ -1766,7 +1784,7 @@ function botDutyLine(bot: RosterBot | undefined): string {
   return '职责还没有单独写下。';
 }
 function rosterBots(): RosterBot[] {
-  const admitted = agentSummaries.filter(agent => agent.status === 'admitted').map(agent => ({
+  const admitted = agentSummaries.filter(rosterAgent).map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
   return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
@@ -5252,10 +5270,15 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false): P
     if (conversationCorrectionId && (intent !== 'discuss' || !conversation.tasks.some(task => task.id === target))) return;
     const lifeSpeaker = selectedLifeSpeaker();
     const text = $<HTMLTextAreaElement>('conversation-text').value.trim();
+    // Small talk gets its own quick reply, even while another task holds the focus, and never takes the focus.
+    const chat = !conversationCorrectionId && !target && !conversationReplyId && !lifeSpeaker && quickRunReady && localBotCanExecute(lifeAgent(conversation)) && smallTalk(text) && autoTaskTitle(text).length >= 2;
+    if (chat) intent = 'execute';
     // A send that names no task starts a new one and makes it the focus, so the next message (a change to the plan, a follow-up) lands on it.
     const autoTitle = intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId ? autoTaskTitle(text) : '';
     if (intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId && autoTitle.length < 2) intent = 'discuss';
-    const body = conversationCorrectionId
+    const body = chat
+      ? { text, expectedRevision: conversation.revision, newTask: { title: autoTaskTitle(text) }, focus: 'keep', intent, runOptions: chatRunOptions() }
+      : conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text, expectedRevision: conversation.revision,
         ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),

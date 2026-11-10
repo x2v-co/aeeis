@@ -132,6 +132,23 @@ describe('runs under a work grant', () => {
     expect(workGrantRemaining(await h.grants.get(scope, grant.grantId))).toEqual({ tokens: 1500 });
   });
 
+  it('gives back what an ended Run did not spend, and keeps a running Run\'s whole reservation', async () => {
+    const h = harness();
+    const grant = await h.grants.create(scope, grantInput);
+    const waiting = await h.engine.create({ goal: 'Add a header', materials: h.materials, workGrantId: grant.grantId });
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const finished = await h.repository.get(run.id);
+    const spent = finished.calls.length * 15;
+    expect(spent).toBeGreaterThan(0);
+    const settled = await h.engine.settleWorkGrant(grant.grantId, scope);
+    expect(settled.allocations.find(item => item.runId === run.id)).toMatchObject({ tokens: spent, settledAt: expect.any(String) });
+    expect(settled.allocations.find(item => item.runId === waiting.id)).toEqual(expect.not.objectContaining({ settledAt: expect.anything() }));
+    expect(workGrantRemaining(settled)).toEqual({ tokens: 2500 - 1000 - spent });
+    // Settling again changes nothing; the next Run reserves from what came back.
+    expect((await h.engine.settleWorkGrant(grant.grantId, scope)).revision).toBe(settled.revision);
+  });
+
   it('still asks before an action whose effect reaches outside the workspace', async () => {
     const h = harness({ calls: ['publish'] });
     const grant = await h.grants.create(scope, grantInput);

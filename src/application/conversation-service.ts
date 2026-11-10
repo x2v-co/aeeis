@@ -111,6 +111,13 @@ function privatePerson(conversation: Conversation): string | undefined {
   const person = conversation.agentId;
   return person && /^[A-Za-z0-9._-]+$/.test(person) ? person : undefined;
 }
+/** What happens to the new Run's plan, in the owner's words. It follows the Run's own review choice or grant. */
+function approvalNote(request: { workGrantId?: string | undefined; executionReview?: string | undefined; planning?: string | undefined } | undefined): string {
+  if (request?.workGrantId) return '计划在授权范围内会直接开始，超出授权的部分仍会等你批准。';
+  if (request?.executionReview === 'yolo') return '计划会直接开始。';
+  if (request?.executionReview === 'auto') return request.planning === 'direct' ? '只有一个只读步骤，会直接开始。' : '只读的小任务会直接开始；要用工具、代理或外部动作的计划会等你批准。';
+  return '计划会先等你批准。';
+}
 function harnessGoal(conversation: Conversation, title: string, text: string, speaker: ConversationSpeaker): string {
   const person = privatePerson(conversation);
   const privacy = person ? `私聊：agent:${person}\n` : '';
@@ -1183,7 +1190,7 @@ export class ConversationService implements LifeThreadInbox {
       ? '请明确选择要讨论或执行的任务；本条消息没有触发执行。'
       : message.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。'
       : message.execution?.state === 'cancelled' ? '这次执行没有创建，请重新发送。'
-      : message.execution?.state === 'completed' ? `已为「${task?.title}」创建执行，仍需遵守计划审批。`
+      : message.execution?.state === 'completed' ? `已为「${task?.title}」创建执行，${approvalNote(message.execution.request)}`
       : message.route.status === 'general' ? '已记录一般讨论；选择或新建任务后可继续。'
       : `已关联到${message.route.taskIds.map(id => `「${conversation.tasks.find(task => task.id === id)!.title}」`).join('、')}，未触发执行。`;
     return { conversation: await this.view(conversation, scope, actor), message: redactRunData(this.messageView(message)), response, ...(message.execution?.state === 'completed' ? { runId: message.execution.runId } : {}) };

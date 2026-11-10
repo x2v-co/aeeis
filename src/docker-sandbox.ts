@@ -620,6 +620,16 @@ export class DockerSandbox {
     const state = await this.state(runId);
     if (state && !state.released) { state.keepUntil = Date.now() + hours * 3_600_000; await this.save(state); }
   }
+  /**
+   * Counts as activity on the machine's idle timer. The tool service inside exits after idleSeconds without a request,
+   * which would end a kept machine (and its preview) long before its keep runs out.
+   */
+  async touch(runId: string): Promise<boolean> {
+    const state = await this.state(runId);
+    if (!state || state.released) return false;
+    const ping = `import socket\ns=socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect("/run/aeeis.sock"); s.sendall(b'{"tool":"__ping"}'); s.shutdown(socket.SHUT_WR); assert s.recv(100)==b'{"ready":true}'`;
+    return (await this.command(['exec', state.name, 'python3', '-I', '-c', ping], 30_000)).code === 0;
+  }
   /** Copies the Run's artifacts out now, for a session that wrote them outside any tool call. */
   async snapshotArtifacts(runId: string): Promise<WorkspaceFile[]> {
     const state = await this.state(runId);

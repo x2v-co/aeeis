@@ -3880,12 +3880,36 @@ export class AgentEngine {
   private async loadWorkGrant(request: TaskRequest, scope: Ownership): Promise<WorkGrant> {
     if (!this.workGrants) throw new Conflict('Work grants are not configured on this AEEIS');
     if (request.executionReview) throw new RangeError('A Run under a Work Grant cannot also choose executionReview; the grant decides which plans need approval');
-    const grant = await this.workGrants.get(scope, request.workGrantId!);
+    const grant = await this.settleWorkGrant(request.workGrantId!, scope);
     const state = workGrantState(grant);
     if (state !== 'active') throw new Conflict(state === 'revoked' ? '这份授权已撤销' : state === 'expired' ? '这份授权已过期' : '这份授权的预算已用完');
     if (!request.allowedTools.length && this.tools) request.allowedTools = [...grant.tools];
     if (!request.allowedAgents.length && this.agents) request.allowedAgents = [...grant.agents];
     request.modelBudget = grantedModelBudget(grant, request.modelBudget);
+    return grant;
+  }
+  /**
+   * Returns what ended Runs did not spend to the grant: each ended Run's reservation shrinks to its receipts. A Run
+   * still going keeps its whole reservation, and so does any dimension whose usage was not reported.
+   */
+  async settleWorkGrant(grantId: string, scope: Ownership): Promise<WorkGrant> {
+    if (!this.workGrants) throw new Conflict('Work grants are not configured on this AEEIS');
+    let grant = await this.workGrants.get(scope, grantId);
+    if (!this.workGrants.settle) return grant;
+    for (const allocation of grant.allocations) {
+      if (allocation.settledAt) continue;
+      const run = await this.repository.get(allocation.runId, scope).catch(() => undefined);
+      if (!run || !terminalRunStatuses.has(run.status)) continue;
+      const model = deriveModelUsage(run), external = deriveExternalUsage(run);
+      // This host's own sandbox tools spend no tokens or money, so their receipts carry no cost; that is not missing usage.
+      const local = (run.toolReceipts ?? []).filter(receipt => receipt.provider === 'aeeis-local-tools');
+      const cost = (receipt: (typeof local)[number]) => (receipt.cost && typeof receipt.cost === 'object' ? receipt.cost as Record<string, unknown> : {});
+      const unknownTokens = external.unreportedTokenCalls - local.filter(receipt => !validExternalTokens(cost(receipt).tokens)).length;
+      const unknownMoney = external.unreportedMoneyCalls - local.filter(receipt => !validExternalMoneyUsd(receipt.cost)).length;
+      const tokens = model.unreportedCalls || unknownTokens > 0 ? undefined : model.tokens + external.tokens;
+      const moneyUsd = model.unreportedCalls || unknownMoney > 0 || model.moneyUsd === undefined ? undefined : model.moneyUsd + (external.moneyUsd ?? 0);
+      grant = await this.workGrants.settle(scope, grantId, run.id, { ...(tokens === undefined ? {} : { tokens }), ...(moneyUsd === undefined ? {} : { moneyUsd }) });
+    }
     return grant;
   }
   /** Reserves this Run's share of the grant budget and freezes the grant. Only granted tools that the gateway's own

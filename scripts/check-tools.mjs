@@ -18,11 +18,15 @@ const remote = remoteToolGateway(process.env);
 const local = process.env.AEEIS_LOCAL_TOOLS_CONFIG ? await LocalToolGateway.load(process.env.AEEIS_LOCAL_TOOLS_CONFIG) : undefined;
 const toolkit = local && remote ? new CombinedToolGateway([local, remote]) : local ?? remote;
 try {
-  const defaults = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, local?.config.defaultAllowedTools ?? [], toolkit);
+  // The same check the server makes at startup: local defaults from their configuration, the rest from the remote Toolkit.
+  const defaults = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, local?.config.defaultAllowedTools ?? [], remote, local?.toolRefs(), message => console.log(`warning: ${message}`));
   console.log(`default tools: ${defaults.join(',') || '(none)'}`);
-  // Combining local and remote tools must succeed for every Run. A remote Toolkit alone is not listed here:
-  // the server starts without reaching it, so its outage must not block a deploy either.
-  if (local && remote) console.log(`tools: ${(await toolkit.listTools()).length} (local and remote)`);
+  // Combining local and remote tools must succeed for every Run. The server starts without reaching the remote Toolkit,
+  // so its outage is reported, not enforced; a reachable Toolkit is still checked against the local tools.
+  if (local && remote) {
+    const reachable = await remote.listTools().then(() => true, error => { console.log(`remote Toolkit: NOT REACHABLE (warning only) - ${error instanceof Error ? error.message : error}`); return false; });
+    if (reachable) console.log(`tools: ${(await toolkit.listTools()).length} (local and remote)`);
+  }
   if (local) {
     console.log(`executor: ${local.executorTransport() ? 'configured' : 'none'}`);
     // Reported, not enforced: the server starts without its sandbox host, which may simply be paused.
