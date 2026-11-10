@@ -31,6 +31,9 @@ const allocationSchema = z.object({
   at: z.string().datetime({ offset: true }),
   /** Set once the Run has ended: tokens and moneyUsd then hold what it spent, not what it reserved. */
   settledAt: z.string().datetime({ offset: true }).optional(),
+  /** Dimensions whose spend was not known when it settled, so their whole reservation stayed. A later settlement that
+   * knows them shrinks them then; nothing else about a settled allocation changes. */
+  held: z.array(z.enum(['tokens', 'moneyUsd'])).min(1).max(2).optional(),
 }).strict();
 export type WorkGrantAllocation = z.infer<typeof allocationSchema>;
 
@@ -82,7 +85,7 @@ export interface WorkGrantStore {
   revoke(scope: Ownership, grantId: string, now?: string): Promise<WorkGrant>;
   /** Reserves one Run's budget. Repeating it for the same Run returns the first reservation. */
   allocate(scope: Ownership, grantId: string, runId: string, requested: WorkGrantBudget | undefined, now?: string): Promise<{ grant: WorkGrant; allocation: WorkGrantAllocation }>;
-  /** Shrinks an ended Run's reservation to what it spent. Settling twice keeps the first settlement. */
+  /** Shrinks an ended Run's reservation to what it spent. Settling again only fills in dimensions it held as unknown. */
   settle?(scope: Ownership, grantId: string, runId: string, spent: WorkGrantSpend, now?: string): Promise<WorkGrant>;
   /** Restores a settled Run's reservation before it runs again. */
   reopen?(scope: Ownership, grantId: string, runId: string, reserved: WorkGrantSpend): Promise<WorkGrant>;
@@ -150,11 +153,18 @@ export interface WorkGrantSpend { tokens?: number; moneyUsd?: number }
 export function settleWorkGrant(grant: WorkGrant, runId: string, spent: WorkGrantSpend, now: string): WorkGrant {
   const index = grant.allocations.findIndex(item => item.runId === runId);
   const current = grant.allocations[index];
-  if (!current || current.settledAt) return grant;
-  const shrink = (reserved: number | undefined, used: number | undefined, round: (value: number) => number) =>
-    reserved === undefined ? undefined : used === undefined || !Number.isFinite(used) || used < 0 ? reserved : round(Math.min(reserved, used));
-  const tokens = shrink(current.tokens, spent.tokens, Math.ceil), moneyUsd = shrink(current.moneyUsd, spent.moneyUsd, value => Math.ceil(value * 1e6) / 1e6);
-  const settled = allocationSchema.parse({ runId, ...(tokens ? { tokens } : {}), ...(moneyUsd ? { moneyUsd } : {}), at: current.at, settledAt: now });
+  if (!current || (current.settledAt && !current.held)) return grant;
+  const known = (used: number | undefined) => used !== undefined && Number.isFinite(used) && used >= 0;
+  // Settled already: only a dimension it held can still change, and only once its spend is known.
+  const open = (key: 'tokens' | 'moneyUsd') => !current.settledAt || Boolean(current.held?.includes(key));
+  const shrink = (key: 'tokens' | 'moneyUsd', round: (value: number) => number) => {
+    const reserved = current[key], used = spent[key];
+    return reserved === undefined || !open(key) || !known(used) ? reserved : round(Math.min(reserved, used!));
+  };
+  const tokens = shrink('tokens', Math.ceil), moneyUsd = shrink('moneyUsd', value => Math.ceil(value * 1e6) / 1e6);
+  const held = (['tokens', 'moneyUsd'] as const).filter(key => current[key] !== undefined && open(key) && !known(spent[key]));
+  if (current.settledAt && held.length === current.held!.length) return grant;
+  const settled = allocationSchema.parse({ runId, ...(tokens ? { tokens } : {}), ...(moneyUsd ? { moneyUsd } : {}), at: current.at, settledAt: current.settledAt ?? now, ...(held.length ? { held } : {}) });
   const allocations = [...grant.allocations]; allocations[index] = settled;
   return { ...grant, allocations, revision: grant.revision + 1 };
 }

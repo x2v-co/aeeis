@@ -1343,7 +1343,7 @@ export function buildApp(options: Options) {
     const scope = { owner: principal.id, tenantId: principal.tenantId };
     const listed = await workGrantStore().list(scope);
     // Ended Runs give back what they did not spend before the remaining budget is shown.
-    const grants = options.engine ? await Promise.all(listed.map(grant => grant.allocations.some(item => !item.settledAt) ? options.engine!.settleWorkGrant(grant.grantId, scope).catch(() => grant) : grant)) : listed;
+    const grants = options.engine ? await Promise.all(listed.map(grant => grant.allocations.some(item => !item.settledAt || item.held) ? options.engine!.settleWorkGrant(grant.grantId, scope).catch(() => grant) : grant)) : listed;
     return { grants: grants.map(grantView).reverse() };
   });
   app.post('/api/work-grants', async (request, reply) => {

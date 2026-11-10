@@ -51,6 +51,22 @@ describe('work grant store', () => {
     await store.close();
   });
 
+  it('holds a dimension it could not settle, fills it in once known, and never grows it', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'aeeis-grants-')), 'work-grants.json');
+    let store = new JsonWorkGrantStore(file); await store.init();
+    const grant = await store.create(scope, grantInput);
+    await store.allocate(scope, grant.grantId, 'run_a', undefined);
+    const first = (await store.settle(scope, grant.grantId, 'run_a', {})).allocations[0]!;
+    expect(first).toEqual({ runId: 'run_a', tokens: 1000, at: expect.any(String), settledAt: expect.any(String), held: ['tokens'] });
+    await store.close(); store = new JsonWorkGrantStore(file); await store.init();
+    // Still unknown: nothing changes.
+    expect((await store.settle(scope, grant.grantId, 'run_a', {})).allocations[0]).toEqual(first);
+    const filled = (await store.settle(scope, grant.grantId, 'run_a', { tokens: 80 })).allocations[0]!;
+    expect(filled).toEqual({ runId: 'run_a', tokens: 80, at: first.at, settledAt: first.settledAt });
+    // Settled and known: a later report cannot change it.
+    expect((await store.settle(scope, grant.grantId, 'run_a', { tokens: 5 })).allocations[0]).toEqual(filled);
+    await store.close();
+  });
   it('reports expiry from the clock without rewriting the record', async () => {
     const store = new InMemoryWorkGrantStore();
     const grant = await store.create(scope, grantInput, '2026-11-05T00:00:00.000Z');
@@ -494,6 +510,34 @@ describe('independent acceptance of finished work', () => {
     expect(verify.mock.calls.map(call => call[0].attempt)).toEqual(['0', '1']);
     const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
     expect(settled.tokens).toBe(done.modelUsage!.tokens + 50 + 50);
+  });
+  it('settles again once a late report of the same session brings the tokens the first settlement did not know', async () => {
+    let ctx!: Awaited<ReturnType<typeof start>>;
+    let held: unknown;
+    const resume = vi.fn(async (input: VerifyInput) => check(input.round, true, { cost: { money: 0.01, currency: 'USD' } }));
+    const verify = vi.fn(async (input: VerifyInput) => {
+      // The original closes the relay first (so it alone has the tokens), then stalls; a takeover saves a report without tokens.
+      await ctx.h.repository.mutate(ctx.run.id, current => { current.pendingAcceptance!.at = new Date(Date.now() - 10 * 60_000).toISOString(); });
+      expect(await (ctx.h.engine as unknown as Checking).checkAcceptance(await ctx.h.repository.get(ctx.run.id))).toBe(false);
+      // The owner cancels, and the grant settles while the tokens are still unknown: that part of the reservation stays.
+      await ctx.h.engine.command(ctx.run.id, 'cancel', {});
+      held = (await ctx.h.engine.settleWorkGrant(ctx.run.workGrant!.grantId, scope)).allocations[0];
+      return check(input.round, true, { cost: { tokens: 50, money: 0.01, currency: 'USD' } });
+    });
+    const verifier = { verify, resume };
+    const h = harness({ verifier });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a form', materials: h.materials, workGrantId: grant.grantId, origin: 'channel', acceptance: requirements });
+    ctx = { h, verifier, run } as unknown as Awaited<ReturnType<typeof start>>;
+    await h.settle(run.id, ['succeeded', 'failed', 'cancelled', 'unknown', 'needs_approval', 'paused']);
+    expect(held).toMatchObject({ tokens: 1000, held: ['tokens'], settledAt: expect.any(String) });
+    const done = await h.repository.get(run.id);
+    expect(done.acceptanceChecks).toEqual([expect.objectContaining({ attempt: '0', cost: { tokens: 50, money: 0.01, currency: 'USD' } })]);
+    const settled = (await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]!;
+    expect(settled).toEqual({ runId: run.id, tokens: done.modelUsage!.tokens + 50, at: expect.any(String), settledAt: (held as { settledAt: string }).settledAt });
+    expect((await h.repository.get(run.id)).events.map(item => item.type)).toContain('work_grant.reconciled');
+    // Nothing more to learn: settling again changes nothing.
+    expect((await h.engine.settleWorkGrant(grant.grantId, scope)).allocations[0]).toEqual(settled);
   });
   it('does not start another paid check from a stale snapshot once the round is decided', async () => {
     const { h, verifier, run } = await start(async input => check(input.round, true));

@@ -4021,17 +4021,21 @@ export class AgentEngine {
     let grant = await store.get(scope, grantId);
     if (!store.settle) return grant;
     for (const allocation of grant.allocations) {
-      if (allocation.settledAt) continue;
+      // A settled allocation still holding a dimension it did not know is settled again once a late report fills it in.
+      if (allocation.settledAt && !allocation.held) continue;
       const seen = await this.repository.get(allocation.runId, scope).catch(() => undefined);
       // A stopped Run held up only by a check whose process died: follow that check for its cost, in the background.
       if (seen && terminalRunStatuses.has(seen.status) && seen.pendingAcceptance && acceptanceClaimStale(seen.pendingAcceptance)) void this.reclaimAcceptance(seen.id, scope).catch(() => undefined);
       if (!seen || !workGrantSettleable(seen)) continue;
+      const fillsHeld = (run: AgentRun) => allocation.held!.some(key => workGrantSpend(run)[key] !== undefined);
+      if (allocation.held && !fillsHeld(seen)) continue;
       // Under the Run's lock, so a retry or replan (which reopens the reservation under the same lock) cannot interleave.
       await this.repository.mutate(seen.id, async run => {
-        if (!workGrantSettleable(run) || run.workGrant?.grantId !== grantId) throw new SettleSkipped();
+        if (!workGrantSettleable(run) || run.workGrant?.grantId !== grantId || (allocation.held && !fillsHeld(run))) throw new SettleSkipped();
         const spent = workGrantSpend(run);
         grant = await store.settle!(scope, grantId, run.id, spent);
-        event(run, 'work_grant.settled', { grantId, spent });
+        if (JSON.stringify(grant.allocations.find(item => item.runId === run.id)) === JSON.stringify(allocation)) throw new SettleSkipped();
+        event(run, allocation.settledAt ? 'work_grant.reconciled' : 'work_grant.settled', { grantId, spent });
       }, scope).catch(error => { if (!(error instanceof SettleSkipped)) throw error; });
     }
     return store.get(scope, grantId);
