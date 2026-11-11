@@ -397,6 +397,8 @@ export interface AgentRun {
   approvedAgents?: ApprovedAgent[];
   /** Versioned model context, preserved for older unknown-call reconciliation. */
   capabilityCatalogVersion?: 1;
+  /** Prompts tell the model which model it is. Absent on Runs created before, whose requests must rebuild unchanged. */
+  selfModelNoteVersion?: 1;
   /** Concrete Plugin/Skill/Workflow/Tool versions used by this Run. */
   resourceSnapshot?: ResourceSnapshot;
   toolManifestDigest?: string;
