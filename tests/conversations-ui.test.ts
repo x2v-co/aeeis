@@ -577,6 +577,42 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[1]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'], runOptions: { executionReview: 'required', allowedTools: ['read'], externalBudget: { calls: 2 } } });
   });
 
+  it.each(['你好，你现在用的是什么模型？', '你用的什么模型', '您好，你是谁', 'hi, which model are you using?'])('answers a greeting with a question about the Bot as one quick step (%s)', async text => {
+    const h = harness(); start(h.fetch); await ready();
+    fill('conversation-text', text); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    const body = messagePosts(h)[0]?.body;
+    expect(body).toMatchObject({ intent: 'execute', focus: 'keep', runOptions: { executionReview: 'auto', planning: 'direct', allowedTools: [] } });
+    expect(body).not.toHaveProperty('taskIds');
+  });
+
+  it('starts a new task instead of reopening a finished focus task the conversation has moved on from', async () => {
+    const linked = (id: string, taskId: string, createdAt: string) => ({ id, role: 'user', text: '做一个番茄钟网页', createdAt, route: { status: 'routed', reason: 'explicit', taskIds: [taskId], candidateTaskIds: [], focusEffect: 'keep' } });
+    const recent = new Date(Date.now() - 5 * 60_000).toISOString();
+    const cases: Array<[string, any[], 'focus' | 'new']> = [
+      ['idle for more than an hour', [linked('m1', 'task_a', new Date(Date.now() - 2 * 3_600_000).toISOString())], 'new'],
+      ['a later message went to another task', [linked('m1', 'task_a', recent), linked('m2', 'task_b', recent)], 'new'],
+      ['just talked about', [linked('m1', 'task_a', recent)], 'focus'],
+    ];
+    for (const [, messages, expected] of cases) {
+      const view = fixture(); view.tasks[0] = { ...view.tasks[0]!, status: 'failed' }; view.messages = messages;
+      const h = harness(view); start(h.fetch); await ready(); await sendReady();
+      fill('conversation-text', '核对发布'); submit();
+      await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+      const body = messagePosts(h)[0]?.body;
+      if (expected === 'focus') expect(body).toMatchObject({ intent: 'execute', taskIds: ['task_a'] });
+      else { expect(body).toMatchObject({ intent: 'execute', focus: 'switch', newTask: { title: '核对发布' } }); expect(body).not.toHaveProperty('taskIds'); }
+    }
+  });
+
+  it('keeps a focus task that is still waiting on you, however old', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'needs_approval', runId, latestRunId: runId };
+    view.messages = [{ id: 'm1', role: 'user', text: '发布', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' } }];
+    const h = harness(view); start(h.fetch); await ready();
+    await vi.waitFor(() => expect(el('conversation-send').textContent).toBe('记下来'));
+  });
+
   it('answers a greeting without the selected grant, which would fill in tools a one-step reply cannot have', async () => {
     const grantId = `wg_${'a'.repeat(32)}`;
     const grant = { grantId, title: '站点', tools: ['read'], agents: [], expiresAt: '2099-01-01T00:00:00.000Z', runCount: 0, state: 'active', remaining: { tokens: 5000 } };
