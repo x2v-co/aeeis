@@ -998,6 +998,16 @@ function parseReviewDecision(value: unknown): z.infer<typeof reviewSchema> {
   }
 }
 
+/**
+ * What the Bot may say about the model it runs on. Users ask; without this it can only say it does not know. Only the
+ * model name and the provider (or the endpoint's host) are given, never the endpoint path or anything about keys.
+ */
+export function selfModelNote(pin: Pick<ModelPin, 'model' | 'endpoint' | 'provider'>): string {
+  let host = '';
+  try { host = new URL(pin.endpoint).hostname; } catch { /* no host to name */ }
+  const via = pin.provider || host;
+  return `\n\nYou run on the model ${JSON.stringify(pin.model)}${via ? ` from ${JSON.stringify(via)}` : ''}. When the user asks which model you are or use, say this plainly; do not name or guess any other model.`;
+}
 function pinnedTaskKindDecision(pin: ModelPin, privacy: TaskRequest['privacy']): ModelDecision {
   const provider = pin.provider ?? 'pinned';
   const selectionReason = 'owner-selected model within the pinned runtime';
@@ -1105,7 +1115,7 @@ export class AgentEngine {
    */
   async completeForBot(request: Pick<ModelRequest, 'system' | 'input' | 'maxTokens'> & { idempotencyKey: string }, scope: Ownership): Promise<unknown> {
     return this.budgetedOwnerCall(`aeeis:bot-turn:${request.idempotencyKey}`, scope, { act: 'Bot 回复', thing: '回复' }, async adapter => {
-      const response = await adapter.complete({ system: request.system, input: request.input, idempotencyKey: request.idempotencyKey, maxTokens: request.maxTokens ?? 1200, disableRetries: true });
+      const response = await adapter.complete({ system: `${request.system}${selfModelNote(adapter.pin)}`, input: request.input, idempotencyKey: request.idempotencyKey, maxTokens: request.maxTokens ?? 1200, disableRetries: true });
       return { value: response.value, ...(response.usage ? { usage: response.usage } : {}) };
     });
   }
@@ -1399,7 +1409,7 @@ export class AgentEngine {
       ...(trusted?.lineage ? { lineage: lineageSchema.parse(trusted.lineage) } : {}),
       status: 'queued', createdAt: timestamp, updatedAt: timestamp,
       context: { id: contextId, audience: [audience], sources, manifestHash: contextManifestHash, ...(memoryManifest ? { memoryManifestId: memoryManifest.id, memoryManifestHash: digest(memoryManifest), memoryRefs: memoryManifest.memoryRefs } : {}), ...(projectSourceSync ? { projectSourceSync } : {}) }, privacy: request.privacy,
-      capabilityCatalogVersion: 1, approvedAgents,
+      capabilityCatalogVersion: 1, selfModelNoteVersion: 1, approvedAgents,
       ...(resourceSnapshot ? { resourceSnapshot } : {}),
       ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}),
       ...(request.acceptance ? { acceptance: request.acceptance } : {}), ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), ...(actionPolicy ? { actionPolicy, actionPolicyDigest: actionPolicyDigest(actionPolicy) } : {}), ...(request.origin && request.origin !== 'owner' ? { origin: request.origin } : {}), model: selectedModel.pin,
@@ -3972,6 +3982,7 @@ export class AgentEngine {
   }
 
   private governedPrompt(base: string, run: AgentRun): string {
+    if (run.selfModelNoteVersion) base += selfModelNote(run.model);
     if (run.context.threadHistory) base += threadHistoryGuidance;
     if (run.acceptance?.length) base += acceptanceGuidance;
     let prompt = run.builtinSkill === 'fillable-pdf/1' ? `${base}\n\n${fillablePdfGuidance}` : usesProjectPulse(run) ? `${base}\n\n${projectPulseGuidance}` : usesWebsiteBuilder(run) ? `${base}\n\n${websiteBuilderGuidance}` : base;
