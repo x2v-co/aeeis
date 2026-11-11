@@ -401,6 +401,19 @@ describe('single-entry conversation routing', () => {
     expect(afterOverflow.tasks.map((task: { title: string }) => task.title).filter((title: string) => title === '挤满材料')).toEqual(['挤满材料']);
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('tells the owner when the model service refused the account, and nothing more about other failures', async () => {
+    const f = await fixture(), entry = await f.create();
+    const refused = await f.addTask(entry.id, '你好', 'execute');
+    const other = await f.addTask(entry.id, '别的', 'execute');
+    await f.repository.mutate(refused.runId, run => { run.status = 'failed'; run.error = 'Model provider refused the account (InvalidSubscription, HTTP 400)'; });
+    await f.repository.mutate(other.runId, run => { run.status = 'failed'; run.error = 'Model provider returned HTTP 400 SECRET DETAIL'; });
+    const seen = await f.fresh(entry.id);
+    const task = (runId: string) => seen.tasks.find((item: any) => item.runId === runId);
+    expect(task(refused.runId).failure).toContain('InvalidSubscription');
+    expect(task(refused.runId).failure).toContain('续订或更换密钥');
+    expect(task(other.runId)).not.toHaveProperty('failure');
+    expect(JSON.stringify(seen)).not.toContain('SECRET DETAIL');
+  });
   it('shows the latest succeeded delivery on this person and keeps it out of the next Run', async () => {
     const f = await fixture(), entry = await f.create();
     const earlier = await f.addTask(entry.id, '发布口径', 'execute');

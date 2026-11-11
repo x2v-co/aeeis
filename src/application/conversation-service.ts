@@ -8,6 +8,7 @@ import { requestSchema, type AgentRun } from '../runtime/contracts.js';
 import { projectRunGraphs } from '../runtime/graphs.js';
 import { NotFound, type RunRepository } from '../runtime/repository.js';
 import { Conflict } from '../runtime/engine.js';
+import { modelAccountCode, modelAccountNotice } from '../runtime/model.js';
 import { ThreadConflict } from '../runtime/threads.js';
 import { baselineVersions } from '../evolution-activation.js';
 import type { RsiService } from '../rsi.js';
@@ -488,7 +489,10 @@ export class ConversationService implements LifeThreadInbox {
         catch { machine = { state: 'unknown', ready: false }; }
       }
       const execution = executionView(run);
-      return { run, task: { ...task, sourceId: conversation.messages.find(message => message.route.taskIds.includes(task.id))?.id ?? task.id, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id, runRevision: run.revision, runBoundary: runBoardBoundary(run) } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}) } };
+      // Only reasons the owner can act on are shown; other failures stay in the workbench.
+      const refused = run?.status === 'failed' ? modelAccountCode(run.error) : undefined;
+      const failure = refused ? modelAccountNotice(refused) : undefined;
+      return { run, task: { ...task, sourceId: conversation.messages.find(message => message.route.taskIds.includes(task.id))?.id ?? task.id, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id, runRevision: run.revision, runBoundary: runBoardBoundary(run) } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}), ...(failure ? { failure } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const replies = owner ? await this.messageReplies(conversation, scope, loaded.map(item => item.run)) : new Map<string, NonNullable<ReturnType<typeof runReply>>>();

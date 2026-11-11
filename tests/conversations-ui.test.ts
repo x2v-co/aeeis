@@ -790,6 +790,18 @@ describe('single-entry conversation workbench', () => {
     }
   });
 
+  it('says why a Run failed when the reason is one the owner can fix', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'failed', runId, latestRunId: runId, failure: '模型服务拒绝了这个账号（InvalidSubscription）：订阅过期、欠费或密钥失效。请在模型服务那边续订或更换密钥，然后重试。',
+      execution: { steps: [{ title: '你好', state: 'current' }] } } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: '你好', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { taskId: 'task_a', runId, state: 'completed' } });
+    const h = harness(view); start(h.fetch); await ready();
+    const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .plan-card'); expect(found).not.toBeNull(); return found!; });
+    expect(card.querySelector('.plan-card-status')?.textContent).toBe('卡住了');
+    expect(card.querySelector('.plan-card-activity')?.textContent).toContain('InvalidSubscription');
+    expect(card.querySelector('.plan-card-activity')?.textContent).toContain('续订或更换密钥');
+  });
+
   it('opens the workbench on a Run that finishes while you watch, without moving focus or remembering it', async () => {
     const running = () => {
       const view = fixture();

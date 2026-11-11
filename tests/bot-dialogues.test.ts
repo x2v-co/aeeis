@@ -1,3 +1,4 @@
+import { ModelAccountRefused } from '../src/runtime/model.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -160,6 +161,30 @@ describe('Bot dialogue canonical dataflow', () => {
       const execute = { text: '请执行', expectedRevision: view.revision, newTask: { title: '执行任务' }, intent: 'execute' };
       await f.request(`/rooms/${binding.roomId}/dialogue/messages`, execute, 'execute'); await f.app.aeeisBots?.drain(); expect(f.calls).toHaveLength(callCount); expect(await f.runs.list(scope)).toHaveLength(1);
     } finally { await f.close(); }
+  });
+  it('says so in the conversation, once, when the model service refused the account; other failures stay quiet', async () => {
+    const refused = await dialogueFixture({ replies: true, reply: async () => { throw new ModelAccountRefused('InvalidSubscription', 400); } });
+    try {
+      const binding = await refused.ensure();
+      const body = { text: '你好', expectedRevision: 0, unassigned: true, intent: 'discuss' };
+      expect((await refused.request(`/rooms/${binding.roomId}/dialogue/messages`, body, 'hello')).statusCode).toBe(200); await refused.app.aeeisBots?.drain();
+      const view = (await refused.request(`/conversations/${binding.conversationId}`)).json();
+      expect(view.messages).toHaveLength(2);
+      expect(view.messages[1]).toMatchObject({ speaker: { role: 'agent', id: refused.bot.id }, replyTo: view.messages[0].id, intent: 'discuss' });
+      expect(view.messages[1].text).toContain('InvalidSubscription');
+      expect(view.messages[1].text).toContain('续订或更换密钥');
+      // A sweep or a retry of the same message does not say it again.
+      await refused.service.respond(binding.conversationId, view.messages[0].id, scope, (input, key) => refused.engine.completeForBot({ system: '只讨论，不执行', input, idempotencyKey: key }, scope));
+      expect((await refused.request(`/conversations/${binding.conversationId}`)).json().messages).toHaveLength(2);
+    } finally { await refused.close(); }
+    const broken = await dialogueFixture({ replies: true, reply: async () => { throw new Error('provider said SECRET'); } });
+    try {
+      const binding = await broken.ensure();
+      await broken.request(`/rooms/${binding.roomId}/dialogue/messages`, { text: '你好', expectedRevision: 0, unassigned: true, intent: 'discuss' }, 'hello'); await broken.app.aeeisBots?.drain();
+      const view = (await broken.request(`/conversations/${binding.conversationId}`)).json();
+      expect(view.messages).toHaveLength(1);
+      expect(JSON.stringify(view)).not.toContain('SECRET');
+    } finally { await broken.close(); }
   });
   it('deduplicates channel deliveries by source and saves artifact revisions without replacing Run evidence', async () => {
     const f = await dialogueFixture();
