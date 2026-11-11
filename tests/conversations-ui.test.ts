@@ -586,12 +586,22 @@ describe('single-entry conversation workbench', () => {
     expect(body).not.toHaveProperty('taskIds');
   });
 
+  it('checks a long run of repeated greeting words at once, without stalling the page', async () => {
+    const h = harness(); start(h.fetch); await ready();
+    const started = performance.now();
+    fill('conversation-text', `${'嗯'.repeat(39)}x`); submit();
+    await vi.waitFor(() => expect(messagePosts(h)).toHaveLength(1));
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(messagePosts(h)[0]?.body).toMatchObject({ intent: 'execute', taskIds: ['task_a'] });
+  });
+
   it('starts a new task instead of reopening a finished focus task the conversation has moved on from', async () => {
     const linked = (id: string, taskId: string, createdAt: string) => ({ id, role: 'user', text: '做一个番茄钟网页', createdAt, route: { status: 'routed', reason: 'explicit', taskIds: [taskId], candidateTaskIds: [], focusEffect: 'keep' } });
     const recent = new Date(Date.now() - 5 * 60_000).toISOString();
     const cases: Array<[string, any[], 'focus' | 'new']> = [
       ['idle for more than an hour', [linked('m1', 'task_a', new Date(Date.now() - 2 * 3_600_000).toISOString())], 'new'],
       ['a later message went to another task', [linked('m1', 'task_a', recent), linked('m2', 'task_b', recent)], 'new'],
+      ['a later Run ran on another task', [linked('m1', 'task_a', recent), { ...linked('m2', 'task_b', recent), route: { status: 'general', reason: 'general', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' }, execution: { runId, taskId: 'task_b', state: 'running' } }], 'new'],
       ['just talked about', [linked('m1', 'task_a', recent)], 'focus'],
     ];
     for (const [, messages, expected] of cases) {

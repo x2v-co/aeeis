@@ -1379,7 +1379,7 @@ const ABOUT_BOT = '(?:你|您)?(?:是谁|叫什么(?:名字)?|能做什么|会�
 function smallTalk(text: string): boolean {
   const line = text.trim().replace(/[\s!！?？。.,，~～、…]+$/u, '').trim();
   if (!line || line.length > 40 || line.includes('\n')) return false;
-  const greeting = '(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯+|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)';
+  const greeting = '(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)';
   const about = `(?:${ABOUT_BOT}|who are you|what can you do|(?:which|what) model (?:are you(?: using| on)?|do you use))`;
   return new RegExp(`^(?:${greeting}[\\s,，!！]*)+${about}?$|^${about}$`, 'iu').test(line);
 }
@@ -1403,9 +1403,10 @@ function sendFocusTaskId(now = Date.now()): string | undefined {
   // Work in progress or waiting on you keeps the focus however long it takes.
   const task = conversation.tasks.find(item => item.id === focus);
   if (!task || taskHoldsSend(task)) return focus;
-  const linked = (message: ConversationMessageView) => message.effectiveTaskIds ?? message.route.taskIds;
+  // Every task a message touched: where it was routed and the task its Run ran on.
+  const linked = (message: ConversationMessageView) => [...(message.effectiveTaskIds ?? message.route.taskIds), ...(message.execution ? [message.execution.taskId] : [])];
   let index = conversation.messages.length - 1;
-  while (index >= 0 && !(linked(conversation.messages[index]!).includes(focus) || conversation.messages[index]!.execution?.taskId === focus)) index -= 1;
+  while (index >= 0 && !linked(conversation.messages[index]!).includes(focus)) index -= 1;
   if (index < 0) return focus;
   const last = Date.parse(conversation.messages[index]!.createdAt);
   if (Number.isFinite(last) && now - last > FOCUS_IDLE_MS) return undefined;
