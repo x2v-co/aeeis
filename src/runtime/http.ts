@@ -2277,6 +2277,8 @@ export function buildApp(options: Options) {
     if (options.brain && options.brainStore) await options.brainStore.save(options.brain);
     return view;
   });
+  app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/put-down', async request =>
+    conversationService().putDown(request.params.id, request.params.taskId, request.body, conversationScope(request), principalOf(request)));
   app.post<{ Params: { id: string; taskId: string } }>('/api/conversations/:id/tasks/:taskId/priority', async request => {
     const view = await conversationService().priority(request.params.id, request.params.taskId, request.body, conversationScope(request), principalOf(request));
     // Rank only. Do not notify: reordering must not approve, pause, resume, or cancel.

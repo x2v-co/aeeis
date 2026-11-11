@@ -1425,6 +1425,36 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
+  it('puts a failed task down from its row: it reads 已放下 and stops counting as waiting, while retry stays', async () => {
+    const failedRunId = 'run_00000000-0000-4000-8000-000000000009';
+    const view = fixture();
+    view.tasks.push({ id: 'task_c', title: '复盘', threadId: 'thread_c', status: 'failed', runId: failedRunId, latestRunId: failedRunId } as any);
+    view.messages = [{ id: 'm_c', role: 'user', text: '复盘一下', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_c'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { runId: failedRunId, taskId: 'task_c', state: 'failed' } }];
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url.endsWith('/tasks/task_c/put-down')) {
+        (view.tasks[2] as any).putDown = true;
+        view.revision++;
+        return response(view);
+      }
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-task-id="task_c"]')!;
+    await vi.waitFor(() => expect(row().querySelector('[data-put-down]')).not.toBeNull());
+    expect(el('conversation-task-count').textContent).toContain('1 件等你');
+    expect(doc().querySelector('[data-plan-task="task_c"]')?.textContent).toContain('卡住了');
+    clickText('放下', row());
+    await vi.waitFor(() => expect(row().textContent).toContain('已放下'));
+    expect(h.posts.find(post => post.url.endsWith('/put-down'))?.body).toEqual({ expectedRevision: 1 });
+    expect(row().querySelector('[data-put-down]')).toBeNull();
+    expect(row().querySelector('[data-retry]')).not.toBeNull();
+    expect(el('conversation-task-count').textContent).not.toContain('等你');
+    const card = doc().querySelector('[data-plan-task="task_c"]')!;
+    expect(card.textContent).toContain('已放下');
+    expect(card.textContent).not.toContain('卡住了');
+    expect(el('conversation-status').textContent).toContain('已放下');
+    expect(h.posts.filter(post => post.url.endsWith('/retry') || post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+  });
+
   it('pauses, resumes and reconciles the existing run from the task row without moving focus', async () => {
     const activeId = 'run_00000000-0000-4000-8000-000000000003';
     const pausedId = 'run_00000000-0000-4000-8000-000000000004';

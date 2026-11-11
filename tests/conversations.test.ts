@@ -1489,6 +1489,40 @@ describe('single-entry conversation routing', () => {
     expect((await f.repository.get(runId)).schedulingPriority).toBe(2);
     expect(f.model.complete).not.toHaveBeenCalled();
   });
+  it('puts a failed task down: it stays listed, stops holding the Bot as stuck, and a retry brings it back', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'bot_release01' } })).json();
+    const started = await f.addTask(release.id, '发布口径', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
+    const presence = async () => ((await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json() as Array<{ id: string; presence: { state: string; label: string } }>).find(item => item.id === release.id)!.presence;
+    const putDown = async (revision: number, id = taskId) => f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/tasks/${id}/put-down`, headers: f.headers, payload: { expectedRevision: revision } });
+    // Only a failed task can be put down.
+    expect((await putDown((await f.fresh(release.id)).revision)).statusCode).toBe(409);
+    await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'fixture failed'; });
+    expect(await presence()).toMatchObject({ state: 'blocked', label: '卡住' });
+    const before = await f.fresh(release.id);
+    expect((await putDown(before.revision - 1)).statusCode).toBe(409);
+    expect((await putDown(before.revision, 'task_unknown')).statusCode).toBe(404);
+    const down = await putDown(before.revision);
+    expect(down.statusCode, down.body).toBe(200);
+    const task = down.json().tasks.find((item: { id: string }) => item.id === taskId);
+    expect(task).toMatchObject({ status: 'failed', putDown: true, latestRunId: runId });
+    expect(task).not.toHaveProperty('putDownRun');
+    expect(await presence()).toEqual({ state: 'idle', label: '空闲' });
+    expect((await f.repository.get(runId)).status).toBe('failed');
+    // Housekeeping on the failed Run (its machine released, say) does not bring it back.
+    await f.repository.mutate(runId, run => { run.events.push({ id: 'evt_housekeeping', seq: run.events.length + 1, type: 'machine.released', at: new Date().toISOString(), data: {} }); });
+    expect(await presence()).toEqual({ state: 'idle', label: '空闲' });
+    // Retrying the task runs again, and the task counts as usual.
+    const retried = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/retry`, headers: f.headers, payload: {} });
+    expect(retried.statusCode, retried.body).toBe(200);
+    const afterRetry = (await f.fresh(release.id)).tasks.find((item: { id: string }) => item.id === taskId);
+    expect(afterRetry.status).not.toBe('failed');
+    expect(afterRetry).not.toHaveProperty('putDown');
+    await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'failed again'; });
+    expect(await presence()).toMatchObject({ state: 'blocked', label: '卡住' });
+  });
   it('records the speaker on each input and carries that role into the next Run without granting it', async () => {
     const f = await fixture();
     const entry = await f.create();
