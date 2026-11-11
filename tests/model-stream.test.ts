@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpModelAdapter, ModelAccountRefused, ModelOutcomeUnknown, accountRefusalCode, modelAccountCode, modelAccountNotice, modelTransportConfig } from '../src/runtime/model.js';
+import { HttpModelAdapter, ModelAccountRefused, ModelOutcomeUnknown, accountRefusalCode, modelAccountCode, modelAccountNotice, safeAccountCode, modelTransportConfig } from '../src/runtime/model.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 const chunk = (content: string, reason: string | null = null) => ({ choices: [{ index: 0, delta: { content }, finish_reason: reason }], usage: null });
@@ -215,6 +215,22 @@ describe('OpenAI-compatible SSE transport', () => {
     const other = await model.complete({ system: 's', input: {} }).catch(error => error);
     expect(other).not.toBeInstanceOf(ModelAccountRefused);
     expect(other.message).toBe('Model provider returned HTTP 400');
+  });
+  it('never copies what the provider wrote into its code: a key or account number there is reduced to the kind', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const key = '6f1d2c3b-aaaa-bbbb-cccc-1234567890ab';
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: `InvalidApiKey.${key}` } }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'InvalidSubscription:account=2101124974' } }), { status: 400 })); vi.stubGlobal('fetch', fetch);
+    const model = new HttpModelAdapter('https://ark.cn-beijing.volces.com/api/v3', 'ark-model', key, undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0 });
+    const first = await model.complete({ system: 's', input: {} }).catch(error => error);
+    expect(first).toMatchObject({ providerCode: 'api_key' });
+    expect(first.message).not.toContain(key);
+    const second = await model.complete({ system: 's', input: {} }).catch(error => error);
+    expect(second).toMatchObject({ providerCode: 'subscription' });
+    expect(second.message).not.toContain('2101124974');
+    expect(modelAccountNotice(first.providerCode)).not.toContain(key);
+    expect(['InvalidSubscription', 'insufficient_quota'].map(safeAccountCode)).toEqual(['InvalidSubscription', 'insufficient_quota']);
+    expect(safeAccountCode('AccountOverdue<script>')).toBe('arrears');
   });
   it('turns a refused account into one plain sentence the owner can act on', () => {
     expect(['InvalidSubscription', 'AccountOverdueError', 'AuthenticationError', 'insufficient_quota', 'ModelNotOpen'].every(accountRefusalCode)).toBe(true);

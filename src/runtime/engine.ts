@@ -495,6 +495,8 @@ export function event(run: AgentRun, type: string, data: Record<string, unknown>
   if (type === 'run.partial' && run.acceptance?.length && run.status === 'succeeded' && !run.reconcileDisposition) queueReviewAfterStop(run, typeof data.reason === 'string' ? data.reason : 'Partial answer');
 }
 export class Conflict extends Error {}
+/** A Bot reply could not be generated for a reason the owner should hear about (and can fix); its message is safe to post. */
+export class BotReplyNotice extends Conflict {}
 export type CreateRunCheckpoint = <T>(stage: string, operation: () => Promise<T>) => Promise<T>;
 
 /** Strip durable AEEIS bookkeeping before a Tool provider call. The provider
@@ -1160,7 +1162,7 @@ export class AgentEngine {
       }
       if (error instanceof ModelAccountRefused) {
         await account(error.usage, 'settled');
-        throw new Conflict(modelAccountNotice(error.providerCode));
+        throw new BotReplyNotice(modelAccountNotice(error.providerCode));
       }
       if (error instanceof ModelResponseRejected) {
         await account(error.usage, 'settled');

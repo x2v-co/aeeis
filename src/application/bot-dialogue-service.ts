@@ -8,7 +8,7 @@ import type { ConversationStore, ConversationMessage } from '../conversations.js
 import { visibleConversationMessages } from '../conversations.js';
 import type { OwnedBotStore } from '../owned-bots.js';
 import type { SessionEvent, SessionEventService } from '../session-events.js';
-import { Conflict } from '../runtime/engine.js';
+import { BotReplyNotice, Conflict } from '../runtime/engine.js';
 import { NotFound } from '../runtime/repository.js';
 import type { AeeisService } from './aeeis-service.js';
 import type { ConversationService } from './conversation-service.js';
@@ -240,11 +240,20 @@ export class BotDialogueService {
       if (current.messages.some(m => m.keyHash === followupHash(key))) return;
       const trigger = current.messages.find(m => m.id === messageId);
       if (!trigger || trigger.execution || trigger.intent !== 'discuss' || trigger.source || trigger.speaker?.role === 'agent') return;
-      const raw = await complete({ bot, standingInstruction: current.standingInstruction, transcript_untrusted: visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text })) }, key);
-      if (!raw || typeof raw !== 'object' || !('reply' in raw) || typeof raw.reply !== 'string' || !raw.reply.trim()) throw new Conflict('Invalid Bot reply');
+      let reply: string;
+      try {
+        const raw = await complete({ bot, standingInstruction: current.standingInstruction, transcript_untrusted: visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text })) }, key);
+        if (!raw || typeof raw !== 'object' || !('reply' in raw) || typeof raw.reply !== 'string' || !raw.reply.trim()) throw new Conflict('Invalid Bot reply');
+        reply = raw.reply;
+      } catch (error) {
+        // A reason the owner can act on (the model service refused the account) is said in the conversation, under the
+        // same key, so a retry or sweep does not say it twice. Anything else stays in the log.
+        if (!(error instanceof BotReplyNotice)) throw error;
+        reply = error.message;
+      }
       // Agent speech stays discussion. It cannot acquire the owner's execution authority.
       const latest = await this.aggregates.get(conversationId, scope);
-      await this.conversations.post(conversationId, { text: raw.reply.slice(0, 2000), expectedRevision: latest.revision, replyTo: messageId, intent: 'discuss', speaker: { role: 'agent', id: bot.id } }, scope, key, false);
+      await this.conversations.post(conversationId, { text: reply.slice(0, 2000), expectedRevision: latest.revision, replyTo: messageId, intent: 'discuss', speaker: { role: 'agent', id: bot.id } }, scope, key, false);
     });
   }
 }

@@ -74,9 +74,22 @@ export function modelAccountNotice(code: string): string {
 export function modelAccountCode(error: string | undefined): string | undefined {
   return error?.startsWith(MODEL_ACCOUNT_REFUSED) ? /\(([^,)]+)/.exec(error)?.[1] : undefined;
 }
-/** Provider codes that say the account, not the request, is the problem. */
+/** Provider codes that say the account, not the request, is the problem, by kind. Order matters: the first match names it. */
+const ACCOUNT_REFUSALS: ReadonlyArray<[string, RegExp]> = [
+  ['subscription', /subscription/i], ['arrears', /overdue|arrear|payment|billing/i], ['api_key', /invalid.?api.?key|api.?key.?invalid/i],
+  ['authentication', /authenticat|unauthori[sz]ed|access.?denied/i], ['quota', /insufficient.?quota|quota.?exceeded|set.?limit.?exceeded/i], ['not_enabled', /not.?open/i],
+];
+/** Codes that are passed on as they are. The provider writes the code, so anything else could carry a key or an account
+ * number; it is named only by its kind. */
+const KNOWN_ACCOUNT_CODES = new Set(['InvalidSubscription', 'SubscriptionExpired', 'AccountOverdueError', 'AccountOverdue', 'AuthenticationError', 'AccessDenied',
+  'ModelNotOpen', 'InvalidApiKey', 'invalid_api_key', 'insufficient_quota', 'QuotaExceeded', 'SetLimitExceeded', 'billing_hard_limit_reached', 'Unauthorized']);
 export function accountRefusalCode(code: string | undefined): boolean {
-  return Boolean(code) && /subscription|overdue|arrear|authenticat|unauthori[sz]ed|access.?denied|not.?open|invalid.?api.?key|api.?key.?invalid|insufficient.?quota|quota.?exceeded|set.?limit.?exceeded|billing|payment/i.test(code!);
+  return Boolean(code) && ACCOUNT_REFUSALS.some(([, pattern]) => pattern.test(code!));
+}
+/** A name for a refusal code that is safe to store and show: the code itself when it is a known one, otherwise its kind. */
+export function safeAccountCode(code: string): string {
+  if (KNOWN_ACCOUNT_CODES.has(code)) return code;
+  return ACCOUNT_REFUSALS.find(([, pattern]) => pattern.test(code))?.[0] ?? 'account_refused';
 }
 /** The provider kept rejecting with HTTP 429; nothing was generated or billed for the rejected attempts. */
 export class ModelRateLimited extends ModelResponseRejected {
@@ -574,7 +587,7 @@ export class HttpModelAdapter implements ModelAdapter {
         if (!response.ok) {
           bodyExcerpt = responseBody;
           try { const parsed = JSON.parse(responseBody); errorCode = String(parsed.error?.code ?? parsed.code ?? '') || undefined; } catch { /* text error */ }
-          if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 && accountRefusalCode(errorCode)) httpError = new ModelAccountRefused(errorCode!.slice(0, 80), response.status);
+          if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 && accountRefusalCode(errorCode)) httpError = new ModelAccountRefused(safeAccountCode(errorCode!), response.status);
           throw httpError;
         }
         const parsed = JSON.parse(responseBody);

@@ -20,7 +20,7 @@ import { BotDialogueService } from '../../src/application/bot-dialogue-service.j
 
 export const dialogueScope = { owner: 'alice', tenantId: 'team-a' };
 export const dialogueHeaders = { authorization: 'Bearer alice' };
-export async function dialogueFixture(options: { file?: string; url?: string; storage?: BotDialogueStore; replies?: boolean } = {}) {
+export async function dialogueFixture(options: { file?: string; url?: string; storage?: BotDialogueStore; replies?: boolean; reply?: () => Promise<unknown> } = {}) {
   const boardControls = options.url ? new PostgresTaskBoardStore(options.url) : options.file ? new FileTaskBoardStore(join(options.file,'board-relations.json')) : new InMemoryTaskBoardStore(); await boardControls.init();
   const storage = options.storage ?? (options.url ? new PostgresBotDialogueStore(options.url) : options.file ? new FileBotDialogueStore(join(options.file, 'dialogues.json')) : new InMemoryBotDialogueStore());
   const aggregates = options.url ? new PostgresConversationStore(options.url) : options.file ? new FileConversationStore(join(options.file, 'conversations')) : new InMemoryConversationStore();
@@ -37,7 +37,7 @@ export async function dialogueFixture(options: { file?: string; url?: string; st
   const calls: unknown[] = [], notified: string[] = [];
   const engine = new AgentEngine(runs, { pin: { model: 'dialogue-test', endpoint: 'http://localhost', promptVersion: 'fixture/1' }, complete: async request => {
     calls.push(request);
-    if (request.system.includes('只讨论，不执行')) return { value: { reply: '这是服务端的真实回复。' } };
+    if (request.system.includes('只讨论，不执行')) return { value: options.reply ? await options.reply() : { reply: '这是服务端的真实回复。' } };
     return { value: { summary: '执行计划', nodes: [{ id: 'work', title: '核对', instruction: '核对公开资料', dependsOn: [] }] } };
   } });
   const app = buildApp({ repository: runs, conversationStore: aggregates, botDialogues: storage, taskBoardControls: boardControls, domain, sessionEvents: events, ownedBots: bots, engine,
