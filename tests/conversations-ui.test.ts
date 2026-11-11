@@ -29,7 +29,7 @@ function runFixture() {
     plans: [{ version: 1, hash: 'plan-hash', summary: 'Plan', nodes: [{ id: 'node_report', title: '核对证据', dependsOn: [] }] }],
     steps: [{ taskId: 'node_report', status: 'succeeded' }], events: [], artifacts: [], calls: [], context: { sources: [] } };
 }
-function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; owned?: boolean; handler?: (url: string, options: any) => any } = {}) {
+function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; owned?: boolean; botTeam?: boolean; handler?: (url: string, options: any) => any } = {}) {
   const posts: Array<{ url: string; body: any; key: string; raw: string }> = [];
   const uiEvents: Array<{ name: string; roomId: string }> = [];
   const lives = new Map<string, any>();
@@ -91,7 +91,7 @@ function harness(view = fixture(), options: { enabled?: boolean; model?: boolean
     }
     const custom = options.handler?.(url, request);
     if (custom !== undefined) return custom;
-    if (url === '/api/status') return response({ modelConfigured: options.model ?? true, runner: 'fixture', mode: 'single-owner-local', principal, tenantId: 'local', conversationRouting: options.enabled ?? true });
+    if (url === '/api/status') return response({ modelConfigured: options.model ?? true, ...(options.botTeam ? { botTeamConfigured: true } : {}), runner: 'fixture', mode: 'single-owner-local', principal, tenantId: 'local', conversationRouting: options.enabled ?? true });
     if (url === '/api/tools') return response({ tools: [], defaultAllowedTools: [] });
     if (url === '/api/conversations' && request.method === 'POST') {
       const body = JSON.parse(request.body);
@@ -623,17 +623,36 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(el('conversation-send').textContent).toBe('记下来'));
   });
 
-  it('says a Bot replies to a recorded message in its own conversation, unless the Bot is quiet', async () => {
+  it('says a Bot replies to a recorded message in its own conversation, unless the Bot is quiet or replies are off', async () => {
     const note = () => el('conversation-send-note').textContent ?? '';
-    const quiet = harness(fixture('bot')); start(quiet.fetch); await ready();
-    await vi.waitFor(() => expect(note()).toContain('“只记下来”只保存记录，不生成模型回答。'));
+    const replyNote = '“只记下来”不启动执行，Bot 只会在对话里简短回一句（设为安静的 Bot 不回）。';
+    const plainNote = '“只记下来”只保存记录，不生成模型回答。';
+    // The page starts from the same sentence as the HTML, so the two never drift apart.
+    expect(html).toContain(plainNote);
+    const quiet = harness(fixture('bot'), { botTeam: true }); start(quiet.fetch); await ready();
+    await vi.waitFor(() => expect(note()).toContain(plainNote));
     const original = ownedBot.autonomy;
     ownedBot.autonomy = 'reply';
     try {
-      const replying = harness(fixture('bot')); start(replying.fetch); await ready();
-      await vi.waitFor(() => expect(note()).toContain('“只记下来”不启动执行，Bot 只会在对话里简短回一句（设为安静的 Bot 不回）。'));
+      const replying = harness(fixture('bot'), { botTeam: true }); start(replying.fetch); await ready();
+      await vi.waitFor(() => expect(note()).toContain(replyNote));
       expect(note()).not.toContain('不生成模型回答');
+      // With Bot replies switched off on this AEEIS, nothing answers, and the note says so.
+      const off = harness(fixture('bot')); start(off.fetch); await ready();
+      await vi.waitFor(() => expect(el('conversation-panel').getAttribute('aria-busy')).toBe('false'));
+      expect(note()).toContain(plainNote);
     } finally { ownedBot.autonomy = original; }
+  });
+
+  it('says AEEIS replies in its own main conversation, and shows the HTML sentence unchanged when replies are off', async () => {
+    const note = () => el('conversation-send-note').textContent ?? '';
+    const view = fixture();
+    const main = harness(view, { botTeam: true }); start(main.fetch, { local: { 'aeeis.life.aeeis': view.id } }); await ready();
+    await vi.waitFor(() => expect(note()).toContain('Bot 只会在对话里简短回一句'));
+    const off = harness(fixture()); start(off.fetch, { local: { 'aeeis.life.aeeis': view.id } }); await ready();
+    await vi.waitFor(() => expect(el('conversation-panel').getAttribute('aria-busy')).toBe('false'));
+    // Exactly the HTML's own sentence: the script's copy has not drifted from it.
+    expect(note()).toBe(html.match(/<p id="conversation-send-note" class="muted">([^<]*)<\/p>/)![1]);
   });
 
   it('answers a greeting without the selected grant, which would fill in tools a one-step reply cannot have', async () => {

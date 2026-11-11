@@ -1423,14 +1423,15 @@ function openConversationRoute(): void {
   if (route) route.open = true;
 }
 const SEND_NOTE = '发送先留在对话里。小任务直接做；抽出一份计划后再请你批准。选 YOLO 时，计划也直接做。“只记下来”只保存记录，不生成模型回答。选这个人，只是标明这句话是它说的；它不会自己回复，也不会启动执行。执行使用“更多设置”中的资料、工具和预算。Enter 发送，Shift+Enter 换行。';
-/** In a Bot's own conversation a recorded message still gets the Bot's short discussion reply, unless the Bot is quiet. */
+/** In a Bot's own conversation a recorded message still gets the Bot's short discussion reply, unless the Bot is quiet
+ * or this AEEIS has Bot replies switched off (AEEIS_BOT_REPLIES=0, no model): then nothing answers it. */
 const SEND_NOTE_BOT = SEND_NOTE.replace('“只记下来”只保存记录，不生成模型回答。', '“只记下来”不启动执行，Bot 只会在对话里简短回一句（设为安静的 Bot 不回）。');
 function updateSendNote(): void {
   const note = document.getElementById('conversation-send-note');
   if (!note) return;
   const botId = lifeAgent(conversation);
   const quiet = ownedBotRecords.some(bot => bot.id === botId && bot.autonomy === 'quiet');
-  note.textContent = botId && !quiet ? SEND_NOTE_BOT : SEND_NOTE;
+  note.textContent = botsActive && botId && !quiet ? SEND_NOTE_BOT : SEND_NOTE;
 }
 function updateConversationControls(): void {
   updateSendNote();
