@@ -82,7 +82,19 @@ const ACCOUNT_REFUSALS: ReadonlyArray<[string, RegExp]> = [
 /** Codes that are passed on as they are. The provider writes the code, so anything else could carry a key or an account
  * number; it is named only by its kind. */
 const KNOWN_ACCOUNT_CODES = new Set(['InvalidSubscription', 'SubscriptionExpired', 'AccountOverdueError', 'AccountOverdue', 'AuthenticationError', 'AccessDenied',
-  'ModelNotOpen', 'InvalidApiKey', 'invalid_api_key', 'insufficient_quota', 'QuotaExceeded', 'SetLimitExceeded', 'billing_hard_limit_reached', 'Unauthorized']);
+  'ModelNotOpen', 'InvalidApiKey', 'invalid_api_key', 'insufficient_quota', 'QuotaExceeded', 'SetLimitExceeded', 'billing_hard_limit_reached', 'Unauthorized', 'authentication_error']);
+/** Model providers that ask clients to name themselves (OpenCode Go) get this instead of the HTTP library's name. */
+export const MODEL_USER_AGENT = 'aeeis/1.0';
+/** One session per Run, so the provider can route and cache a Run's calls together; other calls get a stable ID
+ * derived from their idempotency key. Never the key itself, which can carry user or room IDs. */
+const RUN_ID = /^run_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+export function modelSessionId(idempotencyKey: string | undefined): string {
+  // Only a whole colon-separated segment shaped exactly like a Run ID counts, so text that merely contains one
+  // (an e-mail address, say) is hashed like any other key.
+  const run = idempotencyKey?.split(':').find(segment => RUN_ID.test(segment));
+  if (run) return `aeeis-${run}`;
+  return `aeeis-${createHash('sha256').update(idempotencyKey ?? randomUUID()).digest('hex').slice(0, 32)}`;
+}
 export function accountRefusalCode(code: string | undefined): boolean {
   return Boolean(code) && ACCOUNT_REFUSALS.some(([, pattern]) => pattern.test(code!));
 }
@@ -305,6 +317,8 @@ export class HttpModelAdapter implements ModelAdapter {
   readonly pin: ModelPin;
   private readonly healthEndpoint?: string;
   private readonly arkProvider: boolean;
+  /** OpenCode Go refuses requests without a per-conversation session ID; it routes and caches by it. */
+  private readonly sessionHeader: string | undefined;
   private thinkingUnsupported = false;
   private readonly transport: Required<Omit<ModelTransportOptions, 'thinking' | 'reasoningEffort'>> & {
     thinking?: ModelRequest['thinking']; reasoningEffort?: ModelTransportOptions['reasoningEffort'];
@@ -317,6 +331,7 @@ export class HttpModelAdapter implements ModelAdapter {
     }
     const ark = /(^|\.)(?:volces\.com|volcengineapi\.com|bytepluses\.com)$/.test(url.hostname) || /ark|volcengine|byteplus/i.test(provider ?? '');
     this.arkProvider = ark;
+    this.sessionHeader = /(^|\.)opencode\.ai$/.test(url.hostname) ? 'x-opencode-session' : undefined;
     const defaultThinkingDisabled = /(^|\.)(?:volces\.com|volcengineapi\.com)$/.test(url.hostname) || provider?.toLowerCase() === 'ark';
     this.transport = { maxAttempts: transport.maxAttempts ?? (ark ? 3 : 1), retryBaseMs: transport.retryBaseMs ?? 500, retryMaxMs: transport.retryMaxMs ?? 10_000,
       rateLimitMaxAttempts: transport.rateLimitMaxAttempts ?? 5, rateLimitBaseMs: transport.rateLimitBaseMs ?? 2_000, rateLimitMaxMs: transport.rateLimitMaxMs ?? 60_000,
@@ -363,7 +378,7 @@ export class HttpModelAdapter implements ModelAdapter {
     const checkedAt = new Date().toISOString();
     if (!this.healthEndpoint) return { ready: true, detail: 'model configured; provider health probe not configured', checkedAt };
     try {
-      const response = await fetch(this.healthEndpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 10_000)), headers: this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {} });
+      const response = await fetch(this.healthEndpoint, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 10_000)), headers: { 'user-agent': MODEL_USER_AGENT, ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}) } });
       await response.body?.cancel();
       return { ready: response.ok, detail: response.ok ? 'provider health probe passed' : `provider health probe returned HTTP ${response.status}`, checkedAt };
     } catch { return { ready: false, detail: 'provider health probe failed or timed out', checkedAt }; }
@@ -505,7 +520,8 @@ export class HttpModelAdapter implements ModelAdapter {
       try {
         response = await fetch(this.pin.endpoint, {
           method: 'POST', redirect: 'error', signal,
-          headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}) },
+          headers: { 'content-type': 'application/json', 'user-agent': MODEL_USER_AGENT, ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}), ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
+            ...(this.sessionHeader ? { [this.sessionHeader]: modelSessionId(idempotencyKey) } : {}) },
           body,
         });
         stage = 'response';
@@ -586,7 +602,7 @@ export class HttpModelAdapter implements ModelAdapter {
         const responseBody = Buffer.concat(chunks).toString('utf8');
         if (!response.ok) {
           bodyExcerpt = responseBody;
-          try { const parsed = JSON.parse(responseBody); errorCode = String(parsed.error?.code ?? parsed.code ?? '') || undefined; } catch { /* text error */ }
+          try { const parsed = JSON.parse(responseBody); errorCode = String(parsed.error?.code ?? parsed.error?.type ?? parsed.code ?? '') || undefined; } catch { /* text error */ }
           if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 && accountRefusalCode(errorCode)) httpError = new ModelAccountRefused(safeAccountCode(errorCode!), response.status);
           throw httpError;
         }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpModelAdapter, ModelAccountRefused, ModelOutcomeUnknown, accountRefusalCode, modelAccountCode, modelAccountNotice, safeAccountCode, modelTransportConfig } from '../src/runtime/model.js';
+import { HttpModelAdapter, ModelAccountRefused, ModelOutcomeUnknown, accountRefusalCode, modelAccountCode, modelAccountNotice, safeAccountCode, modelSessionId, modelTransportConfig } from '../src/runtime/model.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 const chunk = (content: string, reason: string | null = null) => ({ choices: [{ index: 0, delta: { content }, finish_reason: reason }], usage: null });
@@ -231,6 +231,33 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(modelAccountNotice(first.providerCode)).not.toContain(key);
     expect(['InvalidSubscription', 'insufficient_quota'].map(safeAccountCode)).toEqual(['InvalidSubscription', 'insufficient_quota']);
     expect(safeAccountCode('AccountOverdue<script>')).toBe('arrears');
+  });
+  it('names itself and sends one OpenCode Go session per Run; reads OpenCode error types', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.fn(async () => new Response('{"error":{"type":"authentication_error","message":"Invalid credential"}}', { status: 401 })); vi.stubGlobal('fetch', fetch);
+    const go = new HttpModelAdapter('https://opencode.ai/inference/go/openai/v1', 'deepseek-v4.1-flash', 'key', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0 });
+    const run = 'run_fd2b17ff-0107-2f4d-2ab6-069691c3957e';
+    await expect(go.complete({ system: 's', input: {}, idempotencyKey: `model:${run}:call-1` })).rejects.toMatchObject({ providerCode: 'authentication_error', httpStatus: 401 });
+    await go.complete({ system: 's', input: {}, idempotencyKey: `model:${run}:call-2` }).catch(() => undefined);
+    await go.complete({ system: 's', input: {}, idempotencyKey: 'bot-reply:evt_1:owner@example.com' }).catch(() => undefined);
+    const headers = fetch.mock.calls.map(([, options]) => (options as RequestInit).headers as Record<string, string>);
+    expect(headers.map(item => item['user-agent'])).toEqual(['aeeis/1.0', 'aeeis/1.0', 'aeeis/1.0']);
+    expect(headers[0]!['x-opencode-session']).toBe(`aeeis-${run}`);
+    expect(headers[1]!['x-opencode-session']).toBe(`aeeis-${run}`);
+    // Other calls get a stable opaque ID, never the key with its user or room IDs.
+    expect(headers[2]!['x-opencode-session']).toMatch(/^aeeis-[a-f0-9]{32}$/);
+    expect(modelSessionId('bot-reply:evt_1:owner@example.com')).toBe(headers[2]!['x-opencode-session']);
+    expect(modelSessionId(undefined)).not.toBe(modelSessionId(undefined));
+    // Something that only contains a Run ID is not one: it is hashed, never sent as it is.
+    for (const key of [`bot-reply:evt_1:${run}@example.com`, `x${run}`, `model:${run}x:call-1`]) {
+      expect(modelSessionId(key)).toMatch(/^aeeis-[a-f0-9]{32}$/);
+      expect(modelSessionId(key)).not.toContain(run);
+    }
+    expect(modelSessionId(run)).toBe(`aeeis-${run}`);
+    fetch.mockClear();
+    const other = new HttpModelAdapter('https://other.example/v1', 'model', 'key', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0 });
+    await other.complete({ system: 's', input: {}, idempotencyKey: `model:${run}:call-1` }).catch(() => undefined);
+    expect(((fetch.mock.calls[0]![1] as RequestInit).headers as Record<string, string>)['x-opencode-session']).toBeUndefined();
   });
   it('turns a refused account into one plain sentence the owner can act on', () => {
     expect(['InvalidSubscription', 'AccountOverdueError', 'AuthenticationError', 'insufficient_quota', 'ModelNotOpen'].every(accountRefusalCode)).toBe(true);
