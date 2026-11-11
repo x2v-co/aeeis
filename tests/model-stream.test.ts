@@ -248,6 +248,12 @@ describe('OpenAI-compatible SSE transport', () => {
     expect(headers[2]!['x-opencode-session']).toMatch(/^aeeis-[a-f0-9]{32}$/);
     expect(modelSessionId('bot-reply:evt_1:owner@example.com')).toBe(headers[2]!['x-opencode-session']);
     expect(modelSessionId(undefined)).not.toBe(modelSessionId(undefined));
+    // Something that only contains a Run ID is not one: it is hashed, never sent as it is.
+    for (const key of [`bot-reply:evt_1:${run}@example.com`, `x${run}`, `model:${run}x:call-1`]) {
+      expect(modelSessionId(key)).toMatch(/^aeeis-[a-f0-9]{32}$/);
+      expect(modelSessionId(key)).not.toContain(run);
+    }
+    expect(modelSessionId(run)).toBe(`aeeis-${run}`);
     fetch.mockClear();
     const other = new HttpModelAdapter('https://other.example/v1', 'model', 'key', undefined, 180_000, undefined, false, undefined, { retryBaseMs: 0 });
     await other.complete({ system: 's', input: {}, idempotencyKey: `model:${run}:call-1` }).catch(() => undefined);

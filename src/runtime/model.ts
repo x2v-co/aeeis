@@ -87,8 +87,11 @@ const KNOWN_ACCOUNT_CODES = new Set(['InvalidSubscription', 'SubscriptionExpired
 export const MODEL_USER_AGENT = 'aeeis/1.0';
 /** One session per Run, so the provider can route and cache a Run's calls together; other calls get a stable ID
  * derived from their idempotency key. Never the key itself, which can carry user or room IDs. */
+const RUN_ID = /^run_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export function modelSessionId(idempotencyKey: string | undefined): string {
-  const run = idempotencyKey ? /run_[a-f0-9-]{36}/.exec(idempotencyKey)?.[0] : undefined;
+  // Only a whole colon-separated segment shaped exactly like a Run ID counts, so text that merely contains one
+  // (an e-mail address, say) is hashed like any other key.
+  const run = idempotencyKey?.split(':').find(segment => RUN_ID.test(segment));
   if (run) return `aeeis-${run}`;
   return `aeeis-${createHash('sha256').update(idempotencyKey ?? randomUUID()).digest('hex').slice(0, 32)}`;
 }
