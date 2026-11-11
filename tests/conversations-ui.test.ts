@@ -1455,6 +1455,33 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/retry') || post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
+  it('takes a put-down task out of the Bot status in the header and roster, keeping any other failure', async () => {
+    const one = 'run_00000000-0000-4000-8000-00000000000a', two = 'run_00000000-0000-4000-8000-00000000000b';
+    const view = fixture('bot');
+    view.tasks = [
+      view.tasks[0]!,
+      { id: 'task_x', title: '你好', threadId: 'thread_x', status: 'failed', runId: one, latestRunId: one },
+      { id: 'task_y', title: '复盘', threadId: 'thread_y', status: 'failed', runId: two, latestRunId: two },
+    ] as any;
+    const h = harness(view, { handler(url, request) {
+      const match = request.method === 'POST' && url.match(/\/tasks\/(task_[xy])\/put-down$/);
+      if (match) { (view.tasks.find(task => task.id === match[1]) as any).putDown = true; view.revision++; return response(view); }
+    } });
+    start(h.fetch); await ready();
+    const header = () => doc().querySelector(`[data-bot-id="${ownedBot.id}"]`)?.textContent ?? '';
+    await vi.waitFor(() => expect(header()).toContain('卡住'));
+    const row = (id: string) => doc().querySelector<HTMLElement>(`[data-task-id="${id}"]`)!;
+    await vi.waitFor(() => expect(row('task_x').querySelector('[data-put-down]')).not.toBeNull());
+    clickText('放下', row('task_x'));
+    await vi.waitFor(() => expect(row('task_x').textContent).toContain('已放下'));
+    // The other failure still holds the status.
+    await vi.waitFor(() => expect(header()).toContain('卡住 · 复盘'));
+    expect(header()).not.toContain('你好');
+    await vi.waitFor(() => expect(row('task_y').querySelector<HTMLButtonElement>('[data-put-down]')?.disabled).toBe(false));
+    clickText('放下', row('task_y'));
+    await vi.waitFor(() => expect(header()).not.toContain('卡住'));
+  });
+
   it('pauses, resumes and reconciles the existing run from the task row without moving focus', async () => {
     const activeId = 'run_00000000-0000-4000-8000-000000000003';
     const pausedId = 'run_00000000-0000-4000-8000-000000000004';

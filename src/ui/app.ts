@@ -1981,7 +1981,9 @@ function taskCountOf(item: ConversationSummary | undefined): number | undefined 
   const tasks = (item as ConversationView).tasks;
   return Array.isArray(tasks) ? tasks.length : undefined;
 }
-function presenceFromTasks(tasks: Array<{ id: string; title: string; status: string }>): LifePresence {
+function presenceFromTasks(all: Array<{ id: string; title: string; status: string; putDown?: true }>): LifePresence {
+  // A failed task the owner put down no longer holds the Bot's status (the server's list does the same).
+  const tasks = all.filter(task => !task.putDown);
   const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
     : status === 'unknown' ? 1
     : status === 'failed' || status === 'channel_blocked' ? 2

@@ -164,11 +164,14 @@ export interface LifePresence {
   taskTitle?: string;
 }
 /** Roster line for one person. Titles only; questions, plans, and instructions stay on the Run. */
-/** Put down applies to the failure it was given for: the same Run, still failed, and not retried since. */
+/** Anything that reopens a Run (retry, replan, resume, reconcile) or ends it again. Any of these after a task was put
+ * down means the failure it was put down for is no longer the one on screen. */
+const PUT_DOWN_ENDS = new Set(['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled', 'run.failed', 'run.partial']);
+/** Put down applies to the failure it was given for: the same Run, still failed, and neither reopened nor failed again since. */
 function putDown(task: { putDownRun?: { id: string; eventSeq: number } }, run: AgentRun | undefined): boolean {
   const mark = task.putDownRun;
   if (!run || !mark || mark.id !== run.id || run.status !== 'failed') return false;
-  return !run.events.some(item => item.seq > mark.eventSeq && item.type === 'run.retry_requested');
+  return !run.events.some(item => item.seq > mark.eventSeq && PUT_DOWN_ENDS.has(item.type));
 }
 export function lifePresence(items: ReadonlyArray<{ id: string; title: string; status: string }>): LifePresence {
   const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
@@ -483,7 +486,8 @@ export class ConversationService implements LifeThreadInbox {
       if (task.latestRunId) {
         try { run = await this.runs.get(task.latestRunId, scope); }
         catch (error) {
-          return { run: undefined, task: { ...task, status: 'unreadable' } };
+          const { putDownRun: _hidden, ...readable } = task;
+          return { run: undefined, task: { ...readable, status: 'unreadable' } };
         }
       }
       const memory = taskMemory(run);

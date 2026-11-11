@@ -1523,6 +1523,24 @@ describe('single-entry conversation routing', () => {
     await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'failed again'; });
     expect(await presence()).toMatchObject({ state: 'blocked', label: '卡住' });
   });
+  it('brings a put-down task back when its Run is replanned and fails again', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'bot_release01' } })).json();
+    const started = await f.addTask(release.id, '发布口径', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
+    const presence = async () => ((await f.app.inject({ method: 'GET', url: '/api/conversations', headers: f.headers })).json() as Array<{ id: string; presence: { state: string } }>).find(item => item.id === release.id)!.presence;
+    await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'fixture failed'; });
+    const down = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/tasks/${taskId}/put-down`, headers: f.headers, payload: { expectedRevision: (await f.fresh(release.id)).revision } });
+    expect(down.statusCode, down.body).toBe(200);
+    expect((await presence()).state).toBe('idle');
+    // Replanning reuses the same Run; when it fails again the task shows as stuck, not still put down.
+    const replanned = await f.app.inject({ method: 'POST', url: `/api/runs/${runId}/replan`, headers: f.headers, payload: {} });
+    expect(replanned.statusCode, replanned.body).toBe(200);
+    await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'planning failed again'; });
+    expect((await presence()).state).toBe('blocked');
+    expect((await f.fresh(release.id)).tasks.find((item: { id: string }) => item.id === taskId)).not.toHaveProperty('putDown');
+  });
   it('records the speaker on each input and carries that role into the next Run without granting it', async () => {
     const f = await fixture();
     const entry = await f.create();
