@@ -1354,26 +1354,34 @@ function conversationTargetTask(): ConversationTaskView | undefined {
   const target = $<HTMLSelectElement>('conversation-target').value;
   const reply = conversation?.messages.find(item => item.id === conversationReplyId);
   const replyTasks = reply?.effectiveTaskIds ?? reply?.route.taskIds;
-  const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : conversation?.focusTaskId);
+  // A stale focus is not where the next message goes (see sendFocusTaskId), so it does not hold the button either.
+  const id = target || (replyTasks?.length === 1 ? replyTasks[0] : reply ? undefined : sendFocusTaskId());
   return conversation?.tasks.find(task => task.id === id);
+}
+/** A task still preparing, running or waiting on you: a new message is recorded on it instead of starting work. */
+function taskHoldsSend(task: ConversationTaskView): boolean {
+  const preparing = task.status === 'preparing' && !task.runId && !task.latestRunId;
+  return preparing || Boolean(task.pendingMessageId) || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status);
 }
 /** What the main send button does now: start work when a Run can start, otherwise only record the message. */
 function conversationSendIntent(): 'discuss' | 'execute' {
   const surface = rosterView();
   if (!conversation || conversationCorrectionId || !quickRunReady || selectedLifeSpeaker() || !localBotCanExecute(lifeAgent(conversation)) || (surface !== 'entry' && surface !== 'bot')) return 'discuss';
   const task = conversationTargetTask();
-  const preparing = Boolean(task && task.status === 'preparing' && !task.runId && !task.latestRunId);
-  const active = task && !preparing && (task.pendingMessageId || !['discussion', 'succeeded', 'failed', 'cancelled'].includes(task.status));
-  return preparing || active ? 'discuss' : 'execute';
+  return task && taskHoldsSend(task) ? 'discuss' : 'execute';
 }
 /**
  * A greeting, a thanks or a question about the Bot itself. It needs a reply, not a plan: it is sent as one read-only step
  * without the side panel's tools, agents, skill or budget, so automatic review lets it through instead of asking.
  */
+/** Short questions about the Bot itself: who it is, what it can do, which model it runs on, whether it is there. */
+const ABOUT_BOT = '(?:你|您)?(?:是谁|叫什么(?:名字)?|能做什么|会做什么|可以做什么|会什么|能干什么|在(?:吗|不在|么)?|(?:现在|目前)?(?:用|用的|使用|使用的|跑|跑的)(?:是)?(?:什么|哪个|哪一个)(?:大)?模型(?:啊|呀|呢)?|是(?:什么|哪个)(?:大)?模型(?:啊|呀|呢)?)';
 function smallTalk(text: string): boolean {
   const line = text.trim().replace(/[\s!！?？。.,，~～、…]+$/u, '').trim();
-  if (!line || line.length > 24 || line.includes('\n')) return false;
-  return /^(?:(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯+|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)[\s,，!！]*)+(?:你是谁|你能做什么|你会做什么|你可以做什么)?$|^(?:你是谁|你能做什么|你会做什么|你可以做什么|who are you|what can you do)$/iu.test(line);
+  if (!line || line.length > 40 || line.includes('\n')) return false;
+  const greeting = '(?:你好|您好|哈喽|嗨|hi|hello|hey|早上好|早安|上午好|中午好|下午好|晚上好|晚安|在吗|在不在|在么|谢谢(?:你|您|啦)?|多谢|辛苦了?|好的|好|ok|okay|嗯|收到|明白了?|知道了|thanks?(?: you)?|thx|good (?:morning|afternoon|evening|night)|bye|再见|拜拜)';
+  const about = `(?:${ABOUT_BOT}|who are you|what can you do|(?:which|what) model (?:are you(?: using| on)?|do you use))`;
+  return new RegExp(`^(?:${greeting}[\\s,，!！]*)+${about}?$|^${about}$`, 'iu').test(line);
 }
 /**
  * Run options for a small-talk reply: one direct step, never the side panel's work settings. Never under a grant
@@ -1381,6 +1389,29 @@ function smallTalk(text: string): boolean {
  */
 function chatRunOptions(): Record<string, unknown> {
   return { executionReview: 'auto', allowedTools: [], planning: 'direct', materials: [], privacy: $<HTMLSelectElement>('privacy').value };
+}
+/** How long a finished or stuck focus task still takes a new message that names no task. */
+const FOCUS_IDLE_MS = 60 * 60 * 1000;
+/**
+ * The task a send that names no task goes to. A finished, failed or stuck focus stays the target while it is where the conversation just was;
+ * once a later message went to another task, or nothing touched it for an hour, a new message starts its own task
+ * instead of reopening old work. With no message about the focus loaded, nothing says it is stale, so it is kept.
+ */
+function sendFocusTaskId(now = Date.now()): string | undefined {
+  const focus = conversation?.focusTaskId;
+  if (!conversation || !focus) return focus;
+  // Work in progress or waiting on you keeps the focus however long it takes.
+  const task = conversation.tasks.find(item => item.id === focus);
+  if (!task || taskHoldsSend(task)) return focus;
+  // Every task a message touched: where it was routed and the task its Run ran on.
+  const linked = (message: ConversationMessageView) => [...(message.effectiveTaskIds ?? message.route.taskIds), ...(message.execution ? [message.execution.taskId] : [])];
+  let index = conversation.messages.length - 1;
+  while (index >= 0 && !linked(conversation.messages[index]!).includes(focus)) index -= 1;
+  if (index < 0) return focus;
+  const last = Date.parse(conversation.messages[index]!.createdAt);
+  if (Number.isFinite(last) && now - last > FOCUS_IDLE_MS) return undefined;
+  const elsewhere = conversation.messages.slice(index + 1).some(message => linked(message).some(id => id !== focus));
+  return elsewhere ? undefined : focus;
 }
 /** A new task named after the message, for a send that names no task. Titles need at least two characters. */
 function autoTaskTitle(text: string): string {
@@ -5277,15 +5308,16 @@ async function sendConversation(intent: 'discuss' | 'execute', retry = false, se
     const chat = send && !conversationCorrectionId && !target && !conversationReplyId && !lifeSpeaker && quickRunReady && localBotCanExecute(lifeAgent(conversation)) && smallTalk(text) && autoTaskTitle(text).length >= 2;
     if (chat) intent = 'execute';
     // A send that names no task starts a new one and makes it the focus, so the next message (a change to the plan, a follow-up) lands on it.
-    const autoTitle = intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId ? autoTaskTitle(text) : '';
-    if (intent === 'execute' && !target && !conversationReplyId && !conversation.focusTaskId && autoTitle.length < 2) intent = 'discuss';
+    const focusTaskId = sendFocusTaskId();
+    const autoTitle = intent === 'execute' && !target && !conversationReplyId && !focusTaskId ? autoTaskTitle(text) : '';
+    if (intent === 'execute' && !target && !conversationReplyId && !focusTaskId && autoTitle.length < 2) intent = 'discuss';
     const body = chat
       ? { text, expectedRevision: conversation.revision, newTask: { title: autoTaskTitle(text) }, focus: 'keep', intent, runOptions: chatRunOptions() }
       : conversationCorrectionId
       ? { text: '纠正这条讨论的任务归属', expectedRevision: conversation.revision, taskIds: [target], correctsMessageId: conversationCorrectionId, intent: 'discuss', focus: 'keep' }
       : { text, expectedRevision: conversation.revision,
         ...(lifeSpeaker ? { speaker: lifeSpeaker } : {}),
-        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : autoTitle.length >= 2 && intent === 'execute' ? { newTask: { title: autoTitle } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && conversation.focusTaskId ? { taskIds: [conversation.focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
+        ...(target === '__new' ? { newTask: { title: $<HTMLInputElement>('conversation-task-title').value.trim() } } : autoTitle.length >= 2 && intent === 'execute' ? { newTask: { title: autoTitle } } : { ...(target ? { taskIds: [target] } : intent === 'execute' && !conversationReplyId && focusTaskId ? { taskIds: [focusTaskId] } : {}), ...(conversationReplyId ? { replyTo: conversationReplyId } : {}) }),
         focus: autoTitle.length >= 2 && intent === 'execute' ? 'switch' : $<HTMLSelectElement>('conversation-focus-effect').value, intent, ...(intent === 'execute' ? { ...(currentTaskKind() ? { taskKind: currentTaskKind() } : {}), runOptions: runOptions(true, conversationExecutionGoal()) } : {}) };
     if (!body.text) return;
     conversationAttempt = { conversationId: conversation.id, scope: conversationScope, key: crypto.randomUUID(), body: JSON.stringify(body) };
