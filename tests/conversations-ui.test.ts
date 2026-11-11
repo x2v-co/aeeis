@@ -623,6 +623,19 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(el('conversation-send').textContent).toBe('记下来'));
   });
 
+  it('says a Bot replies to a recorded message in its own conversation, unless the Bot is quiet', async () => {
+    const note = () => el('conversation-send-note').textContent ?? '';
+    const quiet = harness(fixture('bot')); start(quiet.fetch); await ready();
+    await vi.waitFor(() => expect(note()).toContain('“只记下来”只保存记录，不生成模型回答。'));
+    const original = ownedBot.autonomy;
+    ownedBot.autonomy = 'reply';
+    try {
+      const replying = harness(fixture('bot')); start(replying.fetch); await ready();
+      await vi.waitFor(() => expect(note()).toContain('“只记下来”不启动执行，Bot 只会在对话里简短回一句（设为安静的 Bot 不回）。'));
+      expect(note()).not.toContain('不生成模型回答');
+    } finally { ownedBot.autonomy = original; }
+  });
+
   it('answers a greeting without the selected grant, which would fill in tools a one-step reply cannot have', async () => {
     const grantId = `wg_${'a'.repeat(32)}`;
     const grant = { grantId, title: '站点', tools: ['read'], agents: [], expiresAt: '2099-01-01T00:00:00.000Z', runCount: 0, state: 'active', remaining: { tokens: 5000 } };
