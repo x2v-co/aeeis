@@ -3,20 +3,20 @@
 //   docker compose ... run --rm --no-deps -T api node scripts/check-tools.mjs
 // It repeats what the server does at startup for tools (secret files, startup checks, remote Toolkit plus local
 // tools, default tools) and lists the combined tools, so a release that would not start, or whose tools could not
-// be combined, is caught before any running container is replaced. The sandbox host is checked but only reported.
+// be combined, is caught before any running container is replaced. The sandbox host (which may be paused) is only reported.
 // It starts no server, worker, store or Run.
 import { loadFileEnvironment } from '../dist/config-secrets.js';
 import { validateRuntimeConfig } from '../dist/config-validation.js';
-import { CombinedToolGateway, LocalToolGateway } from '../dist/local-tools.js';
+import { LocalToolGateway } from '../dist/local-tools.js';
 import { remoteToolGateway } from '../dist/toolkit-config.js';
 import { resolveToolDefaults, toolkitUnreachable } from '../dist/tool-defaults.js';
+import { checkCombinedTools } from '../dist/tool-check.js';
 
 loadFileEnvironment();
 validateRuntimeConfig();
 console.log('startup checks: ok');
 const remote = remoteToolGateway(process.env);
 const local = process.env.AEEIS_LOCAL_TOOLS_CONFIG ? await LocalToolGateway.load(process.env.AEEIS_LOCAL_TOOLS_CONFIG) : undefined;
-const toolkit = local && remote ? new CombinedToolGateway([local, remote]) : local ?? remote;
 try {
   // The same check the server makes at startup: local defaults from their configuration, the rest from the remote Toolkit.
   const defaults = await resolveToolDefaults(process.env.AEEIS_DEFAULT_ALLOWED_TOOLS, local?.config.defaultAllowedTools ?? [], remote, local?.toolRefs(), message => console.log(`warning: ${message}`));
@@ -29,7 +29,8 @@ try {
       if (!toolkitUnreachable(error)) throw error;
       console.log(`remote Toolkit: NOT REACHABLE (warning only) - ${error.message}`); return false;
     });
-    if (reachable) console.log(`tools: ${(await toolkit.listTools()).length} (local and remote)`);
+    // A paused sandbox host is tolerated here too; the tool IDs are still checked from the local configuration.
+    if (reachable) await checkCombinedTools(local, remote, line => console.log(line));
   }
   if (local) {
     console.log(`executor: ${local.executorTransport() ? 'configured' : 'none'}`);
