@@ -9,7 +9,7 @@ import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
 
 window.addEventListener('pagehide', releaseArtifactDownloads);
 
-interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string; threadId?: string; parentRunId?: string; threadSequence?: number; derivationBlocked?: { kind: 'collaboration_trigger' | 'project_pulse'; limit: number; reason: string; at: string; acknowledgedAt?: string } }
+interface RunSummary { id: string; goal: string; goalId?: string; domainPlanId?: string; followUpPlanId?: string; taskExecution?: { domainPlanId: string; taskId: string }; status: string; updatedAt?: string; archived?: { at: string; actor: string }; threadId?: string; parentRunId?: string; threadSequence?: number; derivationBlocked?: { kind: 'collaboration_trigger' | 'project_pulse'; limit: number; reason: string; at: string; acknowledgedAt?: string } }
 interface ThreadRun extends RunSummary { threadSequence: number; privacy?: string; outputExcerpt?: string }
 interface ThreadPage { id: string; title?: string; runs: ThreadRun[]; nextAfterSequence?: number }
 interface ThreadShareView { kind: 'thread'; thread: { id: string; title?: string }; throughSequence: number; runs: Array<RunView & { explanation: RunExplanation }> }
@@ -318,6 +318,7 @@ let materialFileReadSequence = 0;
 const ATTENTION_STATUSES = new Set(['needs_approval', 'needs_input', 'waiting_external', 'unknown', 'failed']);
 const ACTIVE_STATUSES = new Set(['queued', 'planning', 'running', 'reviewing', 'paused']);
 const DONE_STATUSES = new Set(['succeeded', 'cancelled']);
+const ARCHIVABLE_STATUSES = new Set(['failed', 'cancelled', 'succeeded']);
 function runStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     queued: '排队中', planning: '规划中', needs_approval: '待批准', running: '执行中', reviewing: '复核中',
@@ -459,7 +460,7 @@ function presenceOf(status?: string): { state: string; label: string } {
   return { state: 'idle', label: runStatusLabel(status) };
 }
 function botPresence(runs: RunSummary[]): { state: string; label: string } {
-  const statuses = runs.map(run => run.status);
+  const statuses = runs.filter(run => !runArchived(run)).map(run => run.status);
   if (statuses.some(status => status === 'running' || status === 'queued')) return presenceOf('running');
   if (statuses.some(status => status === 'planning' || status === 'reviewing')) return presenceOf('planning');
   if (statuses.some(status => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused')) return presenceOf('needs_approval');
@@ -1055,7 +1056,7 @@ function executePaletteCommand(command: string): void {
     if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
     else $<HTMLInputElement>('quick-goal').focus();
   } else if (command === 'attention') {
-    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status) && !runPutDown(run))) {
+    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status) && !runPutDown(run) && !runArchived(run))) {
       runFilter = 'attention';
       localStorage.setItem('aeeis.run-filter', runFilter);
       renderRunQueue(runSummaries);
@@ -6779,7 +6780,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   if (!panel || !list || !count) return;
   const items: Array<{ key: string; kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
   for (const run of runs) {
-    const kind = runPutDown(run) ? undefined : inboxKind(run.status);
+    const kind = runPutDown(run) || runArchived(run) ? undefined : inboxKind(run.status);
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
@@ -6793,7 +6794,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   // waits until its owner acknowledges it; acknowledging never resumes it.
   for (const run of runs) {
     const block = run.derivationBlocked;
-    if (!block || block.acknowledgedAt) continue;
+    if (!block || block.acknowledgedAt || runArchived(run)) continue;
     const acknowledge = async () => { await api(`/runs/${encodeURIComponent(run.id)}/derivation-block/acknowledge`, {}, 'POST'); await refresh(true); };
     items.push({
       key: `derivation:${run.id}:${block.at}`, kind: 'derivation', title: runTitle(run),
@@ -6866,7 +6867,13 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     list.append(item);
   }
 }
+/** Archived only while finished: a Run back at work always shows, whatever its stored mark says. */
+function runArchived(run: RunSummary): boolean {
+  return Boolean(run.archived) && ARCHIVABLE_STATUSES.has(run.status);
+}
 function runMatchesFilter(run: RunSummary): boolean {
+  if (runFilter === 'archived') return runArchived(run);
+  if (runArchived(run)) return false;
   if (runFilter === 'active') return ACTIVE_STATUSES.has(run.status);
   if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status) && !runPutDown(run);
   if (runFilter === 'done') return DONE_STATUSES.has(run.status);
@@ -6914,11 +6921,11 @@ function renderRunQueue(runs: RunSummary[]): void {
   }
   syncBotRow();
   const count = $('run-count');
-  if (count) count.textContent = `${visible.length} / ${runs.length} 项任务`;
+  if (count) count.textContent = `${visible.length} / ${runs.filter(run => !runArchived(run)).length} 项任务`;
   const empty = $('runs-empty');
   if (empty) {
     empty.hidden = visible.length > 0;
-    empty.textContent = runs.length ? '当前筛选没有任务。' : '还没有任务。先发一条消息。';
+    empty.textContent = runFilter === 'archived' ? '没有归档的任务。' : runs.length ? '当前筛选没有任务。' : '还没有任务。先发一条消息。';
   }
   document.querySelectorAll<HTMLButtonElement>('#run-filters [data-run-filter]').forEach(control => {
     const active = control.dataset.runFilter === runFilter;
@@ -6930,7 +6937,7 @@ function renderMinimalRecentRuns(runs: RunSummary[]): void {
   const container = $('minimal-recent-runs');
   const toggle = $('recent-runs-toggle') as HTMLButtonElement | null;
   if (!container) return;
-  const recent = runs.slice(0, 5);
+  const recent = runs.filter(run => !runArchived(run)).slice(0, 5);
   if (!recent.length) {
     setRecentRunsOpen(false);
     if (toggle) toggle.hidden = true;
@@ -8744,6 +8751,10 @@ function render(run: RunView): void {
   // are off until the status arrives) turned the next load into a Run link, with chats off for good.
   if (linkedRunId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
   $('create-run-share').hidden = readOnlyShare || run.canEdit === false;
+  const archive = $<HTMLButtonElement>('archive-run');
+  archive.hidden = readOnlyShare || run.canEdit === false || !ARCHIVABLE_STATUSES.has(run.status);
+  archive.textContent = runArchived(run) ? '取消归档' : '归档';
+  archive.title = runArchived(run) ? '放回任务列表' : '从任务列表和待处理里收起，记录都还在';
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;
   if (run.threadId && !readOnlyShare) threadLink.href = `/threads/${run.threadId}`;
@@ -9531,6 +9542,17 @@ $('thread-parent').addEventListener('change', () => {
     await copyRunLink(url).catch(() => undefined);
   } catch (error) { message(errorMessage(error)); }
   finally { control.disabled = false; }
+});
+($('archive-run') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  const run = current;
+  if (!run || readOnlyShare) return;
+  const control = $<HTMLButtonElement>('archive-run');
+  control.disabled = true;
+  const archived = runArchived(run);
+  void api(`/runs/${encodeURIComponent(run.id)}/archive`, { archived: !archived })
+    .then(() => { message(archived ? '已放回任务列表。' : '已归档。它不再出现在任务列表和待处理里，记录都还在；在“已归档”里可以放回来。'); return refresh(); })
+    .catch(error => message(errorMessage(error)))
+    .finally(() => { control.disabled = false; });
 });
 ($('copy-run-link') as HTMLButtonElement | null)?.addEventListener('click', () => {
   const url = readOnlyShare ? window.location.href : new URL(`/runs/${currentId}`, window.location.origin).href;
