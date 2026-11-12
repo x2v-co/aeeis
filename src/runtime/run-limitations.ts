@@ -1,5 +1,6 @@
 import { digest } from './digest.js';
 import type { AgentRun } from './contracts.js';
+import { RUNTIME_UNKNOWN_SUFFIX } from '../readable-answer.js';
 
 /** Surface partial input failures even when no artifact could be produced. */
 export function populateRunLimitations(run: AgentRun): void {
@@ -24,10 +25,9 @@ export function populateRunLimitations(run: AgentRun): void {
   }
 }
 
-const runtimeUnknownSuffix = /\n\nUnknown:\n- Remaining work:[\s\S]*$/;
 /** Remove the runtime-generated partial suffix (never model-written text). */
 export function stripRuntimeUnknown(content: string): string {
-  return content.replace(runtimeUnknownSuffix, '');
+  return content.replace(RUNTIME_UNKNOWN_SUFFIX, '');
 }
 
 /** Explicit gaps shared by the retained output and the run.partial diagnostic. */

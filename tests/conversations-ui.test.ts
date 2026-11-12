@@ -796,6 +796,51 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts).toHaveLength(0);
   });
 
+  it('says only the answer: a partial one points at its details, and a reply to the message above it quotes nothing', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: 'hello', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
+      reply: { text: '你好，我是 AEEIS。', artifactId: 'artifact_hello', partial: true } } as any);
+    view.messages.push({ id: 'said', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '还有别的吗？', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    view.messages.push({ id: 'later', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '接着上面那条说。', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    const h = harness(view); start(h.fetch); await ready();
+    const row = (id: string) => doc().querySelector<HTMLElement>(`#conversation-messages li[data-message-id="${id}"]`);
+    await vi.waitFor(() => expect(row('asked')?.querySelector('.bot-reply')).not.toBeNull());
+    expect(row('asked')!.querySelector('.bot-reply-text')!.textContent).toBe('你好，我是 AEEIS。');
+    expect(row('asked')!.querySelector(`[data-reply-open="${runId}"]`)!.textContent).toBe('有些没核实 · 详情 ↗');
+    expect(row('said')!.querySelector('.message-reply-to')).toBeNull();
+    expect(row('later')!.querySelector('.message-reply-to')!.textContent).toBe('回复：hello');
+  });
+
+  it('opens a finished task on its answer, with how it got there behind one button', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: 'hello', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
+      reply: { text: '你好，我是 AEEIS。', artifactId: 'artifact_hello', partial: true } } as any);
+    const content = 'Partial answer — limited evidence: 没有资料.\n\n你好，我是 AEEIS。 [receipt_abc]\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- 没有资料';
+    const h = harness(view, { handler(url) {
+      if (url === `/api/runs/${runId}`) return response({ id: runId, revision: 1, goal: 'hello', status: 'succeeded', canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [], context: { sources: [] }, toolReceipts: [],
+        artifacts: [{ id: 'artifact_hello', taskId: 'node_hello', title: '问候', content, evidenceRefs: ['receipt_abc'] }] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const open = await vi.waitFor(() => { const found = doc().querySelector<HTMLButtonElement>(`[data-reply-open="${runId}"]`); expect(found).not.toBeNull(); return found!; });
+    open.click();
+    await vi.waitFor(() => expect(el('detail').dataset.answerFirst).toBe('true'));
+    expect(el('detail').dataset.processOpen).toBe('false');
+    expect(el('delivery-artifact').querySelector('.delivery-answer')!.textContent).toContain('你好，我是 AEEIS。');
+    expect(el('delivery-artifact').querySelector('.delivery-answer')!.textContent).not.toMatch(/Partial answer|Unknown:|receipt_/);
+    expect(el('delivery-artifact').querySelector('.delivery-answer-caveat')).not.toBeNull();
+    // The raw output with its caveats is still on the page, for whoever opens the process.
+    expect(el('delivery-artifact').querySelector('.delivery-artifact-full')!.textContent).toContain('Unknown:');
+    const toggle = el<HTMLButtonElement>('run-process-toggle');
+    expect([toggle.hidden, toggle.textContent, toggle.getAttribute('aria-expanded')]).toEqual([false, '看过程与证据', 'false']);
+    toggle.click();
+    expect(el('detail').dataset.processOpen).toBe('true');
+    expect([toggle.textContent, toggle.getAttribute('aria-expanded')]).toEqual(['收起过程与证据', 'true']);
+    expect(css).toContain('#detail[data-answer-first="true"]:not([data-process-open="true"]) :is(#run-phases, #run-activity, #run-decision, #run-computer');
+  });
+
   it.each(['entry', 'bot'])('asks for one action decision in the transcript: approve once, deny, why, and always or block under more (%s)', async surface => {
     const waitingView = () => {
       const view = fixture(surface);
@@ -867,6 +912,11 @@ describe('single-entry conversation workbench', () => {
     const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .plan-card'); expect(found).not.toBeNull(); return found!; });
     expect(card.dataset.state).toBe('running');
     expect([...card.querySelectorAll<HTMLElement>('.plan-card-steps li')].map(item => item.dataset.state)).toEqual(['done', 'current', 'waiting']);
+    // Once it runs, the steps are process: folded behind one line, not spread across the chat.
+    const fold = card.querySelector<HTMLDetailsElement>('details.plan-card-steps-fold')!;
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector('summary')!.textContent).toBe('步骤 · 1 / 3');
+    expect(fold.querySelector('.plan-card-steps')).not.toBeNull();
     expect(card.querySelector('[data-plan-start], [data-plan-cancel], textarea')).toBeNull();
     expect(card.querySelector('.plan-card-title')?.textContent).toBe('发布方案');
     expect(card.querySelector('.plan-card-status')?.textContent).toBe('执行中');
