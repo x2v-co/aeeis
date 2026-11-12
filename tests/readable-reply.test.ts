@@ -39,6 +39,10 @@ describe('what the chat shows of a Run\'s answer', () => {
     expect(readableAnswer(partial)).toEqual({ text: '你好，我是 AEEIS。\n\n有需要请直接说。', caveat: true });
     expect(readableAnswer('结论如下。')).toEqual({ text: '结论如下。', caveat: false });
   });
+  it('keeps a model\'s own Unknown: section and what follows it', () => {
+    const report = '进展如下。\n\nUnknown:\n- Remaining work: 第三节还没写\n\nConclusions:\n- 可以先发前两节';
+    expect(readableAnswer(report)).toEqual({ text: report, caveat: false });
+  });
   it('keeps a caveat that has no answer behind it', () => {
     const empty = 'Partial answer — limited evidence: 超时.\n\nFinal synthesis was unavailable. The following are untrusted observations.';
     expect(readableAnswer(empty)).toEqual({ text: empty, caveat: false });

@@ -4599,7 +4599,7 @@ function conversationBotReply(answer: ConversationReply, runId: string, title: s
   const copy = button('复制', async () => { await navigator.clipboard?.writeText(answer.text); copy.textContent = '已复制'; });
   copy.type = 'button';
   // The reply is the answer only. How it was made, its evidence and anything left unverified open from here.
-  const open = button(answer.truncated ? '看完整结果 ↗' : answer.partial ? '有些没核实 · 详情 ↗' : '过程与证据 ↗', async () => openConversationRun(runId));
+  const open = button(answer.partial ? (answer.truncated ? '有些没核实 · 看完整结果 ↗' : '有些没核实 · 详情 ↗') : answer.truncated ? '看完整结果 ↗' : '过程与证据 ↗', async () => openConversationRun(runId));
   open.type = 'button'; open.dataset.replyOpen = runId;
   actions.append(copy, open);
   reply.append(actions);
@@ -4867,9 +4867,10 @@ function renderConversation(): void {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
       row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`, 'message-meta'), element('p', item.text, 'message-text'));
-      // A reply to the message right above it needs no quote: that is how a conversation reads.
+      // A reply to the message right above it needs no quote: that is how a conversation reads. When that message
+      // carries a Bot's answer, the answer is what sits right above, so the quote says which one is meant.
       const previous = conversation?.messages[conversation.messages.indexOf(item) - 1];
-      if (item.replyTo && item.replyTo !== previous?.id) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
+      if (item.replyTo && (item.replyTo !== previous?.id || previous.reply)) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
       // Routing, execution receipts and the message's own actions stay one click away, so the transcript reads as a conversation.
       const details = element('details', '', 'message-details');
       details.append(element('summary', '详情'));

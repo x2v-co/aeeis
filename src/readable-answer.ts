@@ -2,8 +2,10 @@
  * The Run keeps the full text with its evidence IDs, runtime caveats and summary blocks; those stay one click away.
  * Pure string code, shared by the server and the page. */
 
-/** The runtime's own list of what a partial Run left unverified, appended once the Run is delivered. Never model text. */
-export const RUNTIME_UNKNOWN_SUFFIX = /\n\nUnknown:\n- Remaining work:[\s\S]*$/;
+/** The runtime's own list of what a partial Run left unverified, appended once the Run is delivered: the heading, then
+ * only one-line "- " items to the end of the text (each gap is folded to one line). A model's own "Unknown:" section with
+ * anything after it, such as a conclusion, does not match, so it is never cut. */
+export const RUNTIME_UNKNOWN_SUFFIX = /\n\nUnknown:\n- Remaining work:[^\n]*(?:\n- [^\n]*)*\s*$/;
 /** The runtime's own opening line when the model finished on limited evidence; the answer follows the blank line. */
 const LIMITED_EVIDENCE_PREFIX = /^Partial answer — limited evidence: [^\n]*\n\n/;
 /** Where a machine summary the text opens with ends, such as a structured summary the model also pasted into its

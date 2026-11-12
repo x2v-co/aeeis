@@ -801,14 +801,21 @@ describe('single-entry conversation workbench', () => {
     view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId } as any;
     view.messages.push({ id: 'asked', role: 'user', text: 'hello', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
       reply: { text: '你好，我是 AEEIS。', artifactId: 'artifact_hello', partial: true } } as any);
-    view.messages.push({ id: 'said', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '还有别的吗？', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    view.messages.push({ id: 'note', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '顺便说一句。', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    view.messages.push({ id: 'said', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '还有别的吗？', replyTo: 'note', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
     view.messages.push({ id: 'later', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '接着上面那条说。', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
     const h = harness(view); start(h.fetch); await ready();
     const row = (id: string) => doc().querySelector<HTMLElement>(`#conversation-messages li[data-message-id="${id}"]`);
     await vi.waitFor(() => expect(row('asked')?.querySelector('.bot-reply')).not.toBeNull());
     expect(row('asked')!.querySelector('.bot-reply-text')!.textContent).toBe('你好，我是 AEEIS。');
     expect(row('asked')!.querySelector(`[data-reply-open="${runId}"]`)!.textContent).toBe('有些没核实 · 详情 ↗');
+    // A clipped partial answer still says part of it is unverified.
+    view.messages.find(item => item.id === 'asked')!.reply!.truncated = true;
+    const clipped = harness(view); dom.window.close(); start(clipped.fetch); await ready();
+    await vi.waitFor(() => expect(row('asked')?.querySelector(`[data-reply-open="${runId}"]`)?.textContent).toBe('有些没核实 · 看完整结果 ↗'));
+    // Right under the message it answers: no quote. Under a message that carries a Bot's answer: quoted, to say which.
     expect(row('said')!.querySelector('.message-reply-to')).toBeNull();
+    expect(row('note')!.querySelector('.message-reply-to')!.textContent).toBe('回复：hello');
     expect(row('later')!.querySelector('.message-reply-to')!.textContent).toBe('回复：hello');
   });
 
