@@ -1480,6 +1480,8 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(row('task_y').querySelector<HTMLButtonElement>('[data-put-down]')?.disabled).toBe(false));
     clickText('放下', row('task_y'));
     await vi.waitFor(() => expect(header()).not.toContain('卡住'));
+    // The conversation header (entry and shell) reads the same status as the roster.
+    for (const id of ['entry-presence', 'gb-presence']) expect(el(id).textContent).not.toContain('卡住');
   });
 
   it('pauses, resumes and reconciles the existing run from the task row without moving focus', async () => {
@@ -1591,6 +1593,27 @@ describe('entry bots and group chats', () => {
     expect(research.querySelector('.roster-avatar')?.getAttribute('data-state')).toBe('blocked');
     expect(h.posts.some(post => post.url.includes('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
   });
+  it('does not show a Bot as stuck on a handed-over task its conversation put down', async () => {
+    const holding = (taskId: string, title: string, putDown: boolean) => ({ roomId: 'room_team', roomTitle: '发布协作', conversationId: 'conv_research', taskId, holderId: 'demo.release', fromId: 'demo.research', title, status: 'failed', ...(putDown ? { putDown: true } : {}) });
+    let items = [holding('task_hi', '你好', true)];
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/conversations' && request.method !== 'POST') {
+        return response([fixture(), { id: 'conv_release', title: '发布', revision: 2, agentId: 'demo.release', taskCount: 0, presence: { state: 'idle', label: '空闲' } }]);
+      }
+      if (url === '/api/board-holdings') return response({ items });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const release = () => doc().querySelector('[data-bot-id="demo.release"]')?.textContent ?? '';
+    await vi.waitFor(() => expect(release()).toContain('空闲'));
+    expect(release()).not.toContain('卡住');
+    // The same failure, not put down, still holds its receiver.
+    items = [holding('task_hi', '你好', true), holding('task_review', '复盘', false)];
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(release()).toContain('卡住 · 复盘'));
+    expect(release()).not.toContain('你好');
+  });
+
   it('counts a task a group handed over with its new holder on the roster', async () => {
     const h = harness(undefined, { handler(url, request) {
       if (url === '/api/conversations' && request.method !== 'POST') {

@@ -87,7 +87,7 @@ export interface BoardEvent {
   createdAt?: string | undefined;
 }
 
-export interface BoardTaskView { id: string; title: string; status: string; runId?: string; latestRunId?: string; createdAt?: string; sourceId?: string; runRevision?: number; runBoundary?: number }
+export interface BoardTaskView { id: string; title: string; status: string; runId?: string; latestRunId?: string; createdAt?: string; sourceId?: string; runRevision?: number; runBoundary?: number; putDown?: true }
 export interface BoardConversationView { id: string; agentId?: string; tasks: BoardTaskView[] }
 
 export type BoardColumn = 'capture' | 'ready' | 'doing' | 'blocked' | 'review' | 'done' | 'failed';
@@ -116,6 +116,8 @@ export interface BoardCard {
   movedFrom?: string;
   title?: string;
   status: string;
+  /** The owner put this failed task down in its conversation; it no longer counts as stuck for whoever holds it. */
+  putDown?: true;
   runId?: string;
   column: BoardColumn;
   autoColumn?: BoardColumn; version?: number; runRevision?: number; runBoundary?: number; canMove?: boolean; override?: boolean;
@@ -362,6 +364,7 @@ export function projectChannelBoard(roomId: string, events: readonly BoardEvent[
       ...(ownerId && home && ownerId !== home ? { movedFrom: home } : {}),
       ...(task ? { title: task.title } : {}),
       status,
+      ...(task?.putDown && status === 'failed' ? { putDown: true as const } : {}),
       ...(runId ? { runId } : {}),
       column: boardColumn(status, decision, runId),
       ...(task?.runRevision !== undefined ? { runRevision: task.runRevision } : {}),

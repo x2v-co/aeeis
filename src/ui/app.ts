@@ -2001,7 +2001,7 @@ function presenceFromTasks(all: Array<{ id: string; title: string; status: strin
 /** Tasks a group handed from one person's thread to another holder, or blocked in
  * the channel. The roster counts each with its holder, so a transfer moves the work
  * and its Run state; a channel block shows as stuck and waits in the inbox. */
-interface BoardHoldingView { roomId: string; roomTitle?: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; blocked?: string; blockedAt?: string }
+interface BoardHoldingView { roomId: string; roomTitle?: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; putDown?: true; blocked?: string; blockedAt?: string }
 let boardHoldings: BoardHoldingView[] = [];
 let boardHoldingsReadAt = 0;
 async function loadBoardHoldings(): Promise<void> {
@@ -2013,7 +2013,8 @@ function lifePresence(agentId: string): LifePresence {
   const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
   const listed = lifeSummary(agentId);
   const away = new Set(boardHoldings.filter(item => item.fromId === agentId).map(item => item.taskId));
-  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.blocked ? 'channel_blocked' : item.status }));
+  // A channel block note still holds the receiver; a failure put down in its conversation does not.
+  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.blocked ? 'channel_blocked' : item.status, ...(item.putDown && !item.blocked ? { putDown: true as const } : {}) }));
   const own = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
   const tasks = own ? [...own.filter(task => !away.has(task.id)), ...held] : undefined;
   if (tasks?.length) {

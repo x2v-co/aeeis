@@ -1523,6 +1523,27 @@ describe('single-entry conversation routing', () => {
     await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'failed again'; });
     expect(await presence()).toMatchObject({ state: 'blocked', label: '卡住' });
   });
+  it('does not expose the internal put-down mark when the Run cannot be read', async () => {
+    const f = await fixture();
+    const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'bot_release01' } })).json();
+    const started = await f.addTask(release.id, '发布口径', 'execute');
+    const runId = started.runId as string;
+    const taskId = started.conversation.tasks.find((task: { title: string }) => task.title === '发布口径').id as string;
+    await f.repository.mutate(runId, run => { run.status = 'failed'; run.error = 'fixture failed'; });
+    const down = await f.app.inject({ method: 'POST', url: `/api/conversations/${release.id}/tasks/${taskId}/put-down`, headers: f.headers, payload: { expectedRevision: (await f.fresh(release.id)).revision } });
+    expect(down.statusCode, down.body).toBe(200);
+    const get = f.repository.get.bind(f.repository);
+    vi.spyOn(f.repository, 'get').mockImplementation(async (id: string, scope?: { owner: string; tenantId: string }) => {
+      if (id === runId) throw new Error('disk unreadable');
+      return get(id, scope);
+    });
+    const view = (await f.app.inject({ method: 'GET', url: `/api/conversations/${release.id}`, headers: f.headers })).json();
+    const task = view.tasks.find((item: { id: string }) => item.id === taskId);
+    expect(task.status).toBe('unreadable');
+    expect(task).not.toHaveProperty('putDownRun');
+    expect(task).not.toHaveProperty('putDown');
+  });
+
   it('brings a put-down task back when its Run is replanned and fails again', async () => {
     const f = await fixture();
     const release = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { title: '发布', agentId: 'bot_release01' } })).json();

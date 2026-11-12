@@ -221,7 +221,7 @@ export function buildApp(options: Options) {
     ? new ChannelBoardService(options.sessionEvents, options.domain, async (conversationId, actorId, tenantId) => {
       if (!conversations) return undefined;
       const view = await conversations.get(conversationId, { owner: actorId, tenantId });
-      return { id: view.id, ...(view.agentId ? { agentId: view.agentId } : {}), tasks: view.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...('runId' in task && task.runId ? { runId: task.runId } : {}), ...(task.latestRunId ? { latestRunId: task.latestRunId } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...('runRevision' in task ? { runRevision: task.runRevision, runBoundary: task.runBoundary } : {}) })) };
+      return { id: view.id, ...(view.agentId ? { agentId: view.agentId } : {}), tasks: view.tasks.map(task => ({ id: task.id, title: task.title, status: task.status, ...('putDown' in task && task.putDown ? { putDown: true as const } : {}), ...('runId' in task && task.runId ? { runId: task.runId } : {}), ...(task.latestRunId ? { latestRunId: task.latestRunId } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...('runRevision' in task ? { runRevision: task.runRevision, runBoundary: task.runBoundary } : {}) })) };
     }, async (agentId, tenantId) => nameOfParticipant(agentId, tenantId), options.taskBoardControls, async (roomId, actorId, tenantId) => {
       const binding = await dialogues?.binding(roomId, { owner: actorId, tenantId });
       if (!binding || binding.phase !== 'ready' || binding.roomId !== roomId) return undefined;
