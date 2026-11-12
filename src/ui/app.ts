@@ -4871,7 +4871,26 @@ function renderConversation(): void {
   }
   updateConversationControls();
 }
+// Runs whose failure was put down in a conversation the page has read. The task list
+// only knows Runs, so it learns this here; a retried Run is no longer failed and drops out.
+const putDownRuns = new Set<string>();
+function notePutDownRuns(tasks: ConversationTaskView[]): boolean {
+  let changed = false;
+  for (const task of tasks) {
+    const runId = taskRunId(task);
+    if (!runId) continue;
+    const down = Boolean(task.putDown);
+    if (down === putDownRuns.has(runId)) continue;
+    if (down) putDownRuns.add(runId); else putDownRuns.delete(runId);
+    changed = true;
+  }
+  return changed;
+}
+function runPutDown(run: RunSummary): boolean {
+  return run.status === 'failed' && putDownRuns.has(run.id);
+}
 function rememberLifeSummary(view: ConversationView): void {
+  if (notePutDownRuns(view.tasks)) renderRunQueue(runSummaries);
   const index = conversationList.findIndex(item => item.id === view.id);
   if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
   if (view.agentId === 'aeeis') {
@@ -6824,7 +6843,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
 }
 function runMatchesFilter(run: RunSummary): boolean {
   if (runFilter === 'active') return ACTIVE_STATUSES.has(run.status);
-  if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status);
+  if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status) && !runPutDown(run);
   if (runFilter === 'done') return DONE_STATUSES.has(run.status);
   return true;
 }
@@ -6860,7 +6879,7 @@ function renderRunQueue(runs: RunSummary[]): void {
     });
     item.className = `roster-row task-row${run.id === currentId && currentRunOpen && !openGroupId ? ' selected' : ''}`;
     item.dataset.status = run.status;
-    const presence = presenceOf(run.status);
+    const presence = runPutDown(run) ? { state: 'idle', label: '已放下' } : presenceOf(run.status);
     const dot = element('span', '', 'task-dot');
     dot.dataset.state = presence.state;
     const copy = element('span', '', 'roster-copy');
