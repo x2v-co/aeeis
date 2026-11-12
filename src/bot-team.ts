@@ -415,12 +415,21 @@ export class BotTeam {
           return;
         }
         const receiver = await this.options.conversations.proposeTask({ agentId: to.id, proposerId: from.id, title: task.title, reason: offer.note ?? `${from.name}交过来的`, key: `direct-handoff-task:${offer.offerId}` }, scope);
-        // Start before recording the outcome: a start that fails leaves the talk open, and the pump tries again with the same keys.
+        // Start before recording the outcome, so a crash in between replays the same start (same key, same Run).
+        // A start that fails is final for that key: the handoff still ends accepted and says the work waits to be started.
+        let startFailed: string | undefined;
         if (this.options.canExecute && (to.autonomy === 'auto' || to.autonomy === 'yolo')) {
-          const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute);
-          await this.options.notifyRun(runId, scope);
+          try {
+            const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute);
+            await this.options.notifyRun(runId, scope);
+          } catch (error) {
+            startFailed = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+            this.options.log?.('AEEIS bot handoff start failed', startFailed);
+          }
         }
-        await end('accepted', `${to.name}接下了「${task.title}」，接着在${to.name}那边做。`, undefined, receiver);
+        await end('accepted', startFailed
+          ? `${to.name}接下了「${task.title}」，但没能自己开始（${startFailed}）。可以到${to.name}那边开始。`
+          : `${to.name}接下了「${task.title}」，接着在${to.name}那边做。`, startFailed ? `接下了，但没能自己开始：${startFailed}` : undefined, receiver);
       };
       const side = await this.sideThread(scope, from, to);
       const prefix = `direct-handoff:${offer.offerId}:`;

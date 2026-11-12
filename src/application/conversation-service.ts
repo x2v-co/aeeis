@@ -972,7 +972,9 @@ export class ConversationService implements LifeThreadInbox {
   /** True while the task's latest Run has not ended: it is being worked on here and must not be handed over. */
   async handoffTaskBusy(conversationId: string, taskId: string, scope: Ownership): Promise<boolean> {
     const task = (await this.store.get(conversationId, scope)).tasks.find(item => item.id === taskId);
-    if (!task?.latestRunId) return Boolean(task?.pendingMessageId);
+    // An execution being prepared counts, even when an older finished Run is still the latest one (a retry).
+    if (task?.pendingMessageId) return true;
+    if (!task?.latestRunId) return false;
     const run = await this.runs.get(task.latestRunId, scope).catch(() => undefined);
     return !run || !['succeeded', 'failed', 'cancelled'].includes(run.status);
   }

@@ -198,6 +198,54 @@ describe('Bots working together from a private chat', () => {
     } finally { await f.close(); }
   });
 
+  it('counts a retry being prepared as busy, even though an older failed Run is still the latest', async () => {
+    const { f, writer, binding, say } = await direct({ reply: () => ({ reply: '好。' }) });
+    try {
+      let view = await say({ text: '写方案', newTask: { title: '方案' } }, 'retry-1');
+      const taskId = view.tasks.find((item: any) => item.title === '方案').id;
+      const started = await f.request(`/rooms/${binding.roomId}/dialogue/messages`, { text: '开始', expectedRevision: view.revision, taskIds: [taskId], intent: 'execute' }, 'retry-run');
+      expect(started.statusCode, started.body).toBe(202);
+      await f.runs.mutate(started.json().runId, run => { run.status = 'failed'; });
+      // A new execution for the task is being prepared (its Run not created yet) while the failed Run is still the latest one.
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const create = f.engine.create.bind(f.engine);
+      vi.spyOn(f.engine, 'create').mockImplementationOnce(async (...args) => { await gate; return create(...args); });
+      view = (await f.request(`/conversations/${binding.conversationId}`)).json();
+      const again = f.request(`/rooms/${binding.roomId}/dialogue/messages`, { text: '再试一次', expectedRevision: view.revision, taskIds: [taskId], intent: 'execute' }, 'retry-run-2');
+      await vi.waitFor(async () => expect((await f.aggregates.get(binding.conversationId, scope)).tasks.find(item => item.id === taskId)!.pendingMessageId).toBeDefined());
+      const stored = (await f.aggregates.get(binding.conversationId, scope)).tasks.find(item => item.id === taskId)!;
+      expect(stored.latestRunId).toBe(started.json().runId);
+      const refused = await f.request(`/conversations/${binding.conversationId}/tasks/${taskId}/hand-off`, { expectedRevision: (await f.aggregates.get(binding.conversationId, scope)).revision, to: writer.id });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toContain('这件任务还在做');
+      release();
+      expect((await again).statusCode).toBe(202);
+    } finally { await f.close(); }
+  });
+
+  it('still ends an accepted handoff when the receiver cannot start on its own, and says where the work waits', async () => {
+    const { f, writer, binding, say } = await direct({ reply: () => ({ reply: '好。' }) });
+    try {
+      await f.bots.update(writer.id, { name: writer.name, mark: writer.mark, color: writer.color, background: writer.background, autonomy: 'auto' }, scope);
+      const view = await say({ text: '写方案', newTask: { title: '方案' } }, 'start-1');
+      const taskId = view.tasks.find((item: any) => item.title === '方案').id;
+      const create = vi.spyOn(f.engine, 'create').mockRejectedValueOnce(new Error('执行服务不可用'));
+      const sent = await f.request(`/conversations/${binding.conversationId}/tasks/${taskId}/hand-off`, { expectedRevision: view.revision, to: writer.id });
+      expect(sent.statusCode, sent.body).toBe(200);
+      await f.app.aeeisBots?.drain();
+      expect(create).toHaveBeenCalled();
+      const after = (await f.request(`/conversations/${binding.conversationId}`)).json();
+      const handoff = after.tasks.find((item: any) => item.id === taskId).handoff;
+      expect(handoff).toMatchObject({ state: 'accepted', reason: expect.stringContaining('没能自己开始'), receiver: { taskId: expect.any(String) } });
+      expect(after.messages.at(-1).text).toContain('可以到阿写那边开始');
+      // Nothing is left open for the pump to retry forever.
+      const turns = f.calls.length;
+      await f.app.aeeisBots?.sweepDirect(scope);
+      expect(f.calls).toHaveLength(turns);
+    } finally { await f.close(); }
+  });
+
   it('ignores asks and handoffs to unknown, quiet or self names, and refuses a handoff outside a Bot chat', async () => {
     const { f, say } = await direct({ reply: () => ({ reply: '好的。', ask: { to: '不存在', question: '在吗？' }, handoff: { to: '阿研', task: '自己' } }) });
     try {
