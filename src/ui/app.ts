@@ -3969,6 +3969,19 @@ const UPGRADE_CHECKS: Record<string, string> = { replay: '回放', holdout: '留
 const UPGRADE_RISKS: Record<string, string> = { low: '低', medium: '中', high: '高' };
 let upgradesRoomId = '';
 let upgradesKey = '';
+// Upgrades are team-wide, so every channel would list all of them above its own talk.
+// Beyond a few, they fold into one line that says how many wait on a decision.
+const UPGRADES_INLINE_MAX = 3;
+let upgradesOpen = false;
+/** An upgrade the owner can move forward right now: approve, start shadow or canary, promote, or apply. */
+function upgradeNeedsYou(item: ChannelUpgradeView): boolean {
+  if (item.kind !== 'full') return false;
+  if (['evaluating', 'held'].includes(item.status) && item.evaluated) return true;
+  if (item.status === 'approved') return true;
+  if (item.status === 'shadowing') return Boolean(item.shadow && item.shadow.passed >= item.shadow.needed && !item.shadow.failed);
+  if (item.status === 'canarying') return Boolean(item.canary && item.canary.passed >= item.canary.needed && !item.canary.failed);
+  return item.status === 'promoted' && !item.active && Boolean(item.canActivate);
+}
 /** Interaction-design §8.9: Bot upgrades as cards in the group, never a silent swap. Only the owner gets the full card. */
 async function renderChannelUpgrades(roomId: string): Promise<void> {
   const box = $('channel-upgrades');
@@ -3979,9 +3992,19 @@ async function renderChannelUpgrades(roomId: string): Promise<void> {
   const items = Array.isArray(loaded.items) ? loaded.items : [];
   const key = `${roomId}\0${JSON.stringify(items)}`;
   if (key === upgradesKey) return;
+  if (upgradesRoomId !== roomId) upgradesOpen = false;
   upgradesRoomId = roomId;
   upgradesKey = key;
-  box.replaceChildren(...items.map(item => item.kind === 'full' ? upgradeCard(item, roomId) : upgradeSummary(item)));
+  const cards = items.map(item => item.kind === 'full' ? upgradeCard(item, roomId) : upgradeSummary(item));
+  if (cards.length <= UPGRADES_INLINE_MAX) box.replaceChildren(...cards);
+  else {
+    const fold = document.createElement('details');
+    fold.className = 'upgrade-fold'; fold.open = upgradesOpen;
+    fold.addEventListener('toggle', () => { upgradesOpen = fold.open; });
+    const waiting = items.filter(upgradeNeedsYou).length;
+    fold.append(element('summary', `团队升级 · ${items.length} 件${waiting ? `，${waiting} 件等你决定` : '，都还在评估或已处理'}`), ...cards);
+    box.replaceChildren(fold);
+  }
   box.hidden = items.length === 0;
 }
 function clearChannelUpgrades(): void {

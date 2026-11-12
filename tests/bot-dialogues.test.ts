@@ -186,6 +186,30 @@ describe('Bot dialogue canonical dataflow', () => {
       expect(JSON.stringify(view)).not.toContain('SECRET');
     } finally { await broken.close(); }
   });
+  it('records an unaddressed group message in the entry conversation although AEEIS is not a listed member', async () => {
+    const f = await dialogueFixture();
+    try {
+      const group = await f.domain.createRoom({ title: '东云', description: '群聊' }, undefined, scope.owner, scope.tenantId);
+      await f.domain.addRoomMember(group.id, f.bot.id, 'agent', scope.owner, scope.tenantId);
+      const goal = await f.domain.createGoal({ title: '东云', roomId: group.id }, undefined, scope.owner, scope.tenantId);
+      const manifest = await f.domain.createContextManifest(goal.id, { purpose: '投递', audienceMode: 'room' }, undefined, scope.owner, scope.tenantId);
+      const event = await f.events.create(group.id, { type: 'message', content: '把对话导出成 Markdown 要做哪几件事？', goalId: goal.id, contextManifestId: manifest.id, idempotencyKey: 'unaddressed' }, scope.owner, scope.tenantId);
+      const delivered = await f.request(`/rooms/${group.id}/session-events/${event.id}/deliver`, { botId: 'aeeis', kind: 'intake' });
+      expect(delivered.statusCode, delivered.body).toBe(200);
+      expect(delivered.json().conversation.agentId).toBe('aeeis');
+      expect(delivered.json().message.route.status).toBe('general');
+      expect(await f.runs.list()).toEqual([]);
+      // The exception is AEEIS in a group: a private chat still needs AEEIS as its member.
+      const direct = await f.domain.createRoom({ title: 'cto', description: '私聊' }, undefined, scope.owner, scope.tenantId);
+      await f.domain.addRoomMember(direct.id, f.bot.id, 'agent', scope.owner, scope.tenantId);
+      const goalTwo = await f.domain.createGoal({ title: 'cto', roomId: direct.id }, undefined, scope.owner, scope.tenantId);
+      const manifestTwo = await f.domain.createContextManifest(goalTwo.id, { purpose: '投递', audienceMode: 'room' }, undefined, scope.owner, scope.tenantId);
+      const privateEvent = await f.events.create(direct.id, { type: 'message', content: '只给 cto', goalId: goalTwo.id, contextManifestId: manifestTwo.id, idempotencyKey: 'private' }, scope.owner, scope.tenantId);
+      const refused = await f.request(`/rooms/${direct.id}/session-events/${privateEvent.id}/deliver`, { botId: 'aeeis', kind: 'intake' });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toContain('Bot is not in the message audience');
+    } finally { await f.close(); }
+  });
   it('deduplicates channel deliveries by source and saves artifact revisions without replacing Run evidence', async () => {
     const f = await dialogueFixture();
     try {
