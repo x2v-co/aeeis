@@ -1528,6 +1528,8 @@ describe('single-entry conversation workbench', () => {
     const runs: Array<Record<string, unknown>> = [
       { id: old, goal: '北京天气', status: 'failed', updatedAt: date, archived: { at: date, actor: 'local' } },
       { id: stuck, goal: '旧表单', status: 'failed', updatedAt: date },
+      { id: 'run_00000000-0000-4000-8000-0000000000a3', goal: '停下的链', status: 'succeeded', updatedAt: date, archived: { at: date, actor: 'local' }, derivationBlocked: { kind: 'collaboration_trigger', limit: 8, reason: 'over the limit', at: date } },
+      { id: 'run_00000000-0000-4000-8000-0000000000a4', goal: '又开工了', status: 'running', updatedAt: date, archived: { at: date, actor: 'local' } },
     ];
     let revision = 1;
     const detail = (id: string) => ({ ...runs.find(item => item.id === id)!, revision, canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [], context: { sources: [] }, artifacts: [] });
@@ -1547,12 +1549,21 @@ describe('single-entry conversation workbench', () => {
     const sidebar = (title: string) => [...doc().querySelectorAll<HTMLElement>('#runs .task-row')].find(item => item.querySelector('strong')?.textContent === title);
     await vi.waitFor(() => expect(sidebar('旧表单')).toBeDefined());
     expect(sidebar('北京天气')).toBeUndefined();
-    expect(el('run-count').textContent).toBe('1 / 1 项任务');
+    expect(sidebar('停下的链')).toBeUndefined();
+    // A stale mark never hides a Run that is working again.
+    expect(sidebar('又开工了')).toBeDefined();
+    expect(el('run-count').textContent).toBe('2 / 2 项任务');
+    // Neither the failure nor the stopped chain of an archived Run waits in the inbox.
     await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+    expect(el('minimal-recent-runs').textContent).not.toContain('北京天气');
+    expect(el('minimal-recent-runs').textContent).not.toContain('停下的链');
+    expect(el('minimal-recent-runs').textContent).toContain('又开工了');
     // The archived filter is the way back to them.
     doc().querySelector<HTMLButtonElement>('#run-filters [data-run-filter="archived"]')!.click();
     await vi.waitFor(() => expect(sidebar('北京天气')).toBeDefined());
+    expect(sidebar('停下的链')).toBeDefined();
     expect(sidebar('旧表单')).toBeUndefined();
+    expect(sidebar('又开工了')).toBeUndefined();
     doc().querySelector<HTMLButtonElement>('#run-filters [data-run-filter="all"]')!.click();
     // Archive the other one from its open Run.
     sidebar('旧表单')!.click();

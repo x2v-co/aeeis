@@ -26,7 +26,7 @@ import { channelDigestCost, taskTimeline } from '../channel-digest.js';
 import { emptyUiEventCounts, uiEventDay, uiEventInputSchema, type UiEventCountStore } from '../ui-event-counts.js';
 import { pushSubscriptionInputSchema, pushSubscriptionView, type PushChannel, type PushMessage, type PushStore } from '../push.js';
 import { z } from 'zod';
-import { AgentEngine, Conflict, digest, event } from './engine.js';
+import { AgentEngine, ARCHIVABLE_RUN_STATUSES, Conflict, digest, event } from './engine.js';
 import { encodeRunEventCursor, NotFound, type RunRepository } from './repository.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { AgentRun } from './contracts.js';
@@ -2672,10 +2672,9 @@ function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
 
-const ARCHIVABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['failed', 'cancelled', 'succeeded']);
 function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt' | 'lineage' | 'derivationBlocked' | 'archived'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
   const inputRequest = runInputRequest(run);
-  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}), ...(run.lineage ? { lineage: run.lineage } : {}), ...(run.derivationBlocked ? { derivationBlocked: run.derivationBlocked } : {}), ...(run.archived ? { archived: run.archived } : {}) };
+  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}), ...(run.lineage ? { lineage: run.lineage } : {}), ...(run.derivationBlocked ? { derivationBlocked: run.derivationBlocked } : {}), ...(run.archived && ARCHIVABLE_RUN_STATUSES.has(run.status) ? { archived: run.archived } : {}) };
 }
 async function readableRunCandidates(repository: RunRepository, domain: AeeisService | undefined, principal: Principal): Promise<AgentRun[]> {
   const all = principal.roles.includes('operator')

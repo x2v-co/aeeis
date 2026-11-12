@@ -460,7 +460,7 @@ function presenceOf(status?: string): { state: string; label: string } {
   return { state: 'idle', label: runStatusLabel(status) };
 }
 function botPresence(runs: RunSummary[]): { state: string; label: string } {
-  const statuses = runs.filter(run => !run.archived).map(run => run.status);
+  const statuses = runs.filter(run => !runArchived(run)).map(run => run.status);
   if (statuses.some(status => status === 'running' || status === 'queued')) return presenceOf('running');
   if (statuses.some(status => status === 'planning' || status === 'reviewing')) return presenceOf('planning');
   if (statuses.some(status => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' || status === 'paused')) return presenceOf('needs_approval');
@@ -1056,7 +1056,7 @@ function executePaletteCommand(command: string): void {
     if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
     else $<HTMLInputElement>('quick-goal').focus();
   } else if (command === 'attention') {
-    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status) && !runPutDown(run) && !run.archived)) {
+    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status) && !runPutDown(run) && !runArchived(run))) {
       runFilter = 'attention';
       localStorage.setItem('aeeis.run-filter', runFilter);
       renderRunQueue(runSummaries);
@@ -6780,7 +6780,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   if (!panel || !list || !count) return;
   const items: Array<{ key: string; kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
   for (const run of runs) {
-    const kind = runPutDown(run) || run.archived ? undefined : inboxKind(run.status);
+    const kind = runPutDown(run) || runArchived(run) ? undefined : inboxKind(run.status);
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
@@ -6794,7 +6794,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   // waits until its owner acknowledges it; acknowledging never resumes it.
   for (const run of runs) {
     const block = run.derivationBlocked;
-    if (!block || block.acknowledgedAt) continue;
+    if (!block || block.acknowledgedAt || runArchived(run)) continue;
     const acknowledge = async () => { await api(`/runs/${encodeURIComponent(run.id)}/derivation-block/acknowledge`, {}, 'POST'); await refresh(true); };
     items.push({
       key: `derivation:${run.id}:${block.at}`, kind: 'derivation', title: runTitle(run),
@@ -6867,9 +6867,13 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     list.append(item);
   }
 }
+/** Archived only while finished: a Run back at work always shows, whatever its stored mark says. */
+function runArchived(run: RunSummary): boolean {
+  return Boolean(run.archived) && ARCHIVABLE_STATUSES.has(run.status);
+}
 function runMatchesFilter(run: RunSummary): boolean {
-  if (runFilter === 'archived') return Boolean(run.archived);
-  if (run.archived) return false;
+  if (runFilter === 'archived') return runArchived(run);
+  if (runArchived(run)) return false;
   if (runFilter === 'active') return ACTIVE_STATUSES.has(run.status);
   if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status) && !runPutDown(run);
   if (runFilter === 'done') return DONE_STATUSES.has(run.status);
@@ -6917,7 +6921,7 @@ function renderRunQueue(runs: RunSummary[]): void {
   }
   syncBotRow();
   const count = $('run-count');
-  if (count) count.textContent = `${visible.length} / ${runs.filter(run => !run.archived).length} 项任务`;
+  if (count) count.textContent = `${visible.length} / ${runs.filter(run => !runArchived(run)).length} 项任务`;
   const empty = $('runs-empty');
   if (empty) {
     empty.hidden = visible.length > 0;
@@ -6933,7 +6937,7 @@ function renderMinimalRecentRuns(runs: RunSummary[]): void {
   const container = $('minimal-recent-runs');
   const toggle = $('recent-runs-toggle') as HTMLButtonElement | null;
   if (!container) return;
-  const recent = runs.slice(0, 5);
+  const recent = runs.filter(run => !runArchived(run)).slice(0, 5);
   if (!recent.length) {
     setRecentRunsOpen(false);
     if (toggle) toggle.hidden = true;
@@ -8748,9 +8752,9 @@ function render(run: RunView): void {
   if (linkedRunId && window.location.pathname !== `/runs/${run.id}`) window.history.replaceState(null, '', `/runs/${run.id}`);
   $('create-run-share').hidden = readOnlyShare || run.canEdit === false;
   const archive = $<HTMLButtonElement>('archive-run');
-  archive.hidden = readOnlyShare || run.canEdit === false || !(run.archived || ARCHIVABLE_STATUSES.has(run.status));
-  archive.textContent = run.archived ? '取消归档' : '归档';
-  archive.title = run.archived ? '放回任务列表' : '从任务列表和待处理里收起，记录都还在';
+  archive.hidden = readOnlyShare || run.canEdit === false || !ARCHIVABLE_STATUSES.has(run.status);
+  archive.textContent = runArchived(run) ? '取消归档' : '归档';
+  archive.title = runArchived(run) ? '放回任务列表' : '从任务列表和待处理里收起，记录都还在';
   const threadLink = $<HTMLAnchorElement>('run-thread-link');
   threadLink.hidden = readOnlyShare || !run.threadId;
   if (run.threadId && !readOnlyShare) threadLink.href = `/threads/${run.threadId}`;
@@ -9544,8 +9548,9 @@ $('thread-parent').addEventListener('change', () => {
   if (!run || readOnlyShare) return;
   const control = $<HTMLButtonElement>('archive-run');
   control.disabled = true;
-  void api(`/runs/${encodeURIComponent(run.id)}/archive`, { archived: !run.archived })
-    .then(() => { message(run.archived ? '已放回任务列表。' : '已归档。它不再出现在任务列表和待处理里，记录都还在；在“已归档”里可以放回来。'); return refresh(); })
+  const archived = runArchived(run);
+  void api(`/runs/${encodeURIComponent(run.id)}/archive`, { archived: !archived })
+    .then(() => { message(archived ? '已放回任务列表。' : '已归档。它不再出现在任务列表和待处理里，记录都还在；在“已归档”里可以放回来。'); return refresh(); })
     .catch(error => message(errorMessage(error)))
     .finally(() => { control.disabled = false; });
 });

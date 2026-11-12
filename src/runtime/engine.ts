@@ -483,10 +483,13 @@ function closeDanglingReview(run: AgentRun, reason: string): void {
     if (type === 'review.requested') { run.events.push({ id: id('evt'), seq: run.events.length + 1, type: 'review.skipped', at: now(), data: { reason } }); return; }
   }
 }
+/** Only a finished Run can be archived. */
+export const ARCHIVABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['failed', 'cancelled', 'succeeded']);
 /** Events that put a Run back to work; an archived Run comes back into view on any of them. */
-export const ARCHIVE_ENDS: ReadonlySet<string> = new Set(['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled']);
+export const ARCHIVE_ENDS: ReadonlySet<string> = new Set(['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled', 'model.timeout_retry']);
 export function event(run: AgentRun, type: string, data: Record<string, unknown> = {}): void {
-  if (run.archived && ARCHIVE_ENDS.has(type)) delete run.archived;
+  // Any write that finds the Run live again (a late timeout retry included) also unarchives it.
+  if (run.archived && (ARCHIVE_ENDS.has(type) || !ARCHIVABLE_RUN_STATUSES.has(run.status))) delete run.archived;
   if (type === 'run.partial') {
     populateRunLimitations(run);
     data = { ...data, reason: `${data.reason ?? 'Partial answer'}\n\n${partialUnknownSection(run)}` };

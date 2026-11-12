@@ -60,14 +60,40 @@ it('archives a finished Run without deleting it, brings it back, and refuses liv
 });
 
 it('clears the archive mark when the Run is put back to work', () => {
-  for (const type of ['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled']) {
+  for (const type of ['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled', 'model.timeout_retry']) {
     const item = run(3, 'failed');
     item.archived = { at: '2026-11-12T00:00:00.000Z', actor: 'alice' };
     event(item, type);
     expect(item.archived, type).toBeUndefined();
   }
+  // A Run terminalized mid-call, archived, then revived by its late timeout retry.
+  const revived = run(5, 'failed');
+  revived.archived = { at: '2026-11-12T00:00:00.000Z', actor: 'alice' };
+  revived.status = 'running';
+  event(revived, 'model.timeout_retry', { callId: 'call_1' });
+  expect(revived.archived).toBeUndefined();
+  // Any write that finds the Run live again clears it, whatever the event.
+  const live = run(6, 'failed');
+  live.archived = { at: '2026-11-12T00:00:00.000Z', actor: 'alice' };
+  live.status = 'planning';
+  event(live, 'model.requested');
+  expect(live.archived).toBeUndefined();
   const kept = run(4, 'failed');
   kept.archived = { at: '2026-11-12T00:00:00.000Z', actor: 'alice' };
   event(kept, 'rsi.correction.recorded');
   expect(kept.archived).toBeDefined();
+});
+
+it('never reports a live Run as archived, even with a stale stored mark', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aeeis-run-archive-live-'));
+  const runs = new FileRunRepository(join(directory, 'runs')); await runs.init();
+  const app = buildApp({ repository: runs, principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
+  try {
+    const stale = run(7, 'running');
+    stale.archived = { at: '2026-11-12T00:00:00.000Z', actor: 'alice' };
+    await runs.create(stale);
+    const page = (await app.inject({ method: 'GET', url: '/api/runs/page?limit=50', headers: { authorization: 'Bearer alice' } })).json();
+    expect(page.items.find((item: { id: string }) => item.id === stale.id)).toMatchObject({ status: 'running' });
+    expect(page.items.find((item: { id: string }) => item.id === stale.id)?.archived).toBeUndefined();
+  } finally { await app.close(); await runs.close(); }
 });
