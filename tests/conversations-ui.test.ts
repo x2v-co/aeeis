@@ -3914,6 +3914,8 @@ describe('entry bots and group chats', () => {
     start(h.fetch);
     await ready();
     expect(css).toContain('#channel-inbox');
+    // An open group hides AEEIS's own conversation panel, so the channel talk gets the stage.
+    expect(css).toMatch(/body\.gb\.group-open #conversation-panel \{ display: none !important; \}/);
     expect(css).toContain('.attention-quick-action');
     el('gb-new-group').click();
     for (const name of ['发布', '研究']) [...doc().querySelectorAll('#group-candidates label')].find(label => label.textContent?.includes(name))?.querySelector('input')?.click();
