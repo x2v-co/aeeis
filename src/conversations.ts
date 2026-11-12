@@ -13,6 +13,22 @@ export interface ConversationTask {
   /** The owner put this task down after this Run failed, when it had this many events. A retry of the Run after
    * that, or a new Run, brings the task back on its own. */
   putDownRun?: { id: string; eventSeq: number };
+  /** Handing this task to another Bot from a private chat (no group needed). The two Bots talk it over in their side
+   * thread; an accepted handoff puts a new task in the receiver's chat and links it here. */
+  handoff?: TaskHandoff;
+}
+export interface TaskHandoff {
+  /** Stable per attempt; side-thread turns and outcomes are keyed by it. A new attempt gets a new id. */
+  offerId: string;
+  from: string;
+  to: string;
+  /** The receiver's name when it was offered, for display. */
+  toName: string;
+  note?: string;
+  state: 'suggested' | 'negotiating' | 'accepted' | 'declined' | 'blocked';
+  at: string;
+  reason?: string;
+  receiver?: { conversationId: string; taskId: string };
 }
 /** Dashboard order: explicit priority ascending, then creation order. Does not change stored identity order. */
 export function conversationTaskOrder<T extends { priority?: number }>(tasks: readonly T[]): T[] {

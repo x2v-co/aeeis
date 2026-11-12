@@ -891,12 +891,19 @@ try {
   const botPumpTimer = botIntervalMs > 0 && app.aeeisBots ? setInterval(() => {
     if (closing || botWork) return;
     const work = (async () => {
+      const scopes = new Map<string, { owner: string; tenantId: string }>();
       for (const { room } of await domain.listRoomsForProjection()) {
         if (closing) return;
-        if (room.status !== 'active' || (room.chat !== 'group' && room.chat !== 'direct')) continue;
         const scope = { owner: room.owner ?? 'owner', tenantId: room.tenantId ?? 'local' };
+        scopes.set(`${scope.tenantId}\u0000${scope.owner}`, scope);
+        if (room.status !== 'active' || (room.chat !== 'group' && room.chat !== 'direct')) continue;
         await app.aeeisBots!.sweep(room, scope).catch(error => console.error('AEEIS bot sweep failed', room.id, error instanceof Error ? error.message : error));
         await app.aeeisBots!.reassignFailures(room, scope).catch(error => console.error('AEEIS bot reassign failed', room.id, error instanceof Error ? error.message : error));
+      }
+      // Handoffs started from a private chat live on the conversation, not a room; finish any left open.
+      for (const scope of scopes.values()) {
+        if (closing) return;
+        await app.aeeisBots!.sweepDirect(scope).catch(error => console.error('AEEIS bot direct handoff sweep failed', error instanceof Error ? error.message : error));
       }
       await app.aeeisBots!.drain();
     })().catch(error => console.error('AEEIS bot pump failed', error instanceof Error ? error.message : error)).finally(() => { botWork = undefined; });

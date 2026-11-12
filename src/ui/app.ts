@@ -93,8 +93,20 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
+interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; handoff?: TaskHandoffView; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
 interface ConversationReply { text: string; artifactId: string; truncated?: true }
+interface TaskHandoffView { offerId: string; from: string; to: string; toName: string; note?: string; state: 'suggested' | 'negotiating' | 'accepted' | 'declined' | 'blocked'; at: string; reason?: string; receiver?: { conversationId: string; taskId: string } }
+/** One line for a task's handoff to another Bot, in the owner's words. */
+function handoffLine(handoff: TaskHandoffView): string {
+  const to = handoff.toName;
+  switch (handoff.state) {
+    case 'suggested': return `建议交给${to}${handoff.note ? `：${handoff.note}` : ''}`;
+    case 'negotiating': return `正在和${to}商量交接`;
+    case 'accepted': return `已交给${to}，接着在${to}那边做`;
+    case 'declined': return `没交给${to}${handoff.reason ? `：${handoff.reason}` : ''}`;
+    case 'blocked': return `交给${to}没谈定，需要你决定${handoff.reason ? `：${handoff.reason}` : ''}`;
+  }
+}
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
   correctsMessageId?: string; effectiveTaskIds?: string[]; dismissedAt?: string;
@@ -4744,6 +4756,7 @@ function renderConversation(): void {
         if (task.execution.evidence?.length) name.append(element('small', `证据：${task.execution.evidence.join('、')}`, 'conversation-evidence'));
       }
       if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
+      if (task.handoff) { const line = element('small', handoffLine(task.handoff), 'conversation-handoff'); line.dataset.handoffState = task.handoff.state; name.append(line); }
       const status = document.createElement('td');
       status.append(element('span', taskStateLabel(task)));
       if (task.column) status.append(element('small', ({ capture: '收下', ready: '待领取', doing: '进行中', blocked: '阻塞', review: '待验收', done: '已验收', failed: '失败 / 取消' } as Record<string,string>)[task.column] ?? task.column));
@@ -4791,6 +4804,12 @@ function renderConversation(): void {
           down.dataset.putDown = task.id;
           actions.append(down);
         }
+      }
+      if (task.handoff && ['suggested', 'declined', 'blocked'].includes(task.handoff.state)) {
+        const give = dashboardButton(`${task.handoff.state === 'suggested' ? '' : '再'}交给${task.handoff.toName}`, () => handOffConversationTask(task.id));
+        give.dataset.handOff = task.id;
+        give.title = '两位 Bot 在它们的侧线程里商量，对方接下才转过去';
+        actions.append(give);
       }
       if (runId && ['queued', 'planning', 'running', 'reviewing'].includes(task.status)) {
         const pause = dashboardButton('暂停', () => controlConversationRun(task, 'pause'));
@@ -4870,7 +4889,7 @@ function renderConversation(): void {
         }); correct.type = 'button'; details.append(correct);
       }
       if (item.route.status === 'clarify' && !corrected && !item.dismissedAt) {
-        if (item.role === 'user' && !item.execution) {
+        if (item.role === 'user' && item.speaker?.role !== 'agent' && !item.execution) {
           const dismiss = button('忽略', async () => dismissConversationMessage(item.id));
           dismiss.type = 'button'; dismiss.dataset.dismissMessage = item.id;
           dismiss.title = '不选任务，也不回复；这条留在对话里，不再等你处理';
@@ -5060,6 +5079,24 @@ async function putDownConversationTask(taskId: string): Promise<void> {
     if (epoch === conversationEpoch) {
       acceptConversation(view);
       $('conversation-status').textContent = '已放下。它留在任务列表里，运行记录也还在；想再做时点“重试”。';
+    }
+  } catch (error) {
+    if (epoch === conversationEpoch) {
+      conversationNeedsRefresh = error instanceof ApiError && error.status === 409 && /刷新/.test(errorMessage(error));
+      $('conversation-error').textContent = errorMessage(error);
+    }
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function handOffConversationTask(taskId: string): Promise<void> {
+  if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
+  const epoch = conversationEpoch, id = conversation.id;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}/hand-off`, { expectedRevision: conversation.revision });
+    if (epoch === conversationEpoch) {
+      acceptConversation(view);
+      renderAttentionInbox(runSummaries);
+      $('conversation-status').textContent = '在商量交接。两位 Bot 在它们的侧线程里谈，对方接下才转过去；谈不拢会回到待处理。';
     }
   } catch (error) {
     if (epoch === conversationEpoch) {
@@ -6860,8 +6897,16 @@ function renderAttentionInbox(runs: RunSummary[]): void {
       open, quick: '去处理', act: open,
     });
   }
+  for (const task of conversation?.tasks ?? []) {
+    if (task.handoff?.state !== 'blocked') continue;
+    items.push({
+      key: `handoff:${task.id}:${task.handoff.offerId}`, kind: 'question', title: task.title, detail: handoffLine(task.handoff), at: task.handoff.at, status: 'blocked', selected: false,
+      open: async () => { openConversationRoute(); }, quick: '去处理', act: async () => { openConversationRoute(); },
+    });
+  }
   for (const message of conversation?.messages ?? []) {
-    if (message.route.status !== 'clarify' || message.dismissedAt) continue;
+    // Only the owner's own messages wait for a task choice; a Bot's line never does.
+    if (message.route.status !== 'clarify' || message.dismissedAt || message.speaker?.role === 'agent') continue;
     if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
     items.push({
       key: `mention:${message.id}`, kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,

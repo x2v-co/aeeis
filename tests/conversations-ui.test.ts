@@ -425,6 +425,34 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
   });
 
+  it('shows a suggested handoff to another Bot with 交给, puts a stalemate in 待处理, and never lists a Bot line there', async () => {
+    const view = fixture('bot');
+    const handoff = { offerId: 'handoff_1', from: ownedBot.id, to: 'bot_writer', toName: '阿写', note: '阿写熟悉报价', state: 'suggested', at: date };
+    view.tasks.push({ id: 'task_q', title: '客户报价单', threadId: 'thread_q', status: 'discussion', handoff } as any);
+    // An older Bot reply that was routed as waiting for a choice stays out of the inbox.
+    view.messages.push({ id: 'bot_line', role: 'user', speaker: { role: 'agent', id: ownedBot.id }, text: '你好！', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url === `/api/conversations/${view.id}/tasks/task_q/hand-off`) {
+        (view.tasks.find(item => item.id === 'task_q') as any).handoff = { ...handoff, offerId: 'handoff_2', state: 'blocked', reason: '交接谈不拢：谈了 8 轮还没有结论' };
+        view.revision++;
+        return response(view);
+      }
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-task-id="task_q"]')!;
+    await vi.waitFor(() => expect(row().textContent).toContain('建议交给阿写：阿写熟悉报价'));
+    expect(el('attention-count').textContent).toBe('');
+    expect(doc().querySelector('[data-message-id="bot_line"] [data-dismiss-message]')).toBeNull();
+    const give = row().querySelector<HTMLButtonElement>('[data-hand-off]')!;
+    expect(give.textContent).toBe('交给阿写');
+    give.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url.endsWith('/tasks/task_q/hand-off'))?.body).toEqual({ expectedRevision: 1 }));
+    await vi.waitFor(() => expect(row().textContent).toContain('交给阿写没谈定，需要你决定'));
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+    expect(row().querySelector('[data-hand-off]')?.textContent).toBe('再交给阿写');
+    expect(messagePosts(h)).toHaveLength(0);
+  });
+
   it('sets an unrouted message aside with 忽略: no message, no task, and it leaves the inbox', async () => {
     const view = fixture();
     view.messages.push({ id: 'ambiguous', role: 'user', text: '继续那个任务', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a', 'task_b'], focusEffect: 'keep' } });
