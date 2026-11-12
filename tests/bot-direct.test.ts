@@ -246,6 +246,43 @@ describe('Bots working together from a private chat', () => {
     } finally { await f.close(); }
   });
 
+  it('keeps a handoff open when the receiver\'s Run was saved but not finished, and finishes it with the same start', async () => {
+    const { f, writer, binding, say } = await direct({ reply: () => ({ reply: '好。' }) });
+    try {
+      await f.bots.update(writer.id, { name: writer.name, mark: writer.mark, color: writer.color, background: writer.background, autonomy: 'auto' }, scope);
+      const view = await say({ text: '写方案', newTask: { title: '方案' } }, 'saved-1');
+      const taskId = view.tasks.find((item: any) => item.title === '方案').id;
+      // The store goes down exactly when it would mark the receiver's new execution complete; the Run is already saved.
+      const mutate = f.aggregates.mutate.bind(f.aggregates);
+      let failed = false;
+      const spy = vi.spyOn(f.aggregates, 'mutate').mockImplementation(async (id, scope, change) => {
+        if (!failed) {
+          const probe = structuredClone(await f.aggregates.get(id, scope));
+          change(probe);
+          if (probe.messages.some(message => message.execution?.state === 'completed' && message.speaker?.id === writer.id)) { failed = true; throw new Error('store down'); }
+        }
+        return mutate(id, scope, change);
+      });
+      const sent = await f.request(`/conversations/${binding.conversationId}/tasks/${taskId}/hand-off`, { expectedRevision: view.revision, to: writer.id });
+      expect(sent.statusCode, sent.body).toBe(200);
+      await f.app.aeeisBots?.drain();
+      expect(failed).toBe(true);
+      expect((await f.request(`/conversations/${binding.conversationId}`)).json().tasks.find((item: any) => item.id === taskId).handoff.state).toBe('negotiating');
+      expect(await f.runs.list(scope)).toHaveLength(1);
+      spy.mockRestore();
+      await f.app.aeeisBots?.sweepDirect(scope);
+      const after = (await f.request(`/conversations/${binding.conversationId}`)).json();
+      const handoff = after.tasks.find((item: any) => item.id === taskId).handoff;
+      expect(handoff.state).toBe('accepted');
+      expect(handoff.reason).toBeUndefined();
+      expect(after.messages.at(-1).text).toBe('阿写接下了「方案」，接着在阿写那边做。');
+      const receiver = (await f.aggregates.get(handoff.receiver.conversationId, scope)).tasks.find(item => item.id === handoff.receiver.taskId)!;
+      expect(receiver.pendingMessageId).toBeUndefined();
+      expect(receiver.latestRunId).toBe((await f.runs.list(scope))[0]!.id);
+      expect(await f.runs.list(scope)).toHaveLength(1);
+    } finally { await f.close(); }
+  });
+
   it('ignores asks and handoffs to unknown, quiet or self names, and refuses a handoff outside a Bot chat', async () => {
     const { f, say } = await direct({ reply: () => ({ reply: '好的。', ask: { to: '不存在', question: '在吗？' }, handoff: { to: '阿研', task: '自己' } }) });
     try {

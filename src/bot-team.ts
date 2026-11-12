@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { AeeisService } from './application/aeeis-service.js';
 import { AeeisConflict, AeeisNotFound } from './application/aeeis-service.js';
-import type { ConversationService } from './application/conversation-service.js';
+import { ReplayablePreparationError, type ConversationService } from './application/conversation-service.js';
 import type { ChannelBoardService } from './channel-board.js';
 import { WIP_LIMIT, type BoardCard, type ChannelBoard } from './channel-task-action.js';
 import type { Room } from './contracts.js';
@@ -416,16 +416,20 @@ export class BotTeam {
         }
         const receiver = await this.options.conversations.proposeTask({ agentId: to.id, proposerId: from.id, title: task.title, reason: offer.note ?? `${from.name}交过来的`, key: `direct-handoff-task:${offer.offerId}` }, scope);
         // Start before recording the outcome, so a crash in between replays the same start (same key, same Run).
-        // A start that fails is final for that key: the handoff still ends accepted and says the work waits to be started.
         let startFailed: string | undefined;
         if (this.options.canExecute && (to.autonomy === 'auto' || to.autonomy === 'yolo')) {
+          let runId: string | undefined;
           try {
-            const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute);
-            await this.options.notifyRun(runId, scope);
+            ({ runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute));
           } catch (error) {
+            // The Run was saved but not finished: the same key finishes it, so leave the talk open for the pump.
+            if (error instanceof ReplayablePreparationError) throw error;
+            // No Run was made, and that key cannot make one now: end the handoff and say the work waits to be started.
             startFailed = (error instanceof Error ? error.message : String(error)).slice(0, 200);
             this.options.log?.('AEEIS bot handoff start failed', startFailed);
           }
+          // The Run exists; a missed wake-up is picked up by the dispatcher's recovery, so it does not undo the handoff.
+          if (runId) await this.options.notifyRun(runId, scope).catch(error => this.options.log?.('AEEIS bot handoff notify failed', error instanceof Error ? error.message : error));
         }
         await end('accepted', startFailed
           ? `${to.name}接下了「${task.title}」，但没能自己开始（${startFailed}）。可以到${to.name}那边开始。`
