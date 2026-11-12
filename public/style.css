@@ -1550,7 +1550,9 @@ body.gb #group-speaker[hidden],
 body.gb #group-handoff[hidden],
 body.gb #life-speaker[hidden],
 body.gb #conversation-panel[hidden],
-body.gb.group-draft #conversation-panel { display: none !important; }
+body.gb.group-draft #conversation-panel,
+/* An open group channel takes the whole stage: AEEIS's own conversation panel above it left the talk two lines tall. */
+body.gb.group-open #conversation-panel { display: none !important; }
 body.gb #group-panel:not([hidden]) { display: flex; flex-direction: column; min-height: 0; }
 body.gb #group-panel:not([hidden]) #group-composer { display: flex; flex-direction: column; }
 body.gb.group-open #group-panel,
