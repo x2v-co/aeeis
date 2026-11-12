@@ -3,6 +3,7 @@ import { STARTER_BOTS, starterBot } from '../starter-bots.js';
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
+import { readableAnswer } from '../readable-answer.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
@@ -94,7 +95,7 @@ type ProjectPulseArtifact = {
   unknowns: ProjectPulseItem[];
 };
 interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; handoff?: TaskHandoffView; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
-interface ConversationReply { text: string; artifactId: string; truncated?: true }
+interface ConversationReply { text: string; artifactId: string; truncated?: true; partial?: true }
 interface TaskHandoffView { offerId: string; from: string; to: string; toName: string; note?: string; state: 'suggested' | 'negotiating' | 'accepted' | 'declined' | 'blocked'; at: string; reason?: string; receiver?: { conversationId: string; taskId: string } }
 /** One line for a task's handoff to another Bot, in the owner's words. */
 function handoffLine(handoff: TaskHandoffView): string {
@@ -4553,13 +4554,16 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
   if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
   if (steps.length) {
     const list = element('ol', '', 'plan-card-steps');
+    // A plan waiting for "开始" shows its steps; once it runs, they are process and fold away behind one line.
+    const holder: HTMLElement = task.pendingApproval ? card : element('details', '', 'plan-card-steps-fold');
+    if (holder !== card) { holder.append(element('summary', `步骤 · ${steps.filter(step => step.state === 'done').length} / ${steps.length}`)); card.append(holder); }
     for (const step of steps) {
       const item = element('li'); item.dataset.state = step.state;
       const mark = element('span', step.state === 'done' ? '✓' : step.state === 'current' ? '•' : '○', 'plan-card-mark'); mark.setAttribute('aria-hidden', 'true');
       item.append(mark, element('span', step.title), element('span', step.state === 'done' ? '（已完成）' : step.state === 'current' ? '（正在做）' : '', 'sr-only'));
       list.append(item);
     }
-    card.append(list);
+    holder.append(list);
   }
   if (task.runId && task.pendingApproval) {
     const actions = element('div', '', 'plan-card-actions');
@@ -4594,7 +4598,8 @@ function conversationBotReply(answer: ConversationReply, runId: string, title: s
   const actions = element('div', '', 'bot-reply-actions');
   const copy = button('复制', async () => { await navigator.clipboard?.writeText(answer.text); copy.textContent = '已复制'; });
   copy.type = 'button';
-  const open = button(answer.truncated ? '看完整结果 ↗' : '详情 ↗', async () => openConversationRun(runId));
+  // The reply is the answer only. How it was made, its evidence and anything left unverified open from here.
+  const open = button(answer.partial ? (answer.truncated ? '有些没核实 · 看完整结果 ↗' : '有些没核实 · 详情 ↗') : answer.truncated ? '看完整结果 ↗' : '过程与证据 ↗', async () => openConversationRun(runId));
   open.type = 'button'; open.dataset.replyOpen = runId;
   actions.append(copy, open);
   reply.append(actions);
@@ -4862,7 +4867,10 @@ function renderConversation(): void {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
       row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`, 'message-meta'), element('p', item.text, 'message-text'));
-      if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
+      // A reply to the message right above it needs no quote: that is how a conversation reads. When that message
+      // carries a Bot's answer, the answer is what sits right above, so the quote says which one is meant.
+      const previous = conversation?.messages[conversation.messages.indexOf(item) - 1];
+      if (item.replyTo && (item.replyTo !== previous?.id || previous.reply)) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
       // Routing, execution receipts and the message's own actions stay one click away, so the transcript reads as a conversation.
       const details = element('details', '', 'message-details');
       details.append(element('summary', '详情'));
@@ -8862,6 +8870,7 @@ function render(run: RunView): void {
   syncPresence(run);
   if (intentPresetsOpen) setIntentPresetsOpen(false);
   renderDeliverySummary(run);
+  syncAnswerFirst(run);
   const validationEvent = [...run.events].reverse().find(event => event.type === 'run.failed' && event.data?.validation?.issues?.length);
   const validationText = validationEvent?.data?.validation?.issues?.slice(0, 3).map(issue => `${issue.path ?? '$'}：${issue.message ?? '格式不符合要求'}`).join('；');
   $('run-error').textContent = run.error ? `${run.error}${validationText ? ` · ${validationText}` : ''}` : '';
@@ -9172,6 +9181,25 @@ function memoryWritebackForm(run: RunView, artifact: RunView['artifacts'][number
   details.append(form); return details;
 }
 
+// A finished task opens on its answer, the way a person replies. How it got there (progress, the computer, usage,
+// metrics, the raw output and its evidence) opens from one button, for this task only.
+let processOpenFor = '';
+function answerFirst(run: RunView): boolean { return run.status === 'succeeded' && run.artifacts.length > 0; }
+function syncAnswerFirst(run: RunView): void {
+  const detail = $('detail');
+  const open = processOpenFor === run.id;
+  detail.dataset.answerFirst = String(answerFirst(run));
+  detail.dataset.processOpen = String(open);
+  const toggle = $<HTMLButtonElement>('run-process-toggle');
+  toggle.hidden = !answerFirst(run);
+  toggle.textContent = open ? '收起过程与证据' : '看过程与证据';
+  toggle.setAttribute('aria-expanded', String(open));
+}
+$<HTMLButtonElement>('run-process-toggle').addEventListener('click', () => {
+  if (!current) return;
+  processOpenFor = processOpenFor === current.id ? '' : current.id;
+  syncAnswerFirst(current);
+});
 function renderDeliverySummary(run: RunView): void {
   const messages: Record<string, string> = {
     queued: '已接收目标，等待开始规划。',
@@ -9237,9 +9265,14 @@ function renderDeliveryArtifact(run: RunView): void {
     : '未记录模型调用；当前产物可能来自恢复或历史导入。';
   const runtime = element('small', runtimeText, completedCalls === run.calls.length && run.calls.length ? 'delivery-runtime-ok' : 'delivery-runtime-warning');
   const content = renderArtifactMarkdown(artifact.content);
-  content.classList.add('delivery-artifact-content');
+  content.classList.add('delivery-artifact-content', 'delivery-artifact-full');
+  // What the task page leads with: the answer alone, without evidence IDs, summary blocks or runtime caveats.
+  const readable = readableAnswer(artifact.content);
+  const answer = renderArtifactMarkdown(readable.text);
+  answer.classList.add('delivery-artifact-content', 'delivery-answer');
   const evidence = element('small', `证据引用：${artifact.evidenceRefs.length ? artifact.evidenceRefs.join('、') : '无外部来源引用'}`, 'delivery-artifact-evidence');
-  box.append(element('div', '最终产物', 'delivery-artifact-kicker'), element('h3', artifact.title), runtime, content, evidence);
+  box.append(element('div', '最终产物', 'delivery-artifact-kicker'), element('h3', artifact.title), runtime, answer, content, evidence);
+  if (readable.caveat) box.insertBefore(element('small', '有些内容没核实，在“看过程与证据”里。', 'delivery-answer-caveat'), answer);
   if (isFixture) box.append(element('p', run.toolReceipts?.length
     ? '编排使用的是本地固定协议桩；上面的外部资料来自已授权 Tool，模型本身没有进行真实推理。'
     : '当前使用本地固定协议桩，仅验证 AEEIS 的规划、执行和交付协议；这份内容不能替代真实资料报告。', 'delivery-artifact-warning'));
@@ -9251,7 +9284,7 @@ function renderDeliveryArtifact(run: RunView): void {
   const actions = element('div', '', 'artifact-actions');
   if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken, onError: message }));
   actions.append(open);
-  box.insertBefore(actions, content);
+  box.insertBefore(actions, answer);
 }
 
 function renderFollowUpPlan(run: RunView): void {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readableReply } from '../src/application/conversation-service.js';
+import { readableAnswer } from '../src/readable-answer.js';
 
 describe('what the chat shows of a Run\'s answer', () => {
   // Shaped like the production 番茄钟 reply: a summary block whose empty lists lost their brackets, evidence IDs and a tokened preview link.
@@ -32,5 +33,18 @@ describe('what the chat shows of a Run\'s answer', () => {
   });
   it('never returns an empty reply', () => {
     expect(readableReply('[receipt_d263a1ee-43ba-46b1-a677-fa0ced584a05]')).toBe('[receipt_d263a1ee-43ba-46b1-a677-fa0ced584a05]');
+  });
+  it('drops the runtime\'s partial-answer caveats and says they were there', () => {
+    const partial = 'Partial answer — limited evidence: 本次未提供任何源材料.\n\n你好，我是 AEEIS。\n\n有需要请直接说。\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- 本次未提供任何源材料';
+    expect(readableAnswer(partial)).toEqual({ text: '你好，我是 AEEIS。\n\n有需要请直接说。', caveat: true });
+    expect(readableAnswer('结论如下。')).toEqual({ text: '结论如下。', caveat: false });
+  });
+  it('keeps a model\'s own Unknown: section and what follows it', () => {
+    const report = '进展如下。\n\nUnknown:\n- Remaining work: 第三节还没写\n\nConclusions:\n- 可以先发前两节';
+    expect(readableAnswer(report)).toEqual({ text: report, caveat: false });
+  });
+  it('keeps a caveat that has no answer behind it', () => {
+    const empty = 'Partial answer — limited evidence: 超时.\n\nFinal synthesis was unavailable. The following are untrusted observations.';
+    expect(readableAnswer(empty)).toEqual({ text: empty, caveat: false });
   });
 });

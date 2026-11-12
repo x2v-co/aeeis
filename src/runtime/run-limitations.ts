@@ -1,5 +1,6 @@
 import { digest } from './digest.js';
 import type { AgentRun } from './contracts.js';
+import { RUNTIME_UNKNOWN_SUFFIX } from '../readable-answer.js';
 
 /** Surface partial input failures even when no artifact could be produced. */
 export function populateRunLimitations(run: AgentRun): void {
@@ -24,10 +25,9 @@ export function populateRunLimitations(run: AgentRun): void {
   }
 }
 
-const runtimeUnknownSuffix = /\n\nUnknown:\n- Remaining work:[\s\S]*$/;
 /** Remove the runtime-generated partial suffix (never model-written text). */
 export function stripRuntimeUnknown(content: string): string {
-  return content.replace(runtimeUnknownSuffix, '');
+  return content.replace(RUNTIME_UNKNOWN_SUFFIX, '');
 }
 
 /** Explicit gaps shared by the retained output and the run.partial diagnostic. */
@@ -35,7 +35,9 @@ export function partialUnknownSection(run: AgentRun): string {
   const missing = (run.plans.at(-1)?.nodes ?? []).filter(node => {
     const step = run.steps.find(step => step.taskId === node.id);
     return step?.status !== 'succeeded';
-  }).map(node => node.title);
+  // Folded to one line like every other item: the suffix is recognised by its one-line items, so a title with a
+  // line break would keep it from being stripped, and the next write would append a second one.
+  }).map(node => node.title.replace(/\s+/g, ' ').trim());
   const problems = run.steps.filter(step => step.status !== 'succeeded').flatMap(step => [...(step.finishRepair?.problems ?? []), ...(step.outputRecovery?.problems ?? [])]
     .map(problem => `${step.taskId}: ${problem.message}`));
   const sourceUnknowns = run.artifacts.flatMap(artifact => artifact.structured?.unknowns.map(item => item.text) ?? []);

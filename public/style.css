@@ -1725,3 +1725,12 @@ body.gb.conversation-mode #conversation-status:empty, body.gb.conversation-mode 
 .computer-acceptance li.acceptance-passed { border-left-color: var(--cyan, #3d6b52); }
 .computer-acceptance li.acceptance-failed, .computer-acceptance li.acceptance-unverified { border-left-color: var(--amber, #8a5a12); }
 .computer-acceptance li p { margin: 2px 0 0; }
+
+/* A finished task opens on its answer. Everything about how it got there waits behind "看过程与证据". */
+#detail[data-answer-first="true"]:not([data-process-open="true"]) :is(#run-phases, #run-activity, #run-decision, #run-computer, #usage, #evolution-traffic, #external-usage, #delivery-summary > h2, #delivery-message, #delivery-metrics, #follow-up-plan, #run-details-toggle-row, .delivery-artifact-kicker, .delivery-runtime-ok, .delivery-runtime-warning, .delivery-artifact-full, .delivery-artifact-evidence, .delivery-artifact-warning, .delivery-artifact-open) { display: none !important; }
+#detail:not([data-answer-first="true"]) :is(.delivery-answer, .delivery-answer-caveat),
+#detail[data-process-open="true"] :is(.delivery-answer, .delivery-answer-caveat) { display: none !important; }
+#detail[data-answer-first="true"] #delivery-summary { border: 0; background: transparent; box-shadow: none; padding-inline: 0; }
+.delivery-answer { font-size: 15px; line-height: 1.7; }
+.delivery-answer-caveat { display: block; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.run-process-toggle { float: right; margin: 0 0 8px 12px; font-size: 12px; }
