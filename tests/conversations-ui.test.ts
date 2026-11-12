@@ -1879,6 +1879,36 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
     expect(card().querySelector('[data-teaching-action]')).toBeNull();
   });
+  it('folds more than three upgrades into one line that says how many wait on you, keeping the talk in view', async () => {
+    const room = { id: 'room_team', title: '东云', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: 'cto', mark: 'letter', color: '#176b45', background: '技术负责人', role: '技术', autonomy: 'reply' };
+    const full = (id: string, status: string, evaluated: boolean) => ({ kind: 'full', id, target: 'prompt', baseVersion: 'prompt/1', version: 'prompt/2', status, updatedAt: date, change: `改 ${id}`, reason: '评测', risk: 'low',
+      evaluations: [], evaluated, shadow: { passed: 0, failed: 0, needed: 1 }, canary: { passed: 0, failed: 0, needed: 1 }, sources: 1, fromThisChannel: false, affectedChannels: 1, active: false, canActivate: true });
+    const upgrades: any[] = [full('evo_a', 'evaluating', true), full('evo_b', 'approved', false), ...Array.from({ length: 61 }, (_, index) => full(`evo_${index}`, 'proposed', false))];
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
+      if (url === '/api/rooms/room_team/upgrades') return response({ items: upgrades });
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('东云'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    const fold = () => doc().querySelector<HTMLDetailsElement>('#channel-upgrades > details.upgrade-fold');
+    await vi.waitFor(() => expect(fold()).not.toBeNull());
+    expect(fold()!.open).toBe(false);
+    expect(fold()!.querySelector('summary')!.textContent).toBe('团队升级 · 63 件，2 件等你决定');
+    // The cards are all still there, one click away, with their actions.
+    expect(fold()!.querySelectorAll('[data-upgrade]')).toHaveLength(63);
+    fold()!.querySelector('summary')!.click();
+    expect(fold()!.open).toBe(true);
+    expect(fold()!.querySelector('[data-upgrade="evo_a"] [data-upgrade-action="approve"]')).not.toBeNull();
+  });
+
   it('shows Bot upgrades as cards in the group, acts on them by state, and gives a member only a summary', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };

@@ -175,8 +175,11 @@ export class BotDialogueService {
   async deliver(roomId: string, eventId: string, botId: string, kind: 'intake' | 'entry' | 'handoff', scope: Ownership, actor?: Principal) {
     const event = await this.events.get(eventId, scope.owner, scope.tenantId);
     if (event.roomId !== roomId || event.owner !== scope.owner || event.type !== 'message' || event.operation !== 'publish') throw new NotFound('Unknown channel message');
-    const members = await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
-    if (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId)) throw new Conflict('Bot is not in the message audience');
+    // AEEIS is the entry of every group channel without being a listed member: it answers
+    // unaddressed messages there, so it may also record them in its own conversation.
+    const entry = botId === 'aeeis' && (await this.domain.getRoom(roomId, scope.owner, scope.tenantId)).chat === 'group';
+    const members = entry ? [] : await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
+    if (!entry && (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId))) throw new Conflict('Bot is not in the message audience');
     const binding = await this.ensure(botId, scope, actor);
     const sourceId = `${roomId}:${eventId}:${botId}:${kind}`, operationKey = `delivery:${sourceId}`;
     const operation = await this.store.withOwner(scope, async () => {
