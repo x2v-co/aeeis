@@ -30,6 +30,11 @@ const schema = z.object({
     id: identifier, threadId: z.string().regex(new RegExp(`^thread_${uuid}$`)), title: z.string(),
     createdAt: timestamp, priority: z.number().int().min(1).max(100).optional(),
     latestRunId: runId.optional(), pendingMessageId: identifier.optional(), putDownRun: z.object({ id: runId, eventSeq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).strict().optional(),
+    handoff: z.object({
+      offerId: identifier, from: z.string().min(1).max(200), to: z.string().min(1).max(200), toName: z.string().min(1).max(200), note: z.string().max(300).optional(),
+      state: z.enum(['suggested', 'negotiating', 'accepted', 'declined', 'blocked']), at: timestamp, reason: z.string().max(1000).optional(),
+      receiver: z.object({ conversationId: identifier, taskId: identifier }).strict().optional(),
+    }).strict().optional(),
   }).strict()).max(100),
   messages: z.array(z.object({
     id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']), intent: z.enum(['discuss', 'execute']).optional(),

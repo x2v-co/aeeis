@@ -14,6 +14,16 @@ import type { AeeisService } from './aeeis-service.js';
 import type { ConversationService } from './conversation-service.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+/** What a private-chat reply may ask for besides its words: a question for another Bot, or handing a task over. */
+export interface DirectActions {
+  conversationId: string; triggerMessageId: string; replyMessageId: string; botId: string;
+  ask?: { to: string; question: string };
+  handoff?: { to: string; task?: string; note?: string };
+}
+const directSchema = z.object({
+  ask: z.object({ to: z.string().trim().min(1).max(40), question: z.string().trim().min(1).max(1000) }).strip().optional(),
+  handoff: z.object({ to: z.string().trim().min(1).max(40), task: z.string().trim().min(2).max(80).optional(), note: z.string().trim().max(300).optional() }).strip().optional(),
+}).strip();
 const importedId = (room: string, event: string) => `message_${hash(`${room}:${event}`)}`;
 export class BotDialogueService {
   constructor(readonly store: BotDialogueStore, private readonly conversations: ConversationService,
@@ -175,8 +185,11 @@ export class BotDialogueService {
   async deliver(roomId: string, eventId: string, botId: string, kind: 'intake' | 'entry' | 'handoff', scope: Ownership, actor?: Principal) {
     const event = await this.events.get(eventId, scope.owner, scope.tenantId);
     if (event.roomId !== roomId || event.owner !== scope.owner || event.type !== 'message' || event.operation !== 'publish') throw new NotFound('Unknown channel message');
-    const members = await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
-    if (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId)) throw new Conflict('Bot is not in the message audience');
+    // AEEIS is the entry of every group channel without being a listed member: it answers
+    // unaddressed messages there, so it may also record them in its own conversation.
+    const entry = botId === 'aeeis' && (await this.domain.getRoom(roomId, scope.owner, scope.tenantId)).chat === 'group';
+    const members = entry ? [] : await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
+    if (!entry && (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId))) throw new Conflict('Bot is not in the message audience');
     const binding = await this.ensure(botId, scope, actor);
     const sourceId = `${roomId}:${eventId}:${botId}:${kind}`, operationKey = `delivery:${sourceId}`;
     const operation = await this.store.withOwner(scope, async () => {
@@ -220,17 +233,23 @@ export class BotDialogueService {
     for (const message of current.messages) if (message.source?.kind === 'artifact') latest.set(message.source.artifactId, { id: message.source.artifactId, title: message.source.title, content: message.text, messageId: message.id });
     return { revision: current.revision, items: [...latest.values()] };
   }
-  async sweep(roomId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>): Promise<void> {
+  async sweep(roomId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
     const binding = await this.binding(roomId, scope);
     if (!binding || binding.roomId !== roomId || binding.phase !== 'ready') return;
     const current = await this.aggregates.get(binding.conversationId, scope);
     for (const message of current.messages.slice(-30)) {
-      if (message.intent === 'discuss' && !message.source && !message.execution && message.speaker?.role !== 'agent') await this.respond(current.id, message.id, scope, complete);
+      if (message.intent === 'discuss' && !message.source && !message.execution && message.speaker?.role !== 'agent') await this.respond(current.id, message.id, scope, complete, act);
     }
   }
   /** Background discussion only; deterministic key/replyTo, no implicit Run authorization. */
-  async respond(conversationId: string, messageId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>): Promise<void> {
-    return this.store.withOwner(scope, async () => {
+  /** The owner's other Bots (and AEEIS), so a Bot in a private chat knows whom it can ask or hand work to. */
+  private async team(botId: string, scope: Ownership): Promise<Array<{ name: string; role?: string; background?: string }>> {
+    const others = ((await this.bots?.list(scope)) ?? []).filter(item => item.id !== botId && !item.retiredAt && item.autonomy !== 'quiet')
+      .map(item => ({ name: item.name, ...(item.role ? { role: item.role } : {}), ...(item.background ? { background: item.background.slice(0, 200) } : {}) }));
+    return botId === 'aeeis' ? others : [{ name: 'AEEIS', role: '入口，负责接话、拆活和分派' }, ...others];
+  }
+  async respond(conversationId: string, messageId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
+    const actions = await this.store.withOwner(scope, async (): Promise<DirectActions | undefined> => {
       const binding = (await this.store.list(scope)).find(b => b.conversationId === conversationId);
       if (!binding || binding.phase !== 'ready') return;
       const bot = await this.bot(binding.botId, scope);
@@ -241,10 +260,15 @@ export class BotDialogueService {
       const trigger = current.messages.find(m => m.id === messageId);
       if (!trigger || trigger.execution || trigger.intent !== 'discuss' || trigger.source || trigger.speaker?.role === 'agent') return;
       let reply: string;
+      let wanted: z.infer<typeof directSchema> = {};
       try {
-        const raw = await complete({ bot, standingInstruction: current.standingInstruction, transcript_untrusted: visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text })) }, key);
+        const team = await this.team(bot.id, scope);
+        const raw = await complete({ bot, ...(team.length ? { team } : {}), standingInstruction: current.standingInstruction, tasks: current.tasks.slice(-20).map(task => task.title), transcript_untrusted: visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text })) }, key);
         if (!raw || typeof raw !== 'object' || !('reply' in raw) || typeof raw.reply !== 'string' || !raw.reply.trim()) throw new Conflict('Invalid Bot reply');
         reply = raw.reply;
+        // A malformed ask or handoff is dropped; the reply itself still counts.
+        const parsed = team.length ? directSchema.safeParse(raw) : undefined;
+        if (parsed?.success) wanted = parsed.data;
       } catch (error) {
         // A reason the owner can act on (the model service refused the account) is said in the conversation, under the
         // same key, so a retry or sweep does not say it twice. Anything else stays in the log.
@@ -253,7 +277,11 @@ export class BotDialogueService {
       }
       // Agent speech stays discussion. It cannot acquire the owner's execution authority.
       const latest = await this.aggregates.get(conversationId, scope);
-      await this.conversations.post(conversationId, { text: reply.slice(0, 2000), expectedRevision: latest.revision, replyTo: messageId, intent: 'discuss', speaker: { role: 'agent', id: bot.id } }, scope, key, false);
+      const posted = await this.conversations.post(conversationId, { text: reply.slice(0, 2000), expectedRevision: latest.revision, replyTo: messageId, intent: 'discuss', speaker: { role: 'agent', id: bot.id } }, scope, key, false);
+      if (!wanted.ask && !wanted.handoff) return undefined;
+      return { conversationId, triggerMessageId: messageId, replyMessageId: posted.message.id, botId: bot.id, ...(wanted.ask ? { ask: wanted.ask } : {}), ...(wanted.handoff ? { handoff: { to: wanted.handoff.to, ...(wanted.handoff.task ? { task: wanted.handoff.task } : {}), ...(wanted.handoff.note ? { note: wanted.handoff.note } : {}) } } : {}) };
     });
+    // Asking and handing over talk to another Bot; that happens after the reply is written, outside the write fence.
+    if (actions && act) await act(actions);
   }
 }

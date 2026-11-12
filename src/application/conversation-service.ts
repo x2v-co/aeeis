@@ -1,7 +1,7 @@
 import { runBoardBoundary } from '../task-board-controls.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { visibleConversationMessages, conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask } from '../conversations.js';
+import { visibleConversationMessages, conversationTaskOrder, type Conversation, type ConversationMessage, type ConversationMessageSource, type ConversationRoute, type ConversationSpeaker, type ConversationStore, type ConversationTask, type TaskHandoff } from '../conversations.js';
 import { BrainAccessDenied, brainClaimInputSchema, type BrainClaim, type GovernedBrain } from '../brain.js';
 import type { Ownership, Principal } from '../security/principal.js';
 import { requestSchema, type AgentRun } from '../runtime/contracts.js';
@@ -301,7 +301,8 @@ export function routeConversationMessage(conversation: Conversation, input: z.in
   if (explicit && repliedTasks.length && !sameIds(explicit, repliedTasks)) throw new Conflict('Task selection conflicts with the replied message');
   let result: ConversationRoute;
   if (explicit) result = route('routed', 'explicit', explicit);
-  else if (replied) result = repliedTasks.length ? route('routed', 'reply', [...repliedTasks]) : route('clarify', 'ambiguous', [], [...replied.route.candidateTaskIds]);
+  // A Bot answering a message that belongs to no task is general talk; only the owner is asked to pick a task.
+  else if (replied) result = repliedTasks.length ? route('routed', 'reply', [...repliedTasks]) : input.speaker?.role === 'agent' ? route('general', 'unassigned') : route('clarify', 'ambiguous', [], [...replied.route.candidateTaskIds]);
   else {
     const text = normalize(input.text);
     const named = conversation.tasks.filter(task => mentionsTitle(input.text, task.title) || text.includes(task.id));
@@ -946,6 +947,98 @@ export class ConversationService implements LifeThreadInbox {
     });
     return this.view(updated, scope, actor);
   }
+  // ---------------------------------------------------------------- handoffs between Bots, from a private chat
+
+  /** Who can take a task: the owner's active Bots and AEEIS, by id. */
+  private async handoffTarget(to: string, scope: Ownership): Promise<{ id: string; name: string }> {
+    if (to === 'aeeis') return { id: 'aeeis', name: 'AEEIS' };
+    const bot = (await this.bots?.list(scope))?.find(item => item.id === to && !item.retiredAt);
+    if (!bot) throw new NotFound('Unknown Bot');
+    return { id: bot.id, name: bot.name };
+  }
+  /** A Bot suggests handing one of its chat's tasks to another Bot. It waits for the owner, unless the Bot may act. */
+  async suggestHandoff(conversationId: string, taskId: string, input: { from: string; to: string; note?: string; key: string }, scope: Ownership): Promise<TaskHandoff | undefined> {
+    const target = await this.handoffTarget(input.to, scope);
+    const offerId = `handoff_${followupHash(idempotencyKeySchema.parse(input.key)).slice(0, 32)}`;
+    const updated = await this.store.mutate(conversationId, scope, draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task || draft.agentId !== input.from || target.id === input.from) return;
+      // An open or finished handoff is not replaced by a new suggestion; the same suggestion lands once.
+      if (task.handoff && (task.handoff.offerId === offerId || task.handoff.state === 'negotiating' || task.handoff.state === 'accepted')) return;
+      task.handoff = { offerId, from: input.from, to: target.id, toName: target.name, ...(input.note ? { note: input.note.slice(0, 300) } : {}), state: 'suggested', at: new Date().toISOString() };
+    });
+    return updated.tasks.find(item => item.id === taskId)?.handoff;
+  }
+  /** Starts the side-thread talk for a suggested (or earlier declined/blocked) handoff. Returns the attempt's id. */
+  private async beginHandoffIn(conversationId: string, taskId: string, scope: Ownership, check: (draft: Conversation) => void, to?: string): Promise<Conversation> {
+    const target = to ? await this.handoffTarget(to, scope) : undefined;
+    return this.store.mutate(conversationId, scope, draft => {
+      check(draft);
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task) throw new NotFound('Unknown task');
+      const giver = draft.agentId;
+      if (!giver || !(giver === 'aeeis' || giver.startsWith('bot_'))) throw new Conflict('只有 Bot 的单独对话里的任务可以交给别的 Bot');
+      const current = task.handoff;
+      if (current?.state === 'negotiating') throw new Conflict('正在和对方商量交接');
+      if (current?.state === 'accepted') throw new Conflict('这件任务已经交出去了');
+      const receiver = target ?? (current ? { id: current.to, name: current.toName } : undefined);
+      if (!receiver) throw new Conflict('还没有要交给谁');
+      if (receiver.id === giver) throw new Conflict('不能交给自己');
+      task.handoff = { offerId: `handoff_${randomUUID()}`, from: giver, to: receiver.id, toName: receiver.name, ...(current?.note ? { note: current.note } : {}), state: 'negotiating', at: new Date().toISOString() };
+    });
+  }
+  /** The owner says go: 「交给 X」 on the task. */
+  async beginHandoff(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
+    const body = z.object({ expectedRevision: z.number().int().nonnegative(), to: z.string().min(1).max(200).optional() }).strict().parse(input);
+    const updated = await this.beginHandoffIn(id, taskId, scope, draft => {
+      if (draft.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再交接');
+    }, body.to);
+    return this.view(updated, scope, actor);
+  }
+  /** A Bot allowed to act (auto or yolo) starts its own suggested handoff. */
+  async beginHandoffAsBot(conversationId: string, taskId: string, offerId: string, scope: Ownership): Promise<string | undefined> {
+    const current = (await this.store.get(conversationId, scope)).tasks.find(item => item.id === taskId)?.handoff;
+    if (current?.offerId !== offerId || current.state !== 'suggested') return current?.state === 'negotiating' ? current.offerId : undefined;
+    const updated = await this.beginHandoffIn(conversationId, taskId, scope, () => undefined);
+    return updated.tasks.find(item => item.id === taskId)?.handoff?.offerId;
+  }
+  /** Writes the end of one attempt. A late or repeated outcome for an older attempt changes nothing. */
+  async settleHandoff(conversationId: string, taskId: string, offerId: string, outcome: { state: 'accepted' | 'declined' | 'blocked'; reason?: string; receiver?: { conversationId: string; taskId: string } }, scope: Ownership): Promise<boolean> {
+    let settled = false;
+    await this.store.mutate(conversationId, scope, draft => {
+      const task = draft.tasks.find(item => item.id === taskId);
+      if (!task?.handoff || task.handoff.offerId !== offerId || task.handoff.state !== 'negotiating') return;
+      task.handoff = { ...task.handoff, state: outcome.state, at: new Date().toISOString(), ...(outcome.reason ? { reason: outcome.reason.slice(0, 1000) } : {}), ...(outcome.receiver ? { receiver: outcome.receiver } : {}) };
+      settled = true;
+    });
+    return settled;
+  }
+  /** A Bot says something in a chat in its own name: discussion only, never execution. Same key, same message. */
+  async relay(conversationId: string, input: { text: string; speakerId: string; replyTo?: string }, key: string, scope: Ownership) {
+    const current = await this.store.get(conversationId, scope);
+    const target = input.replyTo && current.messages.some(message => message.id === input.replyTo) ? { replyTo: input.replyTo } : { unassigned: true as const };
+    return this.post(conversationId, { text: input.text.slice(0, 2000), expectedRevision: current.revision, ...target, intent: 'discuss', speaker: { role: 'agent', id: input.speakerId } }, scope, key, false);
+  }
+  /** Handoffs still being talked over, for the pump that finishes them after a restart. */
+  async openHandoffs(scope: Ownership): Promise<Array<{ conversationId: string; taskId: string; offerId: string }>> {
+    const open: Array<{ conversationId: string; taskId: string; offerId: string }> = [];
+    for (const conversation of await this.store.list(scope)) {
+      for (const task of conversation.tasks) if (task.handoff?.state === 'negotiating') open.push({ conversationId: conversation.id, taskId: task.id, offerId: task.handoff.offerId });
+    }
+    return open;
+  }
+  /** The raw chat, for the Bot team that picks which task a handoff is about. */
+  async handoffChat(conversationId: string, scope: Ownership): Promise<Conversation> {
+    return this.store.get(conversationId, scope);
+  }
+  /** The raw task, for the Bot team that runs the handoff. */
+  async handoffTask(conversationId: string, taskId: string, scope: Ownership) {
+    const conversation = await this.store.get(conversationId, scope);
+    const task = conversation.tasks.find(item => item.id === taskId);
+    if (!task) throw new NotFound('Unknown task');
+    return { conversation, task };
+  }
+
   /** Set aside one of the owner's unrouted messages: nothing is posted, no task is chosen, no model is called. */
   async dismissMessage(id: string, messageId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative() }).strict().parse(input);

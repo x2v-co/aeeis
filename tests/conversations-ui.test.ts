@@ -425,6 +425,34 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
   });
 
+  it('shows a suggested handoff to another Bot with 交给, puts a stalemate in 待处理, and never lists a Bot line there', async () => {
+    const view = fixture('bot');
+    const handoff = { offerId: 'handoff_1', from: ownedBot.id, to: 'bot_writer', toName: '阿写', note: '阿写熟悉报价', state: 'suggested', at: date };
+    view.tasks.push({ id: 'task_q', title: '客户报价单', threadId: 'thread_q', status: 'discussion', handoff } as any);
+    // An older Bot reply that was routed as waiting for a choice stays out of the inbox.
+    view.messages.push({ id: 'bot_line', role: 'user', speaker: { role: 'agent', id: ownedBot.id }, text: '你好！', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url === `/api/conversations/${view.id}/tasks/task_q/hand-off`) {
+        (view.tasks.find(item => item.id === 'task_q') as any).handoff = { ...handoff, offerId: 'handoff_2', state: 'blocked', reason: '交接谈不拢：谈了 8 轮还没有结论' };
+        view.revision++;
+        return response(view);
+      }
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-task-id="task_q"]')!;
+    await vi.waitFor(() => expect(row().textContent).toContain('建议交给阿写：阿写熟悉报价'));
+    expect(el('attention-count').textContent).toBe('');
+    expect(doc().querySelector('[data-message-id="bot_line"] [data-dismiss-message]')).toBeNull();
+    const give = row().querySelector<HTMLButtonElement>('[data-hand-off]')!;
+    expect(give.textContent).toBe('交给阿写');
+    give.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url.endsWith('/tasks/task_q/hand-off'))?.body).toEqual({ expectedRevision: 1 }));
+    await vi.waitFor(() => expect(row().textContent).toContain('交给阿写没谈定，需要你决定'));
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+    expect(row().querySelector('[data-hand-off]')?.textContent).toBe('再交给阿写');
+    expect(messagePosts(h)).toHaveLength(0);
+  });
+
   it('sets an unrouted message aside with 忽略: no message, no task, and it leaves the inbox', async () => {
     const view = fixture();
     view.messages.push({ id: 'ambiguous', role: 'user', text: '继续那个任务', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a', 'task_b'], focusEffect: 'keep' } });
@@ -1879,6 +1907,36 @@ describe('entry bots and group chats', () => {
     expect(h.posts.find(post => post.url.endsWith('/revoke'))?.body).toEqual({ reason: '流程改了' });
     expect(card().querySelector('[data-teaching-action]')).toBeNull();
   });
+  it('folds more than three upgrades into one line that says how many wait on you, keeping the talk in view', async () => {
+    const room = { id: 'room_team', title: '东云', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
+    const bot = { id: 'bot_00000001', name: 'cto', mark: 'letter', color: '#176b45', background: '技术负责人', role: '技术', autonomy: 'reply' };
+    const full = (id: string, status: string, evaluated: boolean) => ({ kind: 'full', id, target: 'prompt', baseVersion: 'prompt/1', version: 'prompt/2', status, updatedAt: date, change: `改 ${id}`, reason: '评测', risk: 'low',
+      evaluations: [], evaluated, shadow: { passed: 0, failed: 0, needed: 1 }, canary: { passed: 0, failed: 0, needed: 1 }, sources: 1, fromThisChannel: false, affectedChannels: 1, active: false, canActivate: true });
+    const upgrades: any[] = [full('evo_a', 'evaluating', true), full('evo_b', 'approved', false), ...Array.from({ length: 61 }, (_, index) => full(`evo_${index}`, 'proposed', false))];
+    const h = harness(undefined, { handler(url, request) {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, botTeamConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/rooms') return response([room]);
+      if (url === '/api/bots' && method === 'GET') return response([bot]);
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'm1', roomId: 'room_team', principalId: bot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
+      if (url === '/api/rooms/room_team/upgrades') return response({ items: upgrades });
+    } });
+    start(h.fetch); await ready();
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('东云'));
+    await vi.waitFor(() => expect(groupRow()).toBeTruthy());
+    groupRow()!.click();
+    const fold = () => doc().querySelector<HTMLDetailsElement>('#channel-upgrades > details.upgrade-fold');
+    await vi.waitFor(() => expect(fold()).not.toBeNull());
+    expect(fold()!.open).toBe(false);
+    expect(fold()!.querySelector('summary')!.textContent).toBe('团队升级 · 63 件，2 件等你决定');
+    // The cards are all still there, one click away, with their actions.
+    expect(fold()!.querySelectorAll('[data-upgrade]')).toHaveLength(63);
+    fold()!.querySelector('summary')!.click();
+    expect(fold()!.open).toBe(true);
+    expect(fold()!.querySelector('[data-upgrade="evo_a"] [data-upgrade-action="approve"]')).not.toBeNull();
+  });
+
   it('shows Bot upgrades as cards in the group, acts on them by state, and gives a member only a summary', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date };
     const bot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '阿研负责研究。', role: '研究', autonomy: 'auto' };
