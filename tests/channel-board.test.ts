@@ -146,6 +146,21 @@ describe('channel board on the server', () => {
     expect(card(board, 'task_risk').chain).toEqual(['交给研究', '研究提议这件事', '交接中：交给 发布', '转交给 发布']);
   });
 
+  it('carries a failed task put down in its conversation onto its card, and only while it is failed', () => {
+    const owner = { owner: 'alice', actorId: 'alice', actorType: 'principal' };
+    const events = [
+      { id: 'e1', sequence: 1, type: 'system', content: '已交给发布，记为讨论。', evidenceRefs: [conversationId, 'task_down', 'demo.release'], ...owner },
+      { id: 'e2', sequence: 2, type: 'system', content: '已交给发布，记为讨论。', evidenceRefs: [conversationId, 'task_live', 'demo.release'], ...owner },
+    ];
+    const board = projectChannelBoard('room', events, new Map([[conversationId, { id: conversationId, tasks: [
+      { id: 'task_down', title: '你好', status: 'failed', putDown: true }, { id: 'task_live', title: '复盘', status: 'failed' },
+    ] }]]));
+    expect(card(board, 'task_down')).toMatchObject({ status: 'failed', putDown: true });
+    expect(card(board, 'task_live')).not.toHaveProperty('putDown');
+    const retried = projectChannelBoard('room', events, new Map([[conversationId, { id: conversationId, tasks: [{ id: 'task_down', title: '你好', status: 'running', putDown: true }] }]]));
+    expect(card(retried, 'task_down')).not.toHaveProperty('putDown');
+  });
+
   it('reads channels written before structured actions', () => {
     const owner = { owner: 'alice', actorId: 'alice', actorType: 'principal' };
     const events = [

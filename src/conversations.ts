@@ -10,6 +10,9 @@ export interface ConversationTask {
   priority?: number;
   latestRunId?: string;
   pendingMessageId?: string;
+  /** The owner put this task down after this Run failed, when it had this many events. A retry of the Run after
+   * that, or a new Run, brings the task back on its own. */
+  putDownRun?: { id: string; eventSeq: number };
 }
 /** Dashboard order: explicit priority ascending, then creation order. Does not change stored identity order. */
 export function conversationTaskOrder<T extends { priority?: number }>(tasks: readonly T[]): T[] {

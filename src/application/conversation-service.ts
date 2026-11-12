@@ -164,6 +164,15 @@ export interface LifePresence {
   taskTitle?: string;
 }
 /** Roster line for one person. Titles only; questions, plans, and instructions stay on the Run. */
+/** Anything that reopens a Run (retry, replan, resume, reconcile) or ends it again. Any of these after a task was put
+ * down means the failure it was put down for is no longer the one on screen. */
+const PUT_DOWN_ENDS = new Set(['run.retry_requested', 'plan.revision_requested', 'plan.repair_requested', 'plan.revised', 'run.resumed', 'run.reconciled', 'run.failed', 'run.partial']);
+/** Put down applies to the failure it was given for: the same Run, still failed, and neither reopened nor failed again since. */
+function putDown(task: { putDownRun?: { id: string; eventSeq: number } }, run: AgentRun | undefined): boolean {
+  const mark = task.putDownRun;
+  if (!run || !mark || mark.id !== run.id || run.status !== 'failed') return false;
+  return !run.events.some(item => item.seq > mark.eventSeq && PUT_DOWN_ENDS.has(item.type));
+}
 export function lifePresence(items: ReadonlyArray<{ id: string; title: string; status: string }>): LifePresence {
   const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
     : status === 'unknown' ? 1
@@ -444,7 +453,8 @@ export class ConversationService implements LifeThreadInbox {
         if (!task.latestRunId) return { id: task.id, title: task.title, status: task.pendingMessageId ? 'preparing' : 'discussion' };
         try {
           const run = await this.runs.get(task.latestRunId, scope);
-          return { id: task.id, title: task.title, status: run.status };
+          // A failed task the owner put down no longer holds the Bot's status.
+          return { id: task.id, title: task.title, status: putDown(task, run) ? 'put_down' : run.status };
         } catch (error) {
           if (error instanceof NotFound) return { id: task.id, title: task.title, status: 'discussion' };
           return { id: task.id, title: task.title, status: 'unreadable' };
@@ -476,7 +486,8 @@ export class ConversationService implements LifeThreadInbox {
       if (task.latestRunId) {
         try { run = await this.runs.get(task.latestRunId, scope); }
         catch (error) {
-          return { run: undefined, task: { ...task, status: 'unreadable' } };
+          const { putDownRun: _hidden, ...readable } = task;
+          return { run: undefined, task: { ...readable, status: 'unreadable' } };
         }
       }
       const memory = taskMemory(run);
@@ -492,7 +503,8 @@ export class ConversationService implements LifeThreadInbox {
       // Only reasons the owner can act on are shown; other failures stay in the workbench.
       const refused = run?.status === 'failed' ? modelAccountCode(run.error) : undefined;
       const failure = refused ? modelAccountNotice(refused) : undefined;
-      return { run, task: { ...task, sourceId: conversation.messages.find(message => message.route.taskIds.includes(task.id))?.id ?? task.id, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id, runRevision: run.revision, runBoundary: runBoardBoundary(run) } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}), ...(failure ? { failure } : {}) } };
+      const { putDownRun: _putDownRun, ...stored } = task;
+      return { run, task: { ...stored, ...(putDown(task, run) ? { putDown: true as const } : {}), sourceId: conversation.messages.find(message => message.route.taskIds.includes(task.id))?.id ?? task.id, status: run?.status ?? (task.pendingMessageId ? 'preparing' : 'discussion'), ...(run ? { runId: run.id, runRevision: run.revision, runBoundary: runBoardBoundary(run) } : {}), ...(memory ? { memory } : {}), ...(approval ? { pendingApproval: approval } : {}), ...(question ? { pendingQuestion: question } : {}), ...(action ? { pendingAction: action } : {}), ...(run?.takeover && run.status === 'paused' ? { takenOver: { at: run.takeover.at } } : {}), ...(machine ? { machine } : {}), ...(execution ? { execution } : {}), ...(failure ? { failure } : {}) } };
     }));
     const tasks = loaded.map(item => item.task);
     const replies = owner ? await this.messageReplies(conversation, scope, loaded.map(item => item.run)) : new Map<string, NonNullable<ReturnType<typeof runReply>>>();
@@ -913,6 +925,26 @@ export class ConversationService implements LifeThreadInbox {
       proposalSignalId: lineupSignal(person, body.taskKind, delivery.run.id),
     }, { owner: scope.owner, tenantId: scope.tenantId });
     return this.view(conversation, scope, actor);
+  }
+  /**
+   * Puts a failed task down: it stays in the list with its Run, but no longer reads as stuck or waiting on the owner.
+   * Only the failed Run it is given for is put down, so retrying the task later shows the new Run as usual.
+   */
+  async putDown(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
+    const body = z.object({ expectedRevision: z.number().int().nonnegative() }).strict().parse(input);
+    const current = await this.store.get(id, scope);
+    const task = current.tasks.find(item => item.id === taskId);
+    if (!task) throw new NotFound('Unknown task');
+    if (!task.latestRunId) throw new Conflict('这件任务还没有执行过，不需要放下');
+    const run = await this.runs.get(task.latestRunId, scope);
+    if (run.status !== 'failed') throw new Conflict('只有失败的任务可以放下');
+    const updated = await this.store.mutate(id, scope, draft => {
+      if (draft.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再放下');
+      const target = draft.tasks.find(item => item.id === taskId)!;
+      if (target.latestRunId !== run.id) throw new Conflict('这件任务又执行了一次，请先刷新');
+      target.putDownRun = { id: run.id, eventSeq: run.events.length };
+    });
+    return this.view(updated, scope, actor);
   }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);

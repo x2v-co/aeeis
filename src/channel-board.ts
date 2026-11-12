@@ -28,7 +28,7 @@ type ServerTaskActionInput = z.infer<typeof serverTaskActionInputSchema>;
 export type BoardConversationReader = (conversationId: string, actorId: string, tenantId: string) => Promise<BoardConversationView | undefined>;
 export type BoardNameReader = (agentId: string, tenantId: string) => Promise<string | undefined>;
 export interface BoardHolding {
-  roomId: string; roomTitle: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string;
+  roomId: string; roomTitle: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; putDown?: true;
   /** The channel's block note: the task waits for a person even though no Run asks. */
   blocked?: string; blockedAt?: string;
 }
@@ -175,7 +175,7 @@ export class ChannelBoardService {
         const blockedAt = blocked ? board.actions.filter(mark => mark.kind === 'block' && mark.conversationId === card.conversationId && mark.taskId === card.taskId).at(-1)?.at : undefined;
         held.push({
           roomId: room.id, roomTitle: room.title, conversationId: card.conversationId, taskId: card.taskId, holderId: card.ownerId, fromId: card.movedFrom ?? card.ownerId,
-          ...(card.title ? { title: card.title } : {}), status: card.status, ...(blocked ? { blocked } : {}), ...(blockedAt ? { blockedAt } : {}),
+          ...(card.title ? { title: card.title } : {}), status: card.status, ...(card.putDown ? { putDown: true as const } : {}), ...(blocked ? { blocked } : {}), ...(blockedAt ? { blockedAt } : {}),
         });
       }
     }

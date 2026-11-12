@@ -93,7 +93,7 @@ type ProjectPulseArtifact = {
   nextActions: ProjectPulseItem[];
   unknowns: ProjectPulseItem[];
 };
-interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
+interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
 interface ConversationReply { text: string; artifactId: string; truncated?: true }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
@@ -1981,7 +1981,9 @@ function taskCountOf(item: ConversationSummary | undefined): number | undefined 
   const tasks = (item as ConversationView).tasks;
   return Array.isArray(tasks) ? tasks.length : undefined;
 }
-function presenceFromTasks(tasks: Array<{ id: string; title: string; status: string }>): LifePresence {
+function presenceFromTasks(all: Array<{ id: string; title: string; status: string; putDown?: true }>): LifePresence {
+  // A failed task the owner put down no longer holds the Bot's status (the server's list does the same).
+  const tasks = all.filter(task => !task.putDown);
   const rank = (status: string) => status === 'needs_approval' || status === 'needs_input' || status === 'waiting_external' ? 0
     : status === 'unknown' ? 1
     : status === 'failed' || status === 'channel_blocked' ? 2
@@ -1999,7 +2001,7 @@ function presenceFromTasks(tasks: Array<{ id: string; title: string; status: str
 /** Tasks a group handed from one person's thread to another holder, or blocked in
  * the channel. The roster counts each with its holder, so a transfer moves the work
  * and its Run state; a channel block shows as stuck and waits in the inbox. */
-interface BoardHoldingView { roomId: string; roomTitle?: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; blocked?: string; blockedAt?: string }
+interface BoardHoldingView { roomId: string; roomTitle?: string; conversationId: string; taskId: string; holderId: string; fromId: string; title?: string; status: string; putDown?: true; blocked?: string; blockedAt?: string }
 let boardHoldings: BoardHoldingView[] = [];
 let boardHoldingsReadAt = 0;
 async function loadBoardHoldings(): Promise<void> {
@@ -2011,7 +2013,8 @@ function lifePresence(agentId: string): LifePresence {
   const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
   const listed = lifeSummary(agentId);
   const away = new Set(boardHoldings.filter(item => item.fromId === agentId).map(item => item.taskId));
-  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.blocked ? 'channel_blocked' : item.status }));
+  // A channel block note still holds the receiver; a failure put down in its conversation does not.
+  const held = boardHoldings.filter(item => item.holderId === agentId).map(item => ({ id: item.taskId, title: item.title ?? '交过来的事', status: item.blocked ? 'channel_blocked' : item.status, ...(item.putDown && !item.blocked ? { putDown: true as const } : {}) }));
   const own = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
   const tasks = own ? [...own.filter(task => !away.has(task.id)), ...held] : undefined;
   if (tasks?.length) {
@@ -2418,6 +2421,7 @@ function blockedCaption(status: string): string {
   return '';
 }
 function taskStateLabel(task: ConversationTaskView): string {
+  if (task.putDown) return '已放下';
   if (task.status === 'discussion') return '仅讨论，未执行';
   if (task.status === 'preparing') return '正在准备执行';
   return runStatusLabel(task.status);
@@ -3212,7 +3216,7 @@ function appendHandoffCard(item: HTMLElement, event: SessionEventSummary, drafts
   } else if (task.pendingQuestion) decision('question', '提问', `待回答：${task.pendingQuestion.text}`);
   if (task.takenOver) decision('takeover', '人已接管', 'Bot 停下了，由人来做。做完后写一句说明交还，Bot 接着做。', '在工作台交还。');
   if (task.status === 'unknown' || task.status === 'waiting_external') decision('reconcile', '核查', task.status === 'unknown' ? '结果需要核查。' : '还在等外部回执。');
-  if (task.status === 'failed') decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
+  if (task.status === 'failed' && !task.putDown) decision('blocked', '卡住', '这件工作失败了。先看原因，再决定是否重试。');
 }
 async function refreshHandoffViews(): Promise<void> {
   const epoch = ++handoffEpoch;
@@ -4458,7 +4462,8 @@ function taskStatusWord(task: ConversationTaskView): { word: string; tone: 'quie
     case 'needs_input': return { word: '需要你', tone: 'attention' };
     case 'running': case 'waiting_external': case 'reviewing': return { word: '执行中', tone: 'ink' };
     case 'succeeded': return { word: '已完成', tone: 'done' };
-    case 'failed': case 'unknown': return { word: '卡住了', tone: 'stuck' };
+    case 'failed': return task.putDown ? { word: '已放下', tone: 'quiet' } : { word: '卡住了', tone: 'stuck' };
+    case 'unknown': return { word: '卡住了', tone: 'stuck' };
     case 'cancelled': return { word: '已取消', tone: 'quiet' };
     case 'paused': return { word: '已暂停', tone: 'quiet' };
     default: return { word: runStatusLabel(task.status), tone: 'quiet' };
@@ -4480,7 +4485,7 @@ function taskActivity(task: ConversationTaskView): string {
     case 'reviewing': return '在复核结果。';
     case 'paused': return `已暂停${at ? `，停在${at}` : ''}。`;
     case 'succeeded': return evidence ? `做完了，留下 ${evidence} 份证据。` : '做完了。';
-    case 'failed': return task.failure ?? `在${at || '执行中'}卡住了。可以重试，或打开工作台看原因。`;
+    case 'failed': return task.putDown ? '已放下，不再算作等你处理。想再做时可以在任务列表里重试。' : task.failure ?? `在${at || '执行中'}卡住了。可以重试，或打开工作台看原因。`;
     case 'unknown': return '有一次调用结果未知，需要你核查后才能继续。';
     case 'cancelled': return '已取消，不会再执行。';
     default: return '';
@@ -4716,7 +4721,7 @@ function renderConversation(): void {
       }
       if (task.machine) name.append(element('small', machineLine(task.machine), 'conversation-machine'));
       const status = document.createElement('td');
-      status.append(element('span', task.status === 'discussion' ? '仅讨论，未执行' : task.status === 'preparing' ? '正在准备执行' : runStatusLabel(task.status)));
+      status.append(element('span', taskStateLabel(task)));
       if (task.column) status.append(element('small', ({ capture: '收下', ready: '待领取', doing: '进行中', blocked: '阻塞', review: '待验收', done: '已验收', failed: '失败 / 取消' } as Record<string,string>)[task.column] ?? task.column));
       const actions = document.createElement('td');
       const raise = dashboardButton('提高优先级', () => changeConversationPriority(task.id, 'higher'));
@@ -4757,6 +4762,11 @@ function renderConversation(): void {
         const retry = dashboardButton('重试', () => retryConversationTask(task));
         retry.dataset.retry = task.id;
         actions.append(retry);
+        if (!task.putDown) {
+          const down = dashboardButton('放下', () => putDownConversationTask(task.id));
+          down.dataset.putDown = task.id;
+          actions.append(down);
+        }
       }
       if (runId && ['queued', 'planning', 'running', 'reviewing'].includes(task.status)) {
         const pause = dashboardButton('暂停', () => controlConversationRun(task, 'pause'));
@@ -4790,7 +4800,7 @@ function renderConversation(): void {
       row.append(rank, name, status, actions); taskBody?.append(row);
     });
     $('conversation-tasks').hidden = ordered.length === 0;
-    const waiting = ordered.filter(task => ['needs_approval', 'needs_input', 'unknown', 'failed'].includes(task.status)).length;
+    const waiting = ordered.filter(task => !task.putDown && ['needs_approval', 'needs_input', 'unknown', 'failed'].includes(task.status)).length;
     $('conversation-task-count').textContent = ordered.length ? `${ordered.length} 件${waiting ? ` · ${waiting} 件等你` : ''}` : '';
     const messages = $('conversation-messages');
     const planDrafts = new Map<string, string>();
@@ -4964,6 +4974,24 @@ function prepareConversationReply(item: ConversationMessageView): void {
   $<HTMLSelectElement>('conversation-focus-effect').value = 'keep';
   $('conversation-reply-label').textContent = `回复：${item.text.slice(0, 160)}`;
   updateConversationControls(); $<HTMLTextAreaElement>('conversation-text').focus();
+}
+/** Puts a failed task down: it stays listed with its Run, but stops counting as stuck or waiting on you. */
+async function putDownConversationTask(taskId: string): Promise<void> {
+  if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
+  const epoch = conversationEpoch, id = conversation.id;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/tasks/${encodeURIComponent(taskId)}/put-down`, { expectedRevision: conversation.revision });
+    if (epoch === conversationEpoch) {
+      acceptConversation(view);
+      $('conversation-status').textContent = '已放下。它留在任务列表里，运行记录也还在；想再做时点“重试”。';
+    }
+  } catch (error) {
+    if (epoch === conversationEpoch) {
+      conversationNeedsRefresh = error instanceof ApiError && error.status === 409 && /刷新/.test(errorMessage(error));
+      $('conversation-error').textContent = errorMessage(error);
+    }
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 async function changeConversationPriority(taskId: string, direction: 'higher' | 'lower'): Promise<void> {
   if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;

@@ -1425,6 +1425,65 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
+  it('puts a failed task down from its row: it reads 已放下 and stops counting as waiting, while retry stays', async () => {
+    const failedRunId = 'run_00000000-0000-4000-8000-000000000009';
+    const view = fixture();
+    view.tasks.push({ id: 'task_c', title: '复盘', threadId: 'thread_c', status: 'failed', runId: failedRunId, latestRunId: failedRunId } as any);
+    view.messages = [{ id: 'm_c', role: 'user', text: '复盘一下', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_c'], candidateTaskIds: [], focusEffect: 'keep' }, execution: { runId: failedRunId, taskId: 'task_c', state: 'failed' } }];
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url.endsWith('/tasks/task_c/put-down')) {
+        (view.tasks[2] as any).putDown = true;
+        view.revision++;
+        return response(view);
+      }
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-task-id="task_c"]')!;
+    await vi.waitFor(() => expect(row().querySelector('[data-put-down]')).not.toBeNull());
+    expect(el('conversation-task-count').textContent).toContain('1 件等你');
+    expect(doc().querySelector('[data-plan-task="task_c"]')?.textContent).toContain('卡住了');
+    clickText('放下', row());
+    await vi.waitFor(() => expect(row().textContent).toContain('已放下'));
+    expect(h.posts.find(post => post.url.endsWith('/put-down'))?.body).toEqual({ expectedRevision: 1 });
+    expect(row().querySelector('[data-put-down]')).toBeNull();
+    expect(row().querySelector('[data-retry]')).not.toBeNull();
+    expect(el('conversation-task-count').textContent).not.toContain('等你');
+    const card = doc().querySelector('[data-plan-task="task_c"]')!;
+    expect(card.textContent).toContain('已放下');
+    expect(card.textContent).not.toContain('卡住了');
+    expect(el('conversation-status').textContent).toContain('已放下');
+    expect(h.posts.filter(post => post.url.endsWith('/retry') || post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
+  });
+
+  it('takes a put-down task out of the Bot status in the header and roster, keeping any other failure', async () => {
+    const one = 'run_00000000-0000-4000-8000-00000000000a', two = 'run_00000000-0000-4000-8000-00000000000b';
+    const view = fixture('bot');
+    view.tasks = [
+      view.tasks[0]!,
+      { id: 'task_x', title: '你好', threadId: 'thread_x', status: 'failed', runId: one, latestRunId: one },
+      { id: 'task_y', title: '复盘', threadId: 'thread_y', status: 'failed', runId: two, latestRunId: two },
+    ] as any;
+    const h = harness(view, { handler(url, request) {
+      const match = request.method === 'POST' && url.match(/\/tasks\/(task_[xy])\/put-down$/);
+      if (match) { (view.tasks.find(task => task.id === match[1]) as any).putDown = true; view.revision++; return response(view); }
+    } });
+    start(h.fetch); await ready();
+    const header = () => doc().querySelector(`[data-bot-id="${ownedBot.id}"]`)?.textContent ?? '';
+    await vi.waitFor(() => expect(header()).toContain('卡住'));
+    const row = (id: string) => doc().querySelector<HTMLElement>(`[data-task-id="${id}"]`)!;
+    await vi.waitFor(() => expect(row('task_x').querySelector('[data-put-down]')).not.toBeNull());
+    clickText('放下', row('task_x'));
+    await vi.waitFor(() => expect(row('task_x').textContent).toContain('已放下'));
+    // The other failure still holds the status.
+    await vi.waitFor(() => expect(header()).toContain('卡住 · 复盘'));
+    expect(header()).not.toContain('你好');
+    await vi.waitFor(() => expect(row('task_y').querySelector<HTMLButtonElement>('[data-put-down]')?.disabled).toBe(false));
+    clickText('放下', row('task_y'));
+    await vi.waitFor(() => expect(header()).not.toContain('卡住'));
+    // The conversation header (entry and shell) reads the same status as the roster.
+    for (const id of ['entry-presence', 'gb-presence']) expect(el(id).textContent).not.toContain('卡住');
+  });
+
   it('pauses, resumes and reconciles the existing run from the task row without moving focus', async () => {
     const activeId = 'run_00000000-0000-4000-8000-000000000003';
     const pausedId = 'run_00000000-0000-4000-8000-000000000004';
@@ -1534,6 +1593,27 @@ describe('entry bots and group chats', () => {
     expect(research.querySelector('.roster-avatar')?.getAttribute('data-state')).toBe('blocked');
     expect(h.posts.some(post => post.url.includes('/messages') || post.url.startsWith('/api/runs'))).toBe(false);
   });
+  it('does not show a Bot as stuck on a handed-over task its conversation put down', async () => {
+    const holding = (taskId: string, title: string, putDown: boolean) => ({ roomId: 'room_team', roomTitle: '发布协作', conversationId: 'conv_research', taskId, holderId: 'demo.release', fromId: 'demo.research', title, status: 'failed', ...(putDown ? { putDown: true } : {}) });
+    let items = [holding('task_hi', '你好', true)];
+    const h = harness(undefined, { handler(url, request) {
+      if (url === '/api/conversations' && request.method !== 'POST') {
+        return response([fixture(), { id: 'conv_release', title: '发布', revision: 2, agentId: 'demo.release', taskCount: 0, presence: { state: 'idle', label: '空闲' } }]);
+      }
+      if (url === '/api/board-holdings') return response({ items });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const release = () => doc().querySelector('[data-bot-id="demo.release"]')?.textContent ?? '';
+    await vi.waitFor(() => expect(release()).toContain('空闲'));
+    expect(release()).not.toContain('卡住');
+    // The same failure, not put down, still holds its receiver.
+    items = [holding('task_hi', '你好', true), holding('task_review', '复盘', false)];
+    start(h.fetch); await ready();
+    await vi.waitFor(() => expect(release()).toContain('卡住 · 复盘'));
+    expect(release()).not.toContain('你好');
+  });
+
   it('counts a task a group handed over with its new holder on the roster', async () => {
     const h = harness(undefined, { handler(url, request) {
       if (url === '/api/conversations' && request.method !== 'POST') {
