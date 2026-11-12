@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dialogueFixture, dialogueScope as scope } from './support/bot-dialogues.js';
 
 const ASK = '另一位 Bot 在你们俩的侧线程里问你一个问题';
@@ -138,6 +138,63 @@ describe('Bots working together from a private chat', () => {
       await f.app.aeeisBots?.sweepDirect(scope);
       const after = (await f.request(`/conversations/${binding.conversationId}`)).json();
       expect(after.tasks.find((item: any) => item.id === taskId).handoff).toMatchObject({ state: 'accepted', toName: '阿写' });
+    } finally { await f.close(); }
+  });
+
+  it('hands over the task the Bot named, never the focus task, making it when it does not exist yet', async () => {
+    const { f, binding, say } = await direct({ reply: () => ({ reply: '新的那件交给阿写。', handoff: { to: '阿写', task: '客户回访' } }) });
+    try {
+      let view = await say({ text: '先说周报', newTask: { title: '周报' }, focus: 'switch' }, 'focus-1');
+      const report = view.tasks.find((item: any) => item.title === '周报');
+      expect(view.focusTaskId).toBe(report.id);
+      view = await say({ text: '还有客户回访', unassigned: true }, 'named-1');
+      expect(view.tasks.find((item: any) => item.id === report.id).handoff).toBeUndefined();
+      expect(view.tasks.find((item: any) => item.title === '客户回访').handoff).toMatchObject({ state: 'suggested', toName: '阿写' });
+      expect(binding.conversationId).toBe(view.id);
+    } finally { await f.close(); }
+  });
+
+  it('replays a decision already written in the side thread after a crash, instead of talking on', async () => {
+    let decision = 'accept';
+    const { f, binding, say } = await direct({ reply: () => ({ reply: '好。' }), turn: () => ({ decision, message: decision === 'accept' ? '我来。' : '不接。' }) });
+    try {
+      const view = await say({ text: '写方案', newTask: { title: '方案' } }, 'crash-1');
+      const taskId = view.tasks.find((item: any) => item.title === '方案').id;
+      const writer = (await f.bots.list(scope)).find(bot => bot.name === '阿写')!;
+      // The process stops right after the receiver's answer is written, before the outcome is recorded.
+      const create = f.events.create.bind(f.events);
+      const spy = vi.spyOn(f.events, 'create').mockImplementationOnce(async (...args) => { await create(...args); throw new Error('crashed'); });
+      await f.conversations.beginHandoff(binding.conversationId, taskId, { expectedRevision: view.revision, to: writer.id }, scope);
+      await f.app.aeeisBots?.sweepDirect(scope);
+      expect((await f.request(`/conversations/${binding.conversationId}`)).json().tasks.find((item: any) => item.id === taskId).handoff.state).toBe('negotiating');
+      spy.mockRestore();
+      // On restart the model would now say no; the accept already written wins and no new turn is asked for.
+      decision = 'decline';
+      const turns = f.calls.filter((call: any) => call.system.includes(TURN)).length;
+      await f.app.aeeisBots?.sweepDirect(scope);
+      expect((await f.request(`/conversations/${binding.conversationId}`)).json().tasks.find((item: any) => item.id === taskId).handoff.state).toBe('accepted');
+      expect(f.calls.filter((call: any) => call.system.includes(TURN))).toHaveLength(turns);
+    } finally { await f.close(); }
+  });
+
+  it('refuses to hand over a task that is running, and keeps a task that started while the Bots talked', async () => {
+    const { f, writer, binding, say } = await direct({ reply: () => ({ reply: '好。' }) });
+    try {
+      let view = await say({ text: '写方案', newTask: { title: '方案' } }, 'busy-1');
+      const taskId = view.tasks.find((item: any) => item.title === '方案').id;
+      await f.conversations.beginHandoff(binding.conversationId, taskId, { expectedRevision: view.revision, to: writer.id }, scope);
+      // The owner starts the work here before the Bots finish talking.
+      const fresh = (await f.request(`/conversations/${binding.conversationId}`)).json();
+      const started = await f.request(`/rooms/${binding.roomId}/dialogue/messages`, { text: '我先自己开始', expectedRevision: fresh.revision, taskIds: [taskId], intent: 'execute' }, 'busy-run');
+      expect(started.statusCode, started.body).toBe(202);
+      await f.app.aeeisBots?.sweepDirect(scope);
+      view = (await f.request(`/conversations/${binding.conversationId}`)).json();
+      expect(view.tasks.find((item: any) => item.id === taskId).handoff).toMatchObject({ state: 'declined', reason: '这边已经开始做了' });
+      expect((await f.conversations.list(scope)).some((item: any) => item.agentId === writer.id && item.taskCount)).toBe(false);
+      // And while it runs, it cannot be handed over at all.
+      const refused = await f.request(`/conversations/${binding.conversationId}/tasks/${taskId}/hand-off`, { expectedRevision: view.revision });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toContain('这件任务还在做');
     } finally { await f.close(); }
   });
 

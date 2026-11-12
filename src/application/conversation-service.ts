@@ -969,9 +969,17 @@ export class ConversationService implements LifeThreadInbox {
     });
     return updated.tasks.find(item => item.id === taskId)?.handoff;
   }
+  /** True while the task's latest Run has not ended: it is being worked on here and must not be handed over. */
+  async handoffTaskBusy(conversationId: string, taskId: string, scope: Ownership): Promise<boolean> {
+    const task = (await this.store.get(conversationId, scope)).tasks.find(item => item.id === taskId);
+    if (!task?.latestRunId) return Boolean(task?.pendingMessageId);
+    const run = await this.runs.get(task.latestRunId, scope).catch(() => undefined);
+    return !run || !['succeeded', 'failed', 'cancelled'].includes(run.status);
+  }
   /** Starts the side-thread talk for a suggested (or earlier declined/blocked) handoff. Returns the attempt's id. */
   private async beginHandoffIn(conversationId: string, taskId: string, scope: Ownership, check: (draft: Conversation) => void, to?: string): Promise<Conversation> {
     const target = to ? await this.handoffTarget(to, scope) : undefined;
+    if (await this.handoffTaskBusy(conversationId, taskId, scope)) throw new Conflict('这件任务还在做，先等它结束或取消后再交出去');
     return this.store.mutate(conversationId, scope, draft => {
       check(draft);
       const task = draft.tasks.find(item => item.id === taskId);

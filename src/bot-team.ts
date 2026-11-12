@@ -367,9 +367,10 @@ export class BotTeam {
     if (!to || to.id === from.id || to.autonomy === 'quiet') return;
     const chat = await this.options.conversations.handoffChat(actions.conversationId, scope);
     const open = chat.tasks.filter(task => task.handoff?.state !== 'accepted');
-    let taskId = (handoff.task ? open.find(task => sameName(task.title, handoff.task!)) : undefined)?.id
-      ?? (chat.focusTaskId && open.some(task => task.id === chat.focusTaskId) ? chat.focusTaskId : undefined)
-      ?? (!handoff.task && open.length === 1 ? open[0]!.id : undefined);
+    // A named task is that task, or a new one by that name; only an unnamed handoff means the focus or the only task.
+    let taskId = handoff.task
+      ? open.find(task => sameName(task.title, handoff.task!))?.id
+      : (chat.focusTaskId && open.some(task => task.id === chat.focusTaskId) ? chat.focusTaskId : undefined) ?? (open.length === 1 ? open[0]!.id : undefined);
     if (!taskId && handoff.task) {
       // The thing to hand over is new: it becomes a task in this chat first.
       const made = await this.options.conversations.proposeTask({ agentId: from.id, proposerId: from.id, title: handoff.task, ...(handoff.note ? { reason: handoff.note } : {}), key: `direct-handoff-new:${actions.replyMessageId}` }, scope);
@@ -401,12 +402,38 @@ export class BotTeam {
         return true;
       };
       if (to.autonomy === 'quiet') { await end('declined', `${to.name}现在不接活，「${task.title}」还在这里。`, `${to.name}现在不接活`); return; }
+      /** Carries out a decision that is already written in the side thread, so a restart replays it instead of talking on. */
+      const finish = async (decision: 'accept' | 'decline' | 'withdraw', message: string): Promise<void> => {
+        if (decision !== 'accept') {
+          const reason = decision === 'decline' ? `${to.name}没有接：${message}` : `我收回了：${message}`;
+          await end('declined', `「${task.title}」没有交给${to.name}。${reason}`.slice(0, 2000), reason);
+          return;
+        }
+        // Work that started here while the Bots talked stays here, so the two never do the same thing at once.
+        if (await this.options.conversations.handoffTaskBusy(conversationId, taskId, scope)) {
+          await end('declined', `「${task.title}」这边已经开始做了，就不交给${to.name}了。`, '这边已经开始做了');
+          return;
+        }
+        const receiver = await this.options.conversations.proposeTask({ agentId: to.id, proposerId: from.id, title: task.title, reason: offer.note ?? `${from.name}交过来的`, key: `direct-handoff-task:${offer.offerId}` }, scope);
+        // Start before recording the outcome: a start that fails leaves the talk open, and the pump tries again with the same keys.
+        if (this.options.canExecute && (to.autonomy === 'auto' || to.autonomy === 'yolo')) {
+          const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute);
+          await this.options.notifyRun(runId, scope);
+        }
+        await end('accepted', `${to.name}接下了「${task.title}」，接着在${to.name}那边做。`, undefined, receiver);
+      };
       const side = await this.sideThread(scope, from, to);
       const prefix = `direct-handoff:${offer.offerId}:`;
-      for (let turn = (await this.options.events.history(side.room.id, scope.owner, scope.tenantId)).filter(item => item.idempotencyKey.startsWith(prefix)).length; turn < this.maxTurns; turn++) {
+      // Each turn's key carries its decision: `<prefix><turn>:<decision>`.
+      const said = async () => (await this.options.events.history(side.room.id, scope.owner, scope.tenantId)).filter(item => item.idempotencyKey.startsWith(prefix));
+      const decided = (key: string) => key.slice(prefix.length).split(':')[1];
+      const last = (await said()).at(-1);
+      const settledBefore = last ? decided(last.idempotencyKey) : undefined;
+      if (settledBefore === 'accept' || settledBefore === 'decline' || settledBefore === 'withdraw') { await finish(settledBefore, last!.content); return; }
+      for (let turn = (await said()).length; turn < this.maxTurns; turn++) {
         const speaking = turn % 2 === 0 ? to : from;
         const other = speaking.id === to.id ? from : to;
-        const history = (await this.options.events.history(side.room.id, scope.owner, scope.tenantId)).filter(item => item.idempotencyKey.startsWith(prefix));
+        const history = await said();
         let parsed: z.infer<typeof turnSchema>;
         try {
           const raw = await this.options.complete({
@@ -427,21 +454,8 @@ export class BotTeam {
           return;
         }
         const decision = speaking.id === to.id ? (parsed.decision === 'withdraw' ? 'discuss' : parsed.decision) : (parsed.decision === 'accept' || parsed.decision === 'decline' ? 'discuss' : parsed.decision);
-        await this.say(side.room, side.goalId, scope, speaking, parsed.message, `${prefix}${turn}`, [], side.manifest);
-        if (decision === 'accept') {
-          const receiver = await this.options.conversations.proposeTask({ agentId: to.id, proposerId: from.id, title: task.title, reason: offer.note ?? `${from.name}交过来的`, key: `direct-handoff-task:${offer.offerId}` }, scope);
-          if (!await end('accepted', `${to.name}接下了「${task.title}」，接着在${to.name}那边做。`, undefined, receiver)) return;
-          if (this.options.canExecute && (to.autonomy === 'auto' || to.autonomy === 'yolo')) {
-            const { runId } = await this.options.conversations.startTaskAsBot({ conversationId: receiver.conversationId, taskId: receiver.taskId, agentId: to.id, review: to.autonomy, key: `direct-handoff-start:${offer.offerId}`, note: `${from.name}把「${task.title}」交给我，我在侧线程里接下了。${offer.note ? `\n理由：${offer.note}` : ''}`.slice(0, 4000) }, scope, this.options.canExecute);
-            await this.options.notifyRun(runId, scope);
-          }
-          return;
-        }
-        if (decision === 'decline' || decision === 'withdraw') {
-          const reason = decision === 'decline' ? `${to.name}没有接：${parsed.message}` : `我收回了：${parsed.message}`;
-          await end('declined', `「${task.title}」没有交给${to.name}。${reason}`.slice(0, 2000), reason);
-          return;
-        }
+        await this.say(side.room, side.goalId, scope, speaking, parsed.message, `${prefix}${turn}:${decision}`, [], side.manifest);
+        if (decision !== 'discuss') { await finish(decision, parsed.message); return; }
       }
       await end('blocked', `「${task.title}」我和${to.name}谈了 ${this.maxTurns} 轮还没定，需要你决定。`, `交接谈不拢：谈了 ${this.maxTurns} 轮还没有结论`);
     } finally { this.running.delete(lock); }
