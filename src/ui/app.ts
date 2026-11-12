@@ -97,7 +97,7 @@ interface ConversationTaskView { column?: string; autoColumn?: string; id: strin
 interface ConversationReply { text: string; artifactId: string; truncated?: true }
 interface ConversationMessageView {
   id: string; role: 'user' | 'notification'; speaker?: { role: 'user' | 'agent'; id: string }; text: string; createdAt: string; replyTo?: string; notificationRunId?: string;
-  correctsMessageId?: string; effectiveTaskIds?: string[];
+  correctsMessageId?: string; effectiveTaskIds?: string[]; dismissedAt?: string;
   route: { status: 'routed' | 'clarify' | 'general'; reason: string; taskIds: string[]; candidateTaskIds: string[]; focusEffect: 'keep' | 'switch' };
   execution?: { runId: string; taskId: string; state: string };
   /** The answer of the Run this message started, once it succeeded. */
@@ -4828,7 +4828,8 @@ function renderConversation(): void {
       const corrected = Boolean(item.effectiveTaskIds && (JSON.stringify(item.effectiveTaskIds) !== JSON.stringify(item.route.taskIds) || conversation?.messages.some(message => message.correctsMessageId === item.id)));
       if (corrected) details.append(element('small', `当前有效归属（已纠正）：${item.effectiveTaskIds!.map(conversationTaskName).join('、')}。仅影响后续消息和新执行上下文。`));
       if (item.correctsMessageId) details.append(element('small', `归属纠正记录：${item.correctsMessageId}；原始路由和已有执行记录不变。`));
-      const routeLabel = item.route.status === 'clarify' ? '待澄清：未执行，请明确选择任务' : item.route.status === 'general' ? '一般讨论：已记录，未调用模型' : `${corrected ? '原始关联任务（审计）' : '关联任务'}：${item.route.taskIds.map(conversationTaskName).join('、')}`;
+      const routeLabel = item.route.status === 'clarify' && item.dismissedAt && !corrected ? '已忽略：未执行，不属于任何任务；仍可“纠正归属”'
+        : item.route.status === 'clarify' ? '待澄清：未执行，请明确选择任务' : item.route.status === 'general' ? '一般讨论：已记录，未调用模型' : `${corrected ? '原始关联任务（审计）' : '关联任务'}：${item.route.taskIds.map(conversationTaskName).join('、')}`;
       details.append(element('small', `${routeLabel} · 路由：${item.route.reason} · ${item.route.focusEffect === 'switch' && item.route.status === 'routed' ? '已切换讨论焦点' : '保持讨论焦点'}`));
       if (item.execution?.state === 'cancelled') details.append(element('small', '这次执行没有创建，请重新发送。'));
       else if (item.execution) details.append(element('small', `执行请求：${item.execution.state} · ${item.execution.runId}（不代表计划已批准）`));
@@ -4845,7 +4846,13 @@ function renderConversation(): void {
           updateConversationControls(); openConversationRoute(); $<HTMLSelectElement>('conversation-target').focus();
         }); correct.type = 'button'; details.append(correct);
       }
-      if (item.route.status === 'clarify' && !corrected) {
+      if (item.route.status === 'clarify' && !corrected && !item.dismissedAt) {
+        if (item.role === 'user' && !item.execution) {
+          const dismiss = button('忽略', async () => dismissConversationMessage(item.id));
+          dismiss.type = 'button'; dismiss.dataset.dismissMessage = item.id;
+          dismiss.title = '不选任务，也不回复；这条留在对话里，不再等你处理';
+          row.append(dismiss);
+        }
         for (const id of item.route.candidateTaskIds) {
           const choice = button(`选择任务：${conversationTaskName(id)}`, async () => {
             if (conversationBusy || conversationAttempt) return;
@@ -5030,6 +5037,24 @@ async function putDownConversationTask(taskId: string): Promise<void> {
     if (epoch === conversationEpoch) {
       acceptConversation(view);
       $('conversation-status').textContent = '已放下。它留在任务列表里，运行记录也还在；想再做时点“重试”。';
+    }
+  } catch (error) {
+    if (epoch === conversationEpoch) {
+      conversationNeedsRefresh = error instanceof ApiError && error.status === 409 && /刷新/.test(errorMessage(error));
+      $('conversation-error').textContent = errorMessage(error);
+    }
+  } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
+}
+async function dismissConversationMessage(messageId: string): Promise<void> {
+  if (!conversation || conversationBusy || conversationAttempt || conversationNeedsRefresh) return;
+  const epoch = conversationEpoch, id = conversation.id;
+  conversationBusy = true; updateConversationControls();
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/dismiss`, { expectedRevision: conversation.revision });
+    if (epoch === conversationEpoch) {
+      acceptConversation(view);
+      renderAttentionInbox(runSummaries);
+      $('conversation-status').textContent = '已忽略。这条留在对话里，不再等你选任务；没有回复，也没有执行。';
     }
   } catch (error) {
     if (epoch === conversationEpoch) {
@@ -6813,7 +6838,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
     });
   }
   for (const message of conversation?.messages ?? []) {
-    if (message.route.status !== 'clarify') continue;
+    if (message.route.status !== 'clarify' || message.dismissedAt) continue;
     if (conversation?.messages.some(item => item.correctsMessageId === message.id)) continue;
     items.push({
       key: `mention:${message.id}`, kind: 'mention', title: message.text, detail: '需要你明确选择任务。还没有执行。', at: message.createdAt, status: 'mention', selected: false,

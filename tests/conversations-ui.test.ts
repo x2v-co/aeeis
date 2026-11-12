@@ -425,6 +425,31 @@ describe('single-entry conversation workbench', () => {
     expect(messagePosts(h)[0]?.body).not.toHaveProperty('newTask');
   });
 
+  it('sets an unrouted message aside with 忽略: no message, no task, and it leaves the inbox', async () => {
+    const view = fixture();
+    view.messages.push({ id: 'ambiguous', role: 'user', text: '继续那个任务', createdAt: date, route: { status: 'clarify', reason: 'ambiguous', taskIds: [], candidateTaskIds: ['task_a', 'task_b'], focusEffect: 'keep' } });
+    const h = harness(view, { handler(url, request) {
+      if (request.method === 'POST' && url === `/api/conversations/${view.id}/messages/ambiguous/dismiss`) {
+        (view.messages.find(item => item.id === 'ambiguous') as any).dismissedAt = date; view.revision++;
+        return response(view);
+      }
+    } });
+    start(h.fetch); await ready();
+    const row = () => doc().querySelector<HTMLElement>('[data-message-id="ambiguous"]')!;
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+    expect(row().querySelector('[data-dismiss-message]')).not.toBeNull();
+    row().querySelector<HTMLButtonElement>('[data-dismiss-message]')!.click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url.endsWith('/messages/ambiguous/dismiss'))?.body).toEqual({ expectedRevision: 1 }));
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe(''));
+    expect(row().textContent).toContain('已忽略');
+    expect(row().textContent).not.toContain('选择任务：');
+    expect(row().querySelector('[data-dismiss-message]')).toBeNull();
+    expect(el('conversation-status').textContent).toContain('已忽略');
+    // Nothing was said, chosen, or started.
+    expect(messagePosts(h)).toHaveLength(0);
+    expect(h.posts.filter(post => post.url.endsWith('/focus') || post.url.startsWith('/api/runs'))).toHaveLength(0);
+  });
+
   it.each(['entry', 'bot'])('appends an explicit routing correction without executing, switching focus or rewriting the original route (%s)', async surface => {
     const view = fixture(surface);
     view.messages.push({ id: 'misrouted', role: 'user', text: '只属于周报的事实', createdAt: date, route: { status: 'routed', reason: 'explicit', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'keep' } });

@@ -1111,6 +1111,46 @@ describe('single-entry conversation routing', () => {
     expect(response.json().runId).toBeUndefined();
     expect(await f.repository.list()).toHaveLength(0); expect(f.notify).not.toHaveBeenCalled();
   });
+  it('sets an unrouted message aside without choosing a task, posting, or starting work', async () => {
+    const f = await fixture(), entry = await f.create();
+    const a = await f.addTask(entry.id, '任务甲'); const b = await f.addTask(entry.id, '任务乙');
+    const cleared = await f.service.focus(entry.id, { taskId: null, expectedRevision: b.conversation.revision }, scope);
+    const asked = (await f.post(entry.id, { text: '继续吧', expectedRevision: cleared.revision })).json();
+    expect(asked.message.route.status).toBe('clarify');
+    const dismiss = (messageId: string, expectedRevision: number) => f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/messages/${messageId}/dismiss`, headers: f.headers, payload: { expectedRevision } });
+    // Stale revision, unknown message, extra fields, and messages that are not waiting are refused.
+    expect((await dismiss(asked.message.id, asked.conversation.revision - 1)).statusCode).toBe(409);
+    expect((await dismiss('message_00000000-0000-4000-8000-000000000000', asked.conversation.revision)).statusCode).toBe(404);
+    expect((await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/messages/${asked.message.id}/dismiss`, headers: f.headers, payload: { expectedRevision: asked.conversation.revision, taskId: 'x' } })).statusCode).toBe(400);
+    const routed = await dismiss(a.message.id, asked.conversation.revision);
+    expect(routed.statusCode).toBe(409);
+    expect(routed.json().error).toContain('只有还没选任务的消息可以忽略');
+    const before = await f.fresh(entry.id);
+    const done = await dismiss(asked.message.id, asked.conversation.revision);
+    expect(done.statusCode).toBe(200);
+    const view = done.json();
+    expect(view.revision).toBe(asked.conversation.revision + 1);
+    expect(view.messages).toHaveLength(before.messages.length);
+    const kept = view.messages.find((item: { id: string }) => item.id === asked.message.id);
+    expect(kept).toMatchObject({ text: '继续吧', route: { status: 'clarify' }, dismissedAt: expect.any(String) });
+    expect(view.focusTaskId).toBe(before.focusTaskId);
+    // Dismissing twice changes nothing, and nothing ran.
+    const again = await dismiss(asked.message.id, view.revision);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().revision).toBe(view.revision);
+    expect(await f.repository.list()).toHaveLength(0); expect(f.notify).not.toHaveBeenCalled();
+    // It can still be corrected onto a task afterwards.
+    const corrected = await f.post(entry.id, { text: '归到任务甲', correctsMessageId: asked.message.id, taskIds: [a.message.route.taskIds[0]], expectedRevision: view.revision });
+    expect(corrected.statusCode).toBe(200);
+  });
+  it('refuses to undo or change a dismissal in storage', async () => {
+    const f = await fixture(), entry = await f.create();
+    await f.addTask(entry.id, '任务甲'); const b = await f.addTask(entry.id, '任务乙');
+    const cleared = await f.service.focus(entry.id, { taskId: null, expectedRevision: b.conversation.revision }, scope);
+    const asked = (await f.post(entry.id, { text: '继续吧', expectedRevision: cleared.revision })).json();
+    await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/messages/${asked.message.id}/dismiss`, headers: f.headers, payload: { expectedRevision: asked.conversation.revision } });
+    await expect(f.store.mutate(entry.id, scope, draft => { delete draft.messages.find(item => item.id === asked.message.id)!.dismissedAt; })).rejects.toThrow('Conversation message dismissal is permanent');
+  });
   it('allows multi-task discussion but requires one explicit execution target', async () => {
     const f = await fixture(), entry = await f.create();
     await f.addTask(entry.id, '任务甲'); const b = await f.addTask(entry.id, '任务乙');

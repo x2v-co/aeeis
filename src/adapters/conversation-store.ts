@@ -34,7 +34,7 @@ const schema = z.object({
   messages: z.array(z.object({
     id: identifier, keyHash: hash, requestHash: hash, role: z.enum(['user', 'notification']), intent: z.enum(['discuss', 'execute']).optional(),
     speaker: z.object({ role: z.enum(['user', 'agent']), id: z.string().trim().min(1).max(200) }).strict().optional(),
-    text: z.string(), createdAt: timestamp, replyTo: identifier.optional(), correctsMessageId: identifier.optional(),
+    text: z.string(), createdAt: timestamp, replyTo: identifier.optional(), correctsMessageId: identifier.optional(), dismissedAt: timestamp.optional(),
     route: z.object({
       status: z.enum(['routed', 'clarify', 'general']),
       reason: z.enum(['new-task', 'explicit', 'reply', 'name', 'focus', 'ambiguous', 'unassigned']),
@@ -135,6 +135,7 @@ function changed(before: Conversation, change: (value: Conversation) => void): C
     for (const field of ['id', 'keyHash', 'requestHash', 'role', 'intent', 'speaker', 'text', 'createdAt', 'replyTo', 'correctsMessageId', 'route', 'notificationRunId', 'source'] as const) {
       assert(isDeepStrictEqual(message[field], next[field]), `Conversation message ${field} is immutable`);
     }
+    assert(message.dismissedAt === undefined || message.dismissedAt === next.dismissedAt, 'Conversation message dismissal is permanent');
     if (message.execution) {
       assert(next.execution, 'Conversation execution is immutable');
       for (const field of ['taskId', 'runId', 'parentRunId', 'request'] as const) {
