@@ -370,6 +370,9 @@ export interface AgentRun {
    * The number does not approve, pause, resume, or cancel this Run. */
   schedulingPriority?: number;
   cancellation?: { reason: string; actor: string; at: string; source: 'api' };
+  /** A person filed this finished Run away from the task list and inbox. It keeps every
+   * record; a retry, replan, resume or reconcile clears it so live work is never hidden. */
+  archived?: { at: string; actor: string };
   reconciliation?: { workflowStatus: string; previousStatus: RunStatus; actor: string; at: string; reason: string };
   context: { id: string; audience: string[]; sources: Source[]; manifestHash?: string; threadHistory?: ThreadHistory; projectSourceSync?: ProjectSourceSyncReceipt; memoryManifestId?: string; memoryManifestHash?: string; memoryRefs?: string[] };
   privacy: TaskRequest['privacy'];

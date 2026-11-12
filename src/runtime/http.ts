@@ -2400,6 +2400,23 @@ export function buildApp(options: Options) {
     }, { owner: principal.id, tenantId: principal.tenantId });
     return runSummary(run);
   });
+  // Archiving only files a finished Run away from the task list and inbox. Nothing is
+  // deleted, and archived: false brings it back.
+  app.post<{ Params: { id: string } }>('/api/runs/:id/archive', async request => {
+    const principal = principalOf(request);
+    const before = await getOwnedRun(options.repository, request.params.id, principal.id, principal.tenantId);
+    const { archived } = z.object({ archived: z.boolean() }).strict().parse(request.body ?? {});
+    if (archived && !ARCHIVABLE_RUN_STATUSES.has(before.status)) throw new Conflict('只有已结束的任务可以归档');
+    if (Boolean(before.archived) === archived) return runSummary(before);
+    const run = await options.repository.mutate(before.id, current => {
+      if (Boolean(current.archived) === archived) return;
+      if (archived && !ARCHIVABLE_RUN_STATUSES.has(current.status)) throw new Conflict('只有已结束的任务可以归档');
+      if (archived) current.archived = { at: new Date().toISOString(), actor: principal.id };
+      else delete current.archived;
+      event(current, archived ? 'run.archived' : 'run.unarchived', { actor: principal.id });
+    }, { owner: principal.id, tenantId: principal.tenantId });
+    return runSummary(run);
+  });
   app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async request => {
     const { id } = request.params;
     const principal = principalOf(request);
@@ -2655,9 +2672,10 @@ function readableRunSort(left: AgentRun, right: AgentRun): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
 
-function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt' | 'lineage' | 'derivationBlocked'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
+const ARCHIVABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['failed', 'cancelled', 'succeeded']);
+function runSummary(run: AgentRun): Pick<AgentRun, 'id' | 'goal' | 'goalId' | 'domainPlanId' | 'taskExecution' | 'followUpPlanId' | 'status' | 'updatedAt' | 'lineage' | 'derivationBlocked' | 'archived'> & { inputRequest?: ReturnType<typeof runInputRequest> } {
   const inputRequest = runInputRequest(run);
-  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}), ...(run.lineage ? { lineage: run.lineage } : {}), ...(run.derivationBlocked ? { derivationBlocked: run.derivationBlocked } : {}) };
+  return { id: run.id, goal: run.goal, ...(run.goalId ? { goalId: run.goalId } : {}), ...(run.domainPlanId ? { domainPlanId: run.domainPlanId } : {}), ...(run.taskExecution ? { taskExecution: run.taskExecution } : {}), ...(run.followUpPlanId ? { followUpPlanId: run.followUpPlanId } : {}), status: run.status, updatedAt: run.updatedAt, ...(inputRequest ? { inputRequest } : {}), ...(run.lineage ? { lineage: run.lineage } : {}), ...(run.derivationBlocked ? { derivationBlocked: run.derivationBlocked } : {}), ...(run.archived ? { archived: run.archived } : {}) };
 }
 async function readableRunCandidates(repository: RunRepository, domain: AeeisService | undefined, principal: Principal): Promise<AgentRun[]> {
   const all = principal.roles.includes('operator')

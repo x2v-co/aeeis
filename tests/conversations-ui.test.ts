@@ -1523,6 +1523,51 @@ describe('single-entry conversation workbench', () => {
     await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
   });
 
+  it('hides archived Runs from the task list and inbox, lists them under 已归档, and archives or restores from the open Run', async () => {
+    const old = 'run_00000000-0000-4000-8000-0000000000a1', stuck = 'run_00000000-0000-4000-8000-0000000000a2';
+    const runs: Array<Record<string, unknown>> = [
+      { id: old, goal: '北京天气', status: 'failed', updatedAt: date, archived: { at: date, actor: 'local' } },
+      { id: stuck, goal: '旧表单', status: 'failed', updatedAt: date },
+    ];
+    let revision = 1;
+    const detail = (id: string) => ({ ...runs.find(item => item.id === id)!, revision, canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [], context: { sources: [] }, artifacts: [] });
+    const h = harness(undefined, { handler(url, request) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      const match = url.match(/^\/api\/runs\/(run_[\w-]+)$/);
+      if (match && request.method !== 'POST') return response(detail(match[1]!));
+      const archive = url.match(/^\/api\/runs\/(run_[\w-]+)\/archive$/);
+      if (archive) {
+        const item = runs.find(entry => entry.id === archive[1])!;
+        if (JSON.parse(request.body).archived) item.archived = { at: date, actor: 'local' }; else delete item.archived;
+        revision++;
+        return response(item);
+      }
+    } });
+    start(h.fetch); await ready();
+    const sidebar = (title: string) => [...doc().querySelectorAll<HTMLElement>('#runs .task-row')].find(item => item.querySelector('strong')?.textContent === title);
+    await vi.waitFor(() => expect(sidebar('旧表单')).toBeDefined());
+    expect(sidebar('北京天气')).toBeUndefined();
+    expect(el('run-count').textContent).toBe('1 / 1 项任务');
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+    // The archived filter is the way back to them.
+    doc().querySelector<HTMLButtonElement>('#run-filters [data-run-filter="archived"]')!.click();
+    await vi.waitFor(() => expect(sidebar('北京天气')).toBeDefined());
+    expect(sidebar('旧表单')).toBeUndefined();
+    doc().querySelector<HTMLButtonElement>('#run-filters [data-run-filter="all"]')!.click();
+    // Archive the other one from its open Run.
+    sidebar('旧表单')!.click();
+    await vi.waitFor(() => expect(el<HTMLButtonElement>('archive-run').hidden).toBe(false));
+    expect(el('archive-run').textContent).toBe('归档');
+    el('archive-run').click();
+    await vi.waitFor(() => expect(h.posts.find(post => post.url === `/api/runs/${stuck}/archive`)?.body).toEqual({ archived: true }));
+    await vi.waitFor(() => expect(sidebar('旧表单')).toBeUndefined());
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe(''));
+    await vi.waitFor(() => expect(el('archive-run').textContent).toBe('取消归档'));
+    el('archive-run').click();
+    await vi.waitFor(() => expect(h.posts.filter(post => post.url === `/api/runs/${stuck}/archive`).at(-1)?.body).toEqual({ archived: false }));
+    await vi.waitFor(() => expect(sidebar('旧表单')).toBeDefined());
+  });
+
   it('takes a put-down task out of the Bot status in the header and roster, keeping any other failure', async () => {
     const one = 'run_00000000-0000-4000-8000-00000000000a', two = 'run_00000000-0000-4000-8000-00000000000b';
     const view = fixture('bot');
