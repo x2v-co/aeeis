@@ -49,6 +49,9 @@ export interface ConversationMessage {
   replyTo?: string;
   correctsMessageId?: string;
   route: ConversationRoute;
+  /** The owner set an unrouted (clarify) message aside without choosing a task. It stays in the
+   * conversation and can still be corrected; it just stops waiting for a choice. Set once. */
+  dismissedAt?: string;
   execution?: {
     taskId: string;
     runId: string;

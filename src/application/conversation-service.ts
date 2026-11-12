@@ -946,6 +946,24 @@ export class ConversationService implements LifeThreadInbox {
     });
     return this.view(updated, scope, actor);
   }
+  /** Set aside one of the owner's unrouted messages: nothing is posted, no task is chosen, no model is called. */
+  async dismissMessage(id: string, messageId: string, input: unknown, scope: Ownership, actor?: Principal) {
+    const body = z.object({ expectedRevision: z.number().int().nonnegative() }).strict().parse(input);
+    const current = await this.store.get(id, scope);
+    const message = current.messages.find(item => item.id === messageId);
+    if (!message) throw new NotFound('Unknown message');
+    if (message.dismissedAt) return this.view(current, scope, actor);
+    const updated = await this.store.mutate(id, scope, draft => {
+      if (draft.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再忽略');
+      const target = draft.messages.find(item => item.id === messageId)!;
+      if (target.dismissedAt) return;
+      if (target.role !== 'user' || target.route.status !== 'clarify' || target.execution || draft.messages.some(item => item.correctsMessageId === messageId)) {
+        throw new Conflict('只有还没选任务的消息可以忽略');
+      }
+      target.dismissedAt = new Date().toISOString();
+    });
+    return this.view(updated, scope, actor);
+  }
   async priority(id: string, taskId: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({ expectedRevision: z.number().int().nonnegative(), direction: z.enum(['higher', 'lower']) }).strict().parse(input);
     const updated = await this.store.mutate(id, scope, current => {
