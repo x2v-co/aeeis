@@ -1055,7 +1055,7 @@ function executePaletteCommand(command: string): void {
     if (conversationEnabled) $<HTMLTextAreaElement>('conversation-text').focus();
     else $<HTMLInputElement>('quick-goal').focus();
   } else if (command === 'attention') {
-    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status))) {
+    if (!runSummaries.some(run => ATTENTION_STATUSES.has(run.status) && !runPutDown(run))) {
       runFilter = 'attention';
       localStorage.setItem('aeeis.run-filter', runFilter);
       renderRunQueue(runSummaries);
@@ -4871,7 +4871,51 @@ function renderConversation(): void {
   }
   updateConversationControls();
 }
+// Runs whose failure was put down in a conversation the page has read. The task list
+// only knows Runs, so it learns this here. The mark holds only while the Run is failed and
+// unchanged since: a retry, replan or new failure moves the Run on, so the page drops the
+// mark and asks that conversation again instead of calling a new failure put down.
+const putDownRuns = new Map<string, { conversationId: string; updatedAt?: string }>();
+const putDownRechecks = new Set<string>();
+function notePutDownRuns(view: ConversationView): boolean {
+  let changed = false;
+  for (const task of view.tasks) {
+    const runId = taskRunId(task);
+    if (!runId) continue;
+    if (!task.putDown) { if (putDownRuns.delete(runId)) changed = true; continue; }
+    const updatedAt = runSummaries.find(run => run.id === runId)?.updatedAt;
+    const known = putDownRuns.get(runId);
+    if (known?.conversationId === view.id && known.updatedAt === updatedAt) continue;
+    putDownRuns.set(runId, { conversationId: view.id, ...(updatedAt ? { updatedAt } : {}) });
+    changed = true;
+  }
+  return changed;
+}
+function syncPutDownRuns(runs: RunSummary[]): void {
+  for (const [runId, mark] of [...putDownRuns]) {
+    const run = runs.find(item => item.id === runId);
+    if (!run) continue;
+    if (run.status !== 'failed') { putDownRuns.delete(runId); continue; }
+    if (mark.updatedAt === undefined) { if (run.updatedAt) mark.updatedAt = run.updatedAt; continue; }
+    if (run.updatedAt === mark.updatedAt) continue;
+    putDownRuns.delete(runId);
+    void recheckPutDown(mark.conversationId);
+  }
+}
+async function recheckPutDown(conversationId: string): Promise<void> {
+  if (putDownRechecks.has(conversationId)) return;
+  putDownRechecks.add(conversationId);
+  try {
+    const view = await api<ConversationView>(`/conversations/${encodeURIComponent(conversationId)}`);
+    if (notePutDownRuns(view)) { renderRunQueue(runSummaries); renderAttentionInbox(runSummaries); }
+  } catch { /* the Run keeps reading as failed until its conversation is read again */ }
+  finally { putDownRechecks.delete(conversationId); }
+}
+function runPutDown(run: RunSummary): boolean {
+  return run.status === 'failed' && putDownRuns.has(run.id);
+}
 function rememberLifeSummary(view: ConversationView): void {
+  if (notePutDownRuns(view)) { renderRunQueue(runSummaries); renderAttentionInbox(runSummaries); }
   const index = conversationList.findIndex(item => item.id === view.id);
   if (index < 0) conversationList.unshift(view); else conversationList[index] = view;
   if (view.agentId === 'aeeis') {
@@ -6735,7 +6779,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
   if (!panel || !list || !count) return;
   const items: Array<{ key: string; kind: InboxKind; title: string; detail: string; at?: string | undefined; status: string; selected: boolean; open: () => Promise<void>; quick: string; act: () => Promise<void> }> = [];
   for (const run of runs) {
-    const kind = inboxKind(run.status);
+    const kind = runPutDown(run) ? undefined : inboxKind(run.status);
     if (!kind) continue;
     const [label, next] = attentionCopy(run.status);
     items.push({
@@ -6824,7 +6868,7 @@ function renderAttentionInbox(runs: RunSummary[]): void {
 }
 function runMatchesFilter(run: RunSummary): boolean {
   if (runFilter === 'active') return ACTIVE_STATUSES.has(run.status);
-  if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status);
+  if (runFilter === 'attention') return ATTENTION_STATUSES.has(run.status) && !runPutDown(run);
   if (runFilter === 'done') return DONE_STATUSES.has(run.status);
   return true;
 }
@@ -6860,7 +6904,7 @@ function renderRunQueue(runs: RunSummary[]): void {
     });
     item.className = `roster-row task-row${run.id === currentId && currentRunOpen && !openGroupId ? ' selected' : ''}`;
     item.dataset.status = run.status;
-    const presence = presenceOf(run.status);
+    const presence = runPutDown(run) ? { state: 'idle', label: '已放下' } : presenceOf(run.status);
     const dot = element('span', '', 'task-dot');
     dot.dataset.state = presence.state;
     const copy = element('span', '', 'roster-copy');
@@ -7055,6 +7099,7 @@ async function refresh(background = false): Promise<void> {
   const { candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage } = lists;
   const runs = runPage.items;
   runSummaries = runs;
+  syncPutDownRuns(runs);
   sideThreadRooms = allRooms.filter(room => room.description === SIDE_THREAD);
   const rooms = allRooms.filter(room => room.description !== SIDE_THREAD);
   roomSummaries = rooms;

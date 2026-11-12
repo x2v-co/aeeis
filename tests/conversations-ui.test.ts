@@ -1455,6 +1455,74 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts.filter(post => post.url.endsWith('/retry') || post.url.endsWith('/messages') || post.url.endsWith('/focus'))).toHaveLength(0);
   });
 
+  it('labels a put-down Run 已放下 in the sidebar task list and keeps it out of 待处理', async () => {
+    const down = 'run_00000000-0000-4000-8000-00000000000c', other = 'run_00000000-0000-4000-8000-00000000000d';
+    const view = fixture();
+    view.tasks.push({ id: 'task_c', title: '复盘', threadId: 'thread_c', status: 'failed', runId: down, latestRunId: down } as any);
+    const h = harness(view, { handler(url, request) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: [
+        { id: down, goal: '复盘', status: 'failed', updatedAt: date },
+        { id: other, goal: '番茄钟网页', status: 'failed', updatedAt: date },
+      ] });
+      if (request.method === 'POST' && url.endsWith('/tasks/task_c/put-down')) { (view.tasks[2] as any).putDown = true; view.revision++; return response(view); }
+    } });
+    start(h.fetch); await ready();
+    const sidebar = (id: string) => [...doc().querySelectorAll<HTMLElement>('#runs .task-row')].find(item => item.textContent?.includes(id === down ? '复盘' : '番茄钟网页'));
+    await vi.waitFor(() => expect(sidebar(down)?.textContent).toContain('失败'));
+    const row = doc().querySelector<HTMLElement>('[data-task-id="task_c"]')!;
+    await vi.waitFor(() => expect(row.querySelector('[data-put-down]')).not.toBeNull());
+    clickText('放下', row);
+    await vi.waitFor(() => expect(sidebar(down)?.textContent).toContain('已放下'));
+    expect(sidebar(down)?.querySelector<HTMLElement>('.task-dot')?.dataset.state).toBe('idle');
+    // A failure that was not put down still reads as failed.
+    expect(sidebar(other)?.textContent).toContain('失败');
+    doc().querySelector<HTMLButtonElement>('#run-filters [data-run-filter="attention"]')!.click();
+    await vi.waitFor(() => expect(sidebar(down)).toBeUndefined());
+    expect(sidebar(other)).toBeDefined();
+  });
+
+  it('trusts a put-down mark only while its Run stays failed and unchanged, even after switching away, and leaves it out of the inbox', async () => {
+    const down = 'run_00000000-0000-4000-8000-00000000000e', kept = 'run_00000000-0000-4000-8000-00000000000f';
+    const view = fixture();
+    view.tasks.push(
+      { id: 'task_d', title: '复盘', threadId: 'thread_d', status: 'failed', runId: down, latestRunId: down, putDown: true } as any,
+      { id: 'task_k', title: '番茄钟网页', threadId: 'thread_k', status: 'failed', runId: kept, latestRunId: kept, putDown: true } as any,
+    );
+    const other = { id: 'conv_00000000-0000-4000-8000-0000000000b2', title: '另一段', revision: 1, tasks: [] as any[], messages: [] as any[], hasEarlierMessages: false };
+    const runs = [
+      { id: down, goal: '复盘', status: 'failed', updatedAt: '2026-11-12T01:00:00.000Z' },
+      { id: kept, goal: '番茄钟网页', status: 'failed', updatedAt: '2026-11-12T01:00:00.000Z' },
+    ];
+    const h = harness(view, { handler(url, request) {
+      if (String(url).startsWith('/api/runs/page')) return response({ items: runs });
+      if (url === '/api/conversations' && request.method !== 'POST') return response([view, other]);
+      if (url === `/api/conversations/${other.id}`) return response(other);
+    } });
+    start(h.fetch); await ready();
+    const sidebar = (title: string) => [...doc().querySelectorAll<HTMLElement>('#runs .task-row')].find(item => item.querySelector('strong')?.textContent === title);
+    // A fresh load already reads both as put down, and neither waits in the inbox.
+    await vi.waitFor(() => expect(sidebar('复盘')?.textContent).toContain('已放下'));
+    expect(sidebar('番茄钟网页')?.textContent).toContain('已放下');
+    expect(el('attention-count').textContent).toBe('');
+    // Switch away, so refreshing no longer reads the conversation that put them down.
+    await vi.waitFor(() => expect(el('conversation-select').textContent).toContain('另一段'));
+    el<HTMLSelectElement>('conversation-select').value = other.id;
+    el('conversation-select').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(el('conversation-panel').textContent).toContain('另一段'));
+    // One Run was retried and failed again, so its conversation no longer holds it down;
+    // the other only had a housekeeping write, so its conversation still does.
+    runs[0] = { ...runs[0]!, updatedAt: '2026-11-12T02:00:00.000Z' };
+    runs[1] = { ...runs[1]!, updatedAt: '2026-11-12T02:00:00.000Z' };
+    delete (view.tasks[2] as any).putDown; view.revision++;
+    const reads = () => h.fetch.mock.calls.filter(([url]) => String(url) === `/api/conversations/${view.id}`).length;
+    const before = reads();
+    intervals.find(item => item.ms === 2000)!.callback();
+    await vi.waitFor(() => expect(sidebar('复盘')?.textContent).toContain('失败'));
+    await vi.waitFor(() => expect(sidebar('番茄钟网页')?.textContent).toContain('已放下'));
+    expect(reads()).toBe(before + 1);
+    await vi.waitFor(() => expect(el('attention-count').textContent).toBe('1 项待处理'));
+  });
+
   it('takes a put-down task out of the Bot status in the header and roster, keeping any other failure', async () => {
     const one = 'run_00000000-0000-4000-8000-00000000000a', two = 'run_00000000-0000-4000-8000-00000000000b';
     const view = fixture('bot');
