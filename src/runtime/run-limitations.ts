@@ -35,7 +35,9 @@ export function partialUnknownSection(run: AgentRun): string {
   const missing = (run.plans.at(-1)?.nodes ?? []).filter(node => {
     const step = run.steps.find(step => step.taskId === node.id);
     return step?.status !== 'succeeded';
-  }).map(node => node.title);
+  // Folded to one line like every other item: the suffix is recognised by its one-line items, so a title with a
+  // line break would keep it from being stripped, and the next write would append a second one.
+  }).map(node => node.title.replace(/\s+/g, ' ').trim());
   const problems = run.steps.filter(step => step.status !== 'succeeded').flatMap(step => [...(step.finishRepair?.problems ?? []), ...(step.outputRecovery?.problems ?? [])]
     .map(problem => `${step.taskId}: ${problem.message}`));
   const sourceUnknowns = run.artifacts.flatMap(artifact => artifact.structured?.unknowns.map(item => item.text) ?? []);
