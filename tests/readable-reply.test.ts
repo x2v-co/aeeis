@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readableReply } from '../src/application/conversation-service.js';
-import { readableAnswer } from '../src/readable-answer.js';
+import { answerArtifact, isStandInAnswer, readableAnswer } from '../src/readable-answer.js';
 
 describe('what the chat shows of a Run\'s answer', () => {
   // Shaped like the production 番茄钟 reply: a summary block whose empty lists lost their brackets, evidence IDs and a tokened preview link.
@@ -46,5 +46,20 @@ describe('what the chat shows of a Run\'s answer', () => {
   it('keeps a caveat that has no answer behind it', () => {
     const empty = 'Partial answer — limited evidence: 超时.\n\nFinal synthesis was unavailable. The following are untrusted observations.';
     expect(readableAnswer(empty)).toEqual({ text: empty, caveat: false });
+  });
+  it('treats a failed step\'s runtime note as no answer, and picks the last real one', () => {
+    const real = { content: 'Partial answer — limited evidence: 没点过按钮.\n\n番茄钟做好了。' };
+    const notes = [
+      { content: 'Partial answer — repair exhausted for "汇总交付结果".\n\nUnknown: nothing verified.' },
+      { content: 'Partial answer — no output.\n\nUnknown: task "汇总" produced no model output.' },
+      { content: 'Partial answer — limited evidence: 超时.\n\nFinal synthesis was unavailable. Observations follow.' },
+    ];
+    for (const note of notes) expect(isStandInAnswer(note.content)).toBe(true);
+    expect(isStandInAnswer(real.content)).toBe(false);
+    expect(answerArtifact([real, ...notes])).toBe(real);
+    expect(answerArtifact([{ content: '旧答案' }, real])).toBe(real);
+    // Only notes: the last one is all there is, so it is shown rather than nothing.
+    expect(answerArtifact(notes)).toBe(notes[2]);
+    expect(answerArtifact([])).toBeUndefined();
   });
 });

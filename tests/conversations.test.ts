@@ -461,6 +461,8 @@ describe('single-entry conversation routing', () => {
       run.artifacts = [
         { id: 'artifact_draft', taskId: 'work', title: '草稿', content: 'draft body', evidenceRefs: [], hash: 'a'.repeat(64), createdAt: run.createdAt },
         { id: 'artifact_titles', taskId: 'work', title: '标题', content: '  1. 按期上线\n2. 风险收敛  ', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt },
+        // A later step that failed leaves a runtime note, not an answer: the reply skips it.
+        { id: 'artifact_note', taskId: 'sum', title: '汇总', content: 'Partial answer — repair exhausted for "汇总".\n\nUnknown: task "汇总" did not produce a valid output.', evidenceRefs: [], hash: 'd'.repeat(64), createdAt: run.createdAt },
       ];
     });
     await f.repository.mutate(second.runId, run => {

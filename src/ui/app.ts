@@ -3,7 +3,7 @@ import { STARTER_BOTS, starterBot } from '../starter-bots.js';
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
-import { readableAnswer } from '../readable-answer.js';
+import { answerArtifact, readableAnswer } from '../readable-answer.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
@@ -7167,7 +7167,7 @@ async function refresh(background = false): Promise<void> {
       const view = await api<(RunView & { explanation: RunExplanation }) | ThreadShareView>(`/share/${shareToken}`);
       if ('kind' in view && view.kind === 'thread') {
         document.body.classList.add('thread-page');
-        renderThreadTimeline({ ...view.thread, runs: view.runs.map(run => ({ ...run, threadSequence: run.threadSequence!, outputExcerpt: run.artifacts.at(-1)?.content ?? '' })) }, view.throughSequence);
+        renderThreadTimeline({ ...view.thread, runs: view.runs.map(run => ({ ...run, threadSequence: run.threadSequence!, outputExcerpt: answerArtifact(run.artifacts)?.content ?? '' })) }, view.throughSequence);
         const run = view.runs.find(run => run.id === currentId) ?? view.runs.at(-1);
         if (!run) { current = undefined; currentId = ''; $('detail').hidden = true; return; }
         currentId = run.id; current = run;
@@ -9240,7 +9240,7 @@ function renderDeliveryArtifact(run: RunView): void {
   if (!box) return;
   box.replaceChildren();
   box.hidden = true;
-  const artifact = run.artifacts.at(-1);
+  const artifact = answerArtifact(run.artifacts);
   if (!artifact) {
     const completedCalls = run.calls.filter(call => call.state === 'completed').length;
     const model = run.model?.model ?? run.modelDecision?.selected?.model ?? '固定模型';

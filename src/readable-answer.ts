@@ -46,6 +46,16 @@ export function readableAnswer(raw: string): { text: string; caveat: boolean } {
   return { text: out || text.replace(TOKENED_LINK, '（预览链接见详情）').trim(), caveat };
 }
 
+/** A step that ended without an answer gets a runtime note in its place: no output after a timeout, repair or recovery
+ * exhausted, or raw observations when the final synthesis failed. These openings are fixed runtime text, never a model's. */
+const STAND_IN = /^(?:Partial answer — no output\.|Partial answer — repair exhausted for "|Partial answer — limited evidence: [^\n]*\n\nFinal synthesis was unavailable\.)/;
+export function isStandInAnswer(content: string): boolean { return STAND_IN.test(content.trimStart()); }
+/** Which output is the Run's answer: the last one a step actually wrote. A later step that failed leaves only a note,
+ * which stays in the process view; when every output is such a note, the last one is all there is. */
+export function answerArtifact<T extends { content: string }>(artifacts: readonly T[]): T | undefined {
+  return [...artifacts].reverse().find(item => item.content.trim() && !isStandInAnswer(item.content)) ?? artifacts.at(-1);
+}
+
 /** What the chat shows of a Run's answer: the prose a person reads. A link carrying an access token is never shown in a
  * message, which can be copied or forwarded. */
 export function readableReply(text: string): string {

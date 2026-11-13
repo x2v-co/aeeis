@@ -1,5 +1,5 @@
 import { runBoardBoundary } from '../task-board-controls.js';
-import { readableAnswer } from '../readable-answer.js';
+import { answerArtifact, readableAnswer } from '../readable-answer.js';
 export { readableReply } from '../readable-answer.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -212,12 +212,12 @@ function executionView(run: AgentRun | undefined): { steps: Array<{ title: strin
   const evidence = [...new Set(run.artifacts.map(item => clipTitle(item.title)).filter(Boolean))].slice(0, 6);
   return evidence.length ? { steps, evidence } : { steps };
 }
-/** The answer of a succeeded Run, shown to its owner as the Bot's reply in the chat: the last artifact's text, clipped. The full artifact stays on the Run. */
+/** The answer of a succeeded Run, shown to its owner as the Bot's reply in the chat: the last output a step actually wrote, clipped. The full artifact stays on the Run. */
 const REPLY_LIMIT = 2000;
 const REPLY_RUNS = 20;
 function runReply(run: AgentRun | undefined): { text: string; artifactId: string; truncated?: true; partial?: true } | undefined {
   if (run?.status !== 'succeeded') return;
-  const artifact = run.artifacts.at(-1);
+  const artifact = answerArtifact(run.artifacts);
   const answer = artifact ? readableAnswer(artifact.content) : undefined;
   if (!artifact || !answer?.text) return;
   const { text } = answer;
