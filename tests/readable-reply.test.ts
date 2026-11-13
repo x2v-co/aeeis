@@ -79,9 +79,16 @@ describe('what the chat shows of a Run\'s answer', () => {
     const raw = `${JSON.stringify(block)}\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- Unknown: task "汇总交付结果" did not produce a valid output.`;
     const { text, caveat } = readableAnswer(raw);
     expect(caveat).toBe(true);
-    expect(text).toBe('做好的文件：\n- /workspace/index.html：纯 HTML/JS 单文件番茄钟页面\n\n预览已启动，链接在详情里。\n\n没通过的检查：\n- 重置按钮\n\n还没核实：\n- 没在浏览器里点过开始/重置按钮\n\n静态服务在 3000 端口运行。');
+    expect(text).toBe('做好的文件：\n- /workspace/index.html：纯 HTML/JS 单文件番茄钟页面\n\n预览已启动，链接在详情里。\n\n检查通过 1 项。\n\n没通过的检查：\n- 重置按钮\n\n还没核实：\n- 没在浏览器里点过开始/重置按钮\n\n静态服务在 3000 端口运行。');
     expect(readableReply(JSON.stringify({ ...block, validation: [block.validation[0]], unknowns: [], notes: undefined, preview: { status: 'ready', url: 'https://example.com/' } })))
       .toBe('做好的文件：\n- /workspace/index.html：纯 HTML/JS 单文件番茄钟页面\n\n预览：https://example.com/\n\n检查通过 1 项。');
+  });
+  it('names every check that did not pass, and marks the answer unverified', () => {
+    const block = { schemaVersion: 'website-builder/1', changedFiles: ['index.html'], blockers: [], unknowns: [],
+      validation: [{ name: 'build', status: 'passed' }, { name: 'browser buttons', status: 'unknown' }, { name: 'mobile layout', status: 'skipped' }, { name: 'contrast' }] };
+    expect(readableAnswer(JSON.stringify(block))).toEqual({ caveat: true,
+      text: '做好的文件：\n- index.html\n\n检查通过 1 项。\n\n没确认的检查：\n- browser buttons\n- contrast\n\n跳过的检查：\n- mobile layout' });
+    expect(readableAnswer(JSON.stringify({ ...block, validation: [block.validation[0]] }))).toEqual({ caveat: false, text: '做好的文件：\n- index.html\n\n检查通过 1 项。' });
   });
   it('keeps a summary block it cannot read as it is', () => {
     const other = '{"schemaVersion":"project-pulse/1","progress":[]}';
