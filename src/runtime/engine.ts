@@ -131,20 +131,20 @@ function assertReviewVersion(run: AgentRun, version: number): void {
  * Settles one external side effect against the Run's frozen action policy. On `ask` the pending call is
  * kept and the Run waits; on `refuse` the caller drops the pending call and the executor sees why.
  */
-function gateExternalAction(current: AgentRun, live: Step, candidate: ActionCandidate, pending: { taskId: string; idempotencyKey: string; input: unknown }): ActionVerdict {
+function gateExternalAction(current: AgentRun, live: Step, candidate: ActionCandidate, pending: { taskId: string; idempotencyKey: string; input: unknown; summary?: string | undefined }): ActionVerdict {
   const grant = activeWorkGrant(current);
-  const verdict = decideAction(current.actionPolicy, current.origin, current.executionReview, candidate, { untrusted: externalTextReceived(current), ...(grant ? { grant: { grantId: grant.grantId, containedTools: grant.containedTools, agents: grant.agents } } : {}) });
+  const verdict = decideAction(current.actionPolicy, current.origin, current.executionReview, candidate, { untrusted: externalTextReceived(current), ...(grant ? { grant: { grantId: grant.grantId, containedTools: grant.containedTools, agents: grant.agents, connectors: grant.connectors } } : {}) });
   const ref = actionRef(candidate);
   if (verdict.decision === 'allow') {
     if (verdict.rule === 'allow') event(current, 'action.allowed', { taskId: pending.taskId, ref });
-    if (verdict.rule === 'grant') event(current, 'action.allowed', { taskId: pending.taskId, ref, rule: 'grant', grantId: grant!.grantId });
+    if (verdict.rule === 'grant') event(current, 'action.allowed', { taskId: pending.taskId, ref, rule: 'grant', grantId: grant!.grantId, ...(candidate.scope ? { scope: candidate.scope } : {}) });
     return verdict;
   }
   if (verdict.decision === 'ask' || verdict.decision === 'judge') {
     const judging = verdict.decision === 'judge';
     current.actionApproval = {
       status: judging ? 'judging' : 'pending', kind: candidate.kind, ref, taskId: pending.taskId, idempotencyKey: pending.idempotencyKey,
-      inputHash: digest(pending.input ?? null), reason: verdict.reason, requestedAt: now(),
+      inputHash: digest(pending.input ?? null), reason: pending.summary ? `${verdict.reason}. It would ${pending.summary}` : verdict.reason, requestedAt: now(),
     };
     if (judging) {
       event(current, 'action.judging', { taskId: pending.taskId, ref, idempotencyKey: pending.idempotencyKey, reason: verdict.reason });
@@ -2938,7 +2938,8 @@ export class AgentEngine {
           timeoutMs: 60_000, requestedAt: now(),
         };
         event(current, 'tool.requested', { taskId: node.id, toolId: decision.toolId, toolVersion: decision.toolVersion, idempotencyKey: current.pendingTool.idempotencyKey });
-        const verdict = gateExternalAction(current, live, { kind: 'tool', id: decision.toolId, version: decision.toolVersion, capabilities: approved.capabilities }, { taskId: node.id, idempotencyKey: current.pendingTool.idempotencyKey, input: decision.input });
+        const outward = this.tools?.outwardAction?.(decision.toolId, decision.input);
+        const verdict = gateExternalAction(current, live, { kind: 'tool', id: decision.toolId, version: decision.toolVersion, capabilities: approved.capabilities, scope: outward?.scope }, { taskId: node.id, idempotencyKey: current.pendingTool.idempotencyKey, input: decision.input, summary: outward?.summary });
         if (verdict.decision === 'refuse') {
           delete current.pendingTool;
           this.assertRecoverableFailureBudget(current, node.id, 'External tool was refused by the owner action policy');
@@ -4081,7 +4082,7 @@ export class AgentEngine {
     const budget = { ...(allocation.tokens === undefined ? {} : { tokens: allocation.tokens }), ...(allocation.moneyUsd === undefined ? {} : { moneyUsd: allocation.moneyUsd }) };
     if (budget.tokens !== undefined || budget.moneyUsd !== undefined) request.modelBudget = { ...request.modelBudget, ...budget };
     return {
-      grantId: grant.grantId, digest: workGrantDigest(grant), title: grant.title, tools: [...grant.tools], agents: [...grant.agents],
+      grantId: grant.grantId, digest: workGrantDigest(grant), title: grant.title, tools: [...grant.tools], agents: [...grant.agents], ...(grant.connectors ? { connectors: [...grant.connectors] } : {}),
       containedTools: [...new Set(toolIds)].filter(toolId => grant.tools.includes(toolId) && contained.has(toolId)).sort(),
       expiresAt: grant.expiresAt, allocation: budget,
     };

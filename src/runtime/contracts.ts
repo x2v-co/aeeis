@@ -341,6 +341,8 @@ export interface TakeoverAction { at: string; toolId: string; summary: string; s
 
 export interface WorkGrantSnapshot {
   grantId: string; digest: string; title: string; tools: string[]; agents: string[]; containedTools: string[];
+  /** Outward actions pre-approved by tool and target, e.g. `repo-push:sandbox`. */
+  connectors?: string[];
   expiresAt: string; allocation: { tokens?: number; moneyUsd?: number }; revokedAt?: string;
 }
 export interface AgentRun {
@@ -467,6 +469,8 @@ export interface AgentRun {
 
 export interface WorkGrantSnapshot {
   grantId: string; digest: string; title: string; tools: string[]; agents: string[]; containedTools: string[];
+  /** Outward actions pre-approved by tool and target, e.g. `repo-push:sandbox`. */
+  connectors?: string[];
   expiresAt: string; allocation: { tokens?: number; moneyUsd?: number }; revokedAt?: string;
 }
 

@@ -5,6 +5,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { DEFAULT_HOST, DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord, type SandboxConfig } from './docker-sandbox.js';
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
 import { ClaudeCodeTransport, executorConfigSchema } from './executor.js';
+import { EXPORT_LIMITS, EXPORT_SKIP, REPO_PUSH_TOOL, REPO_PUSH_VERSION, RepoConnector, reposConfigSchema } from './repo-connector.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import type { MachineInterrupt, MachineInterruptResult, Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
@@ -48,6 +49,8 @@ export const localToolsConfigSchema = z.object({
   assign: assignSchema.optional(),
   /** Limits per user, across every host. Required before several users may share the tools (config-validation.ts). */
   perPrincipal: z.object({ maxMachines: z.number().int().min(1).max(50) }).strict().optional(),
+  /** GitHub repositories Bots may publish to through `repo-push`. AEEIS holds each token; Run machines never see it. */
+  repos: reposConfigSchema.optional(),
 }).strict().refine(config => config.defaultAllowedTools.every(name => config.tools.includes(name)), 'Default tools must be enabled')
   .refine(config => !config.executor || config.sandbox.modelRelay, 'The executor needs sandbox.modelRelay')
   .refine(config => !config.hosts === !config.assign, 'hosts and assign go together')
@@ -122,6 +125,7 @@ export function hostConfigs(config: LocalToolsConfig): Map<string, SandboxConfig
 /** Local tools gateway. All file/code execution uses persistent Run containers on a sandbox host. With several users,
  * each user's machines run on the host `assign` gives them, are labelled as theirs, count against their own limit,
  * and wait only behind their own calls on that host. */
+const REPO_PUSH_CAPABILITIES = ['write', 'network'];
 export class LocalToolGateway implements ToolGateway {
   /** One queue per user per host: one person's long call or waiting host never holds up another's tools. */
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -132,7 +136,10 @@ export class LocalToolGateway implements ToolGateway {
   private closing = false;
   /** Who each Run belongs to; the server sets it. Without it every Run is the single owner's. */
   principalOf: ((runId: string) => Promise<RunPrincipal | undefined>) | undefined;
+  /** Publishes workspace folders to the configured repos. Its effect is outside the Run, so it is never contained. */
+  repoConnector: RepoConnector | undefined;
   private constructor(readonly config: LocalToolsConfig) {
+    this.repoConnector = config.repos ? new RepoConnector(config.repos) : undefined;
     const existing = config.assign?.existing ?? config.assign?.default ?? DEFAULT_HOST;
     this.defaultHost = config.assign?.default ?? DEFAULT_HOST;
     const hosts = hostConfigs(config);
@@ -301,10 +308,17 @@ export class LocalToolGateway implements ToolGateway {
     return new LocalToolGateway(config);
   }
   /** The configured tools and versions, without reaching the sandbox host. */
-  toolRefs(): { id: string; version: string }[] { return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3' })); }
+  toolRefs(): { id: string; version: string }[] { return [...this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3' })), ...(this.repoConnector ? [{ id: REPO_PUSH_TOOL, version: REPO_PUSH_VERSION }] : [])]; }
   async listTools(): Promise<ToolDescriptor[]> {
     const image = this.config.tools.some(id => id !== 'web-fetch') ? await this.sandbox.imageId() : null;
-    return this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}${runsCode(id) ? this.networkNote() : ''}`, capabilities: this.capabilities(id), inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
+    const tools: ToolDescriptor[] = this.config.tools.map(id => ({ id, version: id === 'web-fetch' ? '1' : '3', description: `${descriptions[id]}${id === 'web-fetch' ? ` Allowed hosts: ${this.config.webHosts.join(', ') || '(none)'}.` : ''}${runsCode(id) ? this.networkNote() : ''}`, capabilities: this.capabilities(id), inputSchema: { ...z.toJSONSchema(schemas[id], { io: 'input' }), $comment: `Local policy ${fingerprint({ config: this.config, image })}` }, outputSchema: { type: 'object' } }));
+    if (this.repoConnector) tools.push({ id: REPO_PUSH_TOOL, version: REPO_PUSH_VERSION, description: this.repoConnector.description(), capabilities: REPO_PUSH_CAPABILITIES, inputSchema: this.repoConnector.inputSchema(), outputSchema: { type: 'object' } });
+    return tools;
+  }
+  /** What an outward call would do and which grant entry may pre-approve it. Only this gateway's own connector answers,
+   * never tool metadata, so a remote toolkit cannot make its tool look pre-approved. */
+  outwardAction(toolId: string, input: unknown): { scope: string; summary: string } | undefined {
+    return toolId === REPO_PUSH_TOOL ? this.repoConnector?.describe(input) : undefined;
   }
   private capabilities(id: string): string[] {
     if (runsCode(id)) return ['execute', 'read', 'write', ...(this.config.sandbox.network === 'none' ? [] : ['network'])];
@@ -333,6 +347,7 @@ export class LocalToolGateway implements ToolGateway {
   async invoke(request: ToolInvocation, context?: ToolCallContext): Promise<ToolResult> {
     const workspace = this.config.sandbox.workspaceVolumes ? context?.workspace : undefined;
     const runId = /^run:(run_[a-f0-9-]{36}):/.exec(request.capabilityGrant)?.[1];
+    if (request.toolId === REPO_PUSH_TOOL) return this.pushRepo(request, runId, workspace);
     // Without a valid Run there is no host or user to queue for; execute refuses it.
     if (!runId) return this.execute(request, this.sandbox, workspace);
     let host: string, hash: string;
@@ -348,7 +363,50 @@ export class LocalToolGateway implements ToolGateway {
     // report or to throw, so the engine keeps treating it as possibly done.
     return this.enqueueOn(host, hash, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
   }
+  /** Reading the files out goes through the Run's queue like any tool call; the push itself happens here in AEEIS,
+   * journaled first so an interrupted push is checked on GitHub, never repeated blind. */
+  private async pushRepo(request: ToolInvocation, runId: string | undefined, workspace: string | undefined): Promise<ToolResult> {
+    const startedAt = new Date().toISOString();
+    const connector = this.repoConnector;
+    if (!connector || request.toolVersion !== REPO_PUSH_VERSION) return this.result(request, 'failed', { error: 'Tool/version is not enabled' }, startedAt);
+    if (!runId || request.capabilityGrant !== `run:${runId}:${REPO_PUSH_TOOL}` || !request.idempotencyKey.startsWith(runId + ':')) return this.result(request, 'failed', { error: 'Invalid Run capability grant' }, startedAt);
+    let previous;
+    try { previous = await this.readRecord(request); }
+    catch (error) { return this.result(request, 'failed', { error: error instanceof Error ? error.message : 'Local tool failed' }, startedAt); }
+    if (previous) return previous.result && previous.result.status !== 'unknown' ? previous.result : this.reconcilePush(request);
+    let host: string, hash: string;
+    try { host = await this.hostFor(runId); hash = (await this.principalKey(runId)).hash; }
+    catch (error) { return this.result(request, 'failed', { error: error instanceof Error ? error.message : 'Local tool failed' }, startedAt); }
+    let journalStarted = false;
+    try {
+      const outcome = await connector.push(request.input, request.idempotencyKey, runId, async path => {
+        const files = await this.enqueueOn(host, hash, (sandbox, principal) => sandbox.exportFiles(runId, path, { ...EXPORT_LIMITS, skip: EXPORT_SKIP }, workspace, principal));
+        // Recorded only now: from here on the push may reach GitHub.
+        await this.durableWrite(this.recordPath(request), JSON.stringify({ requestHash: this.requestHash(request) }));
+        journalStarted = true;
+        return files;
+      });
+      const result = this.result(request, outcome.status, outcome.output, startedAt);
+      if (journalStarted) await this.saveResult(request, result);
+      return result;
+    } catch (error) {
+      const result = this.result(request, journalStarted ? 'unknown' : 'failed', { error: error instanceof Error ? error.message : 'Local tool failed' }, startedAt);
+      if (journalStarted) await this.saveResult(request, result).catch(() => undefined);
+      return result;
+    }
+  }
+  /** GitHub, not the journal, says whether an interrupted push landed. A settled answer is saved over the journal. */
+  private async reconcilePush(request: ToolInvocation): Promise<ToolResult> {
+    const record = await this.readRecord(request);
+    if (record?.result && record.result.status !== 'unknown') return record.result;
+    if (!this.repoConnector) return this.result(request, 'unknown', { error: 'repo-push is no longer configured, so AEEIS cannot check GitHub' });
+    const outcome = await this.repoConnector.reconcile(request.input, request.idempotencyKey);
+    const result = this.result(request, outcome.status, outcome.output);
+    if (record && outcome.status !== 'unknown') await this.saveResult(request, result);
+    return result;
+  }
   async reconcile(request: ToolInvocation, _receipt: Receipt): Promise<ToolResult> {
+    if (request.toolId === REPO_PUSH_TOOL) return this.reconcilePush(request);
     const record = await this.readRecord(request);
     return record?.result ?? this.result(request, 'unknown', { error: 'No completed local receipt. Inspect the workspace before deciding to retry.' });
   }
@@ -369,7 +427,7 @@ export class LocalToolGateway implements ToolGateway {
     return { status, output, outputRefs: status === 'completed' ? [receiptId] : [], receipt: {
       schemaVersion: 'receipt/1', receiptId, provider: 'aeeis-local-tools', operation: request.toolId,
       requestHash: this.requestHash(request), responseHash: fingerprint(output), inputRefs: [request.taskId], outputRefs: status === 'completed' ? [receiptId] : [],
-      capabilitiesUsed: this.config.tools.includes(request.toolId as typeof names[number]) ? this.capabilities(request.toolId) : [],
+      capabilitiesUsed: request.toolId === REPO_PUSH_TOOL ? REPO_PUSH_CAPABILITIES : this.config.tools.includes(request.toolId as typeof names[number]) ? this.capabilities(request.toolId) : [],
       startedAt, completedAt: new Date().toISOString(), status,
       cost: { tokens: 0, money: 0, currency: 'USD' },
       ...(status === 'completed' ? {} : { errorCode: status === 'unknown' ? 'execution_unknown' : 'tool_failed' }),
@@ -467,6 +525,11 @@ export class CombinedToolGateway implements ToolGateway {
   async invoke(request: ToolInvocation, context?: ToolCallContext) { return (await this.gateway(request)).invoke(request, context); }
   async workspaceContainedTools(): Promise<string[]> {
     return (await Promise.all(this.gateways.map(gateway => gateway.workspaceContainedTools?.() ?? Promise.resolve([])))).flat();
+  }
+  /** Tool IDs are unique across gateways (listTools refuses duplicates), so at most one gateway answers. */
+  outwardAction(toolId: string, input: unknown): { scope: string; summary: string } | undefined {
+    for (const gateway of this.gateways) { const found = gateway.outwardAction?.(toolId, input); if (found) return found; }
+    return undefined;
   }
   async interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> {
     const results = await Promise.all(this.gateways.map(gateway => gateway.interruptRun?.(runId, action) ?? Promise.resolve({ confirmed: true })));
