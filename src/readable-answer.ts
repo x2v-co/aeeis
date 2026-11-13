@@ -40,6 +40,18 @@ type Loose = Record<string, unknown>;
 const loose = (value: unknown): value is Loose => typeof value === 'object' && value !== null && !Array.isArray(value);
 const words = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value.replace(/\s+/g, ' ').trim() : undefined;
 const items = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+/** A check the model described only as a claim, often a whole paragraph: its first clause, links left out and at most
+ * CHECK_GIST characters, so the list stays one short line per check. The full claim stays in the details. */
+const CHECK_GIST = 50;
+function checkGist(claim: string | undefined): string | undefined {
+  if (!claim) return;
+  const text = claim.replace(/https?:\/\/[^\s，。；;）)]+/g, '').replace(/\s+/g, ' ').trim();
+  const first = text.split(/[；;。！？!?]|：|: /)[0]!.replace(/[，,、\s]+$/, '').trim();
+  if (!first) return;
+  const chars = [...first];
+  const gist = chars.length > CHECK_GIST ? `${chars.slice(0, CHECK_GIST).join('').trimEnd()}` : first;
+  return gist.length < text.length ? `${gist}…` : gist;
+}
 /** A site build the model reported only as its summary block, with no prose after it: the same facts in a few lines a
  * person reads. Models fill the block loosely (a file as a path or an object, extra description or notes), so every field
  * is optional here and anything unreadable is left out. Every check that did not pass is named, so the answer never shows
@@ -72,7 +84,7 @@ function websiteBuilderProse(block: Loose): { text: string; open: boolean } | un
   // Anything other than passed, failed or skipped, a missing status included, was not confirmed.
   const kind = (item: Loose) => item.status === 'failed' ? 'failed' : item.status === 'skipped' ? 'skipped' : 'unknown';
   for (const [which, heading] of [['failed', '没通过的检查：'], ['unknown', '没确认的检查：'], ['skipped', '跳过的检查：']] as const) {
-    const named = checks.filter(item => item.status !== 'passed' && kind(item) === which).map(item => words(item.name) ?? words(item.claim) ?? '（没写名称）');
+    const named = checks.filter(item => item.status !== 'passed' && kind(item) === which).map(item => words(item.name) ?? checkGist(words(item.claim)) ?? '（没写名称）');
     if (named.length) { lines.push('', heading, ...named.map(item => `- ${item}`)); open = true; }
   }
   const listed = (key: string, heading: string) => {

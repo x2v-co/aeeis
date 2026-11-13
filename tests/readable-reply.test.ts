@@ -101,6 +101,20 @@ describe('what the chat shows of a Run\'s answer', () => {
     expect(read({ status: 'failed' })).toEqual({ caveat: true, text: `${base}\n\n预览没能启动。\n\n检查通过 1 项。` });
     expect(read({ status: 'started', url: 'https://example.com/' })).toEqual({ caveat: false, text: `${base}\n\n预览：https://example.com/\n\n检查通过 1 项。` });
   });
+  it('names a check described only by a long claim by its first clause, without links', () => {
+    // The claims the production 番茄钟 summary carried, with no name and no status.
+    const validation = [
+      { claim: 'executor 报告已创建 /workspace/index.html：单文件、内联 CSS/JS、无外部资源；h1 与 document.title 均为「番茄钟」；加载显示 25:00（1500 秒，MM:SS）' },
+      { claim: 'executor 用 curl https://32798-abc.instabox.tech/?_token=ibp_secret 确认服务返回 HTTP 200 且页面包含「番茄钟」' },
+      { claim: '3000 端口预览链接已通过 process preview 获取' },
+      { claim: '页面在手机宽度下布局正常、按钮可以点击、倒计时数字足够大、颜色对比度符合要求并且没有出现横向滚动条的问题' },
+    ];
+    const { text } = readableAnswer(JSON.stringify({ schemaVersion: 'website-builder/1', changedFiles: ['index.html'], validation }));
+    expect(text).toBe('做好的文件：\n- index.html\n\n没确认的检查：\n- executor 报告已创建 /workspace/index.html…\n- executor 用 curl 确认服务返回 HTTP 200 且页面包含「番茄钟」\n- 3000 端口预览链接已通过 process preview 获取\n- 页面在手机宽度下布局正常、按钮可以点击、倒计时数字足够大、颜色对比度符合要求并且没有出现横向滚动条的…');
+    expect(text).not.toMatch(/_token|ibp_|https?:/);
+    // A name is the model's own short label and is shown as written.
+    expect(readableAnswer(JSON.stringify({ schemaVersion: 'website-builder/1', changedFiles: ['index.html'], validation: [{ name: validation[3]!.claim }] })).text).toContain(validation[3]!.claim);
+  });
   it('keeps a summary block it cannot read as it is', () => {
     const other = '{"schemaVersion":"project-pulse/1","progress":[]}';
     expect(readableAnswer(other).text).toBe(other);
