@@ -93,7 +93,8 @@ interface RunComputer {
   screenshots(runId: string): Promise<{ name: string; bytes: number; capturedAt: string }[]>;
   screenshot(runId: string, name: string): Promise<Buffer | undefined>;
   sourceArchive(runId: string): Promise<Buffer | undefined>;
-  hostWait(): Promise<HostWait | undefined>;
+  /** Whether the host this Run's machine is on is being waited for. */
+  hostWait(runId: string): Promise<HostWait | undefined>;
   deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
   savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
@@ -2480,7 +2481,7 @@ export function buildApp(options: Options) {
     if (!options.runComputer) return reply.code(404).send({ error: 'This AEEIS has no Run machines' });
     // Each look reaches the host, and on some hosts that counts as activity, so only working Runs are looked at.
     const live = ['queued', 'planning', 'running', 'reviewing', 'needs_input', 'waiting_external', 'paused'].includes(run.status);
-    const [machine, screenshots, hostWait, delivery] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait(), options.runComputer.deliverables?.(run.id)]);
+    const [machine, screenshots, hostWait, delivery] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait(run.id), options.runComputer.deliverables?.(run.id)]);
     return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}), ...(delivery ? { delivery } : {}) };
   });
   // The copy of the site saved when the machine was reclaimed. A browser tab cannot send the owner's token, so the

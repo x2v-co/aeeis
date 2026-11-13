@@ -363,6 +363,8 @@ let hermesDebateIngress: HermesDebateIngress | undefined;
 try {
   const remoteToolkit = remoteToolGateway(process.env);
   localToolkit = process.env.AEEIS_LOCAL_TOOLS_CONFIG ? await LocalToolGateway.load(process.env.AEEIS_LOCAL_TOOLS_CONFIG) : undefined;
+  // Each Run's machine goes to its user's sandbox host and counts as that user's.
+  if (localToolkit) localToolkit.principalOf = async runId => { const run = await repository.get(runId); return { owner: run.owner, tenantId: run.tenantId }; };
   if (process.env.AEEIS_RESOURCE_REGISTRY_FILE) resourceRegistry = await FileResourceRegistry.load(process.env.AEEIS_RESOURCE_REGISTRY_FILE);
   const toolkit = localToolkit && remoteToolkit ? new CombinedToolGateway([localToolkit, remoteToolkit]) : localToolkit ?? remoteToolkit;
   const skillAuditStore = process.env.DATABASE_URL && process.env.AEEIS_OWNHOW_ENABLED === '1'

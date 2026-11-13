@@ -128,13 +128,43 @@ certificate; a paused or cooling-down machine is waited for up to
 and to the npm registry for the pinned `instabox` CLI. The Anthropic key never
 enters the Bot's container: the per-Run relay holds it.
 
-Production allows local tools only in this shape: `sandbox.ssh` set, network
-`proxied` or `none`, no `web-fetch`, and a single owner (no
-`AEEIS_PRINCIPAL_TOKENS` or `AEEIS_OIDC_ISSUER`). `bin/deploy.sh` runs a startup
+#### Several sandbox hosts, one per user
+
+`hosts` names each sandbox host and `assign` says whose machines run where
+(`local-tools.example.hosts.json`). `sandbox` keeps what a Run may do on every
+host (network, egress, image, relay, workspaces, lifetimes); a host adds how to
+reach it (`ssh`, `sshLoginCommand`, `sshWaitSeconds`), its previews
+(`previewPorts`, `previewCommand`; a host without a `previewCommand` shares no
+previews) and its size (`memoryMiB`, `cpus`, `pids`).
+
+- `assign.principals` maps `"<tenant>/<principal>"` (or `"<principal>"` for any
+  tenant) to a host; everyone else gets `assign.default`. A Run stays on the
+  host its machine was created on, so changing the assignment moves only new
+  Runs. A Work Grant's workspace volume lives on one host, so a user moved to
+  another host starts that workspace afresh there.
+- `assign.existing` is the host that machines made before hosts had names live
+  on (default: `assign.default`). Set it to the host the old `sandbox.ssh`
+  pointed at when converting a running deployment.
+- Each user's machines are labelled as theirs (a hash, not the user's name), and
+  a container or workspace volume labelled for someone else is refused. Each
+  user's calls queue apart, per host, so one user's long call or waiting host
+  never holds up another's tools. `perPrincipal.maxMachines` caps how many
+  machines one user has at once across all hosts.
+
+For a plain VPS host: install Docker, give a dedicated user access to it, build
+the image there with `npm run sandbox:build -- --host <name>` (or `docker build
+-t aeeis-sandbox:3 sandbox/` on the VPS), and put an SSH entry for it in
+`secrets/ssh/<name>.conf` with its key and `known_hosts` beside it
+(`ssh.example.conf`). The API container reads `/run/aeeis-secrets/ssh/*.conf`.
+
+Production allows local tools only in this shape: every host remote (`ssh` set
+on each of `hosts`, or `sandbox.ssh`), network `proxied` or `none`, no
+`web-fetch`. Several users (`AEEIS_PRINCIPAL_TOKENS` or `AEEIS_OIDC_ISSUER`)
+also need `perPrincipal.maxMachines`. `bin/deploy.sh` runs a startup
 gate (`scripts/check-tools.mjs`) in a one-off container before replacing anything:
-startup checks, Toolkit plus local tools, and default tools must pass, and the
-sandbox host is reported but not required. AEEIS starts without the sandbox
-host, and its readiness check leaves the host alone while no Run uses it, so an
+startup checks, Toolkit plus local tools, and default tools must pass, and each
+sandbox host is reported but not required. AEEIS starts without its sandbox
+hosts, and its readiness check leaves a host alone while no Run uses it, so an
 idle Instabox machine can pause.
 
 ## Network and trust

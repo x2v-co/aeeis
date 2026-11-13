@@ -2,13 +2,33 @@ import { createHash, randomUUID } from 'node:crypto';
 import { savedSiteFile } from './saved-site.js';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
-import { DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord } from './docker-sandbox.js';
+import { DEFAULT_HOST, DockerSandbox, SandboxError, sandboxConfigSchema, type HostWait, type MachineView, type RunMachineRecord, type SandboxConfig } from './docker-sandbox.js';
 import { readSnapshot, commitSnapshot } from './sandbox-workspace.js';
 import { ClaudeCodeTransport, executorConfigSchema } from './executor.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import type { MachineInterrupt, MachineInterruptResult, Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
 
+const hostId = z.string().regex(/^[a-z][a-z0-9-]{0,30}$/, 'Use a short lowercase host name such as instabox or vps-sg');
+/** What may differ between sandbox hosts: how to reach the machine, how it shares previews, and its size. What a Run
+ * may do (network, egress, image, relay, workspaces, lifetimes) stays the deployment's, the same on every host. */
+const hostOverrideSchema = z.object({
+  ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/),
+  sshLoginCommand: z.array(z.string().min(1).max(500)).min(1).max(20).optional(),
+  sshWaitSeconds: z.number().int().min(0).max(3600).optional(),
+  previewPorts: z.array(z.number().int().min(1024).max(65535)).max(5).optional(),
+  previewCommand: z.object({ publish: z.array(z.string().min(1).max(500)).min(1).max(20), unpublish: z.array(z.string().min(1).max(500)).min(1).max(20) }).strict().optional(),
+  memoryMiB: z.number().int().min(128).max(16384).optional(),
+  cpus: z.number().min(0.25).max(16).optional(),
+  pids: z.number().int().min(16).max(4096).optional(),
+}).strict();
+/** Which host each user's machines run on. A key is "<tenant>/<principal>", or "<principal>" for any tenant. */
+const assignSchema = z.object({
+  default: hostId,
+  principals: z.record(z.string().regex(/^[^\s/]{1,200}(?:\/[^\s/]{1,200})?$/), hostId).default({}),
+  /** The host whose machines were made before hosts had names. Defaults to `default`. */
+  existing: hostId.optional(),
+}).strict();
 const names = ['read', 'write', 'diff', 'glob', 'grep', 'python', 'shell', 'process', 'browser', 'web-fetch'] as const;
 /** Tools that run code in the Run container: what they can reach is whatever the container's network allows. */
 const runsCode = (id: string) => ['python', 'shell', 'process', 'browser'].includes(id);
@@ -23,8 +43,15 @@ export const localToolsConfigSchema = z.object({
   webHosts: z.array(z.string().regex(/^[a-z0-9.-]+$/)).default([]),
   /** A coding executor as an AEEIS Agent, running in each Run's container. Needs sandbox.modelRelay. */
   executor: executorConfigSchema.optional(),
+  /** Named sandbox hosts, each `sandbox` with that host's own access and size. Without it, `sandbox` is the one host. */
+  hosts: z.record(hostId, hostOverrideSchema).optional(),
+  assign: assignSchema.optional(),
+  /** Limits per user, across every host. Required before several users may share the tools (config-validation.ts). */
+  perPrincipal: z.object({ maxMachines: z.number().int().min(1).max(50) }).strict().optional(),
 }).strict().refine(config => config.defaultAllowedTools.every(name => config.tools.includes(name)), 'Default tools must be enabled')
-  .refine(config => !config.executor || config.sandbox.modelRelay, 'The executor needs sandbox.modelRelay');
+  .refine(config => !config.executor || config.sandbox.modelRelay, 'The executor needs sandbox.modelRelay')
+  .refine(config => !config.hosts === !config.assign, 'hosts and assign go together')
+  .refine(config => !config.hosts || !config.assign || [config.assign.default, config.assign.existing ?? config.assign.default, ...Object.values(config.assign.principals)].every(host => host in config.hosts!), 'assign names a host that is not in hosts');
 export type LocalToolsConfig = z.infer<typeof localToolsConfigSchema>;
 const pathInput = z.string().min(1).max(1000);
 const hashInput = z.string().regex(/^[a-f0-9]{64}$/);
@@ -77,31 +104,103 @@ class ToolError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed', readonly output?: unknown) { super(message); }
 }
 
-/** Local, single-owner gateway. All file/code execution uses persistent Run containers. */
+/** The user a Run belongs to. */
+export interface RunPrincipal { owner: string; tenantId?: string | undefined }
+/** Each named host's sandbox settings: the deployment's `sandbox`, with the host's own access and size on top. */
+export function hostConfigs(config: LocalToolsConfig): Map<string, SandboxConfig> {
+  if (!config.hosts) return new Map([[DEFAULT_HOST, config.sandbox]]);
+  return new Map(Object.entries(config.hosts).map(([id, host]) => {
+    const merged = { ...config.sandbox, ...host };
+    // A host that publishes no previews shares none, whatever the deployment lists.
+    if (!host.previewCommand) { delete (merged as Partial<SandboxConfig>).previewCommand; merged.previewPorts = host.previewPorts ?? []; }
+    const parsed = sandboxConfigSchema.safeParse(merged);
+    if (!parsed.success) throw new Error(`Sandbox host ${id}: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
+    return [id, parsed.data];
+  }));
+}
+
+/** Local tools gateway. All file/code execution uses persistent Run containers on a sandbox host. With several users,
+ * each user's machines run on the host `assign` gives them, are labelled as theirs, count against their own limit,
+ * and wait only behind their own calls on that host. */
 export class LocalToolGateway implements ToolGateway {
-  private queue: Promise<unknown> = Promise.resolve();
-  private readonly sandbox: DockerSandbox;
+  /** One queue per user per host: one person's long call or waiting host never holds up another's tools. */
+  private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly sandboxes: Map<string, DockerSandbox>;
+  private readonly defaultHost: string;
+  private readonly runHosts = new Map<string, string>();
   private closing = false;
-  private constructor(readonly config: LocalToolsConfig) { this.sandbox = new DockerSandbox(config.sandbox, config.stateDirectory); }
-  async close() { this.closing = true; await this.sandbox.close(); await this.queue; }
+  /** Who each Run belongs to; the server sets it. Without it every Run is the single owner's. */
+  principalOf: ((runId: string) => Promise<RunPrincipal | undefined>) | undefined;
+  private constructor(readonly config: LocalToolsConfig) {
+    const existing = config.assign?.existing ?? config.assign?.default ?? DEFAULT_HOST;
+    this.defaultHost = config.assign?.default ?? DEFAULT_HOST;
+    this.sandboxes = new Map([...hostConfigs(config)].map(([id, sandbox]) => [id, new DockerSandbox(sandbox, config.stateDirectory, {
+      host: id, unlabeled: id === existing, ...(config.perPrincipal ? { maxRunsPerPrincipal: config.perPrincipal.maxMachines } : {}),
+    })]));
+  }
+  /** The default host's sandbox, for what is the same on every host. */
+  private get sandbox(): DockerSandbox { return this.sandboxes.get(this.defaultHost)!; }
+  /** Host names and their sandboxes, for checks and operator scripts. */
+  hosts(): [string, DockerSandbox][] { return [...this.sandboxes]; }
+  async close() {
+    this.closing = true;
+    await Promise.all([...this.sandboxes.values()].map(sandbox => sandbox.close()));
+    await Promise.all([...this.queues.values()]);
+  }
+  /** A hash of the Run's user, stored and labelled instead of the user's identity. */
+  private async principalKey(runId: string): Promise<{ key: string; hash: string; owner: string; tenant: string }> {
+    const principal = await this.principalOf?.(runId).catch(() => undefined);
+    const owner = principal?.owner ?? 'owner', tenant = principal?.tenantId ?? 'local';
+    const key = `${tenant}/${owner}`;
+    return { key, hash: sha(key).slice(0, 16), owner, tenant };
+  }
+  /** The host a Run's machine is on: where its record says, else where its user is assigned. Fixed once chosen. */
+  async hostFor(runId: string): Promise<string> {
+    const known = this.runHosts.get(runId);
+    if (known) return known;
+    let host: string | undefined;
+    if (/^run_[a-f0-9-]{36}$/.test(runId)) {
+      try {
+        const record = JSON.parse(await readFile(join(this.config.stateDirectory, 'sandboxes', `${runId}.json`), 'utf8')) as { host?: unknown };
+        host = typeof record.host === 'string' && this.sandboxes.has(record.host) ? record.host : this.config.assign?.existing ?? this.defaultHost;
+      } catch (error) { if (!isMissing(error)) throw error; }
+    }
+    if (!host) {
+      const { owner, tenant } = await this.principalKey(runId);
+      const principals = this.config.assign?.principals ?? {};
+      host = principals[`${tenant}/${owner}`] ?? principals[owner] ?? this.defaultHost;
+    }
+    this.runHosts.set(runId, host);
+    return host;
+  }
+  private async sandboxFor(runId: string): Promise<DockerSandbox> { return this.sandboxes.get(await this.hostFor(runId))!; }
+  /** Runs `work` after the calls already queued for this Run's user on this Run's host. */
+  private async enqueue<T>(runId: string, work: (sandbox: DockerSandbox, principal: string) => Promise<T>): Promise<T> {
+    const host = await this.hostFor(runId), { hash } = await this.principalKey(runId), lane = `${host}:${hash}`;
+    const result = (this.queues.get(lane) ?? Promise.resolve()).then(() => work(this.sandboxes.get(host)!, hash));
+    const settled = result.catch(() => undefined);
+    this.queues.set(lane, settled);
+    void settled.then(() => { if (this.queues.get(lane) === settled) this.queues.delete(lane); });
+    return result;
+  }
   private async saveArtifacts(runId: string, files: import('./sandbox-workspace.js').WorkspaceFile[]) {
     const workspace = join(this.config.workspaceRoot, runId);
     await mkdir(workspace, { recursive: true, mode: 0o700 });
     await commitSnapshot(join(workspace, 'artifacts'), files, this.config.sandbox.snapshotMiB * 1024 * 1024);
   }
   release(runId: string): Promise<void> {
-    const result = this.queue.then(() => this.sandbox.release(runId, files => this.saveArtifacts(runId, files)));
-    this.queue = result.catch(() => undefined); return result;
+    return this.enqueue(runId, sandbox => sandbox.release(runId, files => this.saveArtifacts(runId, files)));
   }
   /** When each kept machine was last woken; a machine's own idle timer would otherwise end it before its keep does. */
   private readonly touched = new Map<string, number>();
   async reap(status: (runId: string) => Promise<string>) {
-    for (const run of await this.sandbox.pendingRuns()) {
+    for (const [host, sandbox] of this.sandboxes) for (const run of await sandbox.pendingRuns()) {
+      this.runHosts.set(run.runId, host);
       if (run.keepUntil && run.keepUntil > Date.now() && !run.expired) {
         const last = this.touched.get(run.runId) ?? 0;
-        if (Date.now() - last >= Math.min(600, this.config.sandbox.idleSeconds / 3) * 1000) {
+        if (Date.now() - last >= Math.min(600, sandbox.config.idleSeconds / 3) * 1000) {
           this.touched.set(run.runId, Date.now());
-          await this.sandbox.touch(run.runId).catch(() => false);
+          await sandbox.touch(run.runId).catch(() => false);
         }
         continue;
       }
@@ -109,25 +208,30 @@ export class LocalToolGateway implements ToolGateway {
       if (run.expired || ['succeeded', 'failed', 'cancelled'].includes(await status(run.runId))) await this.release(run.runId);
     }
   }
-  describe(runId: string): Promise<RunMachineRecord | undefined> { return this.sandbox.describe(runId); }
+  async describe(runId: string): Promise<RunMachineRecord | undefined> { return (await this.sandboxFor(runId)).describe(runId); }
   /** Reaches the container directly: the queue may be held by the very call this has to stop. */
-  interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> { return this.sandbox.interrupt(runId, action); }
-  observe(runId: string, live: boolean): Promise<MachineView> { return this.sandbox.observe(runId, live); }
-  hostWait(): Promise<HostWait | undefined> { return this.sandbox.hostWait(); }
+  async interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> { return (await this.sandboxFor(runId)).interrupt(runId, action); }
+  async observe(runId: string, live: boolean): Promise<MachineView> { return (await this.sandboxFor(runId)).observe(runId, live); }
+  /** Whether the host this Run's machine is on is being waited for. Another host's wait is not this Run's business. */
+  async hostWait(runId?: string): Promise<HostWait | undefined> { return (runId ? await this.sandboxFor(runId) : this.sandbox).hostWait(); }
   /** The executor, when configured. It uses the sandbox directly: a session lasts far longer than the tool queue should wait. */
   executorTransport(): ClaudeCodeTransport | undefined {
     if (!this.config.executor) return undefined;
-    const sandbox = this.sandbox, snapshotBytes = this.config.sandbox.snapshotMiB * 1024 * 1024, root = this.config.workspaceRoot;
+    const snapshotBytes = this.config.sandbox.snapshotMiB * 1024 * 1024, root = this.config.workspaceRoot;
+    const on = (runId: string) => this.sandboxFor(runId);
     return new ClaudeCodeTransport({
-      startExecutor: async (runId, session, workspace) => sandbox.startExecutor(runId, session, await readSnapshot(join(root, runId), snapshotBytes), workspace),
-      executorRecord: runId => sandbox.executorRecord(runId), pollExecutor: (runId, session, offset) => sandbox.pollExecutor(runId, session, offset),
-      relayUsage: (runId, token) => sandbox.relayUsage(runId, token), closeRelay: (runId, token) => sandbox.closeRelay(runId, token),
-      stopExecutor: (runId, pid) => sandbox.stopExecutor(runId, pid), observe: (runId, live) => sandbox.observe(runId, live),
-      exportArtifacts: async runId => { await this.saveArtifacts(runId, await sandbox.snapshotArtifacts(runId)); },
+      startExecutor: async (runId, session, workspace) => {
+        const { hash } = await this.principalKey(runId);
+        return (await on(runId)).startExecutor(runId, session, await readSnapshot(join(root, runId), snapshotBytes), workspace, hash);
+      },
+      executorRecord: async runId => (await on(runId)).executorRecord(runId), pollExecutor: async (runId, session, offset) => (await on(runId)).pollExecutor(runId, session, offset),
+      relayUsage: async (runId, token) => (await on(runId)).relayUsage(runId, token), closeRelay: async (runId, token) => (await on(runId)).closeRelay(runId, token),
+      stopExecutor: async (runId, pid) => (await on(runId)).stopExecutor(runId, pid), observe: async (runId, live) => (await on(runId)).observe(runId, live),
+      exportArtifacts: async runId => { await this.saveArtifacts(runId, await (await on(runId)).snapshotArtifacts(runId)); },
       screenshots: runId => this.screenshots(runId),
-      runShell: async (runId, command) => { const response = await sandbox.execute(runId, 'shell', { command }, [], 60_000); return { ok: response.status === 'completed', output: response.output }; },
-      preview: async (runId, port) => { const response = await sandbox.execute(runId, 'process', { action: 'preview', port }, [], 120_000); return response.status === 'completed' ? (response.output as { url?: string }).url : undefined; },
-      keepMachine: (runId, hours) => sandbox.keepMachine(runId, hours),
+      runShell: async (runId, command) => { const { hash } = await this.principalKey(runId); const response = await (await on(runId)).execute(runId, 'shell', { command }, [], 60_000, undefined, hash); return { ok: response.status === 'completed', output: response.output }; },
+      preview: async (runId, port) => { const { hash } = await this.principalKey(runId); const response = await (await on(runId)).execute(runId, 'process', { action: 'preview', port }, [], 120_000, undefined, hash); return response.status === 'completed' ? (response.output as { url?: string }).url : undefined; },
+      keepMachine: async (runId, hours) => (await on(runId)).keepMachine(runId, hours),
     }, this.config.executor, join(this.config.stateDirectory, 'executor-evidence'));
   }
   private screenshotDirectory(runId: string) {
@@ -202,18 +306,20 @@ export class LocalToolGateway implements ToolGateway {
     return this.config.tools.filter(id => id !== 'web-fetch' && (!runsCode(id) || confined));
   }
   async health(options: { probe?: boolean } = {}) {
-    if (this.config.tools.some(id => id !== 'web-fetch')) return this.sandbox.health(options);
-    return { ready: !this.closing, detail: 'Allowlisted HTTPS tools ready', checkedAt: new Date().toISOString() };
+    if (!this.config.tools.some(id => id !== 'web-fetch')) return { ready: !this.closing, detail: 'Allowlisted HTTPS tools ready', checkedAt: new Date().toISOString() };
+    if (!this.config.hosts) return this.sandbox.health(options);
+    const checked = await Promise.all([...this.sandboxes].map(async ([host, sandbox]) => ({ host, ...await sandbox.health(options) })));
+    return { ready: checked.every(item => item.ready), detail: checked.map(item => `${item.host}: ${item.detail}`).join(' | '), checkedAt: new Date().toISOString() };
   }
 
   async invoke(request: ToolInvocation, context?: ToolCallContext): Promise<ToolResult> {
     const workspace = this.config.sandbox.workspaceVolumes ? context?.workspace : undefined;
     const runId = /^run:(run_[a-f0-9-]{36}):/.exec(request.capabilityGrant)?.[1];
+    // Without a valid Run there is no host or user to queue for; execute refuses it.
+    if (!runId) return this.execute(request, this.sandbox, workspace);
     // A finished Run's release goes through the queue, so waiting for it must happen outside.
-    if (workspace && runId) await this.sandbox.waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
-    const result = this.queue.then(() => this.execute(request, workspace));
-    this.queue = result.catch(() => undefined);
-    return result;
+    if (workspace) await (await this.sandboxFor(runId)).waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
+    return this.enqueue(runId, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
   }
   async reconcile(request: ToolInvocation, _receipt: Receipt): Promise<ToolResult> {
     const record = await this.readRecord(request);
@@ -242,7 +348,7 @@ export class LocalToolGateway implements ToolGateway {
       ...(status === 'completed' ? {} : { errorCode: status === 'unknown' ? 'execution_unknown' : 'tool_failed' }),
     } };
   }
-  private async execute(request: ToolInvocation, sharedWorkspace?: string): Promise<ToolResult> {
+  private async execute(request: ToolInvocation, sandbox: DockerSandbox, sharedWorkspace?: string, principal?: string): Promise<ToolResult> {
     const startedAt = new Date().toISOString();
     let journalStarted = false;
     try {
@@ -263,7 +369,7 @@ export class LocalToolGateway implements ToolGateway {
       const timeout = Math.max(100, Math.min(request.timeoutMs, this.config.timeoutMs));
       const response = id === 'web-fetch'
         ? { status: 'completed' as const, output: await this.webFetch(input, timeout), files: null }
-        : await this.sandbox.execute(grant[1]!, id, input, files, timeout, sharedWorkspace);
+        : await sandbox.execute(grant[1]!, id, input, files, timeout, sharedWorkspace, principal);
       if (response.files !== null) await this.saveArtifacts(grant[1]!, response.files);
       const result = this.result(request, response.status, response.output, startedAt);
       await this.saveResult(request, result);
