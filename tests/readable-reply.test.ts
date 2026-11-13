@@ -68,4 +68,26 @@ describe('what the chat shows of a Run\'s answer', () => {
     expect(answerArtifact(notes)).toBe(notes.at(-1));
     expect(answerArtifact([])).toBeUndefined();
   });
+  it('reads a site build reported only as its summary block, without the block or its link token', () => {
+    // Shaped like the production 番茄钟 answer: loosely filled fields, no prose, and the runtime's Unknown list after it.
+    const block = { schemaVersion: 'website-builder/1',
+      changedFiles: [{ path: '/workspace/index.html', action: 'created', evidenceRefs: ['executor_82b40aa651f37a00ded55269087b8883'] }],
+      preview: { status: 'started', url: 'https://32798-abc.instabox.tech/?_token=ibp_secret', port: 3000, evidenceRefs: ['executor_82b4'] },
+      validation: [{ claim: '加载显示 25:00', status: 'passed', evidenceRefs: ['executor_82b4'] }, { name: '重置按钮', status: 'failed', evidenceRefs: ['executor_82b4'] }],
+      artifacts: [{ name: 'index.html', path: '/workspace/index.html', description: '纯 HTML/JS 单文件番茄钟页面', evidenceRefs: ['executor_82b4'] }],
+      blockers: [], unknowns: ['没在浏览器里点过开始/重置按钮'], notes: '静态服务在 3000 端口运行。' };
+    const raw = `${JSON.stringify(block)}\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- Unknown: task "汇总交付结果" did not produce a valid output.`;
+    const { text, caveat } = readableAnswer(raw);
+    expect(caveat).toBe(true);
+    expect(text).toBe('做好的文件：\n- /workspace/index.html：纯 HTML/JS 单文件番茄钟页面\n\n预览已启动，链接在详情里。\n\n没通过的检查：\n- 重置按钮\n\n还没核实：\n- 没在浏览器里点过开始/重置按钮\n\n静态服务在 3000 端口运行。');
+    expect(readableReply(JSON.stringify({ ...block, validation: [block.validation[0]], unknowns: [], notes: undefined, preview: { status: 'ready', url: 'https://example.com/' } })))
+      .toBe('做好的文件：\n- /workspace/index.html：纯 HTML/JS 单文件番茄钟页面\n\n预览：https://example.com/\n\n检查通过 1 项。');
+  });
+  it('keeps a summary block it cannot read as it is', () => {
+    const other = '{"schemaVersion":"project-pulse/1","progress":[]}';
+    expect(readableAnswer(other).text).toBe(other);
+    const broken = '{"schemaVersion":"website-builder/1","changedFiles":,"blockers":}';
+    expect(readableAnswer(broken).text).toBe(broken);
+    expect(readableAnswer('{"schemaVersion":"website-builder/1"}').text).toBe('{"schemaVersion":"website-builder/1"}');
+  });
 });
