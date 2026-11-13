@@ -68,7 +68,9 @@ export interface HostWait { since: string; message: string; availableAt?: string
 const responseSchema = z.object({
   schemaVersion: z.literal('sandbox-output/2'), status: z.enum(['completed', 'failed', 'unknown']), output: z.unknown(), files: snapshotSchema.nullable(),
 }).strict();
-const stateSchema = z.object({ runId: z.string(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
+/** `host` names the sandbox host the Run's machine lives on; a record without one was made before hosts had names.
+ * `principal` is a hash of the user the machine belongs to, never the user's own identity. */
+const stateSchema = z.object({ runId: z.string(), host: z.string().optional(), principal: z.string().optional(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
 type State = z.infer<typeof stateSchema>;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
@@ -98,6 +100,13 @@ export class SandboxUnreachable extends SandboxError {
 /** Life-thread record of one Run's machine. Looking this up does not create or start the container. */
 export type RunMachineRecord = { state: 'present'; ready: boolean } | { state: 'released'; ready: false };
 const PROXY_PORT = 3128;
+/** The host name used when the configuration names no hosts. */
+export const DEFAULT_HOST = 'default';
+/** Machines being created right now, per state directory: Run → user. A count of a user's machines must include
+ * these, or two Runs starting together would both see room under the limit. Every host and every way of creating a
+ * machine (tool calls and executors alike) shares this, so the check and the reservation are one step. */
+const creating = new Map<string, Map<string, string>>();
+const reserving = new Map<string, Promise<void>>();
 /** The proxy's name on the Run's internal network. Container names are too long for one DNS label. */
 const PROXY_ALIAS = 'aeeis-proxy';
 /** The Run container's name on its internal network, where the proxy forwards preview traffic. */
@@ -124,9 +133,9 @@ export function dockerContextArgs(config: SandboxConfig, platform = process.plat
 }
 
 /** Full Linux userspace, isolated from host files/devices and other Run networks. */
-export function sandboxCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test', volume?: string): string[] {
+export function sandboxCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test', volume?: string, principal?: string): string[] {
   return ['create', '--pull=never', '--name', name,
-    '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`,
+    '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`, ...(principal ? ['--label', `aeeis.principal=${principal}`] : []),
     `--network=${config.network === 'none' ? 'none' : `${name}-net`}`, '--cap-drop=NET_RAW', '--security-opt=no-new-privileges:true',
     ...(config.network === 'proxied' ? [...proxyEnvArgs(name), `--network-alias=${RUN_ALIAS}`] : []),
     ...(volume ? ['--volume', `${volume}:/workspace`] : []),
@@ -143,9 +152,9 @@ function proxyEnvArgs(_name: string): string[] {
     .concat(['--env', 'NO_PROXY=localhost,127.0.0.1', '--env', 'no_proxy=localhost,127.0.0.1']);
 }
 /** The Run's only route out: a small, locked-down container on both the Run's internal network and an egress network. */
-export function proxyCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test'): string[] {
+export function proxyCreateArgs(config: SandboxConfig, name: string, imageId: string, owner: string, runId = 'test', principal?: string): string[] {
   return ['create', '--pull=never', '--name', `${name}-proxy`,
-    '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`, '--label', 'aeeis.role=proxy',
+    '--label', 'aeeis.sandbox=2', '--label', `aeeis.owner=${owner}`, '--label', `aeeis.run=${runId}`, ...(principal ? ['--label', `aeeis.principal=${principal}`] : []), '--label', 'aeeis.role=proxy',
     `--network=${name}-egress`, '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '--read-only', '--user=65534:65534',
     '--restart=unless-stopped', '--memory=128m', '--memory-swap=128m', '--cpus=0.5', '--pids-limit=64',
     '--log-driver=json-file', '--log-opt=max-size=1m', '--log-opt=max-file=2',
@@ -173,9 +182,25 @@ export class DockerSandbox {
   private lastLoginRefresh = 0;
   private readonly owner: string;
   private readonly directory: string;
-  constructor(readonly config: SandboxConfig, stateDirectory: string) {
+  /** This host's name. Every host keeps its Runs' records in the same directory, each record naming its host. */
+  readonly host: string;
+  /** Whether records made before hosts had names (no `host` field) are this host's. */
+  private readonly unlabeled: boolean;
+  /** How many machines one user may have at once, across every host. */
+  private readonly maxRunsPerPrincipal: number | undefined;
+  /** Host names that are no configured host any more but name machines of the existing host: the single host a
+   * configuration without `hosts` called "default". */
+  private readonly formerNames: readonly string[];
+  constructor(readonly config: SandboxConfig, stateDirectory: string, options: { host?: string; unlabeled?: boolean; maxRunsPerPrincipal?: number; formerNames?: readonly string[] } = {}) {
     this.owner = createHash('sha256').update(stateDirectory).digest('hex').slice(0, 16);
     this.directory = join(stateDirectory, 'sandboxes');
+    this.host = options.host ?? DEFAULT_HOST;
+    this.unlabeled = options.unlabeled ?? true;
+    this.maxRunsPerPrincipal = options.maxRunsPerPrincipal;
+    this.formerNames = options.formerNames ?? [];
+  }
+  private owns(record: { host?: string | undefined }) {
+    return record.host && !this.formerNames.includes(record.host) ? record.host === this.host : this.unlabeled;
   }
   /** The control socket directory must be this user's alone: whoever can open the socket can use the connection.
    * If it cannot be made private, calls fall back to a fresh SSH login each time. */
@@ -297,7 +322,8 @@ export class DockerSandbox {
     try {
       const record = stateSchema.parse(JSON.parse(await readFile(join(this.directory, `${runId}.json`), 'utf8')));
       if (record.name !== name || record.runId !== runId || record.network !== `${name}-net`) throw new SandboxError('Sandbox identity mismatch');
-      return record;
+      // Another host's machine is not this host's to inspect, start or release.
+      return this.owns(record) ? record : undefined;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
   private async save(state: State) {
@@ -313,7 +339,8 @@ export class DockerSandbox {
     }
     const info = JSON.parse(result.stdout)[0];
     if (!info || info.Config?.Labels?.['aeeis.owner'] !== this.owner || info.Config?.Labels?.['aeeis.run'] !== state.runId
-      || info.Config?.Labels?.['aeeis.sandbox'] !== '2' || info.Image !== state.image || (state.containerId && info.Id !== state.containerId)) throw new SandboxError('Container ownership or identity mismatch', 'unknown');
+      || info.Config?.Labels?.['aeeis.sandbox'] !== '2' || info.Image !== state.image || (state.containerId && info.Id !== state.containerId)
+      || (state.principal && info.Config?.Labels?.['aeeis.principal'] !== state.principal)) throw new SandboxError('Container ownership or identity mismatch', 'unknown');
     return info;
   }
   private async start(state: State) {
@@ -368,19 +395,32 @@ export class DockerSandbox {
     if (await this.state(runId)) return;
     while (await this.workspaceHolder(volume, runId) && Date.now() < deadline && !this.closing) await new Promise(resolve => setTimeout(resolve, Math.min(500, Math.max(1, deadline - Date.now()))));
   }
-  private async prepareVolume(volume: string, runId: string) {
+  private async prepareVolume(volume: string, runId: string, principal?: string) {
     const holder = await this.workspaceHolder(volume, runId);
     if (holder) throw new SandboxError(`This grant's workspace is in use by ${holder}; only one Run can use it at a time`);
     const found = await this.command(['volume', 'inspect', volume], 8000);
     if (found.code === 0) {
-      if (JSON.parse(found.stdout)[0]?.Labels?.['aeeis.owner'] !== this.owner) throw new SandboxError('Workspace volume ownership mismatch');
+      const labels = JSON.parse(found.stdout)[0]?.Labels ?? {};
+      // A volume from before users were told apart has no principal label; grants were already one user's own.
+      if (labels['aeeis.owner'] !== this.owner || (principal && labels['aeeis.principal'] && labels['aeeis.principal'] !== principal)) throw new SandboxError('Workspace volume ownership mismatch');
       return;
     }
     if (!/no such volume/i.test(found.stderr)) throw new SandboxError('Cannot inspect workspace volume');
-    const created = await this.command(['volume', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', volume], 8000);
+    const created = await this.command(['volume', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', ...(principal ? ['--label', `aeeis.principal=${principal}`] : []), volume], 8000);
     if (created.code !== 0) throw new SandboxError('Cannot create workspace volume');
   }
-  private async ensure(runId: string, files: WorkspaceFile[], workspace?: string): Promise<State> {
+  /** The Runs this user has machines for on any host, apart from `runId`. Read from the shared records, without Docker. */
+  private async liveMachines(principal: string, runId: string): Promise<Set<string>> {
+    let names: string[];
+    try { names = await readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set(); throw error; }
+    const runs = new Set<string>();
+    for (const name of names.filter(item => /^run_[a-f0-9-]{36}\.json$/.test(item) && item !== `${runId}.json`)) {
+      const record = stateSchema.safeParse(JSON.parse(await readFile(join(this.directory, name), 'utf8').catch(() => '{}')));
+      if (record.success && !record.data.released && record.data.principal === principal) runs.add(record.data.runId);
+    }
+    return runs;
+  }
+  private async ensure(runId: string, files: WorkspaceFile[], workspace?: string, principal?: string): Promise<State> {
     if (this.blocked) throw new SandboxError('Sandbox stop could not be confirmed; recover Docker and restart AEEIS', 'unknown');
     let state = await this.state(runId);
     const image = state ? state.image : await this.imageId();
@@ -392,38 +432,65 @@ export class DockerSandbox {
       if (Date.now() - state.createdAt > this.config.maxLifetimeSeconds * 1000) throw new SandboxError('Run sandbox lifetime expired; start a new Run');
     } else {
       validateSnapshot(files, this.config.snapshotMiB * 1024 * 1024);
-      // Reach the host before recording anything, so a paused host does not leave a half-created Run behind.
-      if (this.config.ssh) await this.command(['version', '--format', '{{.Server.Version}}'], 8000);
-      const volume = workspace && this.config.workspaceVolumes ? this.volumeName(workspace) : undefined;
-      if (volume) await this.prepareVolume(volume, runId);
-      const name = this.name(runId);
-      state = { runId, name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now(), ...(volume ? { volume } : {}) };
-      await this.save(state);
-      if (this.config.network !== 'none') {
-        const internal = this.config.network === 'proxied' ? ['--internal'] : [];
-        const network = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', ...internal, state.network], 8000);
-        if (network.code !== 0) throw new SandboxError('Cannot create isolated Run network');
-      }
-      if (this.config.network === 'proxied') {
-        const egress = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', `${name}-egress`], 8000);
-        if (egress.code !== 0) throw new SandboxError('Cannot create Run egress network');
-        const proxy = await this.command(proxyCreateArgs(this.config, name, image, this.owner, runId), 10000);
-        if (proxy.code !== 0 || !/^[a-f0-9]{64}$/.test(proxy.stdout.trim())) throw new SandboxError('Cannot create Run egress proxy');
-        state.proxyId = proxy.stdout.trim(); await this.save(state);
-        const attached = await this.command(['network', 'connect', '--alias', PROXY_ALIAS, state.network, `${name}-proxy`], 8000);
-        if (attached.code !== 0) throw new SandboxError('Cannot attach Run egress proxy');
-        const started = await this.command(['start', `${name}-proxy`], 8000);
-        if (started.code !== 0) throw new SandboxError('Cannot start Run egress proxy');
-      }
-      const created = await this.command(sandboxCreateArgs(this.config, name, image, this.owner, runId, volume), 10000);
-      if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout.trim())) throw new SandboxError('Cannot create Run sandbox');
-      state.containerId = created.stdout.trim(); await this.save(state);
-      await this.start(state);
-      const restored = await this.exchange(state, '__restore', { persistent: Boolean(volume) }, 30000, files);
-      if (restored.status !== 'completed') throw new SandboxError('Could not initialize Run workspace', 'unknown');
-      state.ready = true; await this.save(state);
+      const reserved = principal && this.maxRunsPerPrincipal !== undefined ? await this.reserve(runId, principal) : false;
+      try { state = await this.create(runId, files, image, policy, workspace, principal); }
+      finally { if (reserved) creating.get(this.directory)?.delete(runId); }
     }
     await this.start(state);
+    return state;
+  }
+  /** Counts the user's machines, including those being created, and reserves one for this Run, as one step. */
+  private async reserve(runId: string, principal: string): Promise<true> {
+    // A lock per state directory: wait for the reservation before this one, and let the next wait for this one.
+    const previous = reserving.get(this.directory) ?? Promise.resolve();
+    let unlock!: () => void;
+    const mine = new Promise<void>(resolve => { unlock = resolve; });
+    reserving.set(this.directory, previous.then(() => mine));
+    await previous;
+    try {
+      const inFlight = creating.get(this.directory) ?? new Map<string, string>();
+      creating.set(this.directory, inFlight);
+      // A machine being created may already have its record, so the two are joined, not added.
+      const runs = await this.liveMachines(principal, runId);
+      for (const [id, who] of inFlight) if (id !== runId && who === principal) runs.add(id);
+      if (runs.size >= this.maxRunsPerPrincipal!) {
+        throw new SandboxError(`This user already has ${this.maxRunsPerPrincipal} running machine${this.maxRunsPerPrincipal === 1 ? '' : 's'}; wait for a task to finish before starting another`);
+      }
+      inFlight.set(runId, principal);
+      return true;
+    } finally { unlock(); }
+  }
+  private async create(runId: string, files: WorkspaceFile[], image: string, policy: string, workspace?: string, principal?: string): Promise<State> {
+    // Reach the host before recording anything, so a paused host does not leave a half-created Run behind.
+    if (this.config.ssh) await this.command(['version', '--format', '{{.Server.Version}}'], 8000);
+    const volume = workspace && this.config.workspaceVolumes ? this.volumeName(workspace) : undefined;
+    if (volume) await this.prepareVolume(volume, runId, principal);
+    const name = this.name(runId);
+    const state: State = { runId, host: this.host, ...(principal ? { principal } : {}), name, network: `${name}-net`, image, policy, ready: false, released: false, createdAt: Date.now(), ...(volume ? { volume } : {}) };
+    await this.save(state);
+    if (this.config.network !== 'none') {
+      const internal = this.config.network === 'proxied' ? ['--internal'] : [];
+      const network = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', ...internal, state.network], 8000);
+      if (network.code !== 0) throw new SandboxError('Cannot create isolated Run network');
+    }
+    if (this.config.network === 'proxied') {
+      const egress = await this.command(['network', 'create', '--label', `aeeis.owner=${this.owner}`, '--label', 'aeeis.sandbox=2', `${name}-egress`], 8000);
+      if (egress.code !== 0) throw new SandboxError('Cannot create Run egress network');
+      const proxy = await this.command(proxyCreateArgs(this.config, name, image, this.owner, runId, principal), 10000);
+      if (proxy.code !== 0 || !/^[a-f0-9]{64}$/.test(proxy.stdout.trim())) throw new SandboxError('Cannot create Run egress proxy');
+      state.proxyId = proxy.stdout.trim(); await this.save(state);
+      const attached = await this.command(['network', 'connect', '--alias', PROXY_ALIAS, state.network, `${name}-proxy`], 8000);
+      if (attached.code !== 0) throw new SandboxError('Cannot attach Run egress proxy');
+      const started = await this.command(['start', `${name}-proxy`], 8000);
+      if (started.code !== 0) throw new SandboxError('Cannot start Run egress proxy');
+    }
+    const created = await this.command(sandboxCreateArgs(this.config, name, image, this.owner, runId, volume, principal), 10000);
+    if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.stdout.trim())) throw new SandboxError('Cannot create Run sandbox');
+    state.containerId = created.stdout.trim(); await this.save(state);
+    await this.start(state);
+    const restored = await this.exchange(state, '__restore', { persistent: Boolean(volume) }, 30000, files);
+    if (restored.status !== 'completed') throw new SandboxError('Could not initialize Run workspace', 'unknown');
+    state.ready = true; await this.save(state);
     return state;
   }
   private async stop(name: string) {
@@ -442,9 +509,9 @@ export class DockerSandbox {
     }
     this.unstopped.delete(name);
   }
-  async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number, workspace?: string) {
+  async execute(runId: string, tool: string, input: unknown, files: WorkspaceFile[], timeoutMs: number, workspace?: string, principal?: string) {
     if (this.closing) throw new SandboxError('Sandbox service is closing');
-    const state = await this.prepareWithWait(runId, files, workspace);
+    const state = await this.prepareWithWait(runId, files, workspace, principal);
     if (this.closing) throw new SandboxError('Sandbox service is closing');
     if (this.held.has(runId)) throw new SandboxError('This Run was stopped before the tool started; nothing ran');
     this.active.add(state.name);
@@ -463,14 +530,14 @@ export class DockerSandbox {
   /** Everything before the tool runs: a pending stop, then the container. While the SSH host is unreachable
    * (paused, cooling down, rebooting) this waits with backoff up to sshWaitSeconds, because nothing has run yet.
    * A refused login is not waited on; sshLoginCommand handles it. */
-  private async prepareWithWait(runId: string, files: WorkspaceFile[], workspace?: string): Promise<State> {
+  private async prepareWithWait(runId: string, files: WorkspaceFile[], workspace?: string, principal?: string): Promise<State> {
     const name = this.name(runId), started = Date.now(), deadline = started + (this.config.ssh ? this.config.sshWaitSeconds * 1000 : 0);
     for (let attempt = 0; ; attempt++) {
       let waitable: SandboxError | undefined;
       try {
         // A stop that never reached the host is retried before anything else runs in that container.
         if (this.unstopped.has(name)) await this.stop(name);
-        const ready = await this.ensure(runId, files, workspace);
+        const ready = await this.ensure(runId, files, workspace, principal);
         if (attempt > 0) await this.setHostWait(undefined);
         return ready;
       } catch (error) {
@@ -540,7 +607,8 @@ export class DockerSandbox {
       return { state: 'unknown', detail: error instanceof Error ? error.message : 'Sandbox look failed', previews };
     }
   }
-  private hostWaitFile() { return join(this.directory, 'host-wait.json'); }
+  /** One file per host: a wait for one host says nothing about another. The unnamed host keeps the original file. */
+  private hostWaitFile() { return join(this.directory, this.host === DEFAULT_HOST ? 'host-wait.json' : `host-wait-${this.host}.json`); }
   private async setHostWait(wait: HostWait | undefined) {
     try {
       if (!wait) { await rm(this.hostWaitFile(), { force: true }); return; }
@@ -565,9 +633,9 @@ export class DockerSandbox {
     return answer;
   }
   /** Opens a relay session and starts the executor in the Run's container. Nothing has run if this throws. */
-  async startExecutor(runId: string, session: { id: string; token: string; prompt: string; argv: string[]; env: Record<string, string>; key: string; upstream: string; budget: number; seconds: number }, files: WorkspaceFile[], workspace?: string): Promise<void> {
+  async startExecutor(runId: string, session: { id: string; token: string; prompt: string; argv: string[]; env: Record<string, string>; key: string; upstream: string; budget: number; seconds: number }, files: WorkspaceFile[], workspace?: string, principal?: string): Promise<void> {
     if (!this.config.modelRelay) throw new SandboxError('The executor needs sandbox.modelRelay');
-    const state = await this.prepareWithWait(runId, files, workspace);
+    const state = await this.prepareWithWait(runId, files, workspace, principal);
     if (this.held.has(runId)) throw new SandboxError('This Run was stopped before the executor started; nothing ran');
     await this.relay(state, { action: 'open', token: session.token, key: session.key, upstream: session.upstream, budget: session.budget, seconds: session.seconds });
     this.active.add(state.name);

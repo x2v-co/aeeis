@@ -178,8 +178,9 @@ function validatePrivacyList(raw: string | undefined, label: string): void {
 
 /** Local tools run code for the Bot. On a loopback development runtime anything goes. A shared or production
  * runtime may use them only when every tool runs on a separate sandbox host behind the Run's proxy (or with no
- * network) and one owner holds the deployment: tool calls share one queue and one sandbox host, with no per-owner
- * limits yet. Anything else needs an isolated remote tool gateway. */
+ * network). Several users (AEEIS_PRINCIPAL_TOKENS or OIDC) additionally need `perPrincipal`: each user's machines are
+ * then labelled as theirs, capped per user, and queued apart from other users' calls, on the host `assign` gives them.
+ * Anything else needs an isolated remote tool gateway. */
 function validateLocalTools(env: NodeJS.ProcessEnv): void {
   const path = env.AEEIS_LOCAL_TOOLS_CONFIG;
   if (!path) return;
@@ -190,11 +191,15 @@ function validateLocalTools(env: NodeJS.ProcessEnv): void {
   const refuse = (reason: string): never => {
     throw new Error(`AEEIS_LOCAL_TOOLS_CONFIG outside a loopback development runtime ${reason}; otherwise use an isolated remote tool gateway`);
   };
-  if (multiOwner) refuse('needs a single owner (no AEEIS_PRINCIPAL_TOKENS or AEEIS_OIDC_ISSUER)');
-  let config: { tools?: unknown; sandbox?: { ssh?: unknown; network?: unknown } };
+  let config: { tools?: unknown; sandbox?: { ssh?: unknown; network?: unknown }; hosts?: Record<string, { ssh?: unknown }>; perPrincipal?: { maxMachines?: unknown } };
   try { config = JSON.parse(readFileSync(path, 'utf8')) as typeof config; }
   catch { return refuse('needs a readable JSON tools config'); }
-  if (typeof config?.sandbox?.ssh !== 'string' || !config.sandbox.ssh) refuse('needs sandbox.ssh: the sandbox must run on a separate host');
+  if (multiOwner && typeof config?.perPrincipal?.maxMachines !== 'number') refuse('with several users (AEEIS_PRINCIPAL_TOKENS or AEEIS_OIDC_ISSUER) needs perPrincipal.maxMachines');
+  const hosts = config?.hosts && typeof config.hosts === 'object' ? Object.entries(config.hosts) : undefined;
+  if (hosts) {
+    if (!hosts.length) refuse('needs at least one host in hosts');
+    for (const [name, host] of hosts) if (typeof host?.ssh !== 'string' || !host.ssh) refuse(`needs hosts.${name}.ssh: every sandbox must run on a separate host`);
+  } else if (typeof config?.sandbox?.ssh !== 'string' || !config.sandbox.ssh) refuse('needs sandbox.ssh: the sandbox must run on a separate host');
   if (!['proxied', 'none'].includes(String(config.sandbox?.network ?? 'bridge'))) refuse('needs sandbox.network "proxied" or "none"');
   if (Array.isArray(config.tools) && config.tools.includes('web-fetch')) refuse('cannot enable web-fetch, which runs on this host');
 }
