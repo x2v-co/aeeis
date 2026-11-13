@@ -128,14 +128,19 @@ export class LocalToolGateway implements ToolGateway {
   private readonly sandboxes: Map<string, DockerSandbox>;
   private readonly defaultHost: string;
   private readonly runHosts = new Map<string, string>();
+  private readonly formerNames: readonly string[];
   private closing = false;
   /** Who each Run belongs to; the server sets it. Without it every Run is the single owner's. */
   principalOf: ((runId: string) => Promise<RunPrincipal | undefined>) | undefined;
   private constructor(readonly config: LocalToolsConfig) {
     const existing = config.assign?.existing ?? config.assign?.default ?? DEFAULT_HOST;
     this.defaultHost = config.assign?.default ?? DEFAULT_HOST;
-    this.sandboxes = new Map([...hostConfigs(config)].map(([id, sandbox]) => [id, new DockerSandbox(sandbox, config.stateDirectory, {
-      host: id, unlabeled: id === existing, ...(config.perPrincipal ? { maxRunsPerPrincipal: config.perPrincipal.maxMachines } : {}),
+    const hosts = hostConfigs(config);
+    // Machines made while the configuration had no hosts are recorded on "default"; once hosts are named, unless one
+    // of them is called that, they are the existing host's.
+    this.formerNames = config.hosts && !hosts.has(DEFAULT_HOST) ? [DEFAULT_HOST] : [];
+    this.sandboxes = new Map([...hosts].map(([id, sandbox]) => [id, new DockerSandbox(sandbox, config.stateDirectory, {
+      host: id, unlabeled: id === existing, formerNames: this.formerNames, ...(config.perPrincipal ? { maxRunsPerPrincipal: config.perPrincipal.maxMachines } : {}),
     })]));
   }
   /** The default host's sandbox, for what is the same on every host. */
@@ -147,9 +152,15 @@ export class LocalToolGateway implements ToolGateway {
     await Promise.all([...this.sandboxes.values()].map(sandbox => sandbox.close()));
     await Promise.all([...this.queues.values()]);
   }
-  /** A hash of the Run's user, stored and labelled instead of the user's identity. */
+  /** A hash of the Run's user, stored and labelled instead of the user's identity. Without `principalOf` the
+   * deployment has one owner. With it, a Run whose user cannot be read right now gets no machine at all: running it
+   * as someone else would put one user's code on another's host, queue and limit. */
   private async principalKey(runId: string): Promise<{ key: string; hash: string; owner: string; tenant: string }> {
-    const principal = await this.principalOf?.(runId).catch(() => undefined);
+    let principal: RunPrincipal | undefined;
+    if (this.principalOf) {
+      try { principal = await this.principalOf(runId); } catch { principal = undefined; }
+      if (!principal?.owner) throw new ToolError('Could not tell whose task this is right now, so nothing ran; try again shortly');
+    }
     const owner = principal?.owner ?? 'owner', tenant = principal?.tenantId ?? 'local';
     const key = `${tenant}/${owner}`;
     return { key, hash: sha(key).slice(0, 16), owner, tenant };
@@ -162,7 +173,11 @@ export class LocalToolGateway implements ToolGateway {
     if (/^run_[a-f0-9-]{36}$/.test(runId)) {
       try {
         const record = JSON.parse(await readFile(join(this.config.stateDirectory, 'sandboxes', `${runId}.json`), 'utf8')) as { host?: unknown };
-        host = typeof record.host === 'string' && this.sandboxes.has(record.host) ? record.host : this.config.assign?.existing ?? this.defaultHost;
+        const named = typeof record.host === 'string' ? record.host : undefined;
+        // The same rule each host uses to claim a record: no name, or a former name, means the existing host.
+        if (!named || this.formerNames.includes(named)) host = this.config.assign?.existing ?? this.defaultHost;
+        else if (this.sandboxes.has(named)) host = named;
+        else throw new ToolError(`This task's machine is on sandbox host "${named}", which is no longer configured`);
       } catch (error) { if (!isMissing(error)) throw error; }
     }
     if (!host) {
@@ -317,9 +332,14 @@ export class LocalToolGateway implements ToolGateway {
     const runId = /^run:(run_[a-f0-9-]{36}):/.exec(request.capabilityGrant)?.[1];
     // Without a valid Run there is no host or user to queue for; execute refuses it.
     if (!runId) return this.execute(request, this.sandbox, workspace);
-    // A finished Run's release goes through the queue, so waiting for it must happen outside.
-    if (workspace) await (await this.sandboxFor(runId)).waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
-    return this.enqueue(runId, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
+    try {
+      // A finished Run's release goes through the queue, so waiting for it must happen outside.
+      if (workspace) await (await this.sandboxFor(runId)).waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
+      return await this.enqueue(runId, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
+    } catch (error) {
+      // Finding the host or the user failed before anything was recorded or ran (execute itself never throws).
+      return this.result(request, 'failed', { error: error instanceof Error ? error.message : 'Local tool failed' });
+    }
   }
   async reconcile(request: ToolInvocation, _receipt: Receipt): Promise<ToolResult> {
     const record = await this.readRecord(request);

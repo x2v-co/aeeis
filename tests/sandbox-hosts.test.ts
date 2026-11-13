@@ -80,6 +80,42 @@ describe('gateway routing by user', () => {
     expect(await gateway.hostFor(run('alice'))).toBe('vps');
     await gateway.close();
   });
+  it('runs nothing, and remembers no host, while the Run\'s user cannot be read', async () => {
+    const execute = vi.spyOn(DockerSandbox.prototype, 'execute').mockImplementation(async function (this: DockerSandbox) { return { ...done, output: { host: this.host } }; });
+    const gateway = await load();
+    const alice = run('alice');
+    let down = true;
+    const lookup = gateway.principalOf!;
+    gateway.principalOf = async runId => { if (down) throw new Error('repository temporarily unavailable'); return lookup(runId); };
+    const refused = await gateway.invoke(request(alice));
+    expect(refused.status).toBe('failed');
+    expect(refused.output).toMatchObject({ error: expect.stringMatching(/whose task/) });
+    expect(execute).not.toHaveBeenCalled();
+    // A Run the server does not know is refused the same way.
+    gateway.principalOf = async () => undefined;
+    expect((await gateway.invoke(request(alice))).status).toBe('failed');
+    down = false; gateway.principalOf = async runId => { if (down) throw new Error('down'); return lookup(runId); };
+    expect((await gateway.invoke(request(alice))).output).toEqual({ host: 'vps' });
+    expect(await gateway.hostFor(alice)).toBe('vps');
+    await gateway.close();
+  });
+  it('moves machines made under a single-host configuration to the existing host once hosts are named', async () => {
+    // Before: no hosts; this version records the one host as "default".
+    vi.spyOn(DockerSandbox.prototype, 'execute').mockImplementation(async function (this: DockerSandbox) { return { ...done, output: { host: this.host } }; });
+    const state = join(root, 'state', 'sandboxes');
+    await mkdir(state, { recursive: true });
+    const earlier = run('alice'), stray = run('alice');
+    await writeFile(join(state, `${earlier}.json`), JSON.stringify({ runId: earlier, host: 'default' }));
+    await writeFile(join(state, `${stray}.json`), JSON.stringify({ runId: stray, host: 'retired' }));
+    // After: named hosts, with the old machine on instabox even though alice is now assigned to the VPS.
+    const gateway = await load({ ...named, assign: { ...named.assign, existing: 'instabox' } });
+    expect(await gateway.hostFor(earlier)).toBe('instabox');
+    expect((await gateway.invoke(request(earlier))).output).toEqual({ host: 'instabox' });
+    // A host that is no longer configured is not quietly taken for another one.
+    await expect(gateway.hostFor(stray)).rejects.toThrow(/no longer configured/);
+    expect((await gateway.invoke(request(stray))).status).toBe('failed');
+    await gateway.close();
+  });
   it('queues each user apart: one user\'s long call does not hold up another\'s', async () => {
     let finishAlice!: () => void;
     const aliceHolds = new Promise<void>(resolve => { finishAlice = resolve; });
@@ -150,6 +186,45 @@ describe('machines labelled and limited per user (mocked transport)', () => {
     await writeFile(join(root, 'sandboxes', `${id}.json`), JSON.stringify(record));
     expect(await instabox.describe(id)).toEqual({ state: 'present', ready: true });
     expect(await vps.sandbox.describe(id)).toBeUndefined();
+  });
+  it('reserves a machine under the cap as one step, so Runs starting together cannot both get one', async () => {
+    const alice = 'a'.repeat(16);
+    const vps = harness({ host: 'vps', unlabeled: false, maxRunsPerPrincipal: 1 });
+    const instabox = harness({ host: 'instabox', unlabeled: true, maxRunsPerPrincipal: 1 });
+    // Hold every host at its first contact, so both creations are in flight at once.
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    for (const { command } of [vps, instabox]) {
+      const inner = command.getMockImplementation()!;
+      command.mockImplementation(async (...values: any[]) => { if (values[0][0] === 'version') await gate; return inner(...values); });
+    }
+    const session = { id: 's', token: 't', prompt: 'p', argv: [], env: {}, key: 'k', upstream: 'u', budget: 1, seconds: 60 };
+    const relay = (sandbox: DockerSandbox) => vi.spyOn(sandbox as any, 'relay').mockResolvedValue({});
+    relay(vps.sandbox); relay(instabox.sandbox);
+    const configRelay = (sandbox: DockerSandbox) => Object.assign(sandbox.config, { modelRelay: true });
+    configRelay(vps.sandbox); configRelay(instabox.sandbox);
+    const attempts = Promise.allSettled([
+      vps.sandbox.startExecutor(runId(), session, [], undefined, alice),
+      vps.sandbox.execute(runId(), 'python', {}, [], 300, undefined, alice),
+      instabox.sandbox.execute(runId(), 'python', {}, [], 300, undefined, alice),
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    release();
+    const settled = await attempts;
+    expect(settled.filter(item => item.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.filter(item => item.status === 'rejected').map(item => String((item as PromiseRejectedResult).reason))).toEqual([expect.stringMatching(/already has 1/), expect.stringMatching(/already has 1/)]);
+    expect(vps.created.length + instabox.created.length).toBe(1);
+  });
+  it('treats a machine recorded on the former single host as the existing host\'s, on every host', async () => {
+    const id = runId();
+    const single = harness();
+    await single.sandbox.execute(id, 'python', {}, [], 300);
+    expect(JSON.parse(await readFile(join(root, 'sandboxes', `${id}.json`), 'utf8')).host).toBe('default');
+    const instabox = new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'instabox-box', network: 'none' }), root, { host: 'instabox', unlabeled: true, formerNames: ['default'] });
+    const vps = new DockerSandbox(sandboxConfigSchema.parse({ ssh: 'aeeis-sandbox-2', network: 'none' }), root, { host: 'vps', unlabeled: false, formerNames: ['default'] });
+    expect(await instabox.describe(id)).toEqual({ state: 'present', ready: true });
+    expect((await instabox.pendingRuns()).map(item => item.runId)).toEqual([id]);
+    expect(await vps.describe(id)).toBeUndefined();
   });
   it('caps how many machines one user has at once, across hosts, without affecting other users', async () => {
     const { sandbox, created } = harness({ host: 'vps', unlabeled: false, maxRunsPerPrincipal: 1 });
