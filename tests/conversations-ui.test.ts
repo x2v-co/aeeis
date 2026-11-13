@@ -827,7 +827,9 @@ describe('single-entry conversation workbench', () => {
     const content = 'Partial answer — limited evidence: 没有资料.\n\n你好，我是 AEEIS。 [receipt_abc]\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- 没有资料';
     const h = harness(view, { handler(url) {
       if (url === `/api/runs/${runId}`) return response({ id: runId, revision: 1, goal: 'hello', status: 'succeeded', canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [], context: { sources: [] }, toolReceipts: [],
-        artifacts: [{ id: 'artifact_hello', taskId: 'node_hello', title: '问候', content, evidenceRefs: ['receipt_abc'] }] });
+        artifacts: [{ id: 'artifact_hello', taskId: 'node_hello', title: '问候', content, evidenceRefs: ['receipt_abc'] },
+          // The summary step failed and left only a note; the page still opens on the answer above it.
+          { id: 'artifact_note', taskId: 'node_sum', title: '汇总交付结果', content: 'Partial answer — repair exhausted for "汇总交付结果".\n\nUnknown: nothing verified.', evidenceRefs: [] }] });
       return undefined;
     } });
     start(h.fetch); await ready();
