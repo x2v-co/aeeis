@@ -191,7 +191,10 @@ export class LocalToolGateway implements ToolGateway {
   private async sandboxFor(runId: string): Promise<DockerSandbox> { return this.sandboxes.get(await this.hostFor(runId))!; }
   /** Runs `work` after the calls already queued for this Run's user on this Run's host. */
   private async enqueue<T>(runId: string, work: (sandbox: DockerSandbox, principal: string) => Promise<T>): Promise<T> {
-    const host = await this.hostFor(runId), { hash } = await this.principalKey(runId), lane = `${host}:${hash}`;
+    return this.enqueueOn(await this.hostFor(runId), (await this.principalKey(runId)).hash, work);
+  }
+  private enqueueOn<T>(host: string, hash: string, work: (sandbox: DockerSandbox, principal: string) => Promise<T>): Promise<T> {
+    const lane = `${host}:${hash}`;
     const result = (this.queues.get(lane) ?? Promise.resolve()).then(() => work(this.sandboxes.get(host)!, hash));
     const settled = result.catch(() => undefined);
     this.queues.set(lane, settled);
@@ -332,14 +335,18 @@ export class LocalToolGateway implements ToolGateway {
     const runId = /^run:(run_[a-f0-9-]{36}):/.exec(request.capabilityGrant)?.[1];
     // Without a valid Run there is no host or user to queue for; execute refuses it.
     if (!runId) return this.execute(request, this.sandbox, workspace);
+    let host: string, hash: string;
     try {
-      // A finished Run's release goes through the queue, so waiting for it must happen outside.
-      if (workspace) await (await this.sandboxFor(runId)).waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
-      return await this.enqueue(runId, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
+      host = await this.hostFor(runId); hash = (await this.principalKey(runId)).hash;
     } catch (error) {
-      // Finding the host or the user failed before anything was recorded or ran (execute itself never throws).
+      // Only finding the host or the user is turned into a plain failure here: nothing was recorded or ran yet.
       return this.result(request, 'failed', { error: error instanceof Error ? error.message : 'Local tool failed' });
     }
+    // A finished Run's release goes through the queue, so waiting for it must happen outside.
+    if (workspace) await this.sandboxes.get(host)!.waitForWorkspace(workspace, runId, 60_000).catch(() => undefined);
+    // Whatever goes wrong from here on, such as a receipt that cannot be saved after the tool ran, is execute's to
+    // report or to throw, so the engine keeps treating it as possibly done.
+    return this.enqueueOn(host, hash, (sandbox, principal) => this.execute(request, sandbox, workspace, principal));
   }
   async reconcile(request: ToolInvocation, _receipt: Receipt): Promise<ToolResult> {
     const record = await this.readRecord(request);

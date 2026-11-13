@@ -99,6 +99,16 @@ describe('gateway routing by user', () => {
     expect(await gateway.hostFor(alice)).toBe('vps');
     await gateway.close();
   });
+  it('leaves a tool that ran but whose receipt could not be saved as possibly done, never as failed', async () => {
+    const execute = vi.spyOn(DockerSandbox.prototype, 'execute').mockResolvedValue(done);
+    const gateway = await load();
+    vi.spyOn(gateway as any, 'saveResult').mockRejectedValue(new Error('disk full saving result'));
+    const outcome = await gateway.invoke(request(run('alice'))).then(result => result.status, error => `threw: ${error.message}`);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(outcome).not.toBe('failed');
+    expect(outcome).toMatch(/unknown|threw: disk full/);
+    await gateway.close();
+  });
   it('moves machines made under a single-host configuration to the existing host once hosts are named', async () => {
     // Before: no hosts; this version records the one host as "default".
     vi.spyOn(DockerSandbox.prototype, 'execute').mockImplementation(async function (this: DockerSandbox) { return { ...done, output: { host: this.host } }; });
