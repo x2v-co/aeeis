@@ -47,9 +47,16 @@ export function readableAnswer(raw: string): { text: string; caveat: boolean } {
 }
 
 /** A step that ended without an answer gets a runtime note in its place: no output after a timeout, repair or recovery
- * exhausted, or raw observations when the final synthesis failed. These openings are fixed runtime text, never a model's. */
-const STAND_IN = /^(?:Partial answer — no output\.|Partial answer — repair exhausted for "|Partial answer — limited evidence: [^\n]*\n\nFinal synthesis was unavailable\.)/;
-export function isStandInAnswer(content: string): boolean { return STAND_IN.test(content.trimStart()); }
+ * exhausted, or raw observations when the final synthesis failed. These openings are fixed runtime text, never a model's.
+ * The limitations line quotes an error message, which can span lines, so it is matched up to the fixed sentence after it. */
+const STAND_IN = /^(?:Partial answer — no output\.|Partial answer — repair exhausted for "|Partial answer — limited evidence: [\s\S]*?\.\n\nFinal synthesis was unavailable\. The following are untrusted observations)/;
+/** A repair fallback that had to drop the whole prose keeps only this sentence, which the runtime may then wrap in its
+ * limited-evidence line and Unknown list. The note is the entire text: an answer that merely contains it is kept. */
+const PRUNED_PROSE = /^(?:Partial answer — limited evidence: [\s\S]*?\.\n\n)?Partial answer: see the retained evidence-backed structured entries\.$/;
+export function isStandInAnswer(content: string): boolean {
+  const text = content.trim();
+  return STAND_IN.test(text) || PRUNED_PROSE.test(text.replace(RUNTIME_UNKNOWN_SUFFIX, '').trim());
+}
 /** Which output is the Run's answer: the last one a step actually wrote. A later step that failed leaves only a note,
  * which stays in the process view; when every output is such a note, the last one is all there is. */
 export function answerArtifact<T extends { content: string }>(artifacts: readonly T[]): T | undefined {
