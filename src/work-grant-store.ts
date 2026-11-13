@@ -16,6 +16,9 @@ import type { Ownership } from './security/principal.js';
  * isolated workspace still ask; a grant never covers them. Only the owner creates or revokes a grant.
  */
 const ref = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/);
+/** An outward action the grant pre-approves, by tool and target: `repo-push:<repo>` lets that tool push Bot branches to
+ * that one configured repository without asking. Any other outward action still asks. */
+export const connectorRefSchema = z.string().trim().regex(/^repo-push:[a-z][a-z0-9-]{0,39}$/, 'Use repo-push:<repo name>');
 const budgetSchema = z.object({
   tokens: z.number().int().positive().optional(),
   moneyUsd: z.number().positive().optional(),
@@ -45,6 +48,8 @@ export const workGrantSchema = z.object({
   title: z.string().trim().min(1).max(200),
   tools: z.array(ref).max(50),
   agents: z.array(ref).max(20),
+  /** Outward actions run without asking. Missing on grants made before connectors existed. */
+  connectors: z.array(connectorRefSchema).min(1).max(20).optional(),
   /** `perRun` caps one Run; `total` is shared by every Run under this grant. Each Run reserves its cap when it is
    * created; once the Run ends, the reservation shrinks to what it spent and the rest returns to `total`. */
   budget: z.object({ perRun: budgetSchema, total: budgetSchema }).strict(),
@@ -61,10 +66,12 @@ export const createWorkGrantSchema = z.object({
   title: z.string().trim().min(1).max(200),
   tools: z.array(ref).max(50).default([]),
   agents: z.array(ref).max(20).default([]),
+  connectors: z.array(connectorRefSchema).max(20).default([]),
   budget: z.object({ perRun: budgetSchema, total: budgetSchema }).strict(),
   durationHours: z.number().int().min(1).max(MAX_WORK_GRANT_HOURS),
 }).strict().superRefine((value, context) => {
   if (!value.tools.length && !value.agents.length) context.addIssue({ code: 'custom', path: ['tools'], message: 'A grant needs at least one tool or agent' });
+  for (const connector of value.connectors) if (!value.tools.includes(connector.split(':')[0]!)) context.addIssue({ code: 'custom', path: ['connectors'], message: `${connector} needs ${connector.split(':')[0]} in tools` });
   for (const key of ['tokens', 'moneyUsd'] as const) {
     const perRun = value.budget.perRun[key], total = value.budget.total[key];
     if ((perRun === undefined) !== (total === undefined)) context.addIssue({ code: 'custom', path: ['budget', 'total', key], message: `perRun and total must both set ${key} or both leave it out` });
@@ -112,14 +119,14 @@ export function workGrantRemaining(grant: WorkGrant): { tokens?: number; moneyUs
 
 /** The part of a grant a Run freezes. Its digest shows later that the Run ran under exactly this grant. */
 export function workGrantDigest(grant: WorkGrant): string {
-  return digestProtocol({ schemaVersion: 'work-grant/1', grantId: grant.grantId, owner: grant.owner, tenantId: grant.tenantId, tools: grant.tools, agents: grant.agents, budget: grant.budget, expiresAt: grant.expiresAt });
+  return digestProtocol({ schemaVersion: 'work-grant/1', grantId: grant.grantId, owner: grant.owner, tenantId: grant.tenantId, tools: grant.tools, agents: grant.agents, ...(grant.connectors ? { connectors: grant.connectors } : {}), budget: grant.budget, expiresAt: grant.expiresAt });
 }
 
 export function newWorkGrant(scope: Ownership, raw: CreateWorkGrant, now: string): WorkGrant {
   const input = createWorkGrantSchema.parse(raw);
   return workGrantSchema.parse({
     schemaVersion: 'work-grant/1', grantId: `wg_${randomUUID().replaceAll('-', '')}`, owner: scope.owner, tenantId: scope.tenantId,
-    title: input.title, tools: [...new Set(input.tools)].sort(), agents: [...new Set(input.agents)].sort(), budget: input.budget,
+    title: input.title, tools: [...new Set(input.tools)].sort(), agents: [...new Set(input.agents)].sort(), ...(input.connectors.length ? { connectors: [...new Set(input.connectors)].sort() } : {}), budget: input.budget,
     createdAt: now, expiresAt: new Date(Date.parse(now) + input.durationHours * 3_600_000).toISOString(),
     status: 'active', allocations: [], revision: 0,
   });

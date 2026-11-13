@@ -167,6 +167,29 @@ sandbox host is reported but not required. AEEIS starts without its sandbox
 hosts, and its readiness check leaves a host alone while no Run uses it, so an
 idle Instabox machine can pause.
 
+#### Publishing to GitHub (`repo-push`)
+
+`repos` in `local-tools.json` lets Bots publish a workspace folder to a GitHub
+repository as a `bot/<name>` branch with a draft pull request:
+
+```json
+"repos": [{ "name": "sandbox", "url": "https://github.com/x2v-co/aeeis-bots-repo",
+            "tokenFile": "/run/aeeis-secrets/github-sandbox.token" }]
+```
+
+- The token is a fine-grained personal access token for that repository only,
+  with **Contents** and **Pull requests** set to read and write. Put it in
+  `secrets/github-sandbox.token` (owner uid 1000, mode 0400). It is read for each
+  push and never enters a Run machine: AEEIS copies the files out, commits them
+  in a scratch clone and pushes over HTTPS itself.
+- Only `bot/` branches are pushed, never with force. Pushing to the same branch
+  again adds a commit and keeps the pull request. The base branch
+  (`baseBranch`, default `main`) must already exist.
+- Every push asks the owner first, unless the Run's Work Grant lists
+  `repo-push:<name>` under "不用问就能推送的仓库" (and `repo-push` under tools).
+- A push interrupted midway is checked on GitHub (each commit carries an
+  `AEEIS-Push:` trailer) before it is ever tried again.
+
 ## Network and trust
 
 `netns` owns a stable network namespace shared by API and worker. Worker → API
