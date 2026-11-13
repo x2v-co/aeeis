@@ -43,7 +43,7 @@ const items = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 /** A site build the model reported only as its summary block, with no prose after it: the same facts in a few lines a
  * person reads. Models fill the block loosely (a file as a path or an object, extra description or notes), so every field
  * is optional here and anything unreadable is left out. Every check that did not pass is named, so the answer never shows
- * only what worked; `open` says the block itself reports something failed, skipped or unconfirmed. Undefined when nothing
+ * only what worked; `open` says the block itself reports something failed, skipped or unconfirmed, the preview included. Undefined when nothing
  * readable is left. */
 function websiteBuilderProse(block: Loose): { text: string; open: boolean } | undefined {
   const lines: string[] = [];
@@ -58,9 +58,14 @@ function websiteBuilderProse(block: Loose): { text: string; open: boolean } | un
   const preview = loose(block.preview) ? block.preview : undefined;
   const status = preview && words(preview.status);
   const url = preview && words(preview.url);
-  if (status === 'failed') { lines.push('', '预览没能启动。'); open = true; }
+  const running = status === 'started' || status === 'ready' || !status;
+  if (!preview) { /* no preview reported */ }
+  else if (status === 'failed') { lines.push('', '预览没能启动。'); open = true; }
   // A link carrying an access token stays in the details, like everywhere else in a readable answer.
-  else if (url && (status === 'started' || status === 'ready' || !status)) lines.push('', url.search(TOKENED_LINK) >= 0 ? '预览已启动，链接在详情里。' : `预览：${url}`);
+  else if (url && running) lines.push('', url.search(TOKENED_LINK) >= 0 ? '预览已启动，链接在详情里。' : `预览：${url}`);
+  else if (status === 'started' || status === 'ready') { lines.push('', '预览已启动，但没给出链接。'); open = true; }
+  // unknown, any other status, or a preview with neither status nor link: the block itself says it is not confirmed.
+  else { lines.push('', '预览状态还没确认。'); open = true; }
   const checks = items(block.validation).filter(loose);
   const passed = checks.filter(item => item.status === 'passed').length;
   if (passed) lines.push('', `检查通过 ${passed} 项。`);

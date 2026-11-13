@@ -90,6 +90,17 @@ describe('what the chat shows of a Run\'s answer', () => {
       text: '做好的文件：\n- index.html\n\n检查通过 1 项。\n\n没确认的检查：\n- browser buttons\n- contrast\n\n跳过的检查：\n- mobile layout' });
     expect(readableAnswer(JSON.stringify({ ...block, validation: [block.validation[0]] }))).toEqual({ caveat: false, text: '做好的文件：\n- index.html\n\n检查通过 1 项。' });
   });
+  it('says when the preview is not confirmed, and marks the answer unverified', () => {
+    const block = { schemaVersion: 'website-builder/1', changedFiles: ['index.html'], validation: [{ name: 'build', status: 'passed' }], artifacts: [], blockers: [], unknowns: [] };
+    const base = '做好的文件：\n- index.html';
+    const read = (preview: unknown) => readableAnswer(JSON.stringify({ ...block, preview }));
+    expect(read({ status: 'unknown', evidenceRefs: ['executor_1'] })).toEqual({ caveat: true, text: `${base}\n\n预览状态还没确认。\n\n检查通过 1 项。` });
+    expect(read({ status: 'unknown', url: 'https://example.com/' })).toEqual({ caveat: true, text: `${base}\n\n预览状态还没确认。\n\n检查通过 1 项。` });
+    expect(read({})).toEqual({ caveat: true, text: `${base}\n\n预览状态还没确认。\n\n检查通过 1 项。` });
+    expect(read({ status: 'ready' })).toEqual({ caveat: true, text: `${base}\n\n预览已启动，但没给出链接。\n\n检查通过 1 项。` });
+    expect(read({ status: 'failed' })).toEqual({ caveat: true, text: `${base}\n\n预览没能启动。\n\n检查通过 1 项。` });
+    expect(read({ status: 'started', url: 'https://example.com/' })).toEqual({ caveat: false, text: `${base}\n\n预览：https://example.com/\n\n检查通过 1 项。` });
+  });
   it('keeps a summary block it cannot read as it is', () => {
     const other = '{"schemaVersion":"project-pulse/1","progress":[]}';
     expect(readableAnswer(other).text).toBe(other);
