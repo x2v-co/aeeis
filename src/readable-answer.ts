@@ -36,12 +36,74 @@ function withoutCaveats(text: string): { text: string; caveat: boolean } {
   return out && out !== text.trim() ? { text: out, caveat: true } : { text, caveat: false };
 }
 
+type Loose = Record<string, unknown>;
+const loose = (value: unknown): value is Loose => typeof value === 'object' && value !== null && !Array.isArray(value);
+const words = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value.replace(/\s+/g, ' ').trim() : undefined;
+const items = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+/** A site build the model reported only as its summary block, with no prose after it: the same facts in a few lines a
+ * person reads. Models fill the block loosely (a file as a path or an object, extra description or notes), so every field
+ * is optional here and anything unreadable is left out. Every check that did not pass is named, so the answer never shows
+ * only what worked; `open` says the block itself reports something failed, skipped or unconfirmed, the preview included. Undefined when nothing
+ * readable is left. */
+function websiteBuilderProse(block: Loose): { text: string; open: boolean } | undefined {
+  const lines: string[] = [];
+  let open = false;
+  const described = new Map<string, string | undefined>();
+  for (const item of items(block.artifacts)) if (loose(item) && words(item.path)) described.set(words(item.path)!, words(item.description) ?? words(item.kind));
+  for (const item of items(block.changedFiles)) {
+    const path = words(item) ?? (loose(item) ? words(item.path) : undefined);
+    if (path && !described.has(path)) described.set(path, undefined);
+  }
+  if (described.size) lines.push('做好的文件：', ...[...described].map(([path, what]) => `- ${path}${what ? `：${what}` : ''}`));
+  const preview = loose(block.preview) ? block.preview : undefined;
+  const status = preview && words(preview.status);
+  const url = preview && words(preview.url);
+  const running = status === 'started' || status === 'ready' || !status;
+  if (!preview) { /* no preview reported */ }
+  else if (status === 'failed') { lines.push('', '预览没能启动。'); open = true; }
+  // A link carrying an access token stays in the details, like everywhere else in a readable answer.
+  else if (url && running) lines.push('', url.search(TOKENED_LINK) >= 0 ? '预览已启动，链接在详情里。' : `预览：${url}`);
+  else if (status === 'started' || status === 'ready') { lines.push('', '预览已启动，但没给出链接。'); open = true; }
+  // unknown, any other status, or a preview with neither status nor link: the block itself says it is not confirmed.
+  else { lines.push('', '预览状态还没确认。'); open = true; }
+  const checks = items(block.validation).filter(loose);
+  const passed = checks.filter(item => item.status === 'passed').length;
+  if (passed) lines.push('', `检查通过 ${passed} 项。`);
+  // Anything other than passed, failed or skipped, a missing status included, was not confirmed.
+  const kind = (item: Loose) => item.status === 'failed' ? 'failed' : item.status === 'skipped' ? 'skipped' : 'unknown';
+  for (const [which, heading] of [['failed', '没通过的检查：'], ['unknown', '没确认的检查：'], ['skipped', '跳过的检查：']] as const) {
+    const named = checks.filter(item => item.status !== 'passed' && kind(item) === which).map(item => words(item.name) ?? words(item.claim) ?? '（没写名称）');
+    if (named.length) { lines.push('', heading, ...named.map(item => `- ${item}`)); open = true; }
+  }
+  const listed = (key: string, heading: string) => {
+    const texts = items(block[key]).map(item => words(item) ?? (loose(item) ? words(item.text) : undefined)).filter(Boolean);
+    if (texts.length) { lines.push('', heading, ...texts.map(item => `- ${item}`)); open = true; }
+  };
+  listed('blockers', '卡住的地方：');
+  listed('unknowns', '还没核实：');
+  const notes = words(block.notes);
+  if (notes) lines.push('', notes);
+  return lines.length ? { text: lines.join('\n').trim(), open } : undefined;
+}
+/** The prose for a summary block that is the whole answer, for the schemas a person can read without the block. */
+function summaryProse(block: string): { text: string; open: boolean } | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(block); } catch { return; }
+  return loose(parsed) && parsed.schemaVersion === 'website-builder/1' ? websiteBuilderProse(parsed) : undefined;
+}
+
 /** The answer a person reads, and whether the runtime marked parts of it unverified (those notes stay in the details). */
 export function readableAnswer(raw: string): { text: string; caveat: boolean } {
-  const { text, caveat } = withoutCaveats(raw.trim());
-  let out = text.trim();
+  const { text, caveat: runtimeCaveat } = withoutCaveats(raw.trim());
+  let out = text.trim(), caveat = runtimeCaveat;
   const summary = leadingSummaryEnd(out);
-  if (summary !== undefined) out = out.slice(summary);
+  if (summary !== undefined) {
+    const rest = out.slice(summary).trim();
+    const prose = rest ? undefined : summaryProse(out.slice(0, summary));
+    out = rest || prose?.text || '';
+    // The block's own failed, skipped or unconfirmed items are what the caveat is for, like the runtime's.
+    caveat ||= prose?.open ?? false;
+  }
   out = out.replace(EVIDENCE_GROUP, '').replace(TOKENED_LINK, '（预览链接见详情）').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
   return { text: out || text.replace(TOKENED_LINK, '（预览链接见详情）').trim(), caveat };
 }
