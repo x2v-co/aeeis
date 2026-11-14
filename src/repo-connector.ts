@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { z } from 'zod';
@@ -206,6 +206,7 @@ export class RepoConnector {
       if (result.code !== 0) throw new PushFailure(`git ${args[0]} failed: ${redact(result.stderr.trim() || result.stdout.trim(), token).slice(0, 500)}`, 'failed');
       return result.stdout;
     };
+    let checkedOut = '';
     await mkdir(work);
     await run(['init', '-q']);
     await run(['remote', 'add', 'origin', remote]);
@@ -217,13 +218,24 @@ export class RepoConnector {
       checkout: async (name: string) => {
         await run(['fetch', '-q', '--no-tags', '--depth=50', 'origin', `refs/heads/${name}`], 120_000);
         await run(['checkout', '-q', '--detach', 'FETCH_HEAD']);
+        checkedOut = name;
       },
+      /** Searches the whole history of the checked-out branch. The first fetch is shallow; a miss there proves
+       * nothing, so the rest of the history is fetched before saying no. If that fetch fails, this throws instead of
+       * answering, and the caller cannot treat the call as never having landed. */
       findMarker: async (marker: string) => {
-        const out = await run(['log', '-n', '50', '--format=%H%x1f%B%x1e', 'HEAD']);
-        return out.split('\x1e').map(entry => entry.trim().split('\x1f')).find(([, body]) => body?.split('\n').some(line => line.trim() === `AEEIS-Push: ${marker}`))?.[0];
+        const search = async () => {
+          const out = await run(['log', '--fixed-strings', `--grep=AEEIS-Push: ${marker}`, '--format=%H%x1f%B%x1e', 'HEAD']);
+          return out.split('\x1e').map(entry => entry.trim().split('\x1f')).find(([, body]) => body?.split('\n').some(line => line.trim() === `AEEIS-Push: ${marker}`))?.[0];
+        };
+        const found = await search();
+        if (found || (await run(['rev-parse', '--is-shallow-repository'])).trim() !== 'true') return found;
+        await run(['fetch', '-q', '--no-tags', '--unshallow', 'origin', `refs/heads/${checkedOut}`], 300_000).catch(error => { throw new PushFailure(`Could not read the branch's full history: ${message(error)}`, 'unknown'); });
+        return search();
       },
       replace: async (target: string, files: ExportedFile[]) => {
         const root = target === '.' ? work : join(work, target);
+        await assertInsideClone(work, target);
         if (target === '.') { for (const entry of await readdir(work)) if (entry !== '.git') await rm(join(work, entry), { recursive: true, force: true }); }
         else await rm(root, { recursive: true, force: true });
         for (const file of files) {
@@ -288,6 +300,21 @@ export class RepoConnector {
       throw error;
     });
     return view(pullSchema.parse(created));
+  }
+}
+
+/** A repository may contain symbolic links, and checkout restores them. Before anything is removed or written, every
+ * existing part of the target path must be a real folder inside the clone, or a later write could follow a link out of
+ * it and change files on the AEEIS host. Missing parts are created afterwards as plain folders. */
+async function assertInsideClone(work: string, target: string): Promise<void> {
+  if (target === '.') return;
+  let current = work;
+  for (const part of target.split('/')) {
+    current = join(current, part);
+    const info = await lstat(current).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
+    if (!info) return;
+    if (info.isSymbolicLink()) throw new PushFailure(`${target} goes through a symbolic link in the repository (${current.slice(work.length + 1)}), so nothing was pushed`);
+    if (!info.isDirectory()) throw new PushFailure(`${current.slice(work.length + 1)} is a file in the repository, not a folder, so nothing was pushed`);
   }
 }
 

@@ -122,6 +122,49 @@ describe('repo-push connector', () => {
     expect((await connector().push(input({ repo: 'other' }), `${RUN}:d:repo-push`, RUN, async () => [])).output).toMatchObject({ error: expect.stringMatching(/Unknown repo/) });
   });
 
+  it('refuses a target that goes through a symbolic link in the repository, before touching anything', async () => {
+    await seed();
+    const { mkdir, symlink, readdir } = await import('node:fs/promises');
+    const outside = join(root, 'outside');
+    await mkdir(join(outside, 'victim'), { recursive: true });
+    await writeFile(join(outside, 'victim', 'keep.txt'), 'keep');
+    const seedDir = join(root, 'seed');
+    await symlink(outside, join(seedDir, 'alias'));
+    await writeFile(join(seedDir, 'plain.txt'), 'x');
+    git(seedDir, 'add', '.'); git(seedDir, 'commit', '-q', '-m', 'link'); git(seedDir, 'push', '-q', remote, 'main');
+    for (const target of ['alias/victim', 'alias', 'plain.txt/sub']) {
+      const result = await connector().push(input({ target }), `${RUN}:${target}:repo-push`, RUN, async () => [file('new.txt', 'planted')]);
+      expect(result).toMatchObject({ status: 'failed', output: { error: expect.stringMatching(/symbolic link|is a file/) } });
+    }
+    expect(await readdir(join(outside, 'victim'))).toEqual(['keep.txt']);
+    expect(git(root, '--git-dir', remote, 'branch', '--list')).toBe('* main');
+  });
+
+  it('finds an earlier push however many commits came after it', async () => {
+    await seed();
+    const repo = connector();
+    const first = await repo.push(input(), `${RUN}:a:repo-push`, RUN, async () => [file('index.html', 'v1')]);
+    const other = join(root, 'other');
+    git(root, 'clone', '-q', '-b', 'bot/pomodoro', remote, other);
+    for (let i = 0; i < 55; i++) git(other, 'commit', '-q', '--allow-empty', '-m', `later ${i}`);
+    git(other, 'push', '-q', 'origin', 'bot/pomodoro');
+    expect(await repo.reconcile(input(), `${RUN}:a:repo-push`)).toMatchObject({ status: 'completed', output: { commit: first.output.commit } });
+    expect((await repo.push(input(), `${RUN}:a:repo-push`, RUN, async () => [file('index.html', 'v1')])).output).toMatchObject({ pushed: false, commit: first.output.commit, note: expect.stringMatching(/already landed/) });
+    expect(await repo.reconcile(input(), `${RUN}:never:repo-push`)).toMatchObject({ status: 'failed', output: { error: expect.stringMatching(/safe to push again/) } });
+   }, 30_000);
+
+  it('says it cannot tell, rather than safe to retry, when the full history cannot be read', async () => {
+    await seed();
+    const repo = connector();
+    await repo.push(input(), `${RUN}:a:repo-push`, RUN, async () => [file('index.html', 'v1')]);
+    const other = join(root, 'other');
+    git(root, 'clone', '-q', '-b', 'bot/pomodoro', remote, other);
+    for (let i = 0; i < 55; i++) git(other, 'commit', '-q', '--allow-empty', '-m', `later ${i}`);
+    git(other, 'push', '-q', 'origin', 'bot/pomodoro');
+    const failing: GitRunner = async (args, options) => args.includes('--unshallow') ? { code: 128, stdout: '', stderr: 'fatal: the remote end hung up' } : new Promise(resolve => execFile(args, options, resolve));
+    expect(await connector(fakeGitHub(), { git: failing }).reconcile(input(), `${RUN}:never:repo-push`)).toMatchObject({ status: 'unknown' });
+   }, 30_000);
+
   it('never overwrites a branch that moved meanwhile', async () => {
     await seed();
     const repo = connector();
