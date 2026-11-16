@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import { snapshotSchema, validateSnapshot, type WorkspaceFile } from './sandbox-workspace.js';
 import { PACK_DELIVERABLES } from './saved-site.js';
-import { PREVIEW_ID, PREVIEW_RELAY, newPreviewId, previewUrl } from './preview-proxy.js';
+import { PREVIEW_ID, PREVIEW_RELAY, PREVIEW_WINDOW, newPreviewId, previewUrl } from './preview-proxy.js';
 
 const PREVIEW_DOMAIN = /^(?=.{4,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z][a-z0-9-]{1,62}$/;
 export const sandboxConfigSchema = z.object({
@@ -831,7 +831,7 @@ export class DockerSandbox {
     await this.imageId();
     const control = await this.controlDirectory();
     const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
-    const invocation = dockerInvocation(this.config, ['exec', '--interactive', `${state.name}-proxy`, 'python3', '-I', '-u', '-c', PREVIEW_RELAY, String(port)], this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config), control);
+    const invocation = dockerInvocation(this.config, ['exec', '--interactive', `${state.name}-proxy`, 'python3', '-I', '-u', '-c', PREVIEW_RELAY, String(port), String(PREVIEW_WINDOW)], this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config), control);
     return spawn(invocation.command, invocation.args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
   }
   private async ports(state: State) {

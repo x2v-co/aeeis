@@ -24,13 +24,17 @@ export const previewUrl = (domain: string, id: string) => `https://p-${id}.${dom
 /**
  * Runs in the Run's proxy container (python3 -I -c, so nothing in the image changes) and multiplexes connections to
  * one preview port over its standard input and output. A frame is stream id (u32), type (u8) and length (u32), then
- * the data. 1 opens a stream, 2 carries data, 3 ends one direction, 4 drops the stream. The proxy already forwards the
- * preview port to the Run's container, so the relay only ever dials 127.0.0.1 on that port.
+ * the data. 1 opens a stream, 2 carries data, 3 ends one direction, 4 drops the stream, 5 grants the relay credit (u32
+ * bytes) to send more on it. Each stream starts with WINDOW bytes of credit and gets more only as its reader takes
+ * data, so a visitor who stops reading stops that stream alone, and AEEIS holds at most that much of it. The proxy
+ * already forwards the preview port to the Run's container, so the relay only ever dials 127.0.0.1 on that port.
  */
+export const PREVIEW_WINDOW = 256 * 1024;
 export const PREVIEW_RELAY = `
 import asyncio, struct, sys
 PORT = int(sys.argv[1])
 HEAD = struct.Struct('>IBI')
+WINDOW = int(sys.argv[2]) if len(sys.argv) > 2 else 262144
 async def main():
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=1 << 22)
@@ -44,11 +48,18 @@ async def main():
             out.write(HEAD.pack(sid, kind, len(data)) + data)
             await out.drain()
     async def pump(sid, upstream):
+        entry = streams.get(sid)
         try:
             while True:
-                chunk = await upstream.read(65536)
+                while entry['window'] <= 0:
+                    entry['credit'].clear()
+                    await entry['credit'].wait()
+                    if streams.get(sid) is not entry:
+                        return
+                chunk = await upstream.read(min(65536, entry['window']))
                 if not chunk:
                     break
+                entry['window'] -= len(chunk)
                 await send(sid, 2, chunk)
             await send(sid, 3)
         except Exception:
@@ -56,6 +67,8 @@ async def main():
             await send(sid, 4)
     def drop(sid):
         entry = streams.pop(sid, None)
+        if entry:
+            entry['credit'].set()
         if entry and entry['writer']:
             entry['writer'].close()
     async def connect(sid):
@@ -81,7 +94,7 @@ async def main():
         except asyncio.IncompleteReadError:
             break
         if kind == 1 and sid not in streams and len(streams) < 256:
-            streams[sid] = {'writer': None, 'pending': []}
+            streams[sid] = {'writer': None, 'pending': [], 'window': WINDOW, 'credit': asyncio.Event()}
             asyncio.ensure_future(connect(sid))
         elif kind == 1:
             await send(sid, 4)
@@ -89,6 +102,9 @@ async def main():
             entry = streams[sid]
             if kind == 4:
                 drop(sid)
+            elif kind == 5:
+                entry['window'] += struct.unpack('>I', data)[0]
+                entry['credit'].set()
             elif entry['writer'] is None:
                 entry['pending'].append(data if kind == 2 else None)
             elif kind == 2:
@@ -101,7 +117,7 @@ async def main():
 asyncio.run(main())
 `;
 
-const OPEN = 1, DATA = 2, END = 3, DROP = 4;
+const OPEN = 1, DATA = 2, END = 3, DROP = 4, CREDIT = 5;
 const HEADER = 9;
 const MAX_FRAME = 1 << 20;
 const MAX_STREAMS = 200;
@@ -115,6 +131,7 @@ function frame(id: number, type: number, data?: Buffer): Buffer {
 export class PreviewChannel {
   private next = 1;
   private readonly streams = new Map<number, Duplex>();
+  private readonly received = new Map<number, (size: number) => void>();
   private pending: Buffer = Buffer.alloc(0);
   private closed = false;
   private idleTimer: NodeJS.Timeout | undefined;
@@ -152,8 +169,14 @@ export class PreviewChannel {
     const id = this.next;
     this.next = this.next >= 0xffff_fff0 ? 1 : this.next + 1;
     const channel = this;
+    // Bytes received but not yet given back as credit. The reader asking for more (read) means they were taken.
+    let taken = 0;
     const stream = new Duplex({
-      read() { /* data arrives as the relay sends it */ },
+      read() {
+        if (!taken) return;
+        const grant = Buffer.alloc(4); grant.writeUInt32BE(taken, 0); taken = 0;
+        channel.send(id, CREDIT, grant);
+      },
       write(chunk: Buffer, _encoding, callback) {
         let ok = true;
         for (let offset = 0; offset < chunk.length; offset += MAX_FRAME) ok = channel.send(id, DATA, chunk.subarray(offset, offset + MAX_FRAME)) && ok;
@@ -161,6 +184,7 @@ export class PreviewChannel {
       },
       final(callback) { channel.send(id, END); callback(); },
       destroy(error, callback) {
+        channel.received.delete(id);
         if (channel.streams.delete(id)) channel.send(id, DROP);
         channel.idle();
         callback(error);
@@ -169,6 +193,7 @@ export class PreviewChannel {
     // What an http.ClientRequest may call on its socket.
     Object.assign(stream, { setNoDelay() { return stream; }, setKeepAlive() { return stream; }, setTimeout() { return stream; }, ref() { return stream; }, unref() { return stream; } });
     this.streams.set(id, stream);
+    this.received.set(id, size => { taken += size; });
     clearTimeout(this.idleTimer);
     this.send(id, OPEN);
     return stream;
@@ -184,9 +209,9 @@ export class PreviewChannel {
       this.pending = this.pending.subarray(HEADER + size);
       const stream = this.streams.get(id);
       if (!stream) continue;
-      if (type === DATA) stream.push(Buffer.from(data));
+      if (type === DATA) { this.received.get(id)?.(data.length); stream.push(Buffer.from(data)); }
       else if (type === END) stream.push(null);
-      else if (type === DROP) { this.streams.delete(id); stream.destroy(new Error('The preview is not answering on its port')); this.idle(); }
+      else if (type === DROP) { this.streams.delete(id); this.received.delete(id); stream.destroy(new Error('The preview is not answering on its port')); this.idle(); }
     }
   }
 }
@@ -225,7 +250,9 @@ function page(response: ServerResponse, status: number, message: string) {
 interface Entry { target: PreviewTarget; checkedAt: number; channel?: PreviewChannel; starting?: Promise<PreviewChannel> | undefined }
 export class PreviewProxy {
   private readonly hostPattern: RegExp;
-  private readonly entries = new Map<string, Promise<Entry | undefined>>();
+  private readonly entries = new Map<string, Entry>();
+  /** One lookup per id at a time: every request that arrives meanwhile waits for the same one. */
+  private readonly lookups = new Map<string, Promise<Entry | undefined>>();
   constructor(readonly domain: string, private readonly resolve: PreviewResolver, private readonly options: { recheckMs?: number; now?: () => number } = {}) {
     this.hostPattern = new RegExp(`^p-([a-z2-7]{26})\\.${domain.replace(/[.]/g, '\\.')}(?::\\d+)?$`);
   }
@@ -233,19 +260,26 @@ export class PreviewProxy {
   idFor(host: string | undefined): string | undefined {
     return host ? this.hostPattern.exec(host.toLowerCase())?.[1] : undefined;
   }
-  /** The target is looked up again every half minute, so a link stops working soon after its machine is released. */
-  private async entry(id: string): Promise<Entry | undefined> {
+  /** The target is looked up again every half minute, so a link stops working soon after its machine is released.
+   * Nothing here waits before the lookup is registered, so requests arriving together share one lookup and one Entry,
+   * and with it one relay. */
+  private entry(id: string): Promise<Entry | undefined> {
     const now = this.options.now?.() ?? Date.now();
-    const cached = await this.entries.get(id);
-    if (cached && now - cached.checkedAt < (this.options.recheckMs ?? 30_000)) return cached;
+    const cached = this.entries.get(id);
+    if (cached && now - cached.checkedAt < (this.options.recheckMs ?? 30_000)) return Promise.resolve(cached);
+    const running = this.lookups.get(id);
+    if (running) return running;
     const lookup = this.resolve(id).then(target => {
-      if (!target) { cached?.channel?.close(); return undefined; }
-      return { target, checkedAt: now, ...(cached?.channel?.alive && cached.target.port === target.port ? { channel: cached.channel } : {}) } as Entry;
-    }, () => cached);
-    this.entries.set(id, lookup);
-    const found = await lookup;
-    if (!found) this.entries.delete(id);
-    return found;
+      if (!target) { cached?.channel?.close(); this.entries.delete(id); return undefined; }
+      // The same port keeps the same Entry, and so its relay.
+      if (cached && cached.target.port === target.port) { cached.target = target; cached.checkedAt = now; return cached; }
+      cached?.channel?.close();
+      const entry: Entry = { target, checkedAt: now };
+      this.entries.set(id, entry);
+      return entry;
+    }, () => cached).finally(() => { this.lookups.delete(id); });
+    this.lookups.set(id, lookup);
+    return lookup;
   }
   private async connect(id: string): Promise<{ port: number; socket: () => DuplexType } | undefined> {
     const entry = await this.entry(id);
@@ -295,7 +329,7 @@ export class PreviewProxy {
     upstream.on('close', () => socket.destroy());
   }
   close() {
-    for (const entry of this.entries.values()) void entry.then(item => item?.channel?.close());
+    for (const entry of this.entries.values()) entry.channel?.close();
     this.entries.clear();
   }
 }

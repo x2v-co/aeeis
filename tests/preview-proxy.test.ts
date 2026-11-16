@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { connect } from 'node:net';
+import { connect, createServer as createTcpServer } from 'node:net';
 import { createServer, request, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { buildApp } from '../src/runtime/http.js';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { PREVIEW_ID, PREVIEW_RELAY, PreviewProxy, newPreviewId, previewServerFactory, previewUrl, upstreamHeaders } from '../src/preview-proxy.js';
+import { PREVIEW_ID, PREVIEW_RELAY, PREVIEW_WINDOW, PreviewChannel, PreviewProxy, newPreviewId, previewServerFactory, previewUrl, upstreamHeaders } from '../src/preview-proxy.js';
 
 const listen = (server: Server) => new Promise<number>(resolve => server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)));
 const closers: (() => Promise<void> | void)[] = [];
@@ -40,9 +40,13 @@ async function devServer() {
 }
 
 /** AEEIS's side: the preview proxy in front of an app, with the real relay script run locally instead of in a container. */
-async function front(targets: Map<string, number>) {
+async function front(targets: Map<string, number>, options: { lookupMs?: number } = {}) {
   const relays: ChildProcessWithoutNullStreams[] = [];
+  const lookups: string[] = [];
   const proxy = new PreviewProxy('aeeis.link', async id => {
+    lookups.push(id);
+    // Reading the machines' records takes a moment.
+    if (options.lookupMs) await new Promise(resolve => setTimeout(resolve, options.lookupMs));
     const port = targets.get(id);
     return port === undefined ? undefined : { port, relay: async () => { const child = spawn('python3', ['-I', '-u', '-c', PREVIEW_RELAY, String(port)], { stdio: ['pipe', 'pipe', 'pipe'] }); relays.push(child); return child; } };
   }, { recheckMs: 50 });
@@ -56,7 +60,7 @@ async function front(targets: Map<string, number>) {
     });
     outgoing.on('error', reject); outgoing.end(options.body);
   });
-  return { port, proxy, relays, call };
+  return { port, proxy, relays, lookups, call };
 }
 
 describe('preview links', () => {
@@ -122,6 +126,26 @@ describe('preview proxy through the relay', () => {
     const notListening = await call(`p-${idle}.aeeis.link`, '/');
     expect(notListening.status).toBe(502); expect(notListening.body).toContain(`0.0.0.0:${closedPort}`);
   }, 15_000);
+  it('starts one relay for requests that arrive together on a new link, and keeps it when the link is checked again', async () => {
+    const dev = await devServer();
+    const id = newPreviewId();
+    const { port, relays, lookups } = await front(new Map([[id, dev.port]]), { lookupMs: 20 });
+    const host = `p-${id}.aeeis.link`;
+    // 25 requests pipelined on one connection reach the proxy in the same turn, before any lookup has finished.
+    const burst = () => new Promise<number>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1');
+      let text = '';
+      socket.on('data', chunk => { text += chunk; const answers = text.match(/HTTP\/1\.1 200/g)?.length ?? 0; if (answers === 25) { socket.destroy(); resolve(answers); } });
+      socket.on('error', reject);
+      socket.write(Array.from({ length: 25 }, (_, index) => `GET /a/${index} HTTP/1.1\r\nhost: ${host}\r\n\r\n`).join(''));
+    });
+    expect(await burst()).toBe(25);
+    expect(lookups).toHaveLength(1); expect(relays).toHaveLength(1);
+    // Once the check is due, requests arriving together share one new lookup and the relay already running.
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect(await burst()).toBe(25);
+    expect(lookups).toHaveLength(2); expect(relays).toHaveLength(1);
+  }, 30_000);
   it('stops a link soon after its machine is released, and ends its relay', async () => {
     const dev = await devServer();
     const id = newPreviewId();
@@ -151,4 +175,37 @@ describe('the AEEIS server with previews', () => {
     expect(preview.status).toBe(404); expect(preview.body).toContain('preview link is not active');
     expect(await app.inject({ method: 'GET', url: '/health', headers: { host: 'aeeis.com' } })).toMatchObject({ statusCode: 200 });
   });
+});
+
+describe('relay flow control', () => {
+  it('holds at most a window of a stream whose reader stopped, while other streams keep flowing', async () => {
+    const big = Buffer.alloc(24 * 1024 * 1024, 1);
+    const server = createTcpServer(socket => {
+      socket.once('data', chunk => { if (String(chunk) === 'big') socket.end(big); else socket.end('hello'); });
+      socket.on('error', () => undefined);
+    });
+    const port = await new Promise<number>(resolve => server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)));
+    const child = spawn('python3', ['-I', '-u', '-c', PREVIEW_RELAY, String(port), String(PREVIEW_WINDOW)], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const channel = new PreviewChannel(child);
+    closers.push(() => { channel.close(); child.kill('SIGKILL'); return new Promise<void>(resolve => server.close(() => resolve())); });
+    const stalled = channel.open();
+    stalled.on('error', () => undefined);
+    stalled.write('big');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Nobody reads it: AEEIS keeps at most the relay's window plus the stream's own small buffer, not 24 MiB.
+    expect(stalled.readableLength).toBeGreaterThan(0);
+    expect(stalled.readableLength).toBeLessThanOrEqual(PREVIEW_WINDOW + 64 * 1024);
+    // The stalled stream holds up no other stream on the same relay.
+    const other = channel.open();
+    other.on('error', () => undefined);
+    const answer: Buffer[] = [];
+    other.on('data', chunk => answer.push(chunk));
+    other.write('small');
+    await expect.poll(() => Buffer.concat(answer).toString()).toBe('hello');
+    // Reading again gets everything, in full.
+    let total = 0, wrong = false;
+    stalled.on('data', (chunk: Buffer) => { total += chunk.length; if (chunk.some(byte => byte !== 1)) wrong = true; });
+    await expect.poll(() => total, { timeout: 20_000 }).toBe(big.length);
+    expect(wrong).toBe(false);
+  }, 40_000);
 });
