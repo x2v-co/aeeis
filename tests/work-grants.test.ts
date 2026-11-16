@@ -110,9 +110,12 @@ function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boole
       { id: 'edit', version: '1', capabilities: ['write'], inputSchema: {}, outputSchema: {} },
       { id: 'publish', version: '1', capabilities: ['write', 'network'], inputSchema: {}, outputSchema: {} },
       { id: 'other', version: '1', capabilities: ['write'], inputSchema: {}, outputSchema: {} },
+      { id: 'repo-push', version: '1', capabilities: ['write', 'network'], inputSchema: {}, outputSchema: {} },
     ],
     invoke,
     workspaceContainedTools: async () => ['edit', 'other'],
+    // As the local gateway's own connector answers: only repo-push has an outward scope.
+    outwardAction: (toolId: string) => toolId === 'repo-push' ? { scope: 'repo-push:sandbox', summary: 'push workspace root to x2v-co/aeeis-bots-repo on bot/site' } : undefined,
     interruptRun: interrupt,
   };
   const sequence = options.calls ?? ['edit'];
@@ -233,6 +236,23 @@ describe('runs under a work grant', () => {
     expect(waiting.approval).toMatchObject({ approved: true, actor: `grant:${grant.grantId}` });
     expect(waiting.actionApproval).toMatchObject({ status: 'pending', ref: 'publish@1' });
     expect(h.invoke).not.toHaveBeenCalled();
+  });
+
+  it('pushes unasked to a repo the grant names, and asks with what it would do otherwise', async () => {
+    const named = harness({ calls: ['repo-push'] });
+    const covering = await named.grants.create(scope, { ...grantInput, tools: ['edit', 'repo-push'], connectors: ['repo-push:sandbox'] });
+    const run = await named.engine.create({ goal: 'Publish the site', materials: named.materials, workGrantId: covering.grantId, origin: 'channel' });
+    expect(run.workGrant).toMatchObject({ connectors: ['repo-push:sandbox'], containedTools: ['edit'] });
+    expect(await named.settle(run.id)).toBe('succeeded');
+    expect(named.invoke).toHaveBeenCalledTimes(1);
+    expect((await named.repository.get(run.id)).events.find(event => event.type === 'action.allowed')?.data).toMatchObject({ rule: 'grant', grantId: covering.grantId, scope: 'repo-push:sandbox' });
+
+    const unnamed = harness({ calls: ['repo-push'] });
+    const plain = await unnamed.grants.create(scope, { ...grantInput, tools: ['edit', 'repo-push'] });
+    const asking = await unnamed.engine.create({ goal: 'Publish the site', materials: unnamed.materials, workGrantId: plain.grantId });
+    expect(await unnamed.settle(asking.id)).toBe('needs_approval');
+    expect((await unnamed.repository.get(asking.id)).actionApproval).toMatchObject({ status: 'pending', ref: 'repo-push@1', reason: expect.stringContaining('It would push workspace root to x2v-co/aeeis-bots-repo on bot/site') });
+    expect(unnamed.invoke).not.toHaveBeenCalled();
   });
 
   it('waits for approval when the Run asks for a tool outside the grant', async () => {

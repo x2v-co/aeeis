@@ -63,6 +63,9 @@ export interface ToolGateway {
   /** Tool ids whose every effect this gateway's own code confines to the Run's isolated workspace. It is never read
    * from tool metadata: a remote toolkit cannot claim it. A Work Grant lets only these run without asking. */
   workspaceContainedTools?(): Promise<string[]>;
+  /** For a tool this gateway's own code runs against an outside system: the Work Grant entry that may pre-approve this
+   * call (e.g. `repo-push:sandbox`) and what it would do, in one line. Never read from tool metadata. */
+  outwardAction?(toolId: string, input: unknown): { scope: string; summary: string } | undefined;
 }
 
 /** Streamable JSON-RPC MCP client used for the normal AEEIS -> Toolkit path. */

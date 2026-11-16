@@ -72,6 +72,38 @@ const responseSchema = z.object({
  * `principal` is a hash of the user the machine belongs to, never the user's own identity. */
 const stateSchema = z.object({ runId: z.string(), host: z.string().optional(), principal: z.string().optional(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
 type State = z.infer<typeof stateSchema>;
+export interface ExportedWorkspaceFile { path: string; mode: '644' | '755'; data: Buffer }
+const exportSchema = z.union([
+  z.object({ error: z.string().max(1000) }).strict(),
+  z.object({ files: z.array(z.object({ path: z.string().min(1).max(500), mode: z.enum(['644', '755']), data: z.string() }).strict()).max(5000), skipped: z.number().int().nonnegative() }).strict(),
+]);
+/** Runs as python3 -I inside the Run container; its only input is {path, maxFiles, maxBytes, skip} on stdin. */
+export const EXPORT_SCRIPT = `
+import base64, json, os, stat, sys
+a = json.load(sys.stdin)
+root = os.path.realpath('/workspace')
+base = os.path.realpath(os.path.join(root, a['path']))
+def out(value):
+    sys.stdout.write(json.dumps(value)); sys.exit(0)
+if base != root and not base.startswith(root + os.sep): out({'error': 'That folder is outside the workspace'})
+if not os.path.isdir(base): out({'error': 'No such folder in the workspace: ' + a['path']})
+skip = set(a['skip']); files = []; total = 0; skipped = 0
+for d, dirs, names in os.walk(base):
+    kept = []
+    for x in sorted(dirs):
+        if x in skip or os.path.islink(os.path.join(d, x)): skipped += 1
+        else: kept.append(x)
+    dirs[:] = kept
+    for n in sorted(names):
+        p = os.path.join(d, n); st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode): skipped += 1; continue
+        total += st.st_size
+        if len(files) >= a['maxFiles'] or total > a['maxBytes']:
+            out({'error': 'The folder is too large to publish (limit %d files, %d MB)' % (a['maxFiles'], a['maxBytes'] // 1048576)})
+        with open(p, 'rb') as f: data = f.read()
+        files.append({'path': os.path.relpath(p, base), 'mode': '755' if st.st_mode & 0o111 else '644', 'data': base64.b64encode(data).decode()})
+out({'files': files, 'skipped': skipped})
+`;
 export class SandboxError extends Error {
   constructor(message: string, readonly outcome: 'failed' | 'unknown' = 'failed') { super(message); }
 }
@@ -703,6 +735,22 @@ export class DockerSandbox {
     const state = await this.state(runId);
     if (!state) return [];
     return (await this.exchange(state, '__snapshot', {}, 30_000)).files ?? [];
+  }
+  /** Reads one workspace folder out of the Run's container for AEEIS to publish. Only regular files are read: links,
+   * devices and the skipped build folders never leave the machine, and a path that resolves outside /workspace is
+   * refused inside the container. It changes nothing there. */
+  async exportFiles(runId: string, path: string, limits: { maxFiles: number; maxBytes: number; skip: readonly string[] }, workspace?: string, principal?: string): Promise<ExportedWorkspaceFile[]> {
+    if (this.closing) throw new SandboxError('Sandbox service is closing');
+    const state = await this.prepareWithWait(runId, [], workspace, principal);
+    this.active.add(state.name);
+    try {
+      const result = await this.command(['exec', '--interactive', state.name, 'python3', '-I', '-c', EXPORT_SCRIPT], 120_000,
+        JSON.stringify({ path, ...limits }), Math.ceil(limits.maxBytes * 1.4) + 1_000_000);
+      if (result.code !== 0) throw new SandboxError(`Reading the workspace failed: ${result.stderr.trim().slice(0, 300) || `exit ${result.code}`}`);
+      const parsed = exportSchema.parse(JSON.parse(result.stdout));
+      if ('error' in parsed) throw new SandboxError(parsed.error);
+      return parsed.files.map(file => ({ path: file.path, mode: file.mode, data: Buffer.from(file.data, 'base64') }));
+    } finally { this.active.delete(state.name); }
   }
   /** Ends the executor's process group, leaving the container and everything else in it running. */
   async stopExecutor(runId: string, pid: number): Promise<void> {

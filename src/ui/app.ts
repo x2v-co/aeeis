@@ -943,7 +943,7 @@ $('action-policy-add')?.addEventListener('submit', event => {
 });
 document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-actions"]')?.addEventListener('click', () => { void loadActionPolicy(); });
 interface WorkGrantView {
-  grantId: string; title: string; tools: string[]; agents: string[]; expiresAt: string; runCount: number;
+  grantId: string; title: string; tools: string[]; agents: string[]; connectors?: string[]; expiresAt: string; runCount: number;
   state: 'active' | 'revoked' | 'expired' | 'exhausted'; remaining: { tokens?: number; moneyUsd?: number };
 }
 const WORK_GRANT_STATE: Record<WorkGrantView['state'], string> = { active: '有效', revoked: '已撤销', expired: '已过期', exhausted: '预算用完' };
@@ -958,7 +958,7 @@ async function loadWorkGrants(): Promise<void> {
 }
 function workGrantSummary(grant: WorkGrantView): string {
   const left = [grant.remaining.tokens === undefined ? '' : `剩 ${grant.remaining.tokens.toLocaleString()} tokens`, grant.remaining.moneyUsd === undefined ? '' : `剩 $${grant.remaining.moneyUsd}`].filter(Boolean).join('、');
-  const scope = [grant.tools.length ? `工具 ${grant.tools.join('、')}` : '', grant.agents.length ? `代理 ${grant.agents.join('、')}` : ''].filter(Boolean).join(' · ');
+  const scope = [grant.tools.length ? `工具 ${grant.tools.join('、')}` : '', grant.agents.length ? `代理 ${grant.agents.join('、')}` : '', grant.connectors?.length ? `不用问就能推送到 ${grant.connectors.map(item => item.replace(/^repo-push:/, '')).join('、')} 的 bot/ 分支` : ''].filter(Boolean).join(' · ');
   return `${WORK_GRANT_STATE[grant.state]} · ${scope} · ${left} · ${grant.runCount} 件 Run · 到 ${new Date(grant.expiresAt).toLocaleString()}`;
 }
 function renderWorkGrants(): void {
@@ -1016,7 +1016,7 @@ $('work-grant-add')?.addEventListener('submit', event => {
   const num = (fieldId: string) => { const value = $<HTMLInputElement>(fieldId)?.value.trim(); return value ? Number(value) : undefined; };
   const perRun = { ...(num('work-grant-run-tokens') === undefined ? {} : { tokens: num('work-grant-run-tokens') }), ...(num('work-grant-run-usd') === undefined ? {} : { moneyUsd: num('work-grant-run-usd') }) };
   const total = { ...(num('work-grant-total-tokens') === undefined ? {} : { tokens: num('work-grant-total-tokens') }), ...(num('work-grant-total-usd') === undefined ? {} : { moneyUsd: num('work-grant-total-usd') }) };
-  const body = { title: $<HTMLInputElement>('work-grant-title')?.value.trim() ?? '', tools: ids('work-grant-tools'), agents: ids('work-grant-agents'), budget: { perRun, total }, durationHours: Number($<HTMLSelectElement>('work-grant-hours')?.value ?? 24) };
+  const body = { title: $<HTMLInputElement>('work-grant-title')?.value.trim() ?? '', tools: ids('work-grant-tools'), agents: ids('work-grant-agents'), connectors: ids('work-grant-repos').map(name => `repo-push:${name}`), budget: { perRun, total }, durationHours: Number($<HTMLSelectElement>('work-grant-hours')?.value ?? 24) };
   void api<WorkGrantView>('/work-grants', body).then(async grant => {
     if (note) note.textContent = `已创建「${grant.title}」。在发送框的「权限」里选它即可。`;
     ($('work-grant-add') as HTMLFormElement).reset();
