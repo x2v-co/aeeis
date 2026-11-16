@@ -69,6 +69,10 @@ set -a
 set +a
 env_args=(--env-file "$ENV_FILE" --env-file "$candidate")
 echo "deploying $AEEIS_STACK image=$AEEIS_IMAGE build=$AEEIS_BUILD_ID queue=$AEEIS_TASK_QUEUE ns=${TEMPORAL_NAMESPACE:-aeeis}"
+# Without the fingerprint a changed local-tools.json or key file would not restart the API: refuse rather than deploy
+# something that looks done and is not.
+[[ "$AEEIS_SECRETS_FINGERPRINT" != unavailable ]] || { echo "cannot read the secrets directory $secrets_dir; run deploy as root" >&2; exit 2; }
+echo "secrets fingerprint: $AEEIS_SECRETS_FINGERPRINT (the API restarts when it changes)"
 stack_guard
 verify_images
 # Startup gate: the candidate image checks its own settings and tool setup (secret files, startup checks, remote

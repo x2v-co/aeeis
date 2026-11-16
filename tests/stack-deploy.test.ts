@@ -17,7 +17,7 @@ test('production stack deployment, online backup, notifications and systemd path
   }).catch((error: Error & { stdout?: string; stderr?: string }) => {
     throw new Error(`${error.message}\nstdout:\n${error.stdout ?? ''}\nstderr:\n${error.stderr ?? ''}`, { cause: error });
   });
-  expect(output).toContain('replay gate, startup gate and stack state isolation passed');
+  expect(output).toContain('replay gate, startup gate, secrets restart and stack state isolation passed');
   expect(output).toContain('git commit build, label/tag fallback, env precedence and restart persistence passed');
   expect(output).toContain('post-pull startup metadata and unlabeled image environment preservation passed');
   expect(output).toContain('online atomic backups, failure exits, retention, notifications and configurable systemd paths passed');
@@ -30,6 +30,10 @@ test('container release metadata reaches both stack services without empty env_f
     expect(stack.services[name].environment).not.toHaveProperty('AEEIS_GIT_COMMIT');
     expect(commit.services[name].environment.AEEIS_GIT_COMMIT).toContain('${AEEIS_GIT_COMMIT:?');
   }
+  // Only the API mounts the secrets directory, and it restarts when that directory changes (bin/_lib.sh).
+  expect(stack.services.api.labels['aeeis.secrets-fingerprint']).toBe('${AEEIS_SECRETS_FINGERPRINT:-none}');
+  expect(stack.services.api.volumes).toContain('${AEEIS_SECRETS_DIR:-./secrets}:/run/aeeis-secrets:ro');
+  expect(stack.services.worker.volumes ?? []).not.toContain('${AEEIS_SECRETS_DIR:-./secrets}:/run/aeeis-secrets:ro');
   const production = parse(readFileSync('deploy/production/compose.yml', 'utf8'));
   for (const name of ['api', 'worker']) {
     expect(production.services[name].build.args.AEEIS_GIT_COMMIT).toBe('${AEEIS_GIT_COMMIT:-unknown}');

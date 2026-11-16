@@ -191,6 +191,9 @@ services:
     # starts and in-flight model (<=180s) / tool calls finish and persist
     # before SIGKILL. Keep this above the drain budget.
     stop_grace_period: 300s
+    # A changed file in the secrets directory changes this label, so `up` restarts the API (bin/_lib.sh).
+    labels:
+      aeeis.secrets-fingerprint: ${AEEIS_SECRETS_FINGERPRINT:-none}
     volumes:
       - aeeis-data:/app/data
       # Optional *_FILE secrets (e.g. AEEIS_MODEL_API_KEY_FILE=/run/aeeis-secrets/model-key).
