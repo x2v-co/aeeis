@@ -39,6 +39,16 @@ describe('sandbox host configuration', () => {
     expect(() => localToolsConfigSchema.parse({ ...named, assign: undefined })).toThrow(/go together/);
     expect(() => localToolsConfigSchema.parse({ ...named, hosts: { instabox: {} } })).toThrow();
   });
+  it('lets a host with no preview command share previews through AEEIS when the deployment names a preview domain', () => {
+    const instabox = { ssh: 'instabox-box', previewPorts: [3000], previewCommand: base.sandbox.previewCommand };
+    const hosts = hostConfigs(localToolsConfigSchema.parse({ ...named, sandbox: { ...base.sandbox, previewDomain: 'aeeis.link' }, hosts: { instabox, vps: { ssh: 'aeeis-sandbox-2', previewPorts: [3000] } } }));
+    expect(hosts.get('vps')).toMatchObject({ previewPorts: [3000], previewDomain: 'aeeis.link' });
+    expect(hosts.get('vps')?.previewCommand).toBeUndefined();
+    // A host with its own command keeps it; the domain is only for hosts without one.
+    expect(hosts.get('instabox')).toMatchObject({ previewPorts: [3000], previewCommand: base.sandbox.previewCommand });
+    // Without a domain, ports on a host with no command could not be shared at all.
+    expect(() => hostConfigs(localToolsConfigSchema.parse({ ...named, hosts: { ...named.hosts, vps: { ssh: 'aeeis-sandbox-2', previewPorts: [3000] } } }))).toThrow(/previewDomain/);
+  });
 });
 
 describe('gateway routing by user', () => {
@@ -53,6 +63,23 @@ describe('gateway routing by user', () => {
   };
   const run = (owner: string) => { const id = `run_${randomUUID()}`; owners.set(id, owner); return id; };
 
+  it('serves preview links only with a preview domain, and looks each link up on every host', async () => {
+    expect((await load()).previewProxy()).toBeUndefined();
+    const gateway = await load({ ...named, sandbox: { ...base.sandbox, previewDomain: 'aeeis.link' }, hosts: { instabox: { ssh: 'instabox-box' }, vps: { ssh: 'aeeis-sandbox-2', previewPorts: [3000] } } });
+    const proxy = gateway.previewProxy()!;
+    expect(proxy.domain).toBe('aeeis.link');
+    const sandboxes = new Map(gateway.hosts());
+    const runId = `run_${randomUUID()}`, child = { fake: true };
+    vi.spyOn(sandboxes.get('instabox')!, 'previewTarget').mockResolvedValue(undefined);
+    vi.spyOn(sandboxes.get('vps')!, 'previewTarget').mockImplementation(async id => id === 'b'.repeat(26) ? { runId, port: 3000 } : undefined);
+    const relay = vi.spyOn(sandboxes.get('vps')!, 'previewRelay').mockResolvedValue(child as never);
+    const resolve = (proxy as unknown as { resolve: (id: string) => Promise<{ port: number; relay(): Promise<unknown> } | undefined> }).resolve;
+    const found = await resolve('b'.repeat(26));
+    expect(found?.port).toBe(3000);
+    expect(await found!.relay()).toBe(child);
+    expect(relay).toHaveBeenCalledWith(runId, 3000);
+    expect(await resolve('c'.repeat(26))).toBeUndefined();
+  });
   it('runs each user on their assigned host, and everyone else on the default host', async () => {
     const seen: { host: string; principal: string | undefined }[] = [];
     vi.spyOn(DockerSandbox.prototype, 'execute').mockImplementation(async function (this: DockerSandbox, ...args: unknown[]) { seen.push({ host: this.host, principal: args[6] as string | undefined }); return done; });

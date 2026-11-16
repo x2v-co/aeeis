@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,7 +6,9 @@ import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
 import { snapshotSchema, validateSnapshot, type WorkspaceFile } from './sandbox-workspace.js';
 import { PACK_DELIVERABLES } from './saved-site.js';
+import { PREVIEW_ID, PREVIEW_RELAY, PREVIEW_WINDOW, newPreviewId, previewUrl } from './preview-proxy.js';
 
+const PREVIEW_DOMAIN = /^(?=.{4,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z][a-z0-9-]{1,62}$/;
 export const sandboxConfigSchema = z.object({
   runtime: z.literal('docker').default('docker'),
   context: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/).default('auto'),
@@ -40,13 +42,16 @@ export const sandboxConfigSchema = z.object({
   /** Run (no shell, on the AEEIS host) to share a port and to stop sharing it; `{port}` is the port on the sandbox
    * host. `publish` must print the link. Example: ["npx","-y","instabox@latest","port","publish","my-machine","{port}","--private"]. */
   previewCommand: z.object({ publish: z.array(z.string().min(1).max(500)).min(1).max(20), unpublish: z.array(z.string().min(1).max(500)).min(1).max(20) }).strict().optional(),
+  /** Hosts without a previewCommand share previews through AEEIS itself, as https://p-<random>.<previewDomain>/.
+   * The domain needs a wildcard DNS record and certificate pointing at AEEIS, and should not be AEEIS's own. */
+  previewDomain: z.string().regex(PREVIEW_DOMAIN, 'Use a domain name such as aeeis.link').optional(),
 }).strict()
   .refine(config => new Set(config.ports).size === config.ports.length && (config.network === 'bridge' || config.ports.length === 0), 'Ports must be unique and need the bridge network')
   .refine(config => config.network === 'proxied' || config.egressHosts.length === 0, 'egressHosts need the proxied network')
   .refine(config => !config.ssh || config.context === 'auto', 'Use either ssh or a Docker context')
   .refine(config => !config.sshLoginCommand || config.ssh, 'sshLoginCommand needs ssh')
   .refine(config => !config.modelRelay || config.network === 'proxied', 'modelRelay needs the proxied network')
-  .refine(config => new Set(config.previewPorts).size === config.previewPorts.length && (config.previewPorts.length === 0 || (config.network === 'proxied' && config.previewCommand)), 'previewPorts must be unique and need the proxied network and previewCommand');
+  .refine(config => new Set(config.previewPorts).size === config.previewPorts.length && (config.previewPorts.length === 0 || (config.network === 'proxied' && (config.previewCommand || config.previewDomain))), 'previewPorts must be unique and need the proxied network and either previewCommand or previewDomain');
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 const observationSchema = z.object({
   foreground: z.object({ command: z.string(), startedAt: z.string().nullable().optional(), finishedAt: z.string().nullable().optional(), output: z.string() }).nullable(),
@@ -70,7 +75,7 @@ const responseSchema = z.object({
 }).strict();
 /** `host` names the sandbox host the Run's machine lives on; a record without one was made before hosts had names.
  * `principal` is a hash of the user the machine belongs to, never the user's own identity. */
-const stateSchema = z.object({ runId: z.string(), host: z.string().optional(), principal: z.string().optional(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string(), url: z.string() })).optional() });
+const stateSchema = z.object({ runId: z.string(), host: z.string().optional(), principal: z.string().optional(), name: z.string(), network: z.string(), image: z.string(), policy: z.string(), createdAt: z.number(), ready: z.boolean(), released: z.boolean().default(false), containerId: z.string().optional(), proxyId: z.string().optional(), volume: z.string().optional(), keepUntil: z.number().optional(), executor: z.object({ session: z.string(), token: z.string(), pid: z.number() }).optional(), previews: z.record(z.string(), z.object({ hostPort: z.string().optional(), url: z.string(), id: z.string().optional() })).optional() });
 type State = z.infer<typeof stateSchema>;
 export interface ExportedWorkspaceFile { path: string; mode: '644' | '755'; data: Buffer }
 const exportSchema = z.union([
@@ -772,13 +777,20 @@ export class DockerSandbox {
   /** Shares one preview port. A failure here is the tool's result, not a reason to stop the Run's container. */
   private async preview(state: State, port: number) {
     const answer = (status: 'completed' | 'failed', output: unknown) => ({ schemaVersion: 'sandbox-output/2' as const, status, output, files: null });
-    if (!this.config.previewCommand || !this.config.previewPorts.includes(port)) return answer('failed', { error: `Port ${port} cannot be previewed; allowed: ${this.config.previewPorts.join(', ') || '(none)'}` });
+    if ((!this.config.previewCommand && !this.config.previewDomain) || !this.config.previewPorts.includes(port)) return answer('failed', { error: `Port ${port} cannot be previewed; allowed: ${this.config.previewPorts.join(', ') || '(none)'}` });
     const note = 'Only people with this link can open it. Listen on 0.0.0.0 inside the container. The link ends when this Run is released.';
     const known = state.previews?.[String(port)];
     if (known) return answer('completed', { port, url: known.url, note });
     const mapped = await this.command(['port', `${state.name}-proxy`, `${port}/tcp`], 8000);
     const hostPort = /:(\d+)\s*$/m.exec(mapped.stdout.trim().split('\n')[0] ?? '')?.[1];
     if (mapped.code !== 0 || !hostPort) return answer('failed', { error: 'Preview port is not available on this Run; it needs a new Run after a configuration change' });
+    if (!this.config.previewCommand) {
+      // AEEIS carries the visitors itself (preview-proxy.ts); the link is the only key, so it is random and new per port.
+      const id = newPreviewId(), url = previewUrl(this.config.previewDomain!, id);
+      state.previews = { ...state.previews, [String(port)]: { id, url } };
+      await this.save(state);
+      return answer('completed', { port, url, note });
+    }
     let printed: string;
     try { printed = await this.localCommand(this.config.previewCommand.publish.map(item => item.replaceAll('{port}', hostPort)), 120_000); }
     catch { return answer('failed', { error: 'Could not publish the preview link' }); }
@@ -791,9 +803,36 @@ export class DockerSandbox {
   private async unpublishPreviews(state: State) {
     if (!this.config.previewCommand) return;
     for (const { hostPort } of Object.values(state.previews ?? {})) {
+      if (!hostPort) continue;
       await this.localCommand(this.config.previewCommand.unpublish.map(item => item.replaceAll('{port}', hostPort)), 120_000)
         .catch(error => console.warn(`AEEIS sandbox: could not unpublish preview port ${hostPort}: ${error instanceof Error ? error.message : error}`));
     }
+  }
+  /** The Run and port a preview link was issued for, while that Run's machine is kept on this host. */
+  async previewTarget(id: string): Promise<{ runId: string; port: number } | undefined> {
+    if (!PREVIEW_ID.test(id) || !this.config.previewDomain || this.config.previewCommand) return undefined;
+    let names: string[];
+    try { names = await readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    for (const name of names) {
+      const runId = /^(run_[a-f0-9-]{36})\.json$/.exec(name)?.[1];
+      if (!runId) continue;
+      const state = await this.state(runId).catch(() => undefined);
+      if (!state || state.released) continue;
+      for (const [port, preview] of Object.entries(state.previews ?? {})) {
+        if (preview.id === id && this.config.previewPorts.includes(Number(port))) return { runId, port: Number(port) };
+      }
+    }
+    return undefined;
+  }
+  /** Starts the relay that carries preview visitors to one port of a Run (PREVIEW_RELAY), in the Run's proxy container. */
+  async previewRelay(runId: string, port: number): Promise<ChildProcessWithoutNullStreams> {
+    const state = await this.state(runId);
+    if (!state || state.released || !this.config.previewPorts.includes(port)) throw new SandboxError('This preview is not active');
+    await this.imageId();
+    const control = await this.controlDirectory();
+    const env = Object.fromEntries(['PATH', 'HOME', 'USER', 'TMPDIR', 'DOCKER_CONFIG', ...(this.config.ssh ? ['SSH_AUTH_SOCK'] : [])].flatMap(name => process.env[name] ? [[name, process.env[name]!]] : []));
+    const invocation = dockerInvocation(this.config, ['exec', '--interactive', `${state.name}-proxy`, 'python3', '-I', '-u', '-c', PREVIEW_RELAY, String(port), String(PREVIEW_WINDOW)], this.endpoint ? ['--host', this.endpoint] : dockerContextArgs(this.config), control);
+    return spawn(invocation.command, invocation.args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
   }
   private async ports(state: State) {
     const result = await this.command(['port', state.name], 5000);

@@ -8,6 +8,7 @@ import { ClaudeCodeTransport, executorConfigSchema } from './executor.js';
 import { EXPORT_LIMITS, EXPORT_SKIP, REPO_PUSH_TOOL, REPO_PUSH_VERSION, RepoConnector, reposConfigSchema } from './repo-connector.js';
 import { z } from 'zod';
 import { digestProtocol } from './protocol.js';
+import { PreviewProxy } from './preview-proxy.js';
 import type { MachineInterrupt, MachineInterruptResult, Receipt, ToolCallContext, ToolDescriptor, ToolGateway, ToolInvocation, ToolResult } from './integrations.js';
 
 const hostId = z.string().regex(/^[a-z][a-z0-9-]{0,30}$/, 'Use a short lowercase host name such as instabox or vps-sg');
@@ -234,6 +235,19 @@ export class LocalToolGateway implements ToolGateway {
     }
   }
   async describe(runId: string): Promise<RunMachineRecord | undefined> { return (await this.sandboxFor(runId)).describe(runId); }
+  /** Live previews that AEEIS carries itself, for hosts that share no previews of their own. Undefined when the
+   * deployment has no previewDomain. Each id is looked up on every host, so a link always reaches its own Run's host. */
+  previewProxy(): PreviewProxy | undefined {
+    const domain = this.config.sandbox.previewDomain;
+    if (!domain) return undefined;
+    return new PreviewProxy(domain, async id => {
+      for (const sandbox of this.sandboxes.values()) {
+        const found = await sandbox.previewTarget(id);
+        if (found) return { port: found.port, relay: () => sandbox.previewRelay(found.runId, found.port) };
+      }
+      return undefined;
+    });
+  }
   /** Reaches the container directly: the queue may be held by the very call this has to stop. */
   async interruptRun(runId: string, action: MachineInterrupt): Promise<MachineInterruptResult> { return (await this.sandboxFor(runId)).interrupt(runId, action); }
   async observe(runId: string, live: boolean): Promise<MachineView> { return (await this.sandboxFor(runId)).observe(runId, live); }

@@ -25,7 +25,8 @@
     "cpus": 3,
     "pids": 1024,
     "workspaceVolumes": true,
-    "modelRelay": true
+    "modelRelay": true,
+    "previewDomain": "aeeis.link"
   },
   "hosts": {
     "instabox": {
@@ -57,7 +58,10 @@
       "ssh": "aeeis-sandbox-vps",
       "sshWaitSeconds": 120,
       "memoryMiB": 4096,
-      "cpus": 3
+      "cpus": 3,
+      "previewPorts": [
+        3000
+      ]
     }
   },
   "assign": {

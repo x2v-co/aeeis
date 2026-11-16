@@ -134,8 +134,36 @@ enters the Bot's container: the per-Run relay holds it.
 (`local-tools.example.hosts.json`). `sandbox` keeps what a Run may do on every
 host (network, egress, image, relay, workspaces, lifetimes); a host adds how to
 reach it (`ssh`, `sshLoginCommand`, `sshWaitSeconds`), its previews
-(`previewPorts`, `previewCommand`; a host without a `previewCommand` shares no
-previews) and its size (`memoryMiB`, `cpus`, `pids`).
+(`previewPorts`, `previewCommand`; a host without a `previewCommand` shares
+previews only through `sandbox.previewDomain`, below) and its size
+(`memoryMiB`, `cpus`, `pids`).
+
+#### Previews through AEEIS (`previewDomain`)
+
+A host that cannot share a port itself (a plain VPS) can still show a Bot's dev
+server: set `sandbox.previewDomain` (for example `"aeeis.link"`) and list the
+host's `previewPorts` without a `previewCommand`. A preview link is then
+`https://p-<random>.<previewDomain>/`. AEEIS answers it itself: it looks the
+random id up among the Runs' machines on every host, and carries the visitor's
+requests (websockets included) to that port through a relay it starts in the
+Run's proxy container, over the SSH connection it already uses for the host.
+The host needs no open port, no tunnel and no SSH forwarding.
+
+- Use a domain of its own, not AEEIS's: every preview is a Bot's page, and each
+  one gets its own origin under it. Requests for `p-*` hosts never reach the
+  AEEIS app, and the app refuses requests from them.
+- Point a wildcard at AEEIS: with the Cloudflare tunnel, add the public hostname
+  `*.<previewDomain>` to the tunnel with the same service as AEEIS (Cloudflare
+  then adds the DNS record). Cloudflare's free certificate covers one level, so
+  `p-<random>.aeeis.link` needs nothing more.
+- The id is the only key (130 random bits): anyone with the link can open the
+  page while the Run's machine is kept. AEEIS checks the id again every 30
+  seconds, so a link stops working soon after the machine is released.
+- The dev server sees `Host: localhost:<port>` (so dev servers that check the
+  host accept it) and `X-Forwarded-Host` with the link's host. It must listen on
+  `0.0.0.0` inside the Run's container.
+- A Run made before its host had `previewPorts` has no preview port; previews
+  start working for new Runs.
 
 - `assign.principals` maps `"<tenant>/<principal>"` (or `"<principal>"` for any
   tenant) to a host; everyone else gets `assign.default`. A Run stays on the
