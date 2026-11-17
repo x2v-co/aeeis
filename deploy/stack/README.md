@@ -95,6 +95,13 @@ key, remove `AEEIS_MODEL_API_KEY` and use
 `AEEIS_MODEL_HEALTH_URL` if the provider exposes an appropriate real endpoint.
 Do not enable insecure-HTTP flags in production.
 
+The API reads `secrets/` only when it starts. After changing a file there
+(`local-tools.json`, a key, `ssh/`), run `bin/deploy.sh` again, even without a
+new commit: it fingerprints the directory (names, sizes, modes, owners and
+modification times, never contents) into the API's
+`aeeis.secrets-fingerprint` label, so a change restarts the API, and it prints
+the fingerprint. Run it as root so it can see the whole directory.
+
 Keep the **existing access and worker tokens** during migration so Toolkit
 Global and other callers continue to work. Preserve the old Temporal namespace,
 queue and database credentials when carrying over state. A fresh installation

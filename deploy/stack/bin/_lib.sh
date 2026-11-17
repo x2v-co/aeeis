@@ -83,6 +83,12 @@ fi
 [[ "${AEEIS_STACK_SMOKE:-0}" == 1 ]] && compose_files+=(-f "$STACK_DIR/compose.smoke.yml")
 env_args=(--env-file "$ENV_FILE")
 [[ -r "$CURRENT_FILE" ]] && env_args+=(--env-file "$CURRENT_FILE")
+# The API reads its secrets directory only at startup, and compose does not look inside a bind mount. The API carries
+# this fingerprint (names, sizes, modes, times; never contents) as a label, so a changed file restarts it on `up`.
+secrets_dir="${AEEIS_SECRETS_DIR:-./secrets}"
+[[ "$secrets_dir" == /* ]] || secrets_dir="$STACK_DIR/${secrets_dir#./}"
+AEEIS_SECRETS_FINGERPRINT="$(python3 -I "$STACK_DIR/bin/_secrets-fingerprint.py" "$secrets_dir" 2>/dev/null)" || AEEIS_SECRETS_FINGERPRINT=unavailable
+export AEEIS_SECRETS_FINGERPRINT
 dc() {
   local files=("${compose_files[@]}")
   # Omit the environment override when metadata is unavailable, preserving

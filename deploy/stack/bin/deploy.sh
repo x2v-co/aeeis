@@ -27,6 +27,9 @@ export AEEIS_ENV_FILE
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=_images.sh
 . "$STACK_DIR/bin/_images.sh"
+# Without the fingerprint a changed local-tools.json or key file would not restart the API: refuse rather than deploy
+# something that looks done and is not.
+[[ "$AEEIS_SECRETS_FINGERPRINT" != unavailable ]] || { echo "cannot read the secrets directory $secrets_dir; run deploy as root" >&2; exit 2; }
 sha="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
 checkout_commit="$(git -C "$REPO_DIR" rev-parse HEAD)"
 if [[ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]]; then
@@ -69,6 +72,7 @@ set -a
 set +a
 env_args=(--env-file "$ENV_FILE" --env-file "$candidate")
 echo "deploying $AEEIS_STACK image=$AEEIS_IMAGE build=$AEEIS_BUILD_ID queue=$AEEIS_TASK_QUEUE ns=${TEMPORAL_NAMESPACE:-aeeis}"
+echo "secrets fingerprint: $AEEIS_SECRETS_FINGERPRINT (the API restarts when it changes)"
 stack_guard
 verify_images
 # Startup gate: the candidate image checks its own settings and tool setup (secret files, startup checks, remote

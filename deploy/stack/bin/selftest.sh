@@ -53,7 +53,8 @@ if args[0] == 'build' or (args[0] == 'compose' and 'up' in args and args[-1] != 
         assert commit != 'unknown', 'unknown must not mask the image environment'
     with open(os.environ['FAKE_RELEASE_LOG'], 'a') as f:
         f.write(json.dumps({'args': args, 'commit': commit,
-                           'runtimeCommit': commit or os.getenv('FAKE_IMAGE_ENV_COMMIT')}) + '\n')
+                           'runtimeCommit': commit or os.getenv('FAKE_IMAGE_ENV_COMMIT'),
+                           'secrets': os.getenv('AEEIS_SECRETS_FINGERPRINT')}) + '\n')
 images = Path(os.environ['FAKE_IMAGES'])
 local = set(images.read_text().splitlines())
 registry = os.getenv('AEEIS_IMAGE_REGISTRY', '')
@@ -334,7 +335,43 @@ sed -i.bak 's/AEEIS_IMAGE=aeeis:test/AEEIS_IMAGE=aeeis:prod/' "$STACK_DIR/.curre
 [[ "$(read_image)" == aeeis:prod ]]
 sed -i.bak 's/AEEIS_STACK=aeeis-cn-prod/AEEIS_STACK=aeeis-drill/' "$AEEIS_ENV_FILE"
 [[ "$(read_image)" == aeeis:test ]]
-echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate, startup gate and stack state isolation passed'
+# The API's label follows the secrets directory: an edited or added file restarts the API on `up`; contents never go in.
+mkdir -p "$STACK_DIR/secrets/ssh"
+printf 'a' > "$STACK_DIR/secrets/local-tools.json"; printf 'k' > "$STACK_DIR/secrets/ssh/key"
+secrets_label() {
+  python3 - <<'PY'
+import json,os
+ups=[json.loads(l) for l in open(os.environ['FAKE_RELEASE_LOG']) if json.loads(l)['args'][0]=='compose']
+assert ups, 'no compose up'
+print(ups[-1]['secrets'])
+PY
+}
+reset_fake; deploy > "$test_dir/output" 2>&1; first="$(secrets_label)"
+[[ "$first" =~ ^[a-f0-9]{16}$ ]]
+grep -q "secrets fingerprint: $first" "$test_dir/output"
+reset_fake; deploy > "$test_dir/output" 2>&1; [[ "$(secrets_label)" == "$first" ]]
+# Same size and time, other content: the label is unchanged, so it cannot reveal anything about the contents.
+python3 -I -c 'import os,sys; p=sys.argv[1]; st=os.stat(p); open(p,"w").write("b"); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))' "$STACK_DIR/secrets/local-tools.json"
+reset_fake; deploy > "$test_dir/output" 2>&1; [[ "$(secrets_label)" == "$first" ]]
+# An edit (a new modification time) changes it.
+python3 -I -c 'import os,sys; p=sys.argv[1]; st=os.stat(p); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))' "$STACK_DIR/secrets/local-tools.json"
+reset_fake; deploy > "$test_dir/output" 2>&1; second="$(secrets_label)"; [[ "$second" != "$first" ]]
+# So does a new file in a subdirectory.
+printf 'h' > "$STACK_DIR/secrets/ssh/known_hosts"
+reset_fake; deploy > "$test_dir/output" 2>&1; [[ "$(secrets_label)" != "$second" ]]
+[[ "$(python3 -I "$STACK_DIR/bin/_secrets-fingerprint.py" "$test_dir/no-such-dir")" == absent ]]
+rm -rf "$STACK_DIR/secrets"
+# A secrets directory that cannot be read in full stops the deployment before anything is replaced.
+printf 'x' > "$test_dir/not-a-directory"
+reset_fake
+expect_failure env AEEIS_SECRETS_DIR="$test_dir/not-a-directory" AEEIS_DEPLOY_IMAGE=aeeis:test "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" --no-build
+grep -q 'cannot read the secrets directory' "$test_dir/output"
+no_container_mutation
+python3 - <<'PY'
+import json,os
+assert not any(a[0] in ('pull','run','build') for a in map(json.loads, open(os.environ['FAKE_LOG']))), 'refused before pulling or the replay gate'
+PY
+echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate, startup gate, secrets restart and stack state isolation passed'
 
 # Release identity: explicit shell > selected env file > image label > hex tag.
 # The old state SHA must never leak into a new --no-build deployment.

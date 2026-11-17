@@ -710,15 +710,18 @@ describe('preview forwarding (python, no Docker)', () => {
     const port = (target.address() as { port: number }).port, proxyPort = port === 65535 ? port - 1 : port + 1;
     const child = spawn('python3', ['-I', '-u', join(process.cwd(), 'sandbox/proxy.py')], { env: { PATH: process.env.PATH!, AEEIS_PROXY_PORT: String(proxyPort), AEEIS_PREVIEW_PORTS: String(port), AEEIS_PREVIEW_TARGET: '::1' }, stdio: ['ignore', 'pipe', 'inherit'] });
     const lines: string[] = [];
-    const get = () => new Promise<string>((resolve, reject) => {
+    // With nothing listening the proxy closes at once, before reading the request; on Linux closing with unread data
+    // sends a reset, so for that call a reset is the same answer as a plain close: nothing was forwarded.
+    const get = (resetIsClose = false) => new Promise<string>((resolve, reject) => {
       const socket = netConnect(port, '127.0.0.1', () => socket.write('GET / HTTP/1.1\r\n\r\n'));
-      let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('close', () => resolve(data)); socket.on('error', reject);
+      let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('close', () => resolve(data));
+      socket.on('error', error => { if (resetIsClose && (error as NodeJS.ErrnoException).code === 'ECONNRESET') resolve(data); else reject(error); });
     });
     try {
       await new Promise<void>((resolve, reject) => { child.stdout!.on('data', chunk => { lines.push(...String(chunk).trim().split('\n')); if (lines.some(line => line.includes('"ready"'))) resolve(); }); child.once('exit', () => reject(new Error('proxy exited'))); });
       expect(await get()).toMatch(/200 OK[\s\S]*ok$/);
       await new Promise<void>(resolve => target.close(() => resolve()));
-      expect(await get()).toBe('');
+      expect(await get(true)).toBe('');
       await vi.waitFor(() => expect(lines.join('\n')).toContain('preview target not listening'));
     } finally { child.kill(); target.close(); }
   });
