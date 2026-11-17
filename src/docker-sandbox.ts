@@ -96,11 +96,12 @@ skip = set(a['skip']); files = []; total = 0; skipped = 0
 for d, dirs, names in os.walk(base):
     kept = []
     for x in sorted(dirs):
-        if x in skip or os.path.islink(os.path.join(d, x)): skipped += 1
+        if x in skip or os.path.relpath(os.path.join(d, x), base) in skip or os.path.islink(os.path.join(d, x)): skipped += 1
         else: kept.append(x)
     dirs[:] = kept
     for n in sorted(names):
         p = os.path.join(d, n); st = os.lstat(p)
+        if os.path.relpath(p, base) in skip: skipped += 1; continue
         if not stat.S_ISREG(st.st_mode): skipped += 1; continue
         total += st.st_size
         if len(files) >= a['maxFiles'] or total > a['maxBytes']:

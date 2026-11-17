@@ -967,6 +967,9 @@
 <label for="acceptance">验收要求（可选，每行一条）</label>
 <textarea id="acceptance" rows="4" maxlength="15000" placeholder="例如：页面标题是「番茄钟」&#10;打开页面时倒计时显示 25:00"></textarea>
 <p class="muted">填了以后，做完会由另一个会话亲自打开成果逐条检查，全部通过才交付源码和预览。需要 Bot 电脑。只用于下一次执行，创建后清空。</p>
+<label for="publish-repo">检查通过后开 PR 到仓库（可选）</label>
+<input id="publish-repo" maxlength="40" placeholder="仓库名，例如 sandbox；要先填验收要求" autocomplete="off">
+<p class="muted">独立检查通过后，AEEIS 把项目推到这个仓库的 bot/ 分支并开 draft PR。批准计划就是批准这次推送；用授权时，授权里要有这个仓库。和验收要求一起，创建后清空。</p>
 <label for="goal">你想完成什么？</label>
 <textarea id="goal" rows="4" required="" maxlength="8000" placeholder="例如：根据下面的项目资料，梳理发布风险并提出下一周的具体行动计划">
 </textarea>

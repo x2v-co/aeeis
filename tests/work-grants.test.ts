@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { AgentEngine, delegationContext } from '../src/runtime/engine.js';
+import { AgentEngine, delegationContext, publishInput } from '../src/runtime/engine.js';
 import { runMetrics } from '../src/runtime/run-metrics.js';
 import type { VerifyInput } from '../src/executor.js';
 import type { ModelRequest } from '../src/runtime/model.js';
@@ -115,7 +115,7 @@ function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boole
     invoke,
     workspaceContainedTools: async () => ['edit', 'other'],
     // As the local gateway's own connector answers: only repo-push has an outward scope.
-    outwardAction: (toolId: string) => toolId === 'repo-push' ? { scope: 'repo-push:sandbox', summary: 'push workspace root to x2v-co/aeeis-bots-repo on bot/site' } : undefined,
+    outwardAction: (toolId: string, input: unknown) => toolId === 'repo-push' && (input as { repo?: string } | undefined)?.repo !== 'other' ? { scope: 'repo-push:sandbox', summary: 'push workspace root to x2v-co/aeeis-bots-repo on bot/site' } : undefined,
     interruptRun: interrupt,
   };
   const sequence = options.calls ?? ['edit'];
@@ -656,6 +656,113 @@ describe('independent acceptance of finished work', () => {
   it('refuses requirements on an AEEIS that cannot check them', async () => {
     const h = harness();
     await expect(h.engine.create({ goal: 'Add a form', materials: h.materials, acceptance: requirements, origin: 'channel' })).rejects.toThrow(/executor configured/);
+  });
+});
+
+describe('publishing work that passed the independent check', () => {
+  const requirements = ['The page loads'];
+  const check = (round: number, passed: boolean): AcceptanceCheck => ({
+    round, at: '2026-11-17T00:00:00.000Z', passed, projectChanged: false, previewUrl: 'https://p-abc.aeeis.link/',
+    items: [{ requirement: requirements[0]!, status: passed ? 'passed' : 'failed', notes: passed ? 'Loads with the title' : 'Blank page' }],
+  });
+  const pushed = (request: { idempotencyKey: string; input: unknown }) => ({ status: 'completed' as const, output: { repo: 'x2v-co/aeeis-bots-repo', branch: `bot/${(request.input as { branch: string }).branch}`, commit: 'c0ffee', pushed: true, compareUrl: 'https://github.com/x2v-co/aeeis-bots-repo/compare/main...bot/x', pullRequest: { number: 7, url: 'https://github.com/x2v-co/aeeis-bots-repo/pull/7', draft: true } }, receipt: {} as never });
+  const setup = async (options: { connectors?: string[]; verify?: (input: VerifyInput) => Promise<AcceptanceCheck>; publish?: { repo: string; folder?: string }; actionPolicy?: { block: string[] }; push?: typeof pushed } = {}) => {
+    const h = harness({ verifier: { verify: vi.fn(options.verify ?? (async input => check(input.round, true))) } });
+    const respond = h.invoke.getMockImplementation()!;
+    h.invoke.mockImplementation(async (request, context) => request.toolId === 'repo-push' ? (options.push ?? pushed)(request) : respond(request, context));
+    const connectors = options.connectors ?? ['repo-push:sandbox'];
+    const grant = await h.grants.create(scope, { ...grantInput, ...(connectors.length ? { tools: [...grantInput.tools, 'repo-push'], connectors } : {}) });
+    const run = await h.engine.create({ goal: 'Build a pomodoro page\nwith a 25 minute timer', materials: h.materials, workGrantId: grant.grantId, acceptance: requirements, publish: options.publish ?? { repo: 'sandbox' }, ...(options.actionPolicy ? { actionPolicy: options.actionPolicy } : {}) });
+    const pushes = () => h.invoke.mock.calls.filter(call => call[0].toolId === 'repo-push');
+    return { h, run, pushes };
+  };
+
+  it('pushes once the check passes, opens a draft pull request, and records it on the Run', async () => {
+    const { h, run, pushes } = await setup();
+    expect(run.publish).toEqual({ repo: 'sandbox' });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(pushes()).toHaveLength(1);
+    const [request, context] = pushes()[0]!;
+    const branch = `run-${run.id.replace(/^run_/, '').replace(/-/g, '')}`;
+    expect(branch).toHaveLength(36);
+    expect(request).toMatchObject({ toolId: 'repo-push', capabilityGrant: `run:${run.id}:repo-push`, idempotencyKey: `${run.id}:publish:0`, input: { repo: 'sandbox', branch, path: '.', target: branch, title: 'Build a pomodoro page' } });
+    expect((request.input as { body: string }).body).toContain('✅ The page loads');
+    expect((request.input as { body: string }).body).toContain('https://p-abc.aeeis.link/');
+    expect(context).toEqual({ workspace: run.workGrant!.grantId });
+    const done = await h.repository.get(run.id);
+    expect(done.publications).toEqual([expect.objectContaining({ round: 0, status: 'completed', repo: 'sandbox', branch: `bot/${branch}`, commit: 'c0ffee', pullRequest: { number: 7, url: 'https://github.com/x2v-co/aeeis-bots-repo/pull/7', draft: true } })]);
+    expect(done.pendingPublish).toBeUndefined();
+    expect(done.events.map(item => item.type)).toContain('publish.completed');
+    // The push happened after the check and before the reviewer accepted the work.
+    const types = done.events.map(item => item.type);
+    expect(types.indexOf('acceptance.checked')).toBeLessThan(types.indexOf('publish.completed'));
+  });
+
+  it('pushes only work that passed: a failed round is not published, the passing round is', async () => {
+    const { h, run, pushes } = await setup({ verify: async input => check(input.round, input.round === 1) });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(pushes().map(call => call[0].idempotencyKey)).toEqual([`${run.id}:publish:1`]);
+    expect((await h.repository.get(run.id)).publications).toEqual([expect.objectContaining({ round: 1, status: 'completed' })]);
+  });
+
+  it('publishes nothing when the work never passes', async () => {
+    const { h, run, pushes } = await setup({ verify: async input => check(input.round, false) });
+    expect(await h.settle(run.id)).toBe('failed');
+    expect(pushes()).toHaveLength(0);
+    expect((await h.repository.get(run.id)).publications).toBeUndefined();
+  });
+
+  it('holds the plan for the owner when the grant does not name the repository, and publishes after approval', async () => {
+    const { h, run, pushes } = await setup({ connectors: [] });
+    expect(await h.settle(run.id)).toBe('needs_approval');
+    const waiting = await h.repository.get(run.id);
+    expect(waiting.approval?.reason).toContain('sandbox');
+    const plan = waiting.plans.at(-1)!;
+    await h.engine.command(run.id, 'approve', { planHash: plan.hash, planVersion: plan.version });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(pushes()).toHaveLength(1);
+  });
+
+  it('does not push when the owner blocked repo-push, and still accepts the work', async () => {
+    const { h, run, pushes } = await setup({ actionPolicy: { block: ['repo-push'] } });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(pushes()).toHaveLength(0);
+    expect((await h.repository.get(run.id)).publications).toEqual([expect.objectContaining({ status: 'skipped', error: expect.stringContaining('block list') })]);
+  });
+
+  it('records a failed push and still accepts the work that passed', async () => {
+    const { h, run } = await setup({ push: () => ({ status: 'failed' as const, output: { error: 'https://github.com/x2v-co/aeeis-bots-repo has no main branch yet' }, receipt: {} as never }) as never });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect((await h.repository.get(run.id)).publications).toEqual([expect.objectContaining({ status: 'failed', error: expect.stringContaining('no main branch') })]);
+  });
+
+  it('gives every Run its own branch and folder, even when their ids start alike, and keeps one branch across rounds', () => {
+    const first = publishInput({ id: 'run_12345678-1111-4111-8111-111111111111', goal: 'A', publish: { repo: 'sandbox' } }, 0);
+    const second = publishInput({ id: 'run_12345678-2222-4222-8222-222222222222', goal: 'B', publish: { repo: 'sandbox' } }, 0);
+    expect(first.branch).toBe('run-12345678111141118111111111111111');
+    expect(second.branch).not.toBe(first.branch);
+    expect(second.target).not.toBe(first.target);
+    expect(publishInput({ id: 'run_12345678-1111-4111-8111-111111111111', goal: 'A', publish: { repo: 'sandbox' } }, 1).branch).toBe(first.branch);
+    expect(() => publishInput({ id: 'run_', goal: 'A', publish: { repo: 'sandbox' } }, 0)).toThrow(/cannot name a branch/);
+  });
+
+  it('puts the project in the chosen folder', async () => {
+    const { h, run, pushes } = await setup({ publish: { repo: 'sandbox', folder: 'apps/pomodoro' } });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    expect(pushes()[0]![0].input).toMatchObject({ target: 'apps/pomodoro' });
+  });
+
+  it('refuses a publish without requirements, or to a repository this AEEIS does not have', async () => {
+    const h = harness({ verifier: { verify: async input => check(input.round, true) } });
+    await expect(h.engine.create({ goal: 'Build it', materials: h.materials, publish: { repo: 'sandbox' } })).rejects.toThrow(/验收要求/);
+    await expect(h.engine.create({ goal: 'Build it', materials: h.materials, acceptance: requirements, publish: { repo: 'other' } })).rejects.toThrow(/other/);
+    await expect(h.engine.create({ goal: 'Build it', materials: h.materials, acceptance: requirements, publish: { repo: 'sandbox', folder: '../up' } })).rejects.toThrow();
+  });
+
+  it('never lets automatic review approve a plan that publishes', async () => {
+    const h = harness({ verifier: { verify: async input => check(input.round, true) } });
+    const run = await h.engine.create({ goal: 'Build it', materials: h.materials, acceptance: requirements, publish: { repo: 'sandbox' }, executionReview: 'auto' });
+    expect(await h.settle(run.id)).toBe('needs_approval');
   });
 });
 
