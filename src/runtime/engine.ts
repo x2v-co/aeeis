@@ -536,9 +536,13 @@ const ACCEPTANCE_RENEW_MS = 60_000, ACCEPTANCE_LEASE_MS = 5 * 60_000;
  * same idempotency key, which the tool answers from its journal or by asking GitHub. */
 const PUBLISH_LEASE_MS = 10 * 60_000;
 
-/** The repo-push call for a Run's passed check: one branch per Run, so later rounds add commits to the same pull request. */
+/** The repo-push call for a Run's passed check: one branch per Run, so later rounds add commits to the same pull request.
+ * The branch carries the whole Run id: two Runs must never share a branch or folder, or the second would be pushed as a
+ * new version of the first. */
 export function publishInput(run: Pick<AgentRun, 'id' | 'goal'> & { publish?: AgentRun['publish'] }, round: number, check?: AcceptanceCheck) {
-  const branch = `run-${run.id.replace(/^run_/, '').replace(/[^a-z0-9]/g, '').slice(0, 8) || 'work'}`;
+  const id = run.id.replace(/^run_/, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!id || id.length > 56) throw new Error(`Run id ${JSON.stringify(run.id)} cannot name a branch`);
+  const branch = `run-${id}`;
   const goal = run.goal.trim();
   const title = (goal.split('\n').find(line => line.trim())?.trim() ?? 'AEEIS Run').slice(0, 100);
   const items = (check?.items ?? []).map(item => `- ${item.status === 'passed' ? '✅' : item.status === 'failed' ? '❌' : '❔'} ${item.requirement}${item.notes ? ` — ${item.notes.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);

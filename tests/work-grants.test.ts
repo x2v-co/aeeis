@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { AgentEngine, delegationContext } from '../src/runtime/engine.js';
+import { AgentEngine, delegationContext, publishInput } from '../src/runtime/engine.js';
 import { runMetrics } from '../src/runtime/run-metrics.js';
 import type { VerifyInput } from '../src/executor.js';
 import type { ModelRequest } from '../src/runtime/model.js';
@@ -683,7 +683,8 @@ describe('publishing work that passed the independent check', () => {
     expect(await h.settle(run.id)).toBe('succeeded');
     expect(pushes()).toHaveLength(1);
     const [request, context] = pushes()[0]!;
-    const branch = `run-${run.id.replace(/^run_/, '').replace(/[^a-z0-9]/g, '').slice(0, 8)}`;
+    const branch = `run-${run.id.replace(/^run_/, '').replace(/-/g, '')}`;
+    expect(branch).toHaveLength(36);
     expect(request).toMatchObject({ toolId: 'repo-push', capabilityGrant: `run:${run.id}:repo-push`, idempotencyKey: `${run.id}:publish:0`, input: { repo: 'sandbox', branch, path: '.', target: branch, title: 'Build a pomodoro page' } });
     expect((request.input as { body: string }).body).toContain('✅ The page loads');
     expect((request.input as { body: string }).body).toContain('https://p-abc.aeeis.link/');
@@ -733,6 +734,16 @@ describe('publishing work that passed the independent check', () => {
     const { h, run } = await setup({ push: () => ({ status: 'failed' as const, output: { error: 'https://github.com/x2v-co/aeeis-bots-repo has no main branch yet' }, receipt: {} as never }) as never });
     expect(await h.settle(run.id)).toBe('succeeded');
     expect((await h.repository.get(run.id)).publications).toEqual([expect.objectContaining({ status: 'failed', error: expect.stringContaining('no main branch') })]);
+  });
+
+  it('gives every Run its own branch and folder, even when their ids start alike, and keeps one branch across rounds', () => {
+    const first = publishInput({ id: 'run_12345678-1111-4111-8111-111111111111', goal: 'A', publish: { repo: 'sandbox' } }, 0);
+    const second = publishInput({ id: 'run_12345678-2222-4222-8222-222222222222', goal: 'B', publish: { repo: 'sandbox' } }, 0);
+    expect(first.branch).toBe('run-12345678111141118111111111111111');
+    expect(second.branch).not.toBe(first.branch);
+    expect(second.target).not.toBe(first.target);
+    expect(publishInput({ id: 'run_12345678-1111-4111-8111-111111111111', goal: 'A', publish: { repo: 'sandbox' } }, 1).branch).toBe(first.branch);
+    expect(() => publishInput({ id: 'run_', goal: 'A', publish: { repo: 'sandbox' } }, 0)).toThrow(/cannot name a branch/);
   });
 
   it('puts the project in the chosen folder', async () => {
