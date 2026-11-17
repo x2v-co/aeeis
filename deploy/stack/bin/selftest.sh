@@ -361,6 +361,16 @@ printf 'h' > "$STACK_DIR/secrets/ssh/known_hosts"
 reset_fake; deploy > "$test_dir/output" 2>&1; [[ "$(secrets_label)" != "$second" ]]
 [[ "$(python3 -I "$STACK_DIR/bin/_secrets-fingerprint.py" "$test_dir/no-such-dir")" == absent ]]
 rm -rf "$STACK_DIR/secrets"
+# A secrets directory that cannot be read in full stops the deployment before anything is replaced.
+printf 'x' > "$test_dir/not-a-directory"
+reset_fake
+expect_failure env AEEIS_SECRETS_DIR="$test_dir/not-a-directory" AEEIS_DEPLOY_IMAGE=aeeis:test "$STACK_DIR/bin/deploy.sh" --env-file "$AEEIS_ENV_FILE" --no-build
+grep -q 'cannot read the secrets directory' "$test_dir/output"
+no_container_mutation
+python3 - <<'PY'
+import json,os
+assert not any(a[0] in ('pull','run','build') for a in map(json.loads, open(os.environ['FAKE_LOG']))), 'refused before pulling or the replay gate'
+PY
 echo 'stack selftest: project/volume guards, pull failures, offline transport, registry fallback, replay gate, startup gate, secrets restart and stack state isolation passed'
 
 # Release identity: explicit shell > selected env file > image label > hex tag.
