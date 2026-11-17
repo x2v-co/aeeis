@@ -215,7 +215,7 @@ function executionView(run: AgentRun | undefined): { steps: Array<{ title: strin
 /** The answer of a succeeded Run, shown to its owner as the Bot's reply in the chat: the last output a step actually wrote, clipped. The full artifact stays on the Run. */
 const REPLY_LIMIT = 2000;
 const REPLY_RUNS = 20;
-function runReply(run: AgentRun | undefined): { text: string; artifactId: string; truncated?: true; partial?: true } | undefined {
+function runReply(run: AgentRun | undefined): { text: string; artifactId: string; truncated?: true; partial?: true; pullRequest?: { number: number; url: string } } | undefined {
   if (run?.status !== 'succeeded') return;
   const artifact = answerArtifact(run.artifacts);
   const answer = artifact ? readableAnswer(artifact.content) : undefined;
@@ -223,7 +223,10 @@ function runReply(run: AgentRun | undefined): { text: string; artifactId: string
   const { text } = answer;
   // A partial Run's caveats leave the reply; the reply only says some of it is unverified, and the details show what.
   const partial = answer.caveat || run.partial ? { partial: true as const } : {};
-  return text.length > REPLY_LIMIT ? { text: `${text.slice(0, REPLY_LIMIT).trimEnd()}…`, artifactId: artifact.id, truncated: true, ...partial } : { text, artifactId: artifact.id, ...partial };
+  // The draft pull request AEEIS opened for work that passed its check: the result the owner acts on next.
+  const pull = run.publications?.filter(item => item.pullRequest).at(-1)?.pullRequest;
+  const extra = { ...partial, ...(pull ? { pullRequest: { number: pull.number, url: pull.url } } : {}) };
+  return text.length > REPLY_LIMIT ? { text: `${text.slice(0, REPLY_LIMIT).trimEnd()}…`, artifactId: artifact.id, truncated: true, ...extra } : { text, artifactId: artifact.id, ...extra };
 }
 /** The one external action waiting for the owner. Its arguments stay on the Run; the key ties a decision to exactly this call. */
 function pendingAction(run: AgentRun | undefined): { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string } | undefined {
