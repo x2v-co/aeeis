@@ -688,6 +688,8 @@ describe('publishing work that passed the independent check', () => {
     expect(request).toMatchObject({ toolId: 'repo-push', capabilityGrant: `run:${run.id}:repo-push`, idempotencyKey: `${run.id}:publish:0`, input: { repo: 'sandbox', branch, path: '.', target: branch, title: 'Build a pomodoro page' } });
     expect((request.input as { body: string }).body).toContain('✅ The page loads');
     expect((request.input as { body: string }).body).toContain('https://p-abc.aeeis.link/');
+    expect(publishInput({ id: run.id, goal: 'A', publish: { repo: 'sandbox' } }, 0, { ...check(0, true), previewUrl: 'https://32801-x.instabox.tech/?_token=ibp_secret' }).body).not.toContain('ibp_secret');
+    expect(publishInput({ id: run.id, goal: 'A', publish: { repo: 'sandbox' } }, 0, { ...check(0, true), previewUrl: 'https://p-abc.aeeis.link/#t=secret' }).body).not.toContain('secret');
     expect(context).toEqual({ workspace: run.workGrant!.grantId });
     const done = await h.repository.get(run.id);
     expect(done.publications).toEqual([expect.objectContaining({ round: 0, status: 'completed', repo: 'sandbox', branch: `bot/${branch}`, commit: 'c0ffee', pullRequest: { number: 7, url: 'https://github.com/x2v-co/aeeis-bots-repo/pull/7', draft: true } })]);

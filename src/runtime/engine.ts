@@ -550,9 +550,19 @@ export function publishInput(run: Pick<AgentRun, 'id' | 'goal'> & { publish?: Ag
     `AEEIS Run \`${run.id}\` 的成果。独立检查（第 ${round + 1} 轮）已通过；代码由 Bot 写成，合并前请自己看一遍。`, '',
     '**目标**', goal.slice(0, 1500), '',
     ...(items.length ? ['**独立检查**', ...items, ''] : []),
-    ...(check?.previewUrl ? [`预览：${check.previewUrl}`, ''] : []),
+    ...(shareablePreview(check?.previewUrl) ? [`预览（机器收掉后失效）：${check!.previewUrl}`, ''] : []),
   ].join('\n').slice(0, 5000);
   return { repo: run.publish!.repo, branch, path: '.', target: run.publish!.folder ?? branch, title, body, message: `${title}\n\n独立检查第 ${round + 1} 轮通过` };
+}
+
+/** A preview link that can go into a pull request: plain https with nothing after the path. Some hosts put an access
+ * token in the query or fragment, and anyone who reads the repository could then open the preview. */
+export function shareablePreview(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
+  } catch { return false; }
 }
 
 /** Why AEEIS will not publish this Run's work, or undefined when the owner approved it. */
