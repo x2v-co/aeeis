@@ -95,7 +95,7 @@ type ProjectPulseArtifact = {
   unknowns: ProjectPulseItem[];
 };
 interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; handoff?: TaskHandoffView; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
-interface ConversationReply { text: string; artifactId: string; truncated?: true; partial?: true }
+interface ConversationReply { text: string; artifactId: string; truncated?: true; partial?: true; pullRequest?: { number: number; url: string } }
 interface TaskHandoffView { offerId: string; from: string; to: string; toName: string; note?: string; state: 'suggested' | 'negotiating' | 'accepted' | 'declined' | 'blocked'; at: string; reason?: string; receiver?: { conversationId: string; taskId: string } }
 /** One line for a task's handoff to another Bot, in the owner's words. */
 function handoffLine(handoff: TaskHandoffView): string {
@@ -4596,6 +4596,11 @@ function conversationBotReply(answer: ConversationReply, runId: string, title: s
   reply.setAttribute('aria-label', `「${title}」的回答`);
   reply.append(element('small', person ? participantLabel(person) : 'AEEIS', 'message-meta'), element('div', answer.text, 'bot-reply-text'));
   const actions = element('div', '', 'bot-reply-actions');
+  if (answer.pullRequest?.url.startsWith('https://github.com/')) {
+    const pull = element('a', `打开 draft PR #${answer.pullRequest.number} ↗`);
+    pull.href = answer.pullRequest.url; pull.target = '_blank'; pull.rel = 'noopener noreferrer'; pull.dataset.replyPull = runId;
+    actions.append(pull);
+  }
   const copy = button('复制', async () => { await navigator.clipboard?.writeText(answer.text); copy.textContent = '已复制'; });
   copy.type = 'button';
   // The reply is the answer only. How it was made, its evidence and anything left unverified open from here.

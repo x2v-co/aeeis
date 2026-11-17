@@ -544,7 +544,7 @@ export function publishInput(run: Pick<AgentRun, 'id' | 'goal'> & { publish?: Ag
   if (!id || id.length > 56) throw new Error(`Run id ${JSON.stringify(run.id)} cannot name a branch`);
   const branch = `run-${id}`;
   const goal = run.goal.trim();
-  const title = (goal.split('\n').find(line => line.trim())?.trim() ?? 'AEEIS Run').slice(0, 100);
+  const title = publishTitle(goal);
   const items = (check?.items ?? []).map(item => `- ${item.status === 'passed' ? '✅' : item.status === 'failed' ? '❌' : '❔'} ${item.requirement}${item.notes ? ` — ${item.notes.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
   const body = [
     `AEEIS Run \`${run.id}\` 的成果。独立检查（第 ${round + 1} 轮）已通过；代码由 Bot 写成，合并前请自己看一遍。`, '',
@@ -563,6 +563,15 @@ export function shareablePreview(url: string | undefined): boolean {
     const parsed = new URL(url);
     return parsed.protocol === 'https:' && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
   } catch { return false; }
+}
+
+/** A pull request title from the goal: its first sentence or clause, so a long request does not end mid-word. A colon
+ * counts only full-width or before a space, so a URL is not cut at "https:". */
+export function publishTitle(goal: string): string {
+  const line = goal.split('\n').map(item => item.trim()).find(Boolean) ?? '';
+  const end = line.search(/[。！？；：!?;]|[.:](?=\s)/);
+  const first = (end > 0 ? line.slice(0, end) : line).trim() || 'AEEIS Run';
+  return first.length > 60 ? `${first.slice(0, 59).trimEnd()}…` : first;
 }
 
 /** Why AEEIS will not publish this Run's work, or undefined when the owner approved it. */

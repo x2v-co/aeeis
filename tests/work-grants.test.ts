@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
-import { AgentEngine, delegationContext, publishInput } from '../src/runtime/engine.js';
+import { AgentEngine, delegationContext, publishInput, publishTitle } from '../src/runtime/engine.js';
 import { runMetrics } from '../src/runtime/run-metrics.js';
 import type { VerifyInput } from '../src/executor.js';
 import type { ModelRequest } from '../src/runtime/model.js';
@@ -746,6 +746,15 @@ describe('publishing work that passed the independent check', () => {
     expect(second.target).not.toBe(first.target);
     expect(publishInput({ id: 'run_12345678-1111-4111-8111-111111111111', goal: 'A', publish: { repo: 'sandbox' } }, 1).branch).toBe(first.branch);
     expect(() => publishInput({ id: 'run_', goal: 'A', publish: { repo: 'sandbox' } }, 0)).toThrow(/cannot name a branch/);
+  });
+
+  it('titles the pull request with the goal\'s first sentence, not the request cut mid-word', () => {
+    expect(publishTitle('做一个单页番茄钟网页：一个 index.html（内联 CSS 和 JS），标题「番茄钟」，显示 25:00 倒计时。用 python3 -m http.server 3000 提供。')).toBe('做一个单页番茄钟网页');
+    expect(publishTitle('Fix the login page. Then add tests')).toBe('Fix the login page');
+    expect(publishTitle('Mirror https://example.com/docs into a page')).toBe('Mirror https://example.com/docs into a page');
+    expect(publishTitle('\n\n  Build a pomodoro page\nwith a timer')).toBe('Build a pomodoro page');
+    expect(publishTitle('x'.repeat(80))).toBe(`${'x'.repeat(59)}…`);
+    expect(publishTitle('   ')).toBe('AEEIS Run');
   });
 
   it('puts the project in the chosen folder', async () => {
