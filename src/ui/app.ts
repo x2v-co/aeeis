@@ -5531,7 +5531,7 @@ $('conversation-text').addEventListener('keydown', event => {
   if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
 });
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent(), false, true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
-for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance']) {
+for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance', 'publish-repo']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());
   $(id)?.addEventListener('change', () => syncEntryDefaults());
 }
@@ -7959,7 +7959,8 @@ function executionReviewNote(): string {
 /** One line under the entry composer: what the next run will use, read from the Settings fields it is sent with. */
 function acceptanceNote(): string {
   const count = ($<HTMLTextAreaElement>('acceptance')?.value ?? '').split('\n').filter(line => line.trim()).length;
-  return count ? ` · 下一次执行带 ${count} 条验收要求` : '';
+  const repo = $<HTMLInputElement>('publish-repo')?.value.trim();
+  return count ? ` · 下一次执行带 ${count} 条验收要求${repo ? `，通过后开 PR 到 ${repo}` : ''}` : '';
 }
 function entryDefaultsText(): string {
   const review = executionReviewValue();
@@ -7997,7 +7998,17 @@ function acceptanceRequirements(): string[] {
 /** Requirements are for one Run: once it exists they would only surprise the next, unrelated one. */
 function clearAcceptance(): void {
   const field = $<HTMLTextAreaElement>('acceptance');
+  const repo = $<HTMLInputElement>('publish-repo');
+  if (repo?.value) repo.value = '';
   if (field?.value) { field.value = ''; syncEntryDefaults(); }
+}
+/** Where the next Run's checked work is published, if anywhere. Only with acceptance requirements. */
+function publishOption(acceptance: string[]): { repo: string } | undefined {
+  const repo = $<HTMLInputElement>('publish-repo')?.value.trim().toLowerCase() ?? '';
+  if (!repo) return undefined;
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(repo)) throw new Error('仓库名只能用小写字母、数字和 -，例如 sandbox');
+  if (!acceptance.length) throw new Error('开 PR 要先填验收要求：只有通过独立检查的成果才会推送');
+  return { repo };
 }
 function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
@@ -8032,7 +8043,7 @@ function runOptions(includeProjectQuery = true, goal = ''): Record<string, unkno
   const scope = grant
     ? { workGrantId: grant.grantId, allowedTools: [] as string[] }
     : { executionReview: executionReviewValue(), allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}) };
-  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), ...(acceptance.length ? { acceptance } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), ...(acceptance.length ? { acceptance } : {}), ...(includeProjectQuery && publishOption(acceptance) ? { publish: publishOption(acceptance) } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -8728,6 +8739,13 @@ async function showComputerScreenshot(runId: string, shot: ComputerView['screens
   $('computer-shot').hidden = false;
 }
 interface AcceptanceView { round: number; passed: boolean; projectChanged: boolean; error?: string; items: { requirement: string; status: string; notes: string; screenshot?: string }[]; previewUrl?: string; sourceArchive?: string }
+interface PublicationView { round: number; repo: string; branch: string; status: 'completed' | 'failed' | 'unknown' | 'skipped'; pullRequest?: { number: number; url: string; draft: boolean }; compareUrl?: string; error?: string }
+function publicationNote(item: PublicationView): string {
+  if (item.status === 'skipped') return `没有推送到 ${item.repo}：${item.error ?? '没有获得批准'}`;
+  if (item.status === 'failed') return `推送到 ${item.repo} 没成功：${item.error ?? '原因不明'}`;
+  if (item.status === 'unknown') return `推送到 ${item.repo} 的结果不确定：${item.error ?? '没能确认 GitHub 上的状态'}`;
+  return `已推送到 ${item.repo} 的 ${item.branch}，但 PR 没开成${item.error ? `：${item.error}` : ''}`;
+}
 const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '没通过', unverified: '没能确认' };
 /** A machine in these states still serves the preview link it delivered. */
 const MACHINE_UP = ['running', 'frozen', 'unknown', 'unreachable'];
@@ -8747,6 +8765,17 @@ function renderAcceptance(run: RunView, view: ComputerView): void {
   }));
   const delivery = $('computer-delivery');
   delivery.replaceChildren();
+  const published = (run as RunView & { publications?: PublicationView[] }).publications?.at(-1);
+  if (published) {
+    $('computer-acceptance').hidden = false;
+    const target = published.pullRequest?.url ?? published.compareUrl;
+    if (target?.startsWith('https://github.com/')) {
+      const link = element('a', published.pullRequest ? `打开 draft PR #${published.pullRequest.number}` : `看 ${published.branch} 的改动`);
+      link.href = target; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      delivery.append(link);
+    }
+    if (published.status !== 'completed' || !published.pullRequest) delivery.append(element('span', publicationNote(published), 'muted'));
+  }
   if (check?.previewUrl?.startsWith('https://')) {
     if (MACHINE_UP.includes(view.machine.state)) {
       const link = element('a', '打开交付的预览');

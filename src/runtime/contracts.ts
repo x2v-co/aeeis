@@ -69,6 +69,13 @@ export const requestSchema = z.object({
   allowedAgents: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
   /** Requirements someone can check by looking. Each is verified independently before the Run can be accepted. */
   acceptance: z.array(z.string().trim().min(1).max(500)).min(1).max(30).optional(),
+  /** After the independent check passes, AEEIS pushes the project to a `bot/` branch of this configured repository and
+   * opens a draft pull request. Needs `acceptance`. Approving the plan approves the push; under a Work Grant the grant
+   * must list `repo-push:<repo>`. `folder` is where the project goes in the repository (default: the branch name). */
+  publish: z.object({
+    repo: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'Use the configured repository name, such as sandbox'),
+    folder: z.string().trim().min(1).max(300).refine(value => value === '.' || (!value.startsWith('/') && !/[\\\x00-\x1f\x7f]/.test(value) && value.split('/').every(part => part !== '' && part !== '.' && part !== '..' && part !== '.git')), 'Use a folder path relative to the repository root, or "."').optional(),
+  }).strict().optional(),
   knowledgeQuery: z.string().trim().min(1).max(2000).optional(),
   knowledgeMaxItems: z.number().int().min(1).max(20).default(8),
   projectSourceQuery: z.string().trim().min(1).max(2000).optional(),
@@ -294,6 +301,12 @@ export interface AcceptanceCheck {
   /** Which try at the round, so two reports of one session are recorded once. */
   attempt?: string;
 }
+/** What happened to work that passed the independent check of `round`. */
+export interface Publication {
+  round: number; at: string; repo: string; branch: string;
+  status: 'completed' | 'failed' | 'unknown' | 'skipped';
+  commit?: string; pullRequest?: { number: number; url: string; draft: boolean }; compareUrl?: string; error?: string;
+}
 export interface ExternalUsage { calls: number; tokens: number; moneyUsd?: number; unreportedCalls: number; unreportedTokenCalls: number; unreportedMoneyCalls: number }
 export interface ModelCall {
   /** Exact logical request reserved for this call, before transport callbacks/options. */
@@ -453,6 +466,13 @@ export interface AgentRun {
   review?: Review;
   acceptance?: string[];
   acceptanceChecks?: AcceptanceCheck[];
+  /** Frozen at creation: where work that passed the independent check is published as a draft pull request. */
+  publish?: { repo: string; folder?: string | undefined };
+  /** A publish that is out. Only the holder of `claim` records it; a stale claim (its process died) is taken over, and the
+   * repeated push is safe because the tool journals it and GitHub is asked whether it already landed. */
+  pendingPublish?: { round: number; claim: string; at: string };
+  /** One entry per check round that was published, or deliberately not. */
+  publications?: Publication[];
   /** An independent check sent and not yet back. It may still be billed, so the Run's grant reservation stays until it lands. */
   /** An independent check that is out. Only the holder of `claim` may finish it; it renews `at` while it waits, and a
    * claim left stale (its process died) is taken over by following the same session (`attempt`) to its end. */

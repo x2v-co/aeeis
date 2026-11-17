@@ -26,7 +26,8 @@ import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
 import { isRecoverableToolFailure, toolFailureDetails } from '../tool-failures.js';
 import type { VerifyInput } from '../executor.js';
-import type { AcceptanceCheck } from './contracts.js';
+import { REPO_PUSH_TOOL, REPO_PUSH_VERSION } from '../repo-connector.js';
+import type { AcceptanceCheck, Publication } from './contracts.js';
 import type { MachineInterrupt, ToolDescriptor, ToolGateway, SkillGovernance, ModelDecision, ModelSelectionRequest, Receipt, ToolInvocation, ToolResult } from '../integrations.js';
 import type { ModelResolution, ModelResolver } from './model-router.js';
 import { AgentGateway, AgentOutcomeUnknown } from '../agent-gateway.js';
@@ -196,6 +197,8 @@ function plannerApprovalJudgment(value: unknown): { needed: boolean; reason: str
 }
 const automaticReviewGuidance = '\nThis run uses automatic review. Also return "approvalRequest":{"needed":true or false,"reason":"one sentence"}. Set needed true when the plan would spend money, call an external agent or tool, send a message, change shared state, or you are unsure. Set needed false only for read-only work on supplied materials. This judgment cannot add tools, raise budgets, or replace a person\'s approval.';
 function frozenRunCanClear(current: AgentRun): boolean {
+  // Publishing reaches GitHub, so only the owner (or a grant that names the repository) approves it.
+  if (current.publish) return false;
   const plan = current.plans.at(-1);
   const planText = plan ? [plan.summary, ...plan.nodes.flatMap(node => [node.title, node.instruction ?? ''])].join('\n') : '';
   return automaticReviewCanClear({
@@ -254,6 +257,7 @@ function workGrantGap(run: AgentRun): string | undefined {
   if (!activeWorkGrant(run)) return `授权「${grant.title}」已过期，计划等待批准`;
   const tools = (run.approvedTools ?? []).map(tool => tool.id).filter(toolId => !grant.tools.includes(toolId));
   const agents = (run.approvedAgents ?? []).map(agent => agent.agentId).filter(agentId => !grant.agents.includes(agentId));
+  if (run.publish && !grant.connectors?.includes(`${REPO_PUSH_TOOL}:${run.publish.repo}`)) return `检查通过后要推送到 ${run.publish.repo} 并开 PR，授权「${grant.title}」没有包含这个仓库，等待批准`;
   if (tools.length || agents.length) return `计划要用授权「${grant.title}」之外的${[tools.length ? `工具 ${tools.join('、')}` : '', agents.length ? `Agent ${agents.join('、')}` : ''].filter(Boolean).join('和')}，等待批准`;
   return undefined;
 }
@@ -528,6 +532,37 @@ export interface AcceptanceVerifier {
 }
 /** A claim on a check is renewed every minute while it is watched; one not renewed for five belongs to a process that died. */
 const ACCEPTANCE_RENEW_MS = 60_000, ACCEPTANCE_LEASE_MS = 5 * 60_000;
+/** A push takes seconds; one held this long belongs to a process that died. Taking it over repeats the call with the
+ * same idempotency key, which the tool answers from its journal or by asking GitHub. */
+const PUBLISH_LEASE_MS = 10 * 60_000;
+
+/** The repo-push call for a Run's passed check: one branch per Run, so later rounds add commits to the same pull request. */
+export function publishInput(run: Pick<AgentRun, 'id' | 'goal'> & { publish?: AgentRun['publish'] }, round: number, check?: AcceptanceCheck) {
+  const branch = `run-${run.id.replace(/^run_/, '').replace(/[^a-z0-9]/g, '').slice(0, 8) || 'work'}`;
+  const goal = run.goal.trim();
+  const title = (goal.split('\n').find(line => line.trim())?.trim() ?? 'AEEIS Run').slice(0, 100);
+  const items = (check?.items ?? []).map(item => `- ${item.status === 'passed' ? '✅' : item.status === 'failed' ? '❌' : '❔'} ${item.requirement}${item.notes ? ` — ${item.notes.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+  const body = [
+    `AEEIS Run \`${run.id}\` 的成果。独立检查（第 ${round + 1} 轮）已通过；代码由 Bot 写成，合并前请自己看一遍。`, '',
+    '**目标**', goal.slice(0, 1500), '',
+    ...(items.length ? ['**独立检查**', ...items, ''] : []),
+    ...(check?.previewUrl ? [`预览：${check.previewUrl}`, ''] : []),
+  ].join('\n').slice(0, 5000);
+  return { repo: run.publish!.repo, branch, path: '.', target: run.publish!.folder ?? branch, title, body, message: `${title}\n\n独立检查第 ${round + 1} 轮通过` };
+}
+
+/** Why AEEIS will not publish this Run's work, or undefined when the owner approved it. */
+function publishRefusal(run: AgentRun): string | undefined {
+  const scope = `${REPO_PUSH_TOOL}:${run.publish!.repo}`;
+  const grant = activeWorkGrant(run);
+  const verdict = decideAction(run.actionPolicy, run.origin, run.executionReview, { kind: 'tool', id: REPO_PUSH_TOOL, version: REPO_PUSH_VERSION, capabilities: ['write', 'network'], scope }, { ...(grant ? { grant } : {}) });
+  if (verdict.decision === 'refuse') return `没有推送：${verdict.reason}`;
+  if (verdict.decision === 'allow') return undefined;
+  // The plan the owner approved showed this push, which answers the question the policy would ask.
+  if (run.approval?.approved && run.approval.actor === run.owner) return undefined;
+  if (run.approval?.approved && run.approval.actor?.startsWith('grant:') && grant?.connectors?.includes(scope)) return undefined;
+  return `没有推送：计划不是你亲自批准的，授权里也没有 ${scope}`;
+}
 function acceptanceClaimStale(out: NonNullable<AgentRun['pendingAcceptance']>): boolean {
   return !(Date.parse(out.at) > Date.now() - ACCEPTANCE_LEASE_MS);
 }
@@ -1216,6 +1251,10 @@ export class AgentEngine {
       // The planner and executor read the same list the check will hold them to.
       request.materials = [...request.materials, { title: 'Acceptance requirements', source: 'user-input', content: `${request.acceptance.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n\nAn independent check opens the finished work and tests each of these after you finish, so build it and leave it serving on port 3000 rather than testing every item yourself. Hand the building to a coding agent if one is available.` } as never];
     }
+    if (request.publish) {
+      if (!request.acceptance) throw new RangeError('开 PR 需要验收要求：只有通过独立检查的成果才会推送');
+      if (!this.tools?.outwardAction?.(REPO_PUSH_TOOL, publishInput({ id: 'run_probe', goal: 'probe', publish: request.publish }, 0))) throw new Conflict(`这台 AEEIS 没有配置名为 ${request.publish.repo} 的仓库`);
+    }
     // The owner's standing lists are copied now; a later edit to them never reaches this Run.
     const actionPolicy = frozenRunPolicy(await this.actionPolicies?.get({ owner, tenantId }), normalizeActionPolicy(request.actionPolicy));
     // Keep requestSchema composable for the existing HTTP/Thread .omit() paths.
@@ -1418,7 +1457,7 @@ export class AgentEngine {
       capabilityCatalogVersion: 1, selfModelNoteVersion: 1, approvedAgents,
       ...(resourceSnapshot ? { resourceSnapshot } : {}),
       ...(request.builtinSkill ? { builtinSkill: request.builtinSkill } : {}),
-      ...(request.acceptance ? { acceptance: request.acceptance } : {}), ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), ...(actionPolicy ? { actionPolicy, actionPolicyDigest: actionPolicyDigest(actionPolicy) } : {}), ...(request.origin && request.origin !== 'owner' ? { origin: request.origin } : {}), model: selectedModel.pin,
+      ...(request.acceptance ? { acceptance: request.acceptance } : {}), ...(request.publish ? { publish: request.publish } : {}), ...(request.skillRuntime ? { skillRuntime: request.skillRuntime } : {}), ...(request.executionReview ? { executionReview: request.executionReview } : {}), ...(request.planning ? { planning: request.planning } : {}), ...(actionPolicy ? { actionPolicy, actionPolicyDigest: actionPolicyDigest(actionPolicy) } : {}), ...(request.origin && request.origin !== 'owner' ? { origin: request.origin } : {}), model: selectedModel.pin,
       ...(resolution.decision ? { modelDecision: resolution.decision as unknown as Record<string, unknown> } : {}),
       ...(activeEvolution.length ? { evolution: activeEvolution } : {}),
       ...(evolutionSelection.traffic.length ? { evolutionTraffic: evolutionSelection.traffic } : {}),
@@ -3816,6 +3855,59 @@ export class AgentEngine {
     });
     return decides && check.passed;
   }
+  /**
+   * Work that passed the independent check goes to a `bot/` branch and a draft pull request, once per passed round.
+   * The plan the owner approved said so, or the Work Grant names the repository; the owner's block list still wins.
+   * A failed publish never fails the Run: the work passed, and the result says why there is no pull request.
+   * False while another process is publishing this round.
+   */
+  private async publishChecked(run: AgentRun): Promise<boolean> {
+    if (!this.tools) return true;
+    const claim = randomUUID();
+    // Read under the lock: the check that just passed was recorded after this tick's snapshot was taken.
+    let taken: { check: AcceptanceCheck; current: AgentRun } | undefined, waiting = false;
+    await this.repository.mutate(run.id, current => {
+      const check = decidingChecks(current).filter(item => item.passed).at(-1);
+      if (!check || current.publications?.some(item => item.round === check.round)) return;
+      waiting = true;
+      if (current.status !== 'reviewing') return;
+      const out = current.pendingPublish;
+      if (out && Date.now() - Date.parse(out.at) < PUBLISH_LEASE_MS) return;
+      if (out) event(current, 'publish.claim_taken_over', { round: out.round });
+      current.pendingPublish = { round: check.round, claim, at: now() };
+      taken = { check: structuredClone(check), current: structuredClone(current) };
+    });
+    if (!taken) return !waiting;
+    const { check } = taken as { check: AcceptanceCheck; current: AgentRun };
+    run = (taken as { current: AgentRun }).current;
+    const round = check.round;
+    const input = publishInput(run, round, check);
+    const refusal = publishRefusal(run);
+    let record: Publication;
+    const base = { round, at: now(), repo: input.repo, branch: `bot/${input.branch}` };
+    if (refusal) record = { ...base, status: 'skipped', error: refusal };
+    else {
+      const request: ToolInvocation = {
+        toolId: REPO_PUSH_TOOL, toolVersion: REPO_PUSH_VERSION, taskId: 'publish', purpose: 'Open a draft pull request for work that passed the independent check',
+        input, capabilityGrant: `run:${run.id}:${REPO_PUSH_TOOL}`, idempotencyKey: `${run.id}:publish:${round}`, timeoutMs: 180_000,
+      };
+      const result = await invokeForRun(this.tools, run, request).catch((error: unknown): ToolResult => ({ status: 'unknown', output: { error: error instanceof Error ? error.message : 'Publish failed' }, receipt: undefined as never }));
+      const output = (result.output ?? {}) as { commit?: unknown; compareUrl?: unknown; pullRequest?: { number?: unknown; url?: unknown; draft?: unknown } | null; pullRequestError?: unknown; error?: unknown; note?: unknown };
+      const pull = output.pullRequest && typeof output.pullRequest.number === 'number' && typeof output.pullRequest.url === 'string' ? { number: output.pullRequest.number, url: output.pullRequest.url, draft: output.pullRequest.draft === true } : undefined;
+      const error = [output.error, output.pullRequestError].find(item => typeof item === 'string') as string | undefined;
+      record = { ...base, status: result.status, ...(typeof output.commit === 'string' ? { commit: output.commit } : {}), ...(pull ? { pullRequest: pull } : {}), ...(typeof output.compareUrl === 'string' ? { compareUrl: output.compareUrl } : {}), ...(error ? { error: error.slice(0, 1000) } : {}) };
+    }
+    let recorded = false;
+    await this.repository.mutate(run.id, current => {
+      if (current.pendingPublish?.claim !== claim) return;
+      delete current.pendingPublish;
+      if (current.publications?.some(item => item.round === round)) return;
+      (current.publications ??= []).push(record);
+      recorded = true;
+      event(current, `publish.${record.status}`, { round, repo: record.repo, branch: record.branch, ...(record.pullRequest ? { pullRequest: record.pullRequest.url } : {}), ...(record.error ? { error: record.error } : {}) });
+    });
+    return recorded;
+  }
   /** Runs `work` while renewing the claim, so nobody takes over a check that is still being watched. */
   private async holdingClaim<T>(runId: string, claim: string, work: () => Promise<T>, scope?: Ownership): Promise<T> {
     const renew = setInterval(() => {
@@ -3894,6 +3986,7 @@ export class AgentEngine {
     }
     if (run.taskExecution && run.review?.verdict === 'accepted') { await this.finishBoundReview(run); return; }
     if (run.acceptance?.length && !await this.checkAcceptance(run)) return;
+    if (run.publish && !await this.publishChecked(run)) return;
     const planRequirements = run.plans.at(-1)?.nodes.filter(node => node.evidenceRequirements);
     const legacyRequest = { system: this.governedPrompt(reviewerPrompt, run), input: { goal: run.goal, ...(planRequirements?.length ? { planRequirements } : {}), privacy: run.privacy, skill: this.skillContext(run), ...this.capabilityContext(run), ...threadHistoryInput(run), ...(run.capabilityCatalogVersion ? { externalEvidence: { toolReceipts: (run.toolReceipts ?? []).filter(receipt => receipt.authorization?.decision !== 'isolated'), delegations: (run.delegationOutcomes ?? []).filter(outcome => outcome.disposition !== 'isolated'), observations: boundedObservations(run.steps.flatMap(step => step.observations.filter(observation => !observation.tool.startsWith('sources.') && !observation.tool.startsWith('pdf.'))), evidenceRefsFromObservation) } } : {}), evolution: run.evolution ?? [], sources: presentedMaterials(run.context.sources, [], 12_000), sourceObservations: boundedObservations(run.steps.flatMap(step => step.observations.filter(observation => observation.tool.startsWith('sources.') || observation.tool.startsWith('pdf.'))), evidenceRefsFromObservation), artifacts: run.stopReview === 'pending' ? run.artifacts : run.artifacts.map(artifact => ({ ...artifact, content: stripRuntimeUnknown(artifact.content) })), answers: run.answers } };
     const legacyRequests: ModelRequest[] = [legacyRequest];

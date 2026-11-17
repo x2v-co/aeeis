@@ -16,7 +16,9 @@ export const REPO_PUSH_TOOL = 'repo-push';
 export const REPO_PUSH_VERSION = '1';
 export const BOT_BRANCH_PREFIX = 'bot/';
 /** Folders that are rebuilt, not authored. They are never copied out of the workspace. */
-export const EXPORT_SKIP = ['.git', 'node_modules', '__pycache__', '.venv', '.cache', '.next'] as const;
+/** Folder names skipped anywhere, and paths (with a "/") skipped relative to the published folder: what AEEIS itself
+ * leaves in a workspace when it checks and delivers work (screenshots, the source archive, earlier rounds) is not source. */
+export const EXPORT_SKIP = ['.git', 'node_modules', '__pycache__', '.venv', '.cache', '.next', 'artifacts/screenshots', 'artifacts/source.tar.gz', '.previous-artifacts'] as const;
 export const EXPORT_LIMITS = { maxFiles: 2000, maxBytes: 20 * 1024 * 1024 } as const;
 
 const repoName = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'Use a short lowercase name such as sandbox');

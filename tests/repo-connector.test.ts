@@ -314,5 +314,16 @@ describe('workspace export script', () => {
     expect(await run(workspace, { path: 'escape' })).toEqual({ error: 'That folder is outside the workspace' });
     expect(await run(workspace, { path: 'missing' })).toMatchObject({ error: expect.stringMatching(/No such folder/) });
     expect(await run(workspace, { path: 'site', maxFiles: 1 })).toMatchObject({ error: expect.stringMatching(/too large/) });
+  });  it('leaves out what AEEIS delivered beside the project: screenshots, the source archive and earlier rounds', async () => {
+    const { EXPORT_SKIP } = await import('../src/repo-connector.js');
+    const workspace = join(root, 'delivered');
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(workspace, 'artifacts', 'screenshots'), { recursive: true }); await mkdir(join(workspace, '.previous-artifacts'), { recursive: true }); await mkdir(join(workspace, 'src', 'artifacts', 'screenshots'), { recursive: true });
+    await writeFile(join(workspace, 'index.html'), 'hi'); await writeFile(join(workspace, 'artifacts', 'app.js'), 'js');
+    await writeFile(join(workspace, 'artifacts', 'screenshots', 'a.png'), 'png'); await writeFile(join(workspace, 'artifacts', 'source.tar.gz'), 'gz');
+    await writeFile(join(workspace, '.previous-artifacts', 'old.txt'), 'old'); await writeFile(join(workspace, 'src', 'artifacts', 'screenshots', 'keep.png'), 'mine');
+    const result = await run(workspace, { path: '.', skip: [...EXPORT_SKIP] });
+    // Paths with a "/" match from the published folder only, so the project's own folder of the same name stays.
+    expect(result.files.map((item: { path: string }) => item.path).sort()).toEqual(['artifacts/app.js', 'index.html', 'src/artifacts/screenshots/keep.png']);
   });
 });

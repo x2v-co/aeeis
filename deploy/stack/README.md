@@ -224,6 +224,17 @@ repository as a `bot/<name>` branch with a draft pull request:
   `repo-push:<name>` under "不用问就能推送的仓库" (and `repo-push` under tools).
 - A push interrupted midway is checked on GitHub (each commit carries an
   `AEEIS-Push:` trailer) before it is ever tried again.
+- **Coding tasks can end in a draft PR.** A Run started with acceptance
+  requirements and "检查通过后开 PR 到仓库" (`publish: { repo, folder? }`) is
+  pushed by AEEIS itself once the independent check passes: one
+  `bot/run-<id>` branch per Run, the project in `folder` (default: the branch
+  name), and the check results in the PR description. Only checked work is
+  pushed; a later revision round adds a commit to the same PR. Approving the
+  plan approves the push, so automatic review never clears such a plan; under a
+  Work Grant the grant must list `repo-push:<name>`. The block list still wins.
+  A failed push does not fail the Run: the result card says why there is no PR.
+  AEEIS's own screenshots, `artifacts/source.tar.gz` and `.previous-artifacts`
+  are never pushed.
 
 ## Network and trust
 
