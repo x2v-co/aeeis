@@ -8,7 +8,7 @@ import { join } from 'node:path';
 export const CASE_SCHEMA = 'aeeis-eval-case/1';
 export const REPORT_SCHEMA = 'aeeis-eval-report/1';
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
-const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
+const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'sectionContent', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
 
 /** Reads evals/cases/*.json in name order and validates their shape. */
 export function loadCases(root, only = []) {
@@ -138,6 +138,16 @@ const PLACEHOLDER_REF = /^(?:TBD|TODO|N\/A|XX+|\?+|证据|evidence|source|ref|pl
 function artifactText(run) {
   return (run?.artifacts ?? []).map(artifact => `${artifact.content ?? ''}\n${artifact.structured === undefined ? '' : JSON.stringify(artifact.structured)}`).join('\n');
 }
+/** Lines under the first markdown heading matching `heading`, including its subsections, up to the next heading of the
+ * same or a higher level. */
+export function markdownSection(content, heading) {
+  const lines = content.split('\n');
+  const level = line => /^\s{0,3}(#{1,6})\s/.exec(line)?.[1].length;
+  const start = lines.findIndex(line => level(line) !== undefined && heading.test(line.trim()));
+  if (start < 0) return undefined;
+  const end = lines.findIndex((line, index) => index > start && (level(line) ?? 7) <= level(lines[start]));
+  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
+}
 function collectRefs(value, into = []) {
   if (Array.isArray(value)) { for (const item of value) collectRefs(item, into); return into; }
   if (!value || typeof value !== 'object') return into;
@@ -207,6 +217,15 @@ export function checkRun(testCase, outcome, deps) {
       case 'contentExcludes': {
         const found = (check.any ?? []).filter(needle => new RegExp(needle, 'u').test(text));
         return result(!found.length, found.length ? `found: ${found.join(', ')}` : 'absent');
+      }
+      case 'sectionContent': {
+        // The results section the case's goal asks for (e.g. "## 逾期任务"), not the answer's explanations of excluded rows.
+        // A missing section fails: the request named it.
+        const section = markdownSection(artifact?.content ?? '', new RegExp(check.heading, 'u'));
+        if (section === undefined) return result(false, `no section headed /${check.heading}/`);
+        const missing = (check.all ?? []).filter(needle => !section.includes(needle));
+        const found = (check.none ?? []).filter(needle => section.includes(needle));
+        return result(!missing.length && !found.length, [missing.length ? `missing: ${missing.join(', ')}` : '', found.length ? `found: ${found.join(', ')}` : ''].filter(Boolean).join('; ') || 'matches');
       }
       case 'toolUsed': {
         const used = (run.events ?? []).filter(event => event.type === 'tool.completed').map(event => event.data?.tool ?? event.data?.toolId);

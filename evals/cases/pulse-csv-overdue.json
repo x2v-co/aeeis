@@ -7,7 +7,7 @@
     "pulse"
   ],
   "request": {
-    "goal": "列出 due 早于今天（以系统时钟 clock.currentDate 为准）且 status 不是 done/closed/完成 的未完成任务，按 due 升序，给出总数并逐条引用证据。",
+    "goal": "列出 due 早于今天（以系统时钟 clock.currentDate 为准）且 status 不是 done/closed/完成 的未完成任务，按 due 升序，给出总数并逐条引用证据。把结果写在标题「## 逾期任务」下，这一节只列逾期任务；被排除的行和原因放在另一个同级的 ## 小节。",
     "builtinSkill": "project-pulse/1",
     "materials": [
       {
@@ -50,7 +50,8 @@
     {
       "id": "uses-sources-csvquery",
       "kind": "toolUsed",
-      "tool": "sources.csvQuery"
+      "tool": "sources.csvQuery",
+      "required": false
     },
     {
       "id": "no-repair",
@@ -66,7 +67,8 @@
           "op": "lt",
           "effective": true
         }
-      }
+      },
+      "required": false
     },
     {
       "id": "lists-overdue",
@@ -77,11 +79,17 @@
       ]
     },
     {
-      "id": "omits-done-and-future",
-      "kind": "contentExcludes",
-      "any": [
+      "id": "overdue-section",
+      "kind": "sectionContent",
+      "heading": "^##\\s*逾期任务",
+      "all": [
+        "Fix login",
+        "Audit logs"
+      ],
+      "none": [
         "Write docs",
-        "Ship v2"
+        "Ship v2",
+        "Plan Q4"
       ]
     }
   ],
