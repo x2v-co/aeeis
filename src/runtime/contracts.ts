@@ -346,6 +346,8 @@ export interface Step {
   outputRecoveryAttempts?: number;
   /** r74: the task's executor call already timed out once with nothing retained and was retried. */
   timeoutRetried?: boolean;
+  /** Eval 2026-11-18: the task's executor reply was cut off once and the task was retried with a shorter-reply note. */
+  incompleteRetried?: { finishReason: string | null };
   /** r78: index of the retry call that may borrow time after a share-limited overall timeout. */
   timeoutBoostCallIndex?: number;
 }
