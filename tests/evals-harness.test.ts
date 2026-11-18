@@ -86,19 +86,27 @@ describe('deterministic checks', () => {
     expect(bad.map((check: any) => check.detail)).toEqual(['interests=["Music"] (want ["Travel","Music"]); unexpected country="SG"', 'not reported: caseId']);
   });
 
-  it('contentMatches with scope "final" reads only the last artifact (pulse-csv-overdue counts the overdue rows)', () => {
-    const overdue = loadCases(process.cwd(), ['pulse-csv-overdue'])[0].checks.find((check: any) => check.id === 'overdue-count');
-    const countCase = { id: 'count', checks: [overdue] };
+  it('sectionContent reads only the answer\'s overdue section (pulse-csv-overdue)', () => {
+    const check = loadCases(process.cwd(), ['pulse-csv-overdue'])[0].checks.find((item: any) => item.id === 'overdue-section');
+    const sectionCase = { id: 'section', checks: [check] };
     const answer = (content: string) => run({ artifacts: [
-      { id: 'a_1', taskId: 'query', content: '共 4 条：Fix login、Write docs、Ship v2、Audit logs', evidenceRefs: [] },
+      { id: 'a_1', taskId: 'query', content: '## 逾期任务\n| 1 | Fix login |\n| 4 | Audit logs |', evidenceRefs: [] },
       { id: 'a_2', taskId: 'final', content, evidenceRefs: [] },
     ] });
-    // Excluded rows may be named with their reason; the answer must count 2.
-    for (const content of ['命中 2 条：Fix login（2026-11-08）、Audit logs。已排除：Write docs（done）、Ship v2（未到期）', '逾期任务总数：2', 'Total: 2 overdue'])
-      expect(checkRun(countCase, outcome(answer(content)), deps)[0].passed, content).toBe(true);
-    // The intermediate artifact's count does not count, and 20 or 2026 is not 2.
-    for (const content of ['共 3 条：Fix login、Write docs、Audit logs', '截至 2026-11-18，共 20 条', 'Fix login, Audit logs'])
-      expect(checkRun(countCase, outcome(answer(content)), deps)[0].passed, content).toBe(false);
+    const passes = (content: string) => checkRun(sectionCase, outcome(answer(content)), deps)[0];
+    // Recorded layout (live run 2026-11-18): the overdue table, then excluded rows and edge cases under their own headings.
+    const recorded = [
+      '# Project Pulse：逾期任务边界核验（今天 = 2026-11-18）', '## 结论', '共 2 条逾期。若 Write docs 的状态被回退为 open，则逾期数将变为 3。',
+      '## 逾期未完成任务（按 due 升序）', '| 1 | Fix login | open | 2026-11-08 |', '| 4 | Audit logs | open | 2026-11-17 |',
+      '### 未命中的行及原因', '| 2 | Write docs | done | 2026-11-13 | status 为 done |', '| 3 | Ship v2 | in_progress | 2026-11-25 | 未来日期 |', '| 5 | Plan Q4 | open | tbd | 无法判定 |',
+    ].join('\n');
+    expect(passes(recorded)).toMatchObject({ passed: true, detail: 'matches' });
+    // Codex review on #232: a wrong overdue list must fail even when an excluded count happens to be 2.
+    const wrong = '## 逾期任务（总数：3）\nFix login、Write docs、Audit logs [source_1]\n## 已排除\n已排除共 2 条：Ship v2、Plan Q4 [source_1]';
+    expect(passes(wrong)).toMatchObject({ passed: false, detail: 'found: Write docs' });
+    expect(passes('## Overdue\n- Audit logs\n## Excluded\n- Fix login')).toMatchObject({ passed: false, detail: 'missing: Fix login' });
+    // An answer without an overdue heading cannot be checked, so it fails rather than passing silently.
+    expect(passes('Fix login、Audit logs 已逾期。')).toMatchObject({ passed: false });
   });
 
   it('matches nested log fields partially', () => {

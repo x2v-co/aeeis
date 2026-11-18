@@ -79,11 +79,18 @@
       ]
     },
     {
-      "id": "overdue-count",
-      "kind": "contentMatches",
-      "scope": "final",
+      "id": "overdue-section",
+      "kind": "sectionContent",
+      "heading": "逾期|[Oo]verdue",
+      "skipHeading": "排除|未命中|不计入|未逾期|非逾期|边界|核验|[Ee]xclud",
       "all": [
-        "(?:共|总数|合计|命中|总计|[Tt]otal)[^\\d\\n]{0,8}2(?!\\d)"
+        "Fix login",
+        "Audit logs"
+      ],
+      "none": [
+        "Write docs",
+        "Ship v2",
+        "Plan Q4"
       ]
     }
   ],

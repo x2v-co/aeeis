@@ -8,7 +8,7 @@ import { join } from 'node:path';
 export const CASE_SCHEMA = 'aeeis-eval-case/1';
 export const REPORT_SCHEMA = 'aeeis-eval-report/1';
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
-const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'contentMatches', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
+const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'sectionContent', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
 
 /** Reads evals/cases/*.json in name order and validates their shape. */
 export function loadCases(root, only = []) {
@@ -38,7 +38,6 @@ function validateCase(value, name) {
     if (!CHECK_KINDS.has(check.kind)) fail(`unknown check kind ${check.kind}`);
     if (!check.id || checkIds.has(check.id)) fail(`check ids must be present and unique (${check.id})`);
     checkIds.add(check.id);
-    if (check.scope !== undefined && check.scope !== 'final') fail(`check ${check.id}: scope must be "final"`);
   }
 }
 
@@ -139,6 +138,15 @@ const PLACEHOLDER_REF = /^(?:TBD|TODO|N\/A|XX+|\?+|证据|evidence|source|ref|pl
 function artifactText(run) {
   return (run?.artifacts ?? []).map(artifact => `${artifact.content ?? ''}\n${artifact.structured === undefined ? '' : JSON.stringify(artifact.structured)}`).join('\n');
 }
+/** Lines under the first markdown heading matching `heading` (not `skip`), up to the next heading of any level. */
+export function markdownSection(content, heading, skip) {
+  const lines = content.split('\n');
+  const isHeading = line => /^\s{0,3}#{1,6}\s/.test(line);
+  const start = lines.findIndex(line => isHeading(line) && heading.test(line) && !(skip && skip.test(line)));
+  if (start < 0) return undefined;
+  const end = lines.findIndex((line, index) => index > start && isHeading(line));
+  return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
+}
 function collectRefs(value, into = []) {
   if (Array.isArray(value)) { for (const item of value) collectRefs(item, into); return into; }
   if (!value || typeof value !== 'object') return into;
@@ -171,13 +179,10 @@ const sameValue = (left, right) => JSON.stringify(Array.isArray(left) ? [...left
 export function checkRun(testCase, outcome, deps) {
   const { run, logs, durationMs } = outcome;
   const artifact = run?.artifacts?.at(-1);
-  const allText = artifactText(run);
-  const finalText = artifactText(run ? { artifacts: (run.artifacts ?? []).slice(-1) } : run);
+  const text = artifactText(run);
   return testCase.checks.map(check => {
     const required = check.required !== false;
     const result = (passed, detail) => ({ id: check.id, kind: check.kind, required, passed: Boolean(passed), detail });
-    // scope "final": only the Run's last artifact (the answer), not intermediate task artifacts.
-    const text = check.scope === 'final' ? finalText : allText;
     if (!run) return result(false, outcome.error ?? 'no Run was created');
     switch (check.kind) {
       case 'runStatus': {
@@ -212,9 +217,14 @@ export function checkRun(testCase, outcome, deps) {
         const found = (check.any ?? []).filter(needle => new RegExp(needle, 'u').test(text));
         return result(!found.length, found.length ? `found: ${found.join(', ')}` : 'absent');
       }
-      case 'contentMatches': {
-        const missing = (check.all ?? []).filter(pattern => !new RegExp(pattern, 'u').test(text));
-        return result(!missing.length, missing.length ? `no match: ${missing.join(', ')}` : 'matched');
+      case 'sectionContent': {
+        // The answer's own list, not its explanations: the first section of the final artifact whose heading matches
+        // `heading` (and not `skipHeading`), up to the next heading of any level. A missing section fails.
+        const section = markdownSection(artifact?.content ?? '', new RegExp(check.heading, 'u'), check.skipHeading ? new RegExp(check.skipHeading, 'u') : undefined);
+        if (section === undefined) return result(false, `no section headed /${check.heading}/`);
+        const missing = (check.all ?? []).filter(needle => !section.includes(needle));
+        const found = (check.none ?? []).filter(needle => section.includes(needle));
+        return result(!missing.length && !found.length, [missing.length ? `missing: ${missing.join(', ')}` : '', found.length ? `found: ${found.join(', ')}` : ''].filter(Boolean).join('; ') || 'matches');
       }
       case 'toolUsed': {
         const used = (run.events ?? []).filter(event => event.type === 'tool.completed').map(event => event.data?.tool ?? event.data?.toolId);

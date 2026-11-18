@@ -46,7 +46,7 @@ npm run test:evals -- --compare <before.json> <after.json>
 | `evidenceResolvable` | 产物里所有证据引用都能对上这件 Run 收到的资料、产物、回执、PDF 输出或 Thread 历史 |
 | `noPlaceholderRefs` | 没有 `[证据]`、`[evidence]` 这类占位，也没有 `TBD` 之类的引用 |
 | `contentIncludes`、`contentExcludes` | 产物正文和结构化内容里包含 `all`／任一 `any`，或不包含（正则） |
-| `contentMatches` | `all` 里每个正则都能匹配上，例如结论里写明逾期总数是 2 |
+| `sectionContent` | 最后一份产物里第一个标题匹配 `heading`（且不匹配 `skipHeading`）的小节，到下一个任意级别标题为止：包含 `all` 里每一项，不含 `none` 里任何一项；找不到这一节算失败 |
 | `toolUsed` | 用过某个工具，例如 `sources.csvQuery`、`pdf.fill` |
 | `logProtocol` | 运行时打出的协议日志里有匹配的一条，例如 `aeeis-csv-date-filter/1` 里 `op: "lt"` 且 `effective: true` |
 | `pdfFilled` | 填写的字段和值与预期一致；`exact` 时不能多填 |
@@ -54,7 +54,7 @@ npm run test:evals -- --compare <before.json> <after.json>
 | `withinBudget` | 在时间预算内结束，或以部分结果加明确限制结束 |
 | `noRepair` | 没有触发产物修复（通常设为 `required: false`） |
 
-三种 `content*` 检查默认看这件 Run 的全部产物；加 `scope: "final"` 只看最后一份产物，也就是交给用户的答案。答案里列出“已排除”的行并写明原因是好事，所以要查“没有算错”时，用 `contentMatches` 查结论里的数目，不要用 `contentExcludes` 禁止出现被排除的名字。
+答案里列出“已排除”的行并写明原因是好事。要查“没有选错”，用 `sectionContent` 只看答案自己的结果小节，不要用 `contentExcludes` 禁止全文出现被排除的名字，也不要只匹配一个数字（排除项、假设情形里也会出现数字）。
 
 ## 评审模型
 
