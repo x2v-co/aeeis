@@ -8,7 +8,7 @@ import { join } from 'node:path';
 export const CASE_SCHEMA = 'aeeis-eval-case/1';
 export const REPORT_SCHEMA = 'aeeis-eval-report/1';
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
-const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
+const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'contentMatches', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
 
 /** Reads evals/cases/*.json in name order and validates their shape. */
 export function loadCases(root, only = []) {
@@ -38,6 +38,7 @@ function validateCase(value, name) {
     if (!CHECK_KINDS.has(check.kind)) fail(`unknown check kind ${check.kind}`);
     if (!check.id || checkIds.has(check.id)) fail(`check ids must be present and unique (${check.id})`);
     checkIds.add(check.id);
+    if (check.scope !== undefined && check.scope !== 'final') fail(`check ${check.id}: scope must be "final"`);
   }
 }
 
@@ -170,10 +171,13 @@ const sameValue = (left, right) => JSON.stringify(Array.isArray(left) ? [...left
 export function checkRun(testCase, outcome, deps) {
   const { run, logs, durationMs } = outcome;
   const artifact = run?.artifacts?.at(-1);
-  const text = artifactText(run);
+  const allText = artifactText(run);
+  const finalText = artifactText(run ? { artifacts: (run.artifacts ?? []).slice(-1) } : run);
   return testCase.checks.map(check => {
     const required = check.required !== false;
     const result = (passed, detail) => ({ id: check.id, kind: check.kind, required, passed: Boolean(passed), detail });
+    // scope "final": only the Run's last artifact (the answer), not intermediate task artifacts.
+    const text = check.scope === 'final' ? finalText : allText;
     if (!run) return result(false, outcome.error ?? 'no Run was created');
     switch (check.kind) {
       case 'runStatus': {
@@ -207,6 +211,10 @@ export function checkRun(testCase, outcome, deps) {
       case 'contentExcludes': {
         const found = (check.any ?? []).filter(needle => new RegExp(needle, 'u').test(text));
         return result(!found.length, found.length ? `found: ${found.join(', ')}` : 'absent');
+      }
+      case 'contentMatches': {
+        const missing = (check.all ?? []).filter(pattern => !new RegExp(pattern, 'u').test(text));
+        return result(!missing.length, missing.length ? `no match: ${missing.join(', ')}` : 'matched');
       }
       case 'toolUsed': {
         const used = (run.events ?? []).filter(event => event.type === 'tool.completed').map(event => event.data?.tool ?? event.data?.toolId);

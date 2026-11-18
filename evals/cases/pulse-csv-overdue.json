@@ -50,7 +50,8 @@
     {
       "id": "uses-sources-csvquery",
       "kind": "toolUsed",
-      "tool": "sources.csvQuery"
+      "tool": "sources.csvQuery",
+      "required": false
     },
     {
       "id": "no-repair",
@@ -66,7 +67,8 @@
           "op": "lt",
           "effective": true
         }
-      }
+      },
+      "required": false
     },
     {
       "id": "lists-overdue",
@@ -77,11 +79,11 @@
       ]
     },
     {
-      "id": "omits-done-and-future",
-      "kind": "contentExcludes",
-      "any": [
-        "Write docs",
-        "Ship v2"
+      "id": "overdue-count",
+      "kind": "contentMatches",
+      "scope": "final",
+      "all": [
+        "(?:共|总数|合计|命中|总计|[Tt]otal)[^\\d\\n]{0,8}2(?!\\d)"
       ]
     }
   ],

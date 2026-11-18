@@ -86,6 +86,21 @@ describe('deterministic checks', () => {
     expect(bad.map((check: any) => check.detail)).toEqual(['interests=["Music"] (want ["Travel","Music"]); unexpected country="SG"', 'not reported: caseId']);
   });
 
+  it('contentMatches with scope "final" reads only the last artifact (pulse-csv-overdue counts the overdue rows)', () => {
+    const overdue = loadCases(process.cwd(), ['pulse-csv-overdue'])[0].checks.find((check: any) => check.id === 'overdue-count');
+    const countCase = { id: 'count', checks: [overdue] };
+    const answer = (content: string) => run({ artifacts: [
+      { id: 'a_1', taskId: 'query', content: '共 4 条：Fix login、Write docs、Ship v2、Audit logs', evidenceRefs: [] },
+      { id: 'a_2', taskId: 'final', content, evidenceRefs: [] },
+    ] });
+    // Excluded rows may be named with their reason; the answer must count 2.
+    for (const content of ['命中 2 条：Fix login（2026-11-08）、Audit logs。已排除：Write docs（done）、Ship v2（未到期）', '逾期任务总数：2', 'Total: 2 overdue'])
+      expect(checkRun(countCase, outcome(answer(content)), deps)[0].passed, content).toBe(true);
+    // The intermediate artifact's count does not count, and 20 or 2026 is not 2.
+    for (const content of ['共 3 条：Fix login、Write docs、Audit logs', '截至 2026-11-18，共 20 条', 'Fix login, Audit logs'])
+      expect(checkRun(countCase, outcome(answer(content)), deps)[0].passed, content).toBe(false);
+  });
+
   it('matches nested log fields partially', () => {
     expect(partialMatch({ filters: [{ op: 'lt', effective: true, passed: 2 }] }, { filters: { op: 'lt', effective: true } })).toBe(true);
     expect(partialMatch({ filters: [{ op: 'lt', effective: false }] }, { filters: { op: 'lt', effective: true } })).toBe(false);
