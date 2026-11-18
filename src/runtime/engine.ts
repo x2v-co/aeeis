@@ -2886,9 +2886,10 @@ export class AgentEngine {
           if (!source) {
             // pulse-csv-followup (live, 2026-11-18): the model wrote history:<run>:<run>#artifact_… for the listed
             // history:<run>:artifact_… and the whole Run failed. Nothing was read: a wrong ID is the model's mistake to
-            // correct, like a wrong working-memory ref. The node's iteration limit still bounds retries.
+            // correct, like a wrong working-memory ref. It costs no source page (Codex on #233: it used the last page and
+            // left no read for the corrected id); the node's iteration limit still bounds retries.
             const message = `Nothing was read: ${JSON.stringify(decision.argument.slice(0, 200))} is not a source id. Copy an id exactly from sourceCatalog.`;
-            live.observations.push({ tool: decision.tool, argument: decision.argument.slice(0, 200), result: { error: { recoverable: true, errorCode: 'source_ref_unknown', message, sourceIds: sources.map(item => item.id).slice(0, 50) } } });
+            live.observations.push({ tool: decision.tool, argument: decision.argument.slice(0, 200), result: { error: { recoverable: true, errorCode: 'source_ref_unknown', message, sourceIds: sources.map(item => item.id).slice(0, 50) } }, sourcePageCost: 0 });
             event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: decision.tool, errorCode: 'source_ref_unknown', message });
             return;
           }

@@ -232,6 +232,27 @@ describe('executor CSV query tool', () => {
     expect(completed.pendingTool).toBeUndefined();
   });
 
+  // Codex review on #233: a wrong id reads nothing, so it must not spend the page allowance the corrected read needs.
+  it('does not charge a source page for a wrong id, so the last page is left for the corrected read', async () => {
+    const decide = (input: Input) => {
+      if (input.executionBudget.finalOnly) return finish(input);
+      if (!input.observations.length) return { ...query(input), argument: 'missing-source' };
+      return (input.observations.at(-1) as { result?: { error?: unknown } }).result?.error ? query(input) : finish(input);
+    };
+    const fixture = await setup(decide, { limits: { maxNodeSourcePages: 1, maxNodeIterations: 8 } });
+    const completed = await fixture.drain();
+    expect(completed.status, completed.error).toBe('succeeded');
+    const [denied, read] = completed.steps[0]!.observations;
+    expect(denied).toMatchObject({ sourcePageCost: 0, result: { error: { errorCode: 'source_ref_unknown' } } });
+    expect(read!.result).toMatchObject({ matchedRowCount: 200 });
+    // The single page is spent by the corrected read; any limit comes only after it.
+    const types = completed.events.map(event => event.type);
+    const limited = types.indexOf('execution.limited');
+    expect(limited === -1 || limited > types.indexOf('tool.completed')).toBe(true);
+    // The page count lives on the stored observations, so a restarted engine counts the same.
+    expect(sourceReadUsage([completed.steps[0]!]).pages).toBe(sourceReadUsage([{ ...completed.steps[0]!, observations: [read!] }]).pages);
+  });
+
   it('stops retrying a wrong source id at the node iteration limit', async () => {
     const fixture = await setup(input => input.executionBudget.finalOnly ? finish(input) : { ...query(input), argument: 'missing-source' });
     const completed = await fixture.drain();
