@@ -20,7 +20,7 @@ import { WorkGrantConflict, workGrantDigest, workGrantRemaining, workGrantState,
 import type { AgentRun, ExternalToolInvocation, ExternalUsage, ModelCall, ModelPin, ModelUsage, ProjectPulseArtifact, ResourceSnapshot, RunStatus, Source, Step, TaskRequest, WebsiteBuilderArtifact, FillablePdfArtifact } from './contracts.js';
 import type { TaskTransition } from '../contracts.js';
 import type { ModelAdapter, ModelRequest, ModelResponse } from './model.js';
-import { ModelAccountRefused, ModelOutcomeUnknown, ModelTimeout, ModelResponseRejected, modelAccountNotice } from './model.js';
+import { ModelAccountRefused, ModelOutcomeUnknown, ModelTimeout, ModelResponseIncomplete, ModelResponseRejected, modelAccountNotice } from './model.js';
 import { BotBackgroundError, composeBotBackground } from '../bot-background.js';
 import { NotFound, type RunRepository } from './repository.js';
 import { receiptSchema } from '../integrations.js';
@@ -637,6 +637,11 @@ const legacyExecutorPrompt = `${safety} Execute the current task using the provi
 // r79 input: "缺什么就先问我" was planned as gap audit + drafted questions + placeholder template, and the Run finished
 // without asking. When the goal asks to be asked, missing required details stop the Run at a question instead.
 const askFirstPlannerGuidance = '\nThe user asked to be asked about missing details. If the sources leave details the goal requires missing or undecided, make the first task check them and ask the user with a question decision; later tasks use the answers. Do not plan tasks that draft questions for the user, placeholder templates or partial deliverables instead of asking.';
+// Eval baseline 2026-11-18 pulse-csv-followup: the retry after a cut-off reply is told why, so it does not write the same
+// overlong answer again.
+const incompleteRetryGuidance = (finishReason: string | null) => finishReason === 'length'
+  ? '\nYour previous reply for this task was cut off because it ran past the output length limit. Keep this reply well within it: write concise prose, list only the most important items, cite each fact once, and do not repeat source rows or restate the same point in several fields.'
+  : `\nYour previous reply for this task stopped before it finished (finish_reason ${finishReason ?? 'none'}). Return one complete, concise JSON decision.`;
 const askFirstExecutorGuidance = '\nThe user asked to be asked about missing details. If a detail the goal requires is missing, undecided or conflicting in the sources, answers and dependency artifacts, return {"type":"question"} naming each one in missing. Do not finish with placeholders, assumptions or a drafted list of questions instead.';
 // Eval baseline 2026-11-18 (deepseek-v4.1-flash): Project Pulse over a 60–200 row CSV was planned as 4–5 tasks. Every task
 // without dependents writes a full project-pulse artifact, and each finish took 1–3 minutes of output, so the Runs ran 8–16
@@ -2307,6 +2312,9 @@ export class AgentEngine {
       await this.settleModelGlobal(await this.repository.get(run.id), callId, result.usage);
     }
     catch (error) {
+      const incompleteBudgetLeftMs = (current: AgentRun) => this.modelTimeBudget.runBudgetMs - modelTimeUsedMs(current) - this.modelTimeBudget.reviewReserveMs;
+      const incompleteRetryAllowed = (current: AgentRun, step: AgentRun['steps'][number] | undefined) => Boolean(step && step.status !== 'succeeded' && !step.incompleteRetried
+        && current.calls.length < current.maxModelCalls && incompleteBudgetLeftMs(current) >= this.modelTimeBudget.minCallMs);
       if (repairing) repairFailure = error instanceof ModelTimeout ? `${modelTimeoutReason('executor', error)}; provider billing still requires reconciliation` : failureReason(error, 'Artifact repair failed');
       let staleCompaction = false;
       const failed = await this.repository.mutate(run.id, async current => {
@@ -2404,8 +2412,24 @@ export class AgentEngine {
           }
           delete current.resumeStatus;
           delete current.reconcileDisposition;
+        } else if (error instanceof ModelResponseIncomplete && phase === 'executor' && !repairing && taskId && current.status === 'running'
+          && incompleteRetryAllowed(current, current.steps.find(item => item.taskId === taskId))) {
+          // Eval baseline 2026-11-18 pulse-csv-followup: a pulse reply that ran past the output limit (after the
+          // adapter's one larger-limit retry) failed the whole Run. Retry the task once, told to keep the reply short.
+          const step = current.steps.find(item => item.taskId === taskId)!;
+          step.incompleteRetried = { finishReason: error.finishReason };
+          if (step.finalCallId === callId) delete step.finalCallId;
+          event(current, 'model.incomplete_retry', { callId, taskId, finishReason: error.finishReason, remainingBudgetMs: incompleteBudgetLeftMs(current) });
         } else if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
+          // A final-only reply cut off with no retry left still turns the task's observations into a limited artifact.
           createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
+        } else if (error instanceof ModelResponseIncomplete && phase === 'executor' && !repairing && taskId && current.status === 'running') {
+          // No retry left: keep completed work as partial when there is any; otherwise the Run fails as before.
+          const reason = `${failureReason(error, 'Model response is incomplete')}. Independent review was not completed.`;
+          if (await preserveRunOutput(current, reason)) {
+            event(current, 'run.partial', { reason, callId });
+            queueReviewAfterStop(current, reason);
+          }
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
           && await preserveRunOutput(current, modelStopLimitation(phase, error))) {
@@ -2428,6 +2452,8 @@ export class AgentEngine {
       if (failed.status === 'reviewing' && failed.stopReview === 'pending') return;
       if (error instanceof ModelTimeout && terminalRunStatuses.has(failed.status)) return;
       if (error instanceof ModelTimeout && failed.events.at(-1)?.type === 'model.timeout_retry') return;
+      if (error instanceof ModelResponseIncomplete && failed.events.at(-1)?.type === 'model.incomplete_retry') return;
+      if (error instanceof ModelResponseIncomplete && terminalRunStatuses.has(failed.status)) return;
       if (finalOnly && failed.steps.some(step => step.taskId === taskId && step.status === 'succeeded')) return;
       if (failed.status === 'succeeded') return;
       if (!repairing) throw error;
@@ -2663,7 +2689,7 @@ export class AgentEngine {
     }
     const recoveryExhausted = Boolean(recovery && !run.resumeModelCallId && (recovery.exhausted || recoveryCalls >= recoveryAllowance));
     // A granted timeout retry (#68/#79) may re-run the node's final call once: the timed-out call returned nothing.
-    if (!run.resumeModelCallId && !recovery && (step.finalCallId || nodeCalls.length >= limits.maxNodeIterations + (step.timeoutRetried ? 1 : 0))) throw new Error('Node final finish call exhausted; retry requires replanning');
+    if (!run.resumeModelCallId && !recovery && (step.finalCallId || nodeCalls.length >= limits.maxNodeIterations + (step.timeoutRetried ? 1 : 0) + (step.incompleteRetried ? 1 : 0))) throw new Error('Node final finish call exhausted; retry requires replanning');
     // r79 md: a runtime Unknown: suffix (e.g. added while the Run sat in needs_input/paused) is not dependency content.
     const dependencies = (run.workingMemory ? workingDependencies(run, node) : run.artifacts.filter(a => node.dependsOn.includes(a.taskId))).map(a => ({ ...a, content: stripRuntimeUnknown(a.content) }));
     const promptObservations = run.workingMemory ? workingObservations(run, node) : step.observations;
@@ -2708,6 +2734,7 @@ export class AgentEngine {
         + (step.observations.some(observation => observation.tool === 'question.deferred') ? '\nThe user asked for the complete deliverable without these details; questions are deferred. Do not ask again: proceed with reasonable, explicitly stated assumptions, label each one "推断：", and list the open choices the user can adjust.' : '')
         + (run.events.some(event => event.type === 'tool.failed_recoverable' && event.data.taskId === node.id) ? '\nTool observations with error.recoverable=true report a failed attempt, not successful evidence. Use the error message and HTTP status to choose another source or approach, or finish with a useful partial answer and explicit limitations. Avoid repeating the same failing call.' : '')
         + (!reason && !recovery && goalInvitesQuestions(run.goal) ? askFirstExecutorGuidance : '')
+        + (step.incompleteRetried ? incompleteRetryGuidance(step.incompleteRetried.finishReason) : '')
         + (reason ? '\nFINAL CALL: The execution/evidence allowance is exhausted. Tools, capabilities, delegations and questions are disallowed. Return only a finish decision now using evidence already received. Produce a useful partial answer, explicitly state limited evidence and what remains unverified. Follow the expected artifact schema, using unknowns only for source gaps and limitations for runtime limits. Do not claim exhaustive coverage.' : (legacy ? '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.' : '\nSource continuations are optional: read only pages relevant to the task within executionBudget. Prefer sources.csvQuery and the supplied full-data CSV statistics over scanning every row. Finish once you have sufficient evidence.'));
     const executorSystem = systemForLimit(proposedLimitReason) + evidenceWritingGuidance + sourceFidelityGuidance
       + '\nFor questions, include missing as an array of concrete facts requested from the user, such as model, quantity and delivery city; capability means a requested tool or API, not missing case data.'

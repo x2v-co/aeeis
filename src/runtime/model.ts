@@ -56,6 +56,12 @@ export class ModelTimeout extends ModelOutcomeUnknown {}
 export class ModelResponseRejected extends Error {
   constructor(message: string, readonly usage?: ModelResponse['usage'], readonly rawOutput?: string) { super(message); }
 }
+/** The provider stopped the reply before it finished (finish_reason other than stop, after the one length retry). */
+export class ModelResponseIncomplete extends ModelResponseRejected {
+  constructor(readonly finishReason: string | null, usage?: ModelResponse['usage'], rawOutput?: string) {
+    super(`Model response is incomplete (finish_reason: ${finishReason ?? 'none'})`, usage, rawOutput);
+  }
+}
 /**
  * The provider refused the account itself (an expired plan, arrears, a bad key). Retrying, or switching thinking off,
  * cannot help: someone has to fix the account. Its message names only the provider's code, never the provider's text.
@@ -421,7 +427,7 @@ export class HttpModelAdapter implements ModelAdapter {
         maxTokens = Math.min(maxTokens * 2, cap);
         continue;
       }
-      if (choice.finish_reason !== 'stop') throw new ModelResponseRejected('Model response is incomplete', usage, choice.message.content);
+      if (choice.finish_reason !== 'stop') throw new ModelResponseIncomplete(choice.finish_reason, usage, choice.message.content);
       let value: unknown;
       try { value = JSON.parse(choice.message.content); }
       catch {
@@ -430,7 +436,7 @@ export class HttpModelAdapter implements ModelAdapter {
       }
       return { value, ...(request.includeRawOutput ? { rawOutput: choice.message.content } : {}), ...(usage ? { usage } : {}) };
     }
-    throw new ModelResponseRejected('Model response is incomplete', usage);
+    throw new ModelResponseIncomplete('length', usage);
   }
   private async requestCompletion(request: ModelRequest, maxTokens: number, lengthAttempt: number, history: TransportHistory): Promise<z.infer<typeof envelope>> {
     // r74: one call budget across length, midstream and transport retries (complete() starts the clock).

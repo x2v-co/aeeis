@@ -67,7 +67,9 @@
       "any": [
         "Payment API key",
         "payment API key",
-        "API key"
+        "API key",
+        "支付 API 密钥",
+        "API 密钥"
       ]
     }
   ]
