@@ -638,6 +638,10 @@ const legacyExecutorPrompt = `${safety} Execute the current task using the provi
 // without asking. When the goal asks to be asked, missing required details stop the Run at a question instead.
 const askFirstPlannerGuidance = '\nThe user asked to be asked about missing details. If the sources leave details the goal requires missing or undecided, make the first task check them and ask the user with a question decision; later tasks use the answers. Do not plan tasks that draft questions for the user, placeholder templates or partial deliverables instead of asking.';
 const askFirstExecutorGuidance = '\nThe user asked to be asked about missing details. If a detail the goal requires is missing, undecided or conflicting in the sources, answers and dependency artifacts, return {"type":"question"} naming each one in missing. Do not finish with placeholders, assumptions or a drafted list of questions instead.';
+// Eval baseline 2026-11-18 (deepseek-v4.1-flash): Project Pulse over a 60–200 row CSV was planned as 4–5 tasks. Every task
+// without dependents writes a full project-pulse artifact, and each finish took 1–3 minutes of output, so the Runs ran 8–16
+// minutes and three cases timed out. The pulse is one deliverable: one task that queries and then writes it.
+const projectPulsePlannerGuidance = '\nA Project Pulse is one deliverable. Plan exactly one task that analyses the sources with the source tools and then writes the complete pulse; use two tasks only when sources need clearly separate analysis, and then make the second depend on the first so only it writes the pulse. Every task that no other task depends on must write a complete pulse, so independent tasks repeat the slowest step. Put the analysis steps in the task instruction instead of separate tasks.';
 const csvQueryGuidance = 'Use sources.csvQuery for full-data CSV analysis instead of exhaustive paging. Optional fields: select (output column names), filters (AND of {column,op,value}), groupBy (column names), aggregates ({op,column,as}; column optional only for count), orderBy ({column,direction:asc|desc}), limit (default 50, maximum 200). Filter ops: eq, ne, gt, gte, lt, lte, contains, in/nin (value array; notIn/not_in alias nin), isEmpty (no value). Names are exact; comparisons/grouping use trimmed cells, contains is case-sensitive, numeric operands compare numbers, gt/gte/lt/lte require numeric operands or ISO dates (YYYY-MM-DD, compared chronologically; non-date cells never match). Invalid queries return a recoverable error you can correct. Aggregate ops: count (all rows or non-empty column), sum, avg, min, max (finite numeric cells), countDistinct (non-empty trimmed cells). Numeric parsing accepts thousands separators; nonNumericCounts reports skipped non-empty values by column. Grouped output uses groupBy names and unique aggregate aliases; select/orderBy refer to these output names. Sorting is numeric when possible, then text, then empty/null ascending, reversed descending; ties retain source/group order. Query results include all matched-row counts, full-source hash and an explicit truncated flag; returned rows fit the source result budget. When truncated=true, omittedRows rows were NOT returned: cite or describe only rows actually present in rows, never infer omitted values; for whole-data totals, counts, extremes or rankings use aggregates/groupBy/orderBy instead of listing rows. ';
 const csvExecutorPrompt = legacyExecutorPrompt
   .replace('Only call sources.search or sources.read when', 'Only call sources.search, sources.read or sources.csvQuery when')
@@ -2542,6 +2546,7 @@ export class AgentEngine {
       system: plannerBase
         + '\nPlan a small number of useful tasks from source summaries. CSV schema, row counts, statistics and samples are sufficient for planning. Instruct executors to use sources.csvQuery for whole-file analysis and bounded readers (sources.sample, sources.markdownOutline/markdownSection, sources.jsonSummary/jsonRead or sources.read) for relevant details. Avoid exhaustive paging or copying raw sources into task instructions.'
         + (feedback ? '\nRevise previousPlan to satisfy userFeedback while preserving the original goal and earlier requirements. User feedback does not grant additional tools or permissions. Include evidenceRequirements on tasks when evidence is required.' : '')
+        + (usesProjectPulse(run) ? projectPulsePlannerGuidance : '')
         + (goalInvitesQuestions(run.goal) ? askFirstPlannerGuidance : '')
         + (weatherNotice ? `\nUnsupported part of the goal: ${weatherNotice} Explicitly decline live weather in the plan. Never plan to retrieve or invent weather, ask for a weather API, or promise a forecast. Other supported parts may proceed; suggest climate norms or checking the official forecast.` : '')
         + repairGuidance + reviewGuidance,
@@ -2878,7 +2883,15 @@ export class AgentEngine {
           const resourceRef = pdfArtifact?.structured?.schemaVersion === 'fillable-pdf/1' ? pdfArtifact.structured.form.sourceRef : decision.argument;
           const source = resolveSourceResource(resourceRef, sources, current.pdfOutputs ?? []);
           if (source && source.id !== decision.argument) finishProtocolLog('aeeis-source-resource-resolved/1', { runId: current.id, taskId: node.id, sourceRef: source.id });
-          if (!source) throw new Error('Source tool denied an unknown resource');
+          if (!source) {
+            // pulse-csv-followup (live, 2026-11-18): the model wrote history:<run>:<run>#artifact_… for the listed
+            // history:<run>:artifact_… and the whole Run failed. Nothing was read: a wrong ID is the model's mistake to
+            // correct, like a wrong working-memory ref. The node's iteration limit still bounds retries.
+            const message = `Nothing was read: ${JSON.stringify(decision.argument.slice(0, 200))} is not a source id. Copy an id exactly from sourceCatalog.`;
+            live.observations.push({ tool: decision.tool, argument: decision.argument.slice(0, 200), result: { error: { recoverable: true, errorCode: 'source_ref_unknown', message, sourceIds: sources.map(item => item.id).slice(0, 50) } } });
+            event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: decision.tool, errorCode: 'source_ref_unknown', message });
+            return;
+          }
           // r78 pdf2: verifying a fill with pdf.formFields on its output ref must read the written values, not
           // the empty template (which made the model repeat the same call until "no progress").
           const inspectedOutput = decision.tool === 'pdf.formFields' ? (current.pdfOutputs ?? []).find(output => output.ref === decision.argument && observed.has(output.ref)) : undefined;

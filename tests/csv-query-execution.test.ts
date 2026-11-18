@@ -216,13 +216,29 @@ describe('executor CSV query tool', () => {
     expect((await fixture.drain()).status).toBe('succeeded');
   });
 
-  it.each(['missing-source', '../sources/other.csv'])('denies an unknown source id: %s', async argument => {
-    const fixture = await setup(input => ({ ...query(input), argument }));
+  // pulse-csv-followup (live, 2026-11-18): a mistyped id failed the whole Run. It now reads nothing and the model corrects it.
+  it.each(['missing-source', '../sources/other.csv'])('reads nothing for an unknown source id and lets the model correct it: %s', async argument => {
+    const fixture = await setup(input => {
+      if (!input.observations.length) return { ...query(input), argument };
+      return (input.observations.at(-1) as { result?: { error?: unknown } }).result?.error ? query(input) : finish(input);
+    });
     const completed = await fixture.drain();
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('Source tool denied an unknown resource');
-    expect(completed.steps[0]!.observations).toEqual([]);
+    expect(completed.status, completed.error).toBe('succeeded');
+    const [denied, read] = completed.steps[0]!.observations;
+    expect(denied!.result).toEqual({ error: { recoverable: true, errorCode: 'source_ref_unknown', sourceIds: [completed.context.sources[0]!.id],
+      message: `Nothing was read: ${JSON.stringify(argument)} is not a source id. Copy an id exactly from sourceCatalog.` } });
+    expect(read!.result).toMatchObject({ id: completed.context.sources[0]!.id, matchedRowCount: 200 });
+    expect(completed.events.filter(event => event.type === 'tool.failed_recoverable').map(event => event.data.errorCode)).toEqual(['source_ref_unknown']);
     expect(completed.pendingTool).toBeUndefined();
+  });
+
+  it('stops retrying a wrong source id at the node iteration limit', async () => {
+    const fixture = await setup(input => input.executionBudget.finalOnly ? finish(input) : { ...query(input), argument: 'missing-source' });
+    const completed = await fixture.drain();
+    expect(completed.status, completed.error).toBe('succeeded');
+    const observations = completed.steps[0]!.observations;
+    expect(observations.length).toBeGreaterThan(0);
+    for (const observation of observations) expect((observation.result as { error: { errorCode: string } }).error.errorCode).toBe('source_ref_unknown');
   });
 
   it('rejects a non-CSV stored source as a recoverable executor error', async () => {
