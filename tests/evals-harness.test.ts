@@ -86,27 +86,32 @@ describe('deterministic checks', () => {
     expect(bad.map((check: any) => check.detail)).toEqual(['interests=["Music"] (want ["Travel","Music"]); unexpected country="SG"', 'not reported: caseId']);
   });
 
-  it('sectionContent reads only the answer\'s overdue section (pulse-csv-overdue)', () => {
-    const check = loadCases(process.cwd(), ['pulse-csv-overdue'])[0].checks.find((item: any) => item.id === 'overdue-section');
-    const sectionCase = { id: 'section', checks: [check] };
+  it('sectionContent reads only the results section the goal asks for (pulse-csv-overdue)', () => {
+    const testCase = loadCases(process.cwd(), ['pulse-csv-overdue'])[0];
+    // The check depends on a layout, so the request must ask for it (Codex review on #232).
+    expect(testCase.request.goal).toContain('标题「## 逾期任务」');
+    const sectionCase = { id: 'section', checks: [testCase.checks.find((item: any) => item.id === 'overdue-section')] };
     const answer = (content: string) => run({ artifacts: [
       { id: 'a_1', taskId: 'query', content: '## 逾期任务\n| 1 | Fix login |\n| 4 | Audit logs |', evidenceRefs: [] },
       { id: 'a_2', taskId: 'final', content, evidenceRefs: [] },
     ] });
-    const passes = (content: string) => checkRun(sectionCase, outcome(answer(content)), deps)[0];
-    // Recorded layout (live run 2026-11-18): the overdue table, then excluded rows and edge cases under their own headings.
-    const recorded = [
-      '# Project Pulse：逾期任务边界核验（今天 = 2026-11-18）', '## 结论', '共 2 条逾期。若 Write docs 的状态被回退为 open，则逾期数将变为 3。',
-      '## 逾期未完成任务（按 due 升序）', '| 1 | Fix login | open | 2026-11-08 |', '| 4 | Audit logs | open | 2026-11-17 |',
-      '### 未命中的行及原因', '| 2 | Write docs | done | 2026-11-13 | status 为 done |', '| 3 | Ship v2 | in_progress | 2026-11-25 | 未来日期 |', '| 5 | Plan Q4 | open | tbd | 无法判定 |',
+    const check = (content: string) => checkRun(sectionCase, outcome(answer(content)), deps)[0];
+    // As requested: results, then excluded rows in a sibling section; what-ifs elsewhere may mention other counts.
+    const requested = [
+      '# Project Pulse', '## 结论', '共 2 条逾期。若 Write docs 的状态被回退为 open，则逾期数将变为 3。',
+      '## 逾期任务', '共 2 条（按 due 升序）：', '- Fix login，due 2026-11-08 [source_1]', '- Audit logs，due 2026-11-17 [source_1]',
+      '## 被排除的行', '| 2 | Write docs | done | status 为 done |', '| 3 | Ship v2 | in_progress | 未来日期 |', '| 5 | Plan Q4 | open | tbd |',
     ].join('\n');
-    expect(passes(recorded)).toMatchObject({ passed: true, detail: 'matches' });
-    // Codex review on #232: a wrong overdue list must fail even when an excluded count happens to be 2.
+    expect(check(requested)).toMatchObject({ passed: true, detail: 'matches' });
+    // Subsections belong to the results section: a sub-table inside it still counts as the result.
+    expect(check('## 逾期任务\n### 明细\n- Fix login\n- Audit logs\n## 排除\n- Write docs')).toMatchObject({ passed: true });
+    expect(check('## 逾期任务\n- Fix login\n- Audit logs\n### 排除\n- Write docs')).toMatchObject({ passed: false, detail: 'found: Write docs' });
+    // Codex review on #232: a wrong overdue list fails even when an excluded count happens to be 2.
     const wrong = '## 逾期任务（总数：3）\nFix login、Write docs、Audit logs [source_1]\n## 已排除\n已排除共 2 条：Ship v2、Plan Q4 [source_1]';
-    expect(passes(wrong)).toMatchObject({ passed: false, detail: 'found: Write docs' });
-    expect(passes('## Overdue\n- Audit logs\n## Excluded\n- Fix login')).toMatchObject({ passed: false, detail: 'missing: Fix login' });
-    // An answer without an overdue heading cannot be checked, so it fails rather than passing silently.
-    expect(passes('Fix login、Audit logs 已逾期。')).toMatchObject({ passed: false });
+    expect(check(wrong)).toMatchObject({ passed: false, detail: 'found: Write docs' });
+    expect(check('## 逾期任务\n- Audit logs\n## 已排除\n- Fix login')).toMatchObject({ passed: false, detail: 'missing: Fix login' });
+    // Not following the requested layout fails, with the reason.
+    expect(check('逾期未完成任务共 2 条：\n- Fix login\n- Audit logs')).toMatchObject({ passed: false, detail: 'no section headed /^##\\s*逾期任务/' });
   });
 
   it('matches nested log fields partially', () => {

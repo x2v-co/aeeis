@@ -138,13 +138,14 @@ const PLACEHOLDER_REF = /^(?:TBD|TODO|N\/A|XX+|\?+|证据|evidence|source|ref|pl
 function artifactText(run) {
   return (run?.artifacts ?? []).map(artifact => `${artifact.content ?? ''}\n${artifact.structured === undefined ? '' : JSON.stringify(artifact.structured)}`).join('\n');
 }
-/** Lines under the first markdown heading matching `heading` (not `skip`), up to the next heading of any level. */
-export function markdownSection(content, heading, skip) {
+/** Lines under the first markdown heading matching `heading`, including its subsections, up to the next heading of the
+ * same or a higher level. */
+export function markdownSection(content, heading) {
   const lines = content.split('\n');
-  const isHeading = line => /^\s{0,3}#{1,6}\s/.test(line);
-  const start = lines.findIndex(line => isHeading(line) && heading.test(line) && !(skip && skip.test(line)));
+  const level = line => /^\s{0,3}(#{1,6})\s/.exec(line)?.[1].length;
+  const start = lines.findIndex(line => level(line) !== undefined && heading.test(line.trim()));
   if (start < 0) return undefined;
-  const end = lines.findIndex((line, index) => index > start && isHeading(line));
+  const end = lines.findIndex((line, index) => index > start && (level(line) ?? 7) <= level(lines[start]));
   return lines.slice(start + 1, end < 0 ? undefined : end).join('\n');
 }
 function collectRefs(value, into = []) {
@@ -218,9 +219,9 @@ export function checkRun(testCase, outcome, deps) {
         return result(!found.length, found.length ? `found: ${found.join(', ')}` : 'absent');
       }
       case 'sectionContent': {
-        // The answer's own list, not its explanations: the first section of the final artifact whose heading matches
-        // `heading` (and not `skipHeading`), up to the next heading of any level. A missing section fails.
-        const section = markdownSection(artifact?.content ?? '', new RegExp(check.heading, 'u'), check.skipHeading ? new RegExp(check.skipHeading, 'u') : undefined);
+        // The results section the case's goal asks for (e.g. "## 逾期任务"), not the answer's explanations of excluded rows.
+        // A missing section fails: the request named it.
+        const section = markdownSection(artifact?.content ?? '', new RegExp(check.heading, 'u'));
         if (section === undefined) return result(false, `no section headed /${check.heading}/`);
         const missing = (check.all ?? []).filter(needle => !section.includes(needle));
         const found = (check.none ?? []).filter(needle => section.includes(needle));
