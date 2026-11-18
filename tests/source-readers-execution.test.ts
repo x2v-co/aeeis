@@ -90,12 +90,16 @@ describe.each(cases)('$tool executor integration', reader => {
     } });
     expect((await fixture.drain()).status).toBe('succeeded');
   });
-  it('denies unknown IDs and file paths before reading', async () => {
-    const fixture = await setup(reader, { decide: input => ({ ...read(reader, input), argument: '../other-source' }) });
+  it('reads nothing for unknown IDs and file paths, and lets the model correct them', async () => {
+    const fixture = await setup(reader, { decide: input => {
+      if (!input.observations.length) return { ...read(reader, input), argument: '../other-source' };
+      return (input.observations.at(-1) as { result?: { error?: unknown } }).result?.error ? read(reader, input) : finish(input);
+    } });
     const completed = await fixture.drain();
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('Source tool denied an unknown resource');
-    expect(completed.steps[0]!.observations).toEqual([]);
+    expect(completed.status, completed.error).toBe('succeeded');
+    const [denied, received] = completed.steps[0]!.observations;
+    expect(denied!.result).toMatchObject({ error: { recoverable: true, errorCode: 'source_ref_unknown', sourceIds: [completed.context.sources[0]!.id] } });
+    expect(received!.result).toMatchObject({ ...reader.expected, sourceContentHash: materialContentHash(reader.content) });
   });
   it('rejects invalid arguments without treating them as external tools', async () => {
     const fixture = await setup(reader, { decide: input => ({ ...read(reader, input), unexpected: true }) });
