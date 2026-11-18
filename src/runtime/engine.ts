@@ -2312,6 +2312,9 @@ export class AgentEngine {
       await this.settleModelGlobal(await this.repository.get(run.id), callId, result.usage);
     }
     catch (error) {
+      const incompleteBudgetLeftMs = (current: AgentRun) => this.modelTimeBudget.runBudgetMs - modelTimeUsedMs(current) - this.modelTimeBudget.reviewReserveMs;
+      const incompleteRetryAllowed = (current: AgentRun, step: AgentRun['steps'][number] | undefined) => Boolean(step && step.status !== 'succeeded' && !step.incompleteRetried
+        && current.calls.length < current.maxModelCalls && incompleteBudgetLeftMs(current) >= this.modelTimeBudget.minCallMs);
       if (repairing) repairFailure = error instanceof ModelTimeout ? `${modelTimeoutReason('executor', error)}; provider billing still requires reconciliation` : failureReason(error, 'Artifact repair failed');
       let staleCompaction = false;
       const failed = await this.repository.mutate(run.id, async current => {
@@ -2409,23 +2412,24 @@ export class AgentEngine {
           }
           delete current.resumeStatus;
           delete current.reconcileDisposition;
-        } else if (error instanceof ModelResponseIncomplete && phase === 'executor' && !repairing && taskId && current.status === 'running') {
+        } else if (error instanceof ModelResponseIncomplete && phase === 'executor' && !repairing && taskId && current.status === 'running'
+          && incompleteRetryAllowed(current, current.steps.find(item => item.taskId === taskId))) {
           // Eval baseline 2026-11-18 pulse-csv-followup: a pulse reply that ran past the output limit (after the
-          // adapter's one larger-limit retry) failed the whole Run. Retry the task once, told to keep the reply short;
-          // a second cut-off keeps completed work as partial when there is any, and fails otherwise.
-          const step = current.steps.find(item => item.taskId === taskId);
-          const budgetLeftMs = this.modelTimeBudget.runBudgetMs - modelTimeUsedMs(current) - this.modelTimeBudget.reviewReserveMs;
+          // adapter's one larger-limit retry) failed the whole Run. Retry the task once, told to keep the reply short.
+          const step = current.steps.find(item => item.taskId === taskId)!;
+          step.incompleteRetried = { finishReason: error.finishReason };
+          if (step.finalCallId === callId) delete step.finalCallId;
+          event(current, 'model.incomplete_retry', { callId, taskId, finishReason: error.finishReason, remainingBudgetMs: incompleteBudgetLeftMs(current) });
+        } else if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
+          // A final-only reply cut off with no retry left still turns the task's observations into a limited artifact.
+          createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
+        } else if (error instanceof ModelResponseIncomplete && phase === 'executor' && !repairing && taskId && current.status === 'running') {
+          // No retry left: keep completed work as partial when there is any; otherwise the Run fails as before.
           const reason = `${failureReason(error, 'Model response is incomplete')}. Independent review was not completed.`;
-          if (step && step.status !== 'succeeded' && !step.incompleteRetried && current.calls.length < current.maxModelCalls && budgetLeftMs >= this.modelTimeBudget.minCallMs) {
-            step.incompleteRetried = { finishReason: error.finishReason };
-            if (step.finalCallId === callId) delete step.finalCallId;
-            event(current, 'model.incomplete_retry', { callId, taskId, finishReason: error.finishReason, remainingBudgetMs: budgetLeftMs });
-          } else if (await preserveRunOutput(current, reason)) {
+          if (await preserveRunOutput(current, reason)) {
             event(current, 'run.partial', { reason, callId });
             queueReviewAfterStop(current, reason);
           }
-        } else if (finalOnly && (current.status === 'running' || current.status === 'paused')) {
-          createLimitedNodeArtifact(current, taskId!, callId, failureReason(error, 'Final-only model call failed'));
         } else if (error instanceof ModelOutcomeUnknown && phase !== 'planner' && current.reconcileDisposition !== 'paused'
           && (current.status === 'unknown' || repairing && runnable.has(current.status))
           && await preserveRunOutput(current, modelStopLimitation(phase, error))) {

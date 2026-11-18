@@ -6,14 +6,14 @@ import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.
 import { AgentEngine } from '../src/runtime/engine.js';
 import { HttpModelAdapter, ModelResponseIncomplete, type ModelAdapter, type ModelRequest } from '../src/runtime/model.js';
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 const pin = { model: 'fixture', endpoint: 'http://localhost', promptVersion: 'test' };
 const isPlanner = (request: ModelRequest) => request.system.includes('Plan a real deliverable');
 const isReviewer = (request: ModelRequest) => request.system.includes('Independently review');
 const quiet = () => { for (const level of ['error', 'warn', 'info'] as const) vi.spyOn(console, level).mockImplementation(() => undefined); };
 const finish = (request: ModelRequest) => ({ value: { type: 'finish', title: 'Report', content: 'The source says complete.', evidenceRefs: [(request.input as any).sourceCatalog[0].id] } });
 
-async function drive(plan: { summary: string; nodes: unknown[] }, executor: (request: ModelRequest, call: number) => { value: unknown }) {
+async function drive(plan: { summary: string; nodes: unknown[] }, executor: (request: ModelRequest, call: number) => { value: unknown }, options: { executionLimits?: Record<string, number>; maxModelCalls?: number } = {}) {
   quiet();
   const repository = new InMemoryRunRepository();
   const systems: string[] = [];
@@ -23,8 +23,8 @@ async function drive(plan: { summary: string; nodes: unknown[] }, executor: (req
     systems.push(request.system);
     return executor(request, systems.length);
   } };
-  const engine = new AgentEngine(repository, { model });
-  const created = await engine.create({ goal: 'Summarize', materials: [{ title: 'Notes', content: 'complete', source: 'upload' }] } as never);
+  const engine = new AgentEngine(repository, { model, ...(options.executionLimits ? { executionLimits: options.executionLimits as never } : {}) });
+  const created = await engine.create({ goal: 'Summarize', materials: [{ title: 'Notes', content: 'complete', source: 'upload' }], ...(options.maxModelCalls ? { maxModelCalls: options.maxModelCalls } : {}) } as never);
   await engine.advance(created.id);
   const first = (await repository.get(created.id)).plans[0]!;
   await engine.command(created.id, 'approve', { planHash: first.hash, planVersion: first.version });
@@ -75,6 +75,34 @@ it('keeps completed tasks as partial output when the retry is cut off too', asyn
   expect(run.status, run.error).toBe('succeeded');
   expect(run.events.map(item => item.type)).toContain('run.partial');
   expect(run.artifacts.some(artifact => artifact.taskId === 'facts')).toBe(true);
+});
+
+// Review on #236: a final-only reply (source-page limit reached) cut off with no retry left must still turn the
+// task's observations into a limited artifact, as before, instead of failing the Run.
+const readThenCutOff = (request: ModelRequest) => {
+  const input = request.input as any;
+  if (!input.executionBudget?.finalOnly && !input.observations?.length) return { value: { type: 'tool', tool: 'sources.read', argument: input.sourceCatalog[0].id, offset: 0, limit: 1 } };
+  throw new ModelResponseIncomplete('length');
+};
+const finalOnlyCalls = (systems: string[]) => systems.filter(system => system.includes('FINAL CALL')).length;
+
+it('keeps the observations of a final-only task cut off twice as a limited artifact', async () => {
+  const { run, systems } = await drive(onePlan, readThenCutOff, { executionLimits: { maxNodeSourcePages: 1 } });
+  expect(finalOnlyCalls(systems)).toBe(2);
+  expect(run.events.filter(item => item.type === 'model.incomplete_retry')).toHaveLength(1);
+  expect(run.status, run.error).toBe('succeeded');
+  expect(run.events.map(item => item.type)).not.toContain('run.failed');
+  expect(run.artifacts.find(artifact => artifact.taskId === 'report')).toMatchObject({ partial: true });
+});
+
+it('keeps the observations of a final-only task cut off with no retry budget left', async () => {
+  // The Run model-time budget left (60s) is below the minimum for another call (10 min), so no retry is granted.
+  vi.stubEnv('AEEIS_RUN_MODEL_BUDGET_MS', '60000'); vi.stubEnv('AEEIS_REVIEW_RESERVE_MS', '0'); vi.stubEnv('AEEIS_MODEL_CALL_MIN_MS', '600000');
+  const { run, systems } = await drive(onePlan, readThenCutOff, { executionLimits: { maxNodeSourcePages: 1 } });
+  expect(finalOnlyCalls(systems)).toBe(1);
+  expect(run.events.map(item => item.type)).not.toContain('model.incomplete_retry');
+  expect(run.status, run.error).toBe('succeeded');
+  expect(run.artifacts.find(artifact => artifact.taskId === 'report')).toMatchObject({ partial: true });
 });
 
 it('reports the provider finish reason when a reply stays cut off after the larger-limit retry', async () => {
