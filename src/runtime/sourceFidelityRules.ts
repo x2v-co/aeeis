@@ -190,10 +190,17 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   const warnings: string[] = [];
   const sections = content.split('\n');
   const hasHeadings = sections.some(line => markdownHeading.test(line));
-  let heading = '';
+  // Open headings by level: a subheading stays inside its risk section until a heading of the same or a higher level.
+  const open: Array<{ level: number; risk: boolean }> = [];
   const lines = sections.flatMap(line => {
-    if (markdownHeading.test(line)) { heading = line; return []; }
-    return line.split(/(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i).map(text => ({ text, underRisks: !hasHeadings || riskHeading.test(heading) }));
+    if (markdownHeading.test(line)) {
+      const level = /^\s{0,3}(#{1,6})/.exec(line)![1]!.length;
+      while (open.length && open.at(-1)!.level >= level) open.pop();
+      open.push({ level, risk: riskHeading.test(line) });
+      return [];
+    }
+    const underRisks = !hasHeadings || open.some(item => item.risk);
+    return line.split(/(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i).map(text => ({ text, underRisks }));
   });
   for (const { text: line, underRisks } of lines) {
     const text = clean(line);

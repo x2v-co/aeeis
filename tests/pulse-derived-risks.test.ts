@@ -37,6 +37,15 @@ describe('Project Pulse risks derived from labelled prose', () => {
     expect(result.warnings.join('\n')).toContain('建议先核查 blocked');
   });
 
+  // Review on #239: a subheading inside the risk section is still the risk section, until a same- or higher-level heading.
+  it('keeps a subheading inside its risk section until the next heading of the same or a higher level', () => {
+    const structured = pulse();
+    const nested = ['## 风险', '### 支付联调', '推断：支付联调可能延期。', '#### 细节', '推断：密钥可能下周才到。', '## 下一步', '### 联调', '推断：建议先催供应商。'].join('\n');
+    const result = deriveProseInferences(nested, structured, refs);
+    expect(structured.risks.map(risk => risk.text)).toEqual(['推断：支付联调可能延期。', '推断：密钥可能下周才到。']);
+    expect(result.warnings.join('\n')).toContain('建议先催供应商');
+  });
+
   it('still derives risks from content without headings', () => {
     const structured = pulse();
     deriveProseInferences('登录页已上线。\n推断：支付联调可能延期。', structured, refs);
