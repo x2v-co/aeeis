@@ -25,6 +25,16 @@ it('still checks and prunes an id written right after an ordinary colon', () => 
   expect(finishContentProblems(`[${history}]`, new Set([history]))).toEqual([]);
 });
 
+// Review on #241 (second round): a pruned history citation is removed whole; a longer citation that starts with it stays.
+it('removes a whole invalid history citation, in brackets or bare, and nothing else', () => {
+  const ref = 'history:run_febe92ef-fb52-4c46-a458-2fcf2bf45889:artifact_ff1c63ec-7fb2-4766-8d30-77b5a0559d07';
+  expect(removeInlineRef(`正文 [${ref}]`, ref)).toBe('正文 ');
+  expect(removeInlineRef(`正文 ${ref}，结束`, ref)).toBe('正文 ，结束');
+  const run = 'history:run_febe92ef-fb52-4c46-a458-2fcf2bf45889:run_febe92ef-fb52-4c46-a458-2fcf2bf45889';
+  expect(removeInlineRef(`[${run}#review] [${run}]`, run)).toBe(`[${run}#review] `);
+  expect(removeInlineRef(`[${ref}]`, 'artifact_ff1c63ec-7fb2-4766-8d30-77b5a0559d07')).toBe(`[${ref}]`);
+});
+
 it('keeps a follow-up history citation whole when a bare artifact id in the same answer is pruned', async () => {
   for (const level of ['error', 'warn', 'info'] as const) vi.spyOn(console, level).mockImplementation(() => undefined);
   const repository = new InMemoryRunRepository();

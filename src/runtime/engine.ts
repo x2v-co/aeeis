@@ -871,9 +871,11 @@ function standaloneInlineIds(content: string): string[] {
   outsideHistoryCitations(content, text => { ids.push(...(text.match(inlineIdPattern) ?? [])); return text; });
   return ids;
 }
-/** Remove a pruned citation token, but never the same characters inside a history citation. */
+/** Remove a pruned citation token, but never the same characters inside a history citation. A pruned history citation
+ * itself is removed whole, in brackets or bare, and only where the whole token matches (review on #241). */
 export function removeInlineRef(content: string, ref: string): string {
   const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (/^history:/i.test(ref)) return content.replace(new RegExp(`\\[${escaped}\\]|(?<![\\w:-])${escaped}(?![^\\s[\\]，,;；)）])`, 'g'), '');
   return outsideHistoryCitations(content, text => text.replace(new RegExp(`\\[${escaped}\\]|(?<![\\w-])${escaped}(?![\\w-])`, 'g'), ''));
 }
 const inlineIdPattern = /\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
