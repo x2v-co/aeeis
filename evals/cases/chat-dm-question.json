@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "chat-dm-question",
+  "title": "Bot answers a question in a DM from the chat so far",
+  "source": "evals/README.md#聊天回复",
+  "tags": [
+    "chat"
+  ],
+  "request": {
+    "chat": {
+      "system": "team-reply",
+      "input": {
+        "you": {
+          "name": "AEEIS",
+          "role": "入口，负责接话、拆活和分派",
+          "frontDoor": true
+        },
+        "room": {
+          "title": "和 AEEIS 的私聊",
+          "kind": "私聊"
+        },
+        "roster": [
+          {
+            "name": "AEEIS",
+            "role": "入口，负责接话、拆活和分派",
+            "doing": 0
+          },
+          {
+            "name": "小研",
+            "role": "调研：竞品、价格、用户反馈",
+            "doing": 1
+          },
+          {
+            "name": "小文",
+            "role": "写作：发布说明、公告、文档",
+            "doing": 0
+          }
+        ],
+        "transcript_untrusted": [
+          {
+            "speaker": "用户",
+            "text": "这周的情况：登录页 10-10 已经上线。支付接口的 API 密钥还在等供应商，联调卡住了。10-20 要发布。"
+          },
+          {
+            "speaker": "AEEIS",
+            "text": "记下了：登录页已上线，支付在等供应商的密钥，10-20 发布。"
+          }
+        ],
+        "message": {
+          "speaker": "用户",
+          "text": "支付这块现在卡在哪？"
+        }
+      }
+    }
+  },
+  "budget": {
+    "timeoutMs": 30000
+  },
+  "checks": [
+    {
+      "id": "names-blocker",
+      "kind": "replyIncludes",
+      "any": [
+        "密钥",
+        "API key",
+        "供应商"
+      ]
+    },
+    {
+      "id": "short",
+      "kind": "replyLength",
+      "maxChars": 300
+    },
+    {
+      "id": "no-task",
+      "kind": "replyField",
+      "field": "tasks",
+      "max": 0,
+      "required": false
+    },
+    {
+      "id": "fast",
+      "kind": "withinBudget"
+    }
+  ]
+}
