@@ -71,6 +71,26 @@ const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：
 // risk heading (or in content without headings) become derived risks.
 const markdownHeading = /^\s{0,3}#{1,6}\s/;
 const riskHeading = /风险|risk/i;
+// Eval pulse-r79-csv (2026-11-19): a pulse written as "一、当前进度：…" … "四、风险：…" … "八、下一步行动：…" paragraphs had
+// no markdown heading, so every labelled line was treated as a risk and re-added after each revision. A numbered Chinese
+// section opener (also after an auto-added "推断：") or a bold-only line opens a section as well; inside a markdown section
+// it is a subsection, so a numbered list under "## 风险" stays under risks.
+const ordinalOpener = /^(?:\*\*)?(?:[一二三四五六七八九十]+、|第[一二三四五六七八九十]+[节部分][、：:]?)\s*([^：:\n]{1,40}?)(?:\*\*)?\s*[：:]\s*/u;
+const boldOpener = /^\*\*([^*\n]{1,40})\*\*\s*[：:]?\s*$/u;
+// A third run wrote plain title lines ("风险", "负责人", "下一步（均为基于来源的推断）"). A short line with no sentence
+// punctuation or citation that starts with a Project Pulse section name is a title too.
+const pulseSectionName = /^(?:总览|概览|概述|摘要|当前进度|进展|进度|已完成|完成变更|阻塞|风险|决策|负责人|责任人|截止日期|截止|期限|里程碑|下一步|后续|行动|未知|待确认|限制|summary|overview|progress|completed|blockers?|risks?|decisions?|owners?|deadlines?|next|unknowns?|limitations?)/iu;
+const plainTitle = (text: string) => text.length <= 40 && !/[。；;！!？?[\]]/u.test(text) && pulseSectionName.test(text);
+function sectionOpener(line: string): { markdownLevel?: number; title: string; rest: string } | undefined {
+  if (markdownHeading.test(line)) return { markdownLevel: /^\s{0,3}(#{1,6})/.exec(line)![1]!.length, title: line, rest: '' };
+  const plain = line.replace(/^\s*(?:[-*+>]\s+)?(?:推断\s*[:：]\s*)?/u, '');
+  const ordinal = ordinalOpener.exec(plain);
+  if (ordinal) return { title: ordinal[1]!, rest: plain.slice(ordinal[0].length) };
+  const bold = boldOpener.exec(plain);
+  if (bold) return { title: bold[1]!, rest: '' };
+  const bare = plain.replace(/[：:]\s*$/u, '').trim();
+  return plainTitle(bare) ? { title: bare, rest: '' } : undefined;
+}
 const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);
 
 /** PDF choice inferences must be stated as labelled prose as well as structured evidence. */
@@ -189,15 +209,18 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   let derived = 0;
   const warnings: string[] = [];
   const sections = content.split('\n');
-  const hasHeadings = sections.some(line => markdownHeading.test(line));
+  const hasHeadings = sections.some(line => sectionOpener(line) !== undefined);
   // Open headings by level: a subheading stays inside its risk section until a heading of the same or a higher level.
-  const open: Array<{ level: number; risk: boolean }> = [];
-  const lines = sections.flatMap(line => {
-    if (markdownHeading.test(line)) {
-      const level = /^\s{0,3}(#{1,6})/.exec(line)![1]!.length;
+  const open: Array<{ level: number; risk: boolean; markdown: boolean }> = [];
+  const lines = sections.flatMap(raw => {
+    let line = raw;
+    const opener = sectionOpener(raw);
+    if (opener) {
+      const level = opener.markdownLevel ?? (open.filter(item => item.markdown).at(-1)?.level ?? 0) + 1;
       while (open.length && open.at(-1)!.level >= level) open.pop();
-      open.push({ level, risk: riskHeading.test(line) });
-      return [];
+      open.push({ level, risk: riskHeading.test(opener.title), markdown: opener.markdownLevel !== undefined });
+      if (!opener.rest.trim()) return [];
+      line = opener.rest;
     }
     const underRisks = !hasHeadings || open.some(item => item.risk);
     return line.split(/(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i).map(text => ({ text, underRisks }));
