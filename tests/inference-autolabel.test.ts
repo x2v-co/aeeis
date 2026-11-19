@@ -16,9 +16,10 @@ describe('deterministic inference labels', () => {
     const before = structuredClone(structured);
     const content = { content: '# 预计下周完成\n- 建议安排测试\n* 可能延后\n> 可能调整范围\n1. 建议复核。  可能延期；开发完成\n  - 预计交付 [source_tasks]  ' };
     const result = labelInferences(content, structured, () => '开发完成\n上线10-20', refs);
-    expect(result.labeled).toBe(11);
+    // A heading is a title, not a claim: it is not labelled (eval 2026-11-19, "八、下一步（推断/建议）").
+    expect(result.labeled).toBe(10);
     expect(result.paths).toContain('structured.deadlines[2].text');
-    expect(content.content).toBe('# 推断：预计下周完成\n- 推断：建议安排测试\n* 推断：可能延后\n> 推断：可能调整范围\n1. 推断：建议复核。  推断：可能延期；开发完成\n  - 推断：预计交付 [source_tasks]  ');
+    expect(content.content).toBe('# 预计下周完成\n- 推断：建议安排测试\n* 推断：可能延后\n> 推断：可能调整范围\n1. 推断：建议复核。  推断：可能延期；开发完成\n  - 推断：预计交付 [source_tasks]  ');
     expect(structured.progress[1]).toMatchObject({ text: '推断：预计下周完成', derived: true });
     expect(structured.nextActions[0]?.derived).toBe(true);
     expect(structured.deadlines[2]?.derived).toBe(true);

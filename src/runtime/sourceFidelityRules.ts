@@ -65,6 +65,12 @@ const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^(?:\s+
 export const vacuousInference = /^(?:推断\s*[:：]\s*)?(?:除(?:上述|以上|此)?[^，,。]{0,12}外)?[，,\s]*(?:未|没有|并未|不)(?:作|做|进行)?(?:任何|额外|其他|其它|进一步)*(?:的)?推断[。.；;]?$|^(?:推断\s*[:：]\s*)?no (?:further|additional|other) inferences?(?: (?:were|was) made)?[.;]?$/iu;
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
 const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：').replace(/[。；.!;]+$/, '').trim();
+// Eval baseline 2026-11-19 (pulse-csv-followup/large, pulse-r79-csv): a heading such as "八、下一步（推断/建议）" was
+// labelled "推断：" and every labelled line, wherever it stood, was copied into structured.risks; the reviewer then
+// rejected each pulse because its risks did not match the text. Headings are titles, not claims, and only lines under a
+// risk heading (or in content without headings) become derived risks.
+const markdownHeading = /^\s{0,3}#{1,6}\s/;
+const riskHeading = /风险|risk/i;
 const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);
 
 /** PDF choice inferences must be stated as labelled prose as well as structured evidence. */
@@ -102,6 +108,7 @@ export function labelInferences(content: string | { content: string }, structure
   if (structured?.schemaVersion === 'fillable-pdf/1') visit(structured.inferences, refs, 'structured.inferences');
   else visit(structured);
   const labelledContent = (typeof content === 'string' ? content : content.content).split('\n').map((line, index) => {
+    if (markdownHeading.test(line)) return line;
     let sentenceIndex = 0;
     // Preserve separators and whitespace, using the checker's sentence boundaries.
     return line.replace(/[^。；]+[。；]?/g, sentence => {
@@ -181,7 +188,14 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   visit(structured);
   let derived = 0;
   const warnings: string[] = [];
-  for (const line of content.split(/\n|(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i)) {
+  const sections = content.split('\n');
+  const hasHeadings = sections.some(line => markdownHeading.test(line));
+  let heading = '';
+  const lines = sections.flatMap(line => {
+    if (markdownHeading.test(line)) { heading = line; return []; }
+    return line.split(/(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i).map(text => ({ text, underRisks: !hasHeadings || riskHeading.test(heading) }));
+  });
+  for (const { text: line, underRisks } of lines) {
     const text = clean(line);
     if (inferencePrefix.test(text) && vacuousInference.test(text)) continue;
     if (!inferencePrefix.test(text) || entries.includes(inferenceText(text)) || structured?.schemaVersion === 'fillable-pdf/1' && structured.inferences?.some(inference => hasProseInference(line, inference.text))) continue;
@@ -195,7 +209,7 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
       // r62 txt: the same inference restated in several prose clauses must not become several risks.
       entries.push(inferenceText(text)); continue;
     }
-    if (structured?.schemaVersion === 'project-pulse/1' && refs.length && structured.risks.length < 30 && text.length <= 2000) {
+    if (structured?.schemaVersion === 'project-pulse/1' && underRisks && refs.length && structured.risks.length < 30 && text.length <= 2000) {
       structured.risks.push({ text: text.replace(inferencePrefix, '推断：').replace(/[；;]+$/u, '。'), evidenceRefs: [...refs].slice(0, 50), derived: true });
       entries.push(inferenceText(text)); derived++;
     } else warnings.push(`Prose inference has no structured counterpart: ${text.slice(0, 200)}`);
@@ -230,7 +244,7 @@ export function inferenceFidelityProblems(content: string, structured: ProjectPu
   visit(structured);
   for (const line of content.split(/\n|(?<=[。；])\s*/)) {
     const text = clean(line);
-    if (!text || /^(?:推断|Inference)$/i.test(text)) continue;
+    if (!text || markdownHeading.test(line) || /^(?:推断|Inference)$/i.test(text)) continue;
     check(text, sourceText(refs), 'content');
   }
   return [...new Set(problems)];
