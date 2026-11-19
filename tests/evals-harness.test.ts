@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine, runClock } from '../src/runtime/engine.js';
+import { REPLY_SYSTEM } from '../src/bot-team.js';
+import { DISCUSSION_REPLY_SYSTEM } from '../src/runtime/http.js';
 import { HttpModelAdapter } from '../src/runtime/model.js';
 import { fillablePdfArtifactSchema, projectPulseArtifactSchema, requestSchema } from '../src/runtime/contracts.js';
 import { baseEvidenceRef } from '../src/runtime/evidence-refs.js';
@@ -21,7 +23,7 @@ describe('eval cases', () => {
     expect(cases.length).toBeGreaterThanOrEqual(15);
     expect(cases.filter((item: any) => item.tags?.includes('pulse')).length).toBeGreaterThanOrEqual(6);
     expect(cases.filter((item: any) => item.tags?.includes('pdf')).length).toBe(6);
-    for (const item of cases) {
+    for (const item of cases.filter((entry: any) => !entry.request.chat)) {
       for (const material of item.request.materials ?? []) if (material.file) expect(existsSync(join(root, material.file)), material.file).toBe(true);
       const request = buildRequest(item, root, '2026-10-29');
       expect(requestSchema.safeParse(request).success, item.id).toBe(true);
@@ -29,6 +31,10 @@ describe('eval cases', () => {
     }
     expect(loadCases(root, ['pdf']).every((item: any) => item.tags.includes('pdf'))).toBe(true);
     expect(() => loadCases(root, ['nope'])).toThrow('Unknown eval case or tag');
+    // Chat cases time one Bot reply through the team chat prompt; their checks read the reply, not a Run.
+    const chats = loadCases(root, ['chat']);
+    expect(chats.map((item: any) => item.id).sort()).toEqual(['chat-dm-question', 'chat-dm-thanks', 'chat-group-split']);
+    for (const item of chats) expect(item.checks.some((check: any) => check.kind === 'withinBudget'), item.id).toBe(true);
   });
 
   it('places relative dates against the Run clock', () => {
@@ -127,6 +133,31 @@ describe('deterministic checks', () => {
   });
 });
 
+describe('chat reply cases', () => {
+  const chatCase = (checks: unknown[]) => ({ id: 'chat-x', request: { chat: { system: 'team-reply', input: {} } }, budget: { timeoutMs: 10_000 }, checks });
+  it('score the reply text, its fields, its length and how long it took', () => {
+    const testCase = chatCase([
+      { id: 'names', kind: 'replyIncludes', any: ['密钥'], none: ['我已经'] },
+      { id: 'split', kind: 'replyField', field: 'tasks', min: 2, oneOf: ['小研', '小文'], key: 'for' },
+      { id: 'short', kind: 'replyLength', maxChars: 10 },
+      { id: 'fast', kind: 'withinBudget' },
+    ]);
+    const outcome = { chat: { reply: { reply: '在等供应商的密钥', tasks: [{ title: 'a', for: '小研' }, { title: 'b', for: 'AEEIS' }] }, usage: [{ inputTokens: 100, outputTokens: 20 }] }, logs: [], durationMs: 12_000 };
+    const checks = checkRun(testCase, outcome, deps);
+    expect(Object.fromEntries(checks.map((check: any) => [check.id, check.passed]))).toEqual({ names: true, split: false, short: true, fast: false });
+    expect(checks.find((check: any) => check.id === 'split').detail).toBe('tasks: 2 (not all in 小研, 小文)');
+    const result = caseResult(testCase, outcome, checks);
+    expect(result).toMatchObject({ status: 'failed', runId: null, usage: { modelCalls: 1, tokens: 120 }, reply: { reply: '在等供应商的密钥' } });
+  });
+  it('fail every check when no reply came back', () => {
+    const testCase = chatCase([{ id: 'fast', kind: 'withinBudget' }]);
+    const outcome = { chat: { reply: undefined, usage: [] }, logs: [], error: '回复没有生成', durationMs: 1_000 };
+    const checks = checkRun(testCase, outcome, deps);
+    expect(checks[0]).toMatchObject({ passed: false, detail: '回复没有生成' });
+    expect(caseResult(testCase, outcome, checks).status).toBe('error');
+  });
+});
+
 describe('harness on the runtime with the fixture model over HTTP', () => {
   let child: ReturnType<typeof spawn>;
   let baseUrl = '';
@@ -155,6 +186,18 @@ describe('harness on the runtime with the fixture model over HTTP', () => {
     const outcome = await runCase(md, harness);
     expect(checkRun(md, outcome, harness).find((check: any) => check.id === 'blocker-found').passed).toBe(false);
   }, 60_000);
+
+  it('times a chat reply through the engine with the team chat prompt', async () => {
+    const model = new HttpModelAdapter(baseUrl, 'aeeis-fixture/1', '', undefined, 30_000, undefined, true);
+    const harness = { ...deps, root, chatSystems: { 'team-reply': REPLY_SYSTEM, 'discussion-reply': DISCUSSION_REPLY_SYSTEM },
+      createEngine: () => { const repository = new InMemoryRunRepository(); return { repository, engine: new AgentEngine(repository, { model }) }; } };
+    const testCase = loadCases(root, ['chat-group-split'])[0];
+    const outcome = await runCase(testCase, harness);
+    const result = caseResult(testCase, outcome, checkRun(testCase, outcome, harness));
+    // The fixture front door deals the three parts to the two members in turn.
+    expect(result.status, JSON.stringify(result.checks)).toBe('passed');
+    expect(result.reply.tasks.map((task: any) => task.for)).toEqual(['小研', '小文', '小研']);
+  }, 30_000);
 });
 
 describe('evals CLI', () => {

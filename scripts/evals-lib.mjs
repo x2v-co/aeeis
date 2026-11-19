@@ -8,7 +8,10 @@ import { join } from 'node:path';
 export const CASE_SCHEMA = 'aeeis-eval-case/1';
 export const REPORT_SCHEMA = 'aeeis-eval-report/1';
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
-const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'sectionContent', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair']);
+const CHECK_KINDS = new Set(['runStatus', 'artifactType', 'artifactSchema', 'evidenceResolvable', 'noPlaceholderRefs', 'contentIncludes', 'contentExcludes', 'sectionContent', 'toolUsed', 'logProtocol', 'pdfFilled', 'pdfUnknowns', 'withinBudget', 'noRepair', 'replyIncludes', 'replyField', 'replyLength']);
+// A chat case times one Bot reply (one model call through the same path the server uses) instead of a Run.
+const CHAT_KINDS = new Set(['replyIncludes', 'replyField', 'replyLength', 'withinBudget']);
+export const CHAT_SYSTEMS = ['team-reply', 'discussion-reply'];
 
 /** Reads evals/cases/*.json in name order and validates their shape. */
 export function loadCases(root, only = []) {
@@ -31,11 +34,18 @@ function validateCase(value, name) {
   if (value?.schemaVersion !== CASE_SCHEMA) fail(`schemaVersion must be ${CASE_SCHEMA}`);
   if (!/^[a-z0-9][a-z0-9-]{1,80}$/.test(value.id ?? '')) fail('id must be lowercase letters, digits and dashes');
   if (typeof value.title !== 'string' || typeof value.source !== 'string') fail('title and source are required');
-  if (typeof value.request?.goal !== 'string') fail('request.goal is required');
+  const chat = value.request?.chat;
+  if (chat !== undefined) {
+    if (!CHAT_SYSTEMS.includes(chat?.system)) fail(`request.chat.system must be one of ${CHAT_SYSTEMS.join(', ')}`);
+    if (!chat.input || typeof chat.input !== 'object') fail('request.chat.input is required');
+    if (value.request.goal !== undefined || value.followUp !== undefined) fail('a chat case has no goal or followUp');
+  } else if (typeof value.request?.goal !== 'string') fail('request.goal is required');
   if (!Array.isArray(value.checks) || !value.checks.length) fail('at least one check is required');
   const checkIds = new Set();
   for (const check of value.checks) {
     if (!CHECK_KINDS.has(check.kind)) fail(`unknown check kind ${check.kind}`);
+    if (chat !== undefined && !CHAT_KINDS.has(check.kind)) fail(`check kind ${check.kind} does not apply to a chat case`);
+    if (chat === undefined && CHAT_KINDS.has(check.kind) && check.kind !== 'withinBudget') fail(`check kind ${check.kind} applies only to a chat case`);
     if (!check.id || checkIds.has(check.id)) fail(`check ids must be present and unique (${check.id})`);
     checkIds.add(check.id);
   }
@@ -77,6 +87,7 @@ function pointer(value, path) {
  * lines are captured for checks.
  */
 export async function runCase(testCase, deps) {
+  if (testCase.request?.chat) return runChatCase(testCase, deps);
   const { createEngine, root, clock, now = () => Date.now() } = deps;
   const { engine, repository, followUp } = createEngine();
   const started = now();
@@ -118,6 +129,54 @@ export async function runCase(testCase, deps) {
     if (run) run = await repository.get(run.id).catch(() => run);
   } finally { restore(); }
   return { run, parent, logs, error, timedOut, approvals, durationMs: now() - started };
+}
+
+/** One Bot reply: the case's input goes to the engine's Bot call with the server's reply prompt. */
+async function runChatCase(testCase, deps) {
+  const { createEngine, chatSystems, now = () => Date.now() } = deps;
+  const { engine, usage = [] } = createEngine();
+  const logs = [], restore = captureLogs(logs);
+  const started = now();
+  let reply, error;
+  try {
+    const system = chatSystems?.[testCase.request.chat.system];
+    if (!system) throw new Error(`no reply prompt for ${testCase.request.chat.system}`);
+    reply = await engine.completeForBot({ system, input: testCase.request.chat.input, idempotencyKey: `eval-chat:${testCase.id}:${started}` }, { owner: 'eval', tenantId: 'local' });
+  } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
+  finally { restore(); }
+  const durationMs = now() - started;
+  return { chat: { reply, usage: [...usage] }, logs, error, timedOut: durationMs > (testCase.budget?.timeoutMs ?? 30_000), approvals: 0, durationMs };
+}
+
+function chatChecks(testCase, outcome) {
+  const reply = outcome.chat?.reply;
+  const text = typeof reply?.reply === 'string' ? reply.reply : '';
+  return testCase.checks.map(check => {
+    const required = check.required !== false;
+    const result = (passed, detail) => ({ id: check.id, kind: check.kind, required, passed: Boolean(passed), detail });
+    if (!text.trim()) return result(false, outcome.error ?? 'no reply text');
+    switch (check.kind) {
+      case 'replyIncludes': {
+        const missing = (check.all ?? []).filter(needle => !text.includes(needle));
+        const any = check.any ? check.any.some(needle => text.includes(needle)) : true;
+        const found = (check.none ?? []).filter(needle => new RegExp(needle, 'u').test(text));
+        return result(!missing.length && any && !found.length, missing.length ? `missing: ${missing.join(', ')}` : !any ? `none of: ${check.any.join(', ')}` : found.length ? `found: ${found.join(', ')}` : 'matches');
+      }
+      case 'replyField': {
+        const value = reply[check.field];
+        const count = value === undefined ? 0 : Array.isArray(value) ? value.length : 1;
+        const within = count >= (check.min ?? 0) && count <= (check.max ?? Number.MAX_SAFE_INTEGER);
+        const named = check.oneOf ? (Array.isArray(value) ? value : value === undefined ? [] : [value]).every(item => check.oneOf.includes(item?.[check.key ?? 'for'] ?? item?.to)) : true;
+        return result(within && named, `${check.field}: ${count}${named ? '' : ` (not all in ${check.oneOf.join(', ')})`}`);
+      }
+      case 'replyLength': return result([...text].length <= check.maxChars, `${[...text].length} of ${check.maxChars} characters`);
+      case 'withinBudget': {
+        const limit = check.timeoutMs ?? testCase.budget?.timeoutMs ?? 30_000;
+        return result(outcome.durationMs <= limit, `${(outcome.durationMs / 1000).toFixed(1)}s of ${Math.round(limit / 1000)}s`);
+      }
+      default: return result(false, `unsupported check ${check.kind}`);
+    }
+  });
 }
 
 function captureLogs(sink) {
@@ -178,6 +237,7 @@ const sameValue = (left, right) => JSON.stringify(Array.isArray(left) ? [...left
 
 /** Deterministic checks only. Each returns { id, kind, required, passed, detail }. */
 export function checkRun(testCase, outcome, deps) {
+  if (testCase.request?.chat) return chatChecks(testCase, outcome);
   const { run, logs, durationMs } = outcome;
   const artifact = run?.artifacts?.at(-1);
   const text = artifactText(run);
@@ -280,14 +340,20 @@ export function usageOf(run, parent) {
   };
 }
 
+function chatUsage(calls) {
+  const inputTokens = calls.reduce((sum, usage) => sum + (usage?.inputTokens ?? 0), 0), outputTokens = calls.reduce((sum, usage) => sum + (usage?.outputTokens ?? 0), 0);
+  return { modelCalls: calls.length, byPhase: calls.length ? { chat: calls.length } : {}, inputTokens, outputTokens, tokens: inputTokens + outputTokens, moneyUsd: null, unpricedCalls: 0 };
+}
+
 export function caseResult(testCase, outcome, checks, judge) {
-  const status = outcome.error && !outcome.run ? 'error' : outcome.timedOut ? 'timeout' : checks.every(check => check.passed || !check.required) ? 'passed' : 'failed';
+  const status = outcome.error && !outcome.run && !outcome.chat?.reply ? 'error' : outcome.timedOut ? 'timeout' : checks.every(check => check.passed || !check.required) ? 'passed' : 'failed';
   const protocols = {};
   for (const log of outcome.logs) protocols[log.protocol] = (protocols[log.protocol] ?? 0) + 1;
   return {
     id: testCase.id, title: testCase.title, source: testCase.source, status,
     runId: outcome.run?.id ?? null, runStatus: outcome.run?.status ?? null, partial: Boolean(outcome.run?.partial),
-    ...(outcome.parent ? { parentRunId: outcome.parent.id } : {}), durationMs: outcome.durationMs, approvals: outcome.approvals, usage: usageOf(outcome.run, outcome.parent), protocols,
+    ...(outcome.parent ? { parentRunId: outcome.parent.id } : {}), durationMs: outcome.durationMs, approvals: outcome.approvals, usage: outcome.chat ? chatUsage(outcome.chat.usage) : usageOf(outcome.run, outcome.parent), protocols,
+    ...(outcome.chat?.reply !== undefined ? { reply: outcome.chat.reply } : {}),
     ...(outcome.error ? { error: outcome.error } : {}), checks, ...(judge ? { judge } : {}),
   };
 }

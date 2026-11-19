@@ -138,6 +138,7 @@ async function main() {
     import(join(runtime, 'engine.js')), import(join(runtime, 'model.js')), import(join(root, 'dist', 'adapters', 'in-memory-run-repository.js')),
     import(join(runtime, 'contracts.js')), import(join(runtime, 'evidence-refs.js')), import(join(runtime, 'execution-limits.js')), import(join(root, 'dist', 'application', 'thread-service.js')),
   ]);
+  const [{ REPLY_SYSTEM }, { DISCUSSION_REPLY_SYSTEM }] = await Promise.all([import(join(root, 'dist', 'bot-team.js')), import(join(runtime, 'http.js'))]);
   const model = new HttpModelAdapter(modelConfig.baseUrl, modelConfig.model, modelConfig.apiKey, undefined, Number(process.env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), undefined, modelConfig.allowInsecureHttp, undefined, modelTransportConfig(process.env));
   let judge;
   if (args.judge) {
@@ -149,9 +150,15 @@ async function main() {
     root, clock: runClock,
     createEngine: () => {
       const repository = new InMemoryRunRepository();
-      const engine = new AgentEngine(repository, { model, executionLimits: executionLimitsConfig(process.env) });
-      return { repository, engine, followUp: (parent, request) => askFollowUp(ThreadService, repository, engine, parent, request) };
+      // Records what each model call reported, for cases (Bot replies) whose usage is not kept on a Run.
+      const usage = [];
+      const recorded = new Proxy(model, { get: (target, key) => key === 'complete'
+        ? async request => { const response = await target.complete(request); usage.push(response.usage); return response; }
+        : typeof target[key] === 'function' ? target[key].bind(target) : target[key] });
+      const engine = new AgentEngine(repository, { model: recorded, executionLimits: executionLimitsConfig(process.env) });
+      return { repository, engine, usage, followUp: (parent, request) => askFollowUp(ThreadService, repository, engine, parent, request) };
     },
+    chatSystems: { 'team-reply': REPLY_SYSTEM, 'discussion-reply': DISCUSSION_REPLY_SYSTEM },
     schemas: { 'project-pulse/1': contracts.projectPulseArtifactSchema, 'fillable-pdf/1': contracts.fillablePdfArtifactSchema },
     baseEvidenceRef,
   };
@@ -161,7 +168,7 @@ async function main() {
     for (const testCase of cases) {
       const outcome = await runCase(testCase, deps);
       const checks = checkRun(testCase, outcome, deps);
-      const judged = judge ? await judgeCase(testCase, outcome.run, judge) : undefined;
+      const judged = judge && outcome.run ? await judgeCase(testCase, outcome.run, judge) : undefined;
       const result = caseResult(testCase, outcome, checks, judged);
       printCase(result);
       results.push(result);
