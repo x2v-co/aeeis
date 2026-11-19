@@ -131,6 +131,21 @@ export async function runCase(testCase, deps) {
   return { run, parent, logs, error, timedOut, approvals, durationMs: now() - started };
 }
 
+/** How the server reads a reply from each prompt, so a reply it would refuse fails the case (review on #238). The team
+ * reply is checked with bot-team's own schema and its tasks are counted the way the server proposes them
+ * (`tasks`, else `proposeTask`). A discussion reply only needs non-empty `reply` text (bot-dialogue-service). */
+export function chatReplyParsers({ replySchema, replyTasks }) {
+  return {
+    'team-reply': raw => {
+      const parsed = replySchema.safeParse(raw);
+      if (!parsed.success) return { ok: false, detail: parsed.error.issues.slice(0, 5).map(issue => `${issue.path.join('.') || '$'}: ${issue.message}`).join('; ') };
+      return { ok: true, value: { ...parsed.data, tasks: replyTasks(parsed.data) } };
+    },
+    'discussion-reply': raw => raw && typeof raw === 'object' && typeof raw.reply === 'string' && raw.reply.trim()
+      ? { ok: true, value: raw } : { ok: false, detail: 'reply must be non-empty text' },
+  };
+}
+
 /** One Bot reply: the case's input goes to the engine's Bot call with the server's reply prompt. */
 async function runChatCase(testCase, deps) {
   const { createEngine, chatSystems, now = () => Date.now() } = deps;
@@ -148,13 +163,18 @@ async function runChatCase(testCase, deps) {
   return { chat: { reply, usage: [...usage] }, logs, error, timedOut: durationMs > (testCase.budget?.timeoutMs ?? 30_000), approvals: 0, durationMs };
 }
 
-function chatChecks(testCase, outcome) {
-  const reply = outcome.chat?.reply;
+function chatChecks(testCase, outcome, deps) {
+  const raw = outcome.chat?.reply;
+  const parser = deps?.chatParsers?.[testCase.request.chat.system];
+  const parsed = raw === undefined ? { ok: false, detail: outcome.error ?? 'no reply' } : parser ? parser(raw) : { ok: false, detail: `no reply parser for ${testCase.request.chat.system}` };
+  // A reply the server would refuse is never delivered, so it fails before any other check reads it.
+  const format = { id: 'reply-format', kind: 'replyFormat', required: true, passed: parsed.ok, detail: parsed.ok ? 'the server accepts it' : parsed.detail };
+  const reply = parsed.ok ? parsed.value : undefined;
   const text = typeof reply?.reply === 'string' ? reply.reply : '';
-  return testCase.checks.map(check => {
+  return [format, ...testCase.checks.map(check => {
     const required = check.required !== false;
     const result = (passed, detail) => ({ id: check.id, kind: check.kind, required, passed: Boolean(passed), detail });
-    if (!text.trim()) return result(false, outcome.error ?? 'no reply text');
+    if (!parsed.ok) return result(false, 'the server would refuse this reply');
     switch (check.kind) {
       case 'replyIncludes': {
         const missing = (check.all ?? []).filter(needle => !text.includes(needle));
@@ -176,7 +196,7 @@ function chatChecks(testCase, outcome) {
       }
       default: return result(false, `unsupported check ${check.kind}`);
     }
-  });
+  })];
 }
 
 function captureLogs(sink) {
@@ -237,7 +257,7 @@ const sameValue = (left, right) => JSON.stringify(Array.isArray(left) ? [...left
 
 /** Deterministic checks only. Each returns { id, kind, required, passed, detail }. */
 export function checkRun(testCase, outcome, deps) {
-  if (testCase.request?.chat) return chatChecks(testCase, outcome);
+  if (testCase.request?.chat) return chatChecks(testCase, outcome, deps);
   const { run, logs, durationMs } = outcome;
   const artifact = run?.artifacts?.at(-1);
   const text = artifactText(run);

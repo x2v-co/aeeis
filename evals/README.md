@@ -58,6 +58,8 @@ npm run test:evals -- --compare <before.json> <after.json>
 
 标签 `chat` 的用例不跑 Run，只计时一条 Bot 回复：`request.chat.input` 原样交给引擎的 Bot 调用（`completeForBot`，和服务端同一条路径），系统提示用 `request.chat.system` 指定的那一份：`team-reply` 是团队群聊和私聊（`src/bot-team.ts` 的 `REPLY_SYSTEM`），`discussion-reply` 是对话里的讨论回复（`DISCUSSION_REPLY_SYSTEM`）。`input` 写成服务端会给的样子（`you`、`room`、`roster`、`transcript_untrusted`、`message`）。`budget.timeoutMs` 默认 30 秒。
 
+每件聊天用例先自动加一项必需检查 `reply-format`：按服务端读回复的方式校验（`team-reply` 用 `src/bot-team.ts` 的 `replySchema`，`discussion-reply` 要求非空的 `reply` 文字）。服务端会拒收的回复不会送达，所以这一项不过时其余检查一律不过。数任务时也和服务端一样：有 `tasks` 用 `tasks`，否则算上 `proposeTask`。
+
 聊天用例只能用这几种检查：
 
 | `kind` | 通过条件 |
