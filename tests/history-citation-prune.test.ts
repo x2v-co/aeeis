@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { ThreadService } from '../src/application/thread-service.js';
-import { AgentEngine, removeInlineRef } from '../src/runtime/engine.js';
+import { AgentEngine, finishContentProblems, removeInlineRef } from '../src/runtime/engine.js';
 import type { ModelRequest } from '../src/runtime/model.js';
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -14,6 +14,15 @@ const pulse = (refs: string[]) => ({ schemaVersion: 'project-pulse/1', progress:
 it('removes a pruned id only where it stands alone, never inside a longer citation', () => {
   const id = 'artifact_ff1c63ec-7fb2-4766-8d30-77b5a0559d07', history = `history:run_febe92ef-fb52-4c46-a458-2fcf2bf45889:${id}`;
   expect(removeInlineRef(`a [${history}] b [${id}] c ${id}.`, id)).toBe(`a [${history}] b  c .`);
+});
+
+// Review on #241: only ids inside a real history citation are exempt; an id after any other colon is still checked and pruned.
+it('still checks and prunes an id written right after an ordinary colon', () => {
+  const id = 'source_11111111-1111-4111-8111-111111111111';
+  expect(finishContentProblems(`证据:${id}`, new Set())).toEqual([`content cites IDs that were not received: ${JSON.stringify([id])}`]);
+  expect(removeInlineRef(`证据:${id}。`, id)).toBe('证据:。');
+  const history = 'history:run_febe92ef-fb52-4c46-a458-2fcf2bf45889:artifact_ff1c63ec-7fb2-4766-8d30-77b5a0559d07';
+  expect(finishContentProblems(`[${history}]`, new Set([history]))).toEqual([]);
 });
 
 it('keeps a follow-up history citation whole when a bare artifact id in the same answer is pruned', async () => {

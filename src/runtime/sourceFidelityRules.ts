@@ -77,10 +77,12 @@ const riskHeading = /风险|risk/i;
 // it is a subsection, so a numbered list under "## 风险" stays under risks.
 const ordinalOpener = /^(?:\*\*)?(?:[一二三四五六七八九十]+、|第[一二三四五六七八九十]+[节部分][、：:]?)\s*([^：:\n]{1,40}?)(?:\*\*)?\s*[：:]\s*/u;
 const boldOpener = /^\*\*([^*\n]{1,40})\*\*\s*[：:]?\s*$/u;
-// A third run wrote plain title lines ("风险", "负责人", "下一步（均为基于来源的推断）"). A short line with no sentence
-// punctuation or citation that starts with a Project Pulse section name is a title too.
-const pulseSectionName = /^(?:总览|概览|概述|摘要|当前进度|进展|进度|已完成|完成变更|阻塞|风险|决策|负责人|责任人|截止日期|截止|期限|里程碑|下一步|后续|行动|未知|待确认|限制|summary|overview|progress|completed|blockers?|risks?|decisions?|owners?|deadlines?|next|unknowns?|limitations?)/iu;
-const plainTitle = (text: string) => text.length <= 40 && !/[。；;！!？?[\]]/u.test(text) && pulseSectionName.test(text);
+// A third run wrote plain title lines ("风险", "负责人", "下一步（均为基于来源的推断）"). A line that is only a Project Pulse
+// section name — optionally joined with another, with a title suffix or a parenthetical note — is a title too. A sentence
+// that merely starts with one ("负责人可能无法按时完成") stays prose (review on #241).
+const sectionWord = '(?:总览|概览|概述|摘要|当前进度|进展|进度|已完成变更|已完成|完成变更|阻塞|风险|决策|负责人|责任人|截止日期|截止|期限|里程碑|下一步|后续|行动|未知项?|待确认|限制|summary|overview|progress|completed changes|completed|blockers?|risks?|decisions?|owners?|deadlines?|next steps?|next actions?|unknowns?|limitations?)';
+const plainTitlePattern = new RegExp(`^${sectionWord}(?:\\s*(?:与|和|及|、|/|&|and)\\s*${sectionWord})*(?:项|清单|情况|行动|建议|计划|汇总|一览|分析|说明|与建议)?\\s*(?:[（(][^（）()]{0,40}[）)])?$`, 'iu');
+const plainTitle = (text: string) => plainTitlePattern.test(text);
 function sectionOpener(line: string): { markdownLevel?: number; title: string; rest: string } | undefined {
   if (markdownHeading.test(line)) return { markdownLevel: /^\s{0,3}(#{1,6})/.exec(line)![1]!.length, title: line, rest: '' };
   const plain = line.replace(/^\s*(?:[-*+>]\s+)?(?:推断\s*[:：]\s*)?/u, '');
@@ -88,7 +90,8 @@ function sectionOpener(line: string): { markdownLevel?: number; title: string; r
   if (ordinal) return { title: ordinal[1]!, rest: plain.slice(ordinal[0].length) };
   const bold = boldOpener.exec(plain);
   if (bold) return { title: bold[1]!, rest: '' };
-  const bare = plain.replace(/[：:]\s*$/u, '').trim();
+  // A list item is never a plain title: only the "推断：" a runtime label may have added is ignored here.
+  const bare = line.replace(/^\s*(?:推断\s*[:：]\s*)?/u, '').replace(/[：:]\s*$/u, '').trim();
   return plainTitle(bare) ? { title: bare, rest: '' } : undefined;
 }
 const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);

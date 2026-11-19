@@ -856,13 +856,27 @@ export const evidenceWritingGuidance = '\nEvidence writing rules: cite concrete 
 const placeholderPattern = /\[(?:证据|依据|来源|出处|引用|evidence|source|sources|citation|cite|ref|ID|id)(?:\s*(?:ID|id|\d+|…|\.\.\.))?\]|【(?:证据|来源|引用)】/;
 // Eval pulse-csv-followup (2026-11-19): a follow-up cites "history:<runId>:artifact_<id>". The artifact id inside it was read
 // as a bare (invalid) artifact ref and pruned from the text, leaving "[history:<runId>:]" after every revision; the reviewer
-// rejected the follow-up three times. An id right after ":" is part of a longer citation, not an inline ref of its own.
-/** Remove a pruned citation token, but never the same characters inside a longer citation such as "history:<run>:<ref>". */
+// rejected the follow-up three times. Only ids inside a real history citation are protected (review on #241): an id after
+// any other colon ("证据:source_…") is still checked and pruned.
+const historyCitationPattern = /\bhistory:run_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[^\s[\]，,;；)）]+/gi;
+/** Apply `edit` to the text outside history citations, leaving each citation exactly as written. */
+function outsideHistoryCitations(content: string, edit: (text: string) => string): string {
+  let out = '', last = 0;
+  for (const match of content.matchAll(historyCitationPattern)) { out += edit(content.slice(last, match.index)) + match[0]; last = match.index + match[0].length; }
+  return out + edit(content.slice(last));
+}
+/** Inline evidence ids that stand on their own, not inside a history citation. */
+function standaloneInlineIds(content: string): string[] {
+  const ids: string[] = [];
+  outsideHistoryCitations(content, text => { ids.push(...(text.match(inlineIdPattern) ?? [])); return text; });
+  return ids;
+}
+/** Remove a pruned citation token, but never the same characters inside a history citation. */
 export function removeInlineRef(content: string, ref: string): string {
   const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return content.replace(new RegExp(`\\[${escaped}\\]|(?<![:\\w-])${escaped}(?![\\w-])`, 'g'), '');
+  return outsideHistoryCitations(content, text => text.replace(new RegExp(`\\[${escaped}\\]|(?<![\\w-])${escaped}(?![\\w-])`, 'g'), ''));
 }
-const inlineIdPattern = /(?<!:)\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
+const inlineIdPattern = /\b(?:source|artifact|receipt|history|obs)_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
 /** Expand dependency artifact refs into the source evidence they were built from. */
 export function sourceLevelRefs(refs: string[], dependencies: Array<{ id: string; evidenceRefs: string[] }>): string[] {
   const expand = (ref: string, seen: Set<string>): string[] => {
@@ -879,7 +893,7 @@ export function finishContentProblems(content: string, observed: Set<string>): s
   const problems: string[] = [];
   const placeholder = placeholderPattern.exec(content);
   if (placeholder) problems.push(`content contains the evidence placeholder ${JSON.stringify(placeholder[0])}; replace it with concrete IDs from availableEvidenceRefs`);
-  const unknownIds = [...new Set(content.match(inlineIdPattern) ?? [])].filter(ref => !observed.has(ref) && ![...observed].some(known => known.endsWith(ref)));
+  const unknownIds = [...new Set(standaloneInlineIds(content))].filter(ref => !observed.has(ref) && ![...observed].some(known => known.endsWith(ref)));
   if (unknownIds.length) problems.push(`content cites IDs that were not received: ${JSON.stringify(unknownIds.slice(0, 10))}`);
   return problems;
 }
@@ -3227,7 +3241,7 @@ export class AgentEngine {
             }
             const needsEvidence = current.context.sources.length > 0 || historySources.length > 0;
             if (needsEvidence && candidate.evidenceRefs.length === 0) candidate.evidenceRefs = structuredEvidenceRefs.filter(ref => observed.has(ref));
-            const inlineRefs = [...candidate.content.matchAll(inlineIdPattern)].map(match => match[0]);
+            const inlineRefs = standaloneInlineIds(candidate.content);
             candidate.evidenceRefs = [...new Set([...candidate.evidenceRefs, ...inlineRefs.filter(ref => observed.has(ref) && !ref.startsWith('artifact_'))])];
             let invalidRefs = [...new Set([...candidate.evidenceRefs, ...structuredEvidenceRefs, ...inlineRefs])].filter(ref => !observed.has(ref) || ref.startsWith('artifact_'));
             if (invalidRefs.length && structured?.schemaVersion !== 'fillable-pdf/1' && (limitReason || [...candidate.evidenceRefs, ...structuredEvidenceRefs].some(ref => observed.has(ref) && !ref.startsWith('artifact_')))) {

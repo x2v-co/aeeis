@@ -86,6 +86,22 @@ describe('Project Pulse risks derived from labelled prose', () => {
     expect(structured.risks.map(risk => risk.text)).toEqual(['推断：支付联调可能延期']);
   });
 
+  // Review on #241: a risk sentence that starts with a section name is prose, not a title, with or without a list marker.
+  it('keeps a risk sentence that starts with a section name, under a markdown or a plain risk title', () => {
+    for (const content of ['## 风险\n- 推断：负责人可能无法按时完成\n- 推断：支付联调可能延期', '风险\n推断：负责人可能无法按时完成\n推断：支付联调可能延期']) {
+      const structured = pulse();
+      deriveProseInferences(content, structured, refs);
+      expect(structured.risks.map(risk => risk.text), content).toEqual(['推断：负责人可能无法按时完成', '推断：支付联调可能延期']);
+    }
+  });
+
+  it('accepts joined section names, title suffixes and a parenthetical note as plain titles', () => {
+    const structured = pulse();
+    const titled = ['风险与阻塞', '推断：支付联调可能延期。', '下一步行动', '推断：建议先催供应商。', '截止日期与里程碑（推断）', '推断：发布可能推迟。'].join('\n');
+    deriveProseInferences(titled, structured, refs);
+    expect(structured.risks.map(risk => risk.text)).toEqual(['推断：支付联调可能延期。']);
+  });
+
   it('still derives risks from content without headings', () => {
     const structured = pulse();
     deriveProseInferences('登录页已上线。\n推断：支付联调可能延期。', structured, refs);
