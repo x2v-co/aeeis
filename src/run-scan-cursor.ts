@@ -102,17 +102,47 @@ export class PostgresRunScanCursorStore implements RunScanCursorStore {
 export interface RunEventBatch {
   entries: Array<{ run: AgentRun; event: Event }>;
   /** Call only after all entries have been attempted. Failed entries are
-   * revisited next sweep; a crash before this commit replays this batch. */
-  commit(): Promise<boolean>;
+   * revisited next sweep; a crash before this commit replays this batch.
+   * Pass `{ settled: false }` when an entry failed, so an idle gate does not
+   * delay that retry. */
+  commit(options?: { settled?: boolean }): Promise<boolean>;
+}
+
+/** Lets scanners stop re-reading every Run once a sweep finds nothing new.
+ * A finished sweep rests until a Run change wakes the gate or `restMs`
+ * passes. Enable it only while a change feed is subscribed: the fallback
+ * sweep is what covers a notification lost during a reconnect. Disabled,
+ * scanners sweep continuously as before. */
+export class RunScanIdleGate {
+  private rest = 0;
+  private changes = 0;
+  constructor(private readonly now: () => number = Date.now) {}
+  enable(restMs: number): void {
+    if (!Number.isInteger(restMs) || restMs < 1000 || restMs > 3_600_000) throw new Error('Run scan idle rest must be between 1000 and 3600000 milliseconds');
+    this.rest = restMs;
+  }
+  disable(): void { this.rest = 0; }
+  /** Called for every Run change hint; never throttle these. */
+  wake(): void { this.changes += 1; }
+  get restMs(): number { return this.rest; }
+  get generation(): number { return this.changes; }
+  get clock(): number { return this.now(); }
 }
 
 export interface RunEventScannerOptions {
   /** Read the bounded event projection and load full Run state only for Runs
    * that actually contain events. The canonical Run remains authoritative. */
   useEventProjection?: boolean;
+  /** Shared gate that pauses sweeps while nothing changes. */
+  idle?: RunScanIdleGate;
 }
 
 export class RunEventScanner {
+  /** Gate generation when the current sweep started from an empty cursor;
+   * undefined after a restart mid-sweep, so that sweep never rests. */
+  private sweepGeneration: number | undefined;
+  private restUntil = 0;
+  private restGeneration = -1;
   constructor(private readonly repository: RunRepository, private readonly store: RunScanCursorStore, private readonly name: string, private readonly pageSize = 25, private readonly options: RunEventScannerOptions = {}) {
     nameSchema.parse(name);
     if (!repository.scanPage) throw new Error('Run repository must support bounded scans');
@@ -121,8 +151,14 @@ export class RunEventScanner {
   }
   async batch(maxEvents: number): Promise<RunEventBatch> {
     if (!Number.isInteger(maxEvents) || maxEvents < 1 || maxEvents > 1000) throw new Error('Run scan event limit must be between 1 and 1000');
+    const gate = this.options.idle;
+    if (gate && gate.restMs > 0 && gate.generation === this.restGeneration && gate.clock < this.restUntil) {
+      return { entries: [], commit: async () => true };
+    }
+    this.restUntil = 0;
     const checkpoint = await this.store.get(this.name);
     const previous = checkpoint.cursor;
+    if (!previous.afterId && !previous.throughId && !previous.resume) this.sweepGeneration = gate?.generation;
     const projection = this.options.useEventProjection;
     const page = projection
       ? await this.repository.scanEventsPage!({
@@ -181,8 +217,24 @@ export class RunEventScanner {
       next.afterId = run.id;
       if (next.resume && next.resume.runId <= run.id) delete next.resume;
     }
-    if (complete && page.done) next = {};
+    const finished = complete && page.done;
+    if (finished) next = {};
     // Do not publish an unattempted batch or advance on read/processing errors.
-    return { entries, commit: () => this.store.advance(this.name, checkpoint.revision, next) };
+    return {
+      entries,
+      commit: async (options = {}) => {
+        const advanced = await this.store.advance(this.name, checkpoint.revision, next);
+        if (advanced && finished) {
+          // Rest only when nothing changed since this sweep began and every
+          // entry settled; otherwise the next tick starts a fresh sweep.
+          if (gate && gate.restMs > 0 && options.settled !== false && this.sweepGeneration !== undefined && this.sweepGeneration === gate.generation) {
+            this.restUntil = gate.clock + gate.restMs;
+            this.restGeneration = gate.generation;
+          }
+          this.sweepGeneration = undefined;
+        }
+        return advanced;
+      },
+    };
   }
 }

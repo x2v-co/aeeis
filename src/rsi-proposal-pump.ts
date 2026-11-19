@@ -4,7 +4,7 @@ import type { AgentRun, Event } from './runtime/contracts.js';
 import type { RunRepository } from './runtime/repository.js';
 import type { RsiProposalClaimStore } from './rsi-proposal-claims.js';
 import type { DurableRsiProposalSynthesis } from './rsi-proposal-synthesizer.js';
-import { RunEventScanner, type RunScanCursorStore } from './run-scan-cursor.js';
+import { RunEventScanner, type RunScanCursorStore, type RunScanIdleGate } from './run-scan-cursor.js';
 
 /** A proposal is intentionally declarative. A detector may discover a signal
  * without being allowed to invent a change; only a proposal carrying an
@@ -22,7 +22,7 @@ export interface ImprovementSignal {
   runId: string; eventId: string; owner: string; tenantId: string; sourceRefs: string[];
   reason: string; occurredAt: string; proposal?: RsiProposal;
 }
-export interface RsiProposalPumpOptions { maxSignalsPerPass?: number; lowConfidenceThreshold?: number; claimLeaseMs?: number; claimStore?: RsiProposalClaimStore; synthesis?: DurableRsiProposalSynthesis; scanCursorStore?: RunScanCursorStore; scanCursorName?: string; scanPageSize?: number; onError?: (error: unknown, run: AgentRun, event: Event) => void }
+export interface RsiProposalPumpOptions { maxSignalsPerPass?: number; lowConfidenceThreshold?: number; claimLeaseMs?: number; claimStore?: RsiProposalClaimStore; synthesis?: DurableRsiProposalSynthesis; scanCursorStore?: RunScanCursorStore; scanCursorName?: string; scanPageSize?: number; scanIdle?: RunScanIdleGate; onError?: (error: unknown, run: AgentRun, event: Event) => void }
 export interface RsiProposalPumpResult { inspected: number; signalled: number; proposed: number; skipped: number; failed: number }
 
 function validRef(value: string): boolean { return value.length > 0 && value.length <= 200; }
@@ -92,7 +92,7 @@ export class RsiProposalPump {
     this.claimStore = options.claimStore;
     this.synthesis = options.synthesis;
     this.scanner = options.scanCursorStore && this.repository.scanPage
-      ? new RunEventScanner(this.repository, options.scanCursorStore, options.scanCursorName ?? 'rsi-proposal-pump', options.scanPageSize ?? 25, { useEventProjection: true })
+      ? new RunEventScanner(this.repository, options.scanCursorStore, options.scanCursorName ?? 'rsi-proposal-pump', options.scanPageSize ?? 25, { useEventProjection: true, ...(options.scanIdle ? { idle: options.scanIdle } : {}) })
       : undefined;
     this.onError = options.onError ?? (() => undefined);
   }
@@ -114,7 +114,7 @@ export class RsiProposalPump {
     const batch = this.scanner ? await this.scanner.batch(this.maxSignalsPerPass) : undefined;
     if (batch) for (const entry of batch.entries) append(entry.run, entry.event);
     else for (const run of await this.repository.list()) append(run);
-    if (!pending.length) { if (batch) await batch.commit(); return result; }
+    if (!pending.length) { if (batch) await batch.commit({ settled: result.failed === 0 }); return result; }
     const start = this.cursor % pending.length;
     const count = Math.min(this.maxSignalsPerPass, pending.length);
     for (let offset = 0; offset < count; offset += 1) {
@@ -165,7 +165,7 @@ export class RsiProposalPump {
     }
     // Individual failures are retried next sweep, so one poison signal cannot
     // starve every later Run. A crash before this commit replays the batch.
-    if (batch) await batch.commit();
+    if (batch) await batch.commit({ settled: result.failed === 0 });
     this.cursor = (start + count) % pending.length;
     return result;
   }
