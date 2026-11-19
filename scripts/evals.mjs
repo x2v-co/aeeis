@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CASE_SCHEMA, REPORT_SCHEMA, caseResult, checkRun, compareReports, judgeCase, loadCases, reportStatus, runCase } from './evals-lib.mjs';
+import { CASE_SCHEMA, REPORT_SCHEMA, caseResult, chatReplyParsers, checkRun, compareReports, judgeCase, loadCases, reportStatus, runCase } from './evals-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXIT = { passed: 0, failed: 1, not_run: 2, usage: 2 };
@@ -138,7 +138,7 @@ async function main() {
     import(join(runtime, 'engine.js')), import(join(runtime, 'model.js')), import(join(root, 'dist', 'adapters', 'in-memory-run-repository.js')),
     import(join(runtime, 'contracts.js')), import(join(runtime, 'evidence-refs.js')), import(join(runtime, 'execution-limits.js')), import(join(root, 'dist', 'application', 'thread-service.js')),
   ]);
-  const [{ REPLY_SYSTEM }, { DISCUSSION_REPLY_SYSTEM }] = await Promise.all([import(join(root, 'dist', 'bot-team.js')), import(join(runtime, 'http.js'))]);
+  const [{ REPLY_SYSTEM, replySchema, replyTasks }, { DISCUSSION_REPLY_SYSTEM }] = await Promise.all([import(join(root, 'dist', 'bot-team.js')), import(join(runtime, 'http.js'))]);
   const model = new HttpModelAdapter(modelConfig.baseUrl, modelConfig.model, modelConfig.apiKey, undefined, Number(process.env.AEEIS_MODEL_TIMEOUT_MS ?? 180_000), undefined, modelConfig.allowInsecureHttp, undefined, modelTransportConfig(process.env));
   let judge;
   if (args.judge) {
@@ -159,6 +159,7 @@ async function main() {
       return { repository, engine, usage, followUp: (parent, request) => askFollowUp(ThreadService, repository, engine, parent, request) };
     },
     chatSystems: { 'team-reply': REPLY_SYSTEM, 'discussion-reply': DISCUSSION_REPLY_SYSTEM },
+    chatParsers: chatReplyParsers({ replySchema, replyTasks }),
     schemas: { 'project-pulse/1': contracts.projectPulseArtifactSchema, 'fillable-pdf/1': contracts.fillablePdfArtifactSchema },
     baseEvidenceRef,
   };

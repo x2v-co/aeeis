@@ -5,17 +5,17 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine, runClock } from '../src/runtime/engine.js';
-import { REPLY_SYSTEM } from '../src/bot-team.js';
+import { REPLY_SYSTEM, replySchema, replyTasks } from '../src/bot-team.js';
 import { DISCUSSION_REPLY_SYSTEM } from '../src/runtime/http.js';
 import { HttpModelAdapter } from '../src/runtime/model.js';
 import { fillablePdfArtifactSchema, projectPulseArtifactSchema, requestSchema } from '../src/runtime/contracts.js';
 import { baseEvidenceRef } from '../src/runtime/evidence-refs.js';
 // @ts-expect-error plain ESM helper shared with scripts/evals.mjs
-import { buildRequest, caseResult, checkRun, compareReports, loadCases, partialMatch, runCase, shiftDate } from '../scripts/evals-lib.mjs';
+import { buildRequest, caseResult, chatReplyParsers, checkRun, compareReports, loadCases, partialMatch, runCase, shiftDate } from '../scripts/evals-lib.mjs';
 
 const root = process.cwd();
 const schemas = { 'project-pulse/1': projectPulseArtifactSchema, 'fillable-pdf/1': fillablePdfArtifactSchema };
-const deps = { schemas, baseEvidenceRef };
+const deps = { schemas, baseEvidenceRef, chatParsers: chatReplyParsers({ replySchema, replyTasks }) };
 
 describe('eval cases', () => {
   it('load with unique ids, resolve every material and build valid Run requests', () => {
@@ -142,18 +142,38 @@ describe('chat reply cases', () => {
       { id: 'short', kind: 'replyLength', maxChars: 10 },
       { id: 'fast', kind: 'withinBudget' },
     ]);
-    const outcome = { chat: { reply: { reply: '在等供应商的密钥', tasks: [{ title: 'a', for: '小研' }, { title: 'b', for: 'AEEIS' }] }, usage: [{ inputTokens: 100, outputTokens: 20 }] }, logs: [], durationMs: 12_000 };
+    const outcome = { chat: { reply: { reply: '在等供应商的密钥', tasks: [{ title: '查定价', for: '小研' }, { title: '列风险', for: 'AEEIS' }] }, usage: [{ inputTokens: 100, outputTokens: 20 }] }, logs: [], durationMs: 12_000 };
     const checks = checkRun(testCase, outcome, deps);
-    expect(Object.fromEntries(checks.map((check: any) => [check.id, check.passed]))).toEqual({ names: true, split: false, short: true, fast: false });
+    expect(Object.fromEntries(checks.map((check: any) => [check.id, check.passed]))).toEqual({ 'reply-format': true, names: true, split: false, short: true, fast: false });
     expect(checks.find((check: any) => check.id === 'split').detail).toBe('tasks: 2 (not all in 小研, 小文)');
     const result = caseResult(testCase, outcome, checks);
     expect(result).toMatchObject({ status: 'failed', runId: null, usage: { modelCalls: 1, tokens: 120 }, reply: { reply: '在等供应商的密钥' } });
+  });
+  // Review on #238: the eval must read a reply the way the server does, or it passes replies the server refuses or acts on.
+  it('fail a reply the server would refuse, before any other check', () => {
+    const split = loadCases(root, ['chat-group-split'])[0];
+    for (const reply of [{ reply: '已拆分。', tasks: [null, null] }, { reply: '已拆分。', tasks: [{ reason: '没有标题', for: '小研' }, { title: '写说明', for: '小文' }] }]) {
+      const outcome = { chat: { reply, usage: [] }, logs: [], durationMs: 1_000 };
+      const checks = checkRun(split, outcome, deps);
+      expect(checks[0]).toMatchObject({ id: 'reply-format', required: true, passed: false });
+      expect(checks.slice(1).every((check: any) => !check.passed)).toBe(true);
+      expect(caseResult(split, outcome, checks).status).toBe('failed');
+    }
+  });
+  it('count the tasks a reply proposes the way the server does: tasks, else proposeTask', () => {
+    const thanks = loadCases(root, ['chat-dm-thanks'])[0];
+    const proposing = { chat: { reply: { reply: '不客气！', proposeTask: { title: '新建发布报告', for: '小文' } }, usage: [] }, logs: [], durationMs: 1_000 };
+    const checks = checkRun(thanks, proposing, deps);
+    expect(checks.find((check: any) => check.id === 'no-task')).toMatchObject({ passed: false, detail: 'tasks: 1' });
+    expect(caseResult(thanks, proposing, checks).status).toBe('failed');
+    const both = { reply: '好', tasks: [{ title: '查定价', for: '小研' }, { title: '写说明', for: '小文' }], proposeTask: { title: '另一件' } };
+    expect(chatReplyParsers({ replySchema, replyTasks })['team-reply'](both).value.tasks.map((task: any) => task.title)).toEqual(['查定价', '写说明']);
   });
   it('fail every check when no reply came back', () => {
     const testCase = chatCase([{ id: 'fast', kind: 'withinBudget' }]);
     const outcome = { chat: { reply: undefined, usage: [] }, logs: [], error: '回复没有生成', durationMs: 1_000 };
     const checks = checkRun(testCase, outcome, deps);
-    expect(checks[0]).toMatchObject({ passed: false, detail: '回复没有生成' });
+    expect(checks[0]).toMatchObject({ id: 'reply-format', passed: false, detail: '回复没有生成' });
     expect(caseResult(testCase, outcome, checks).status).toBe('error');
   });
 });
