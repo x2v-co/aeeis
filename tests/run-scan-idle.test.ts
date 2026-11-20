@@ -7,6 +7,8 @@ import { FileRunScanCursorStore, RunEventScanner, RunScanIdleGate } from '../src
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { RsiProposalPump } from '../src/rsi-proposal-pump.js';
 import { runWithSignals } from './support/rsi-proposal.js';
+import { CollaborationService, FileCollaborationRepository } from '../src/collaboration-service.js';
+import { CollaborationTriggerService, FileCollaborationTriggerStore } from '../src/collaboration-triggers.js';
 import { scanRun } from './support/run-scan-contract.js';
 
 async function fixture() {
@@ -54,9 +56,10 @@ describe('Run scan idle gate', () => {
         expect(await batch.commit()).toBe(true);
       }
       expect(get).not.toHaveBeenCalled(); expect(scan).not.toHaveBeenCalled(); expect(advance).not.toHaveBeenCalled();
-      // The fallback sweep still runs once the rest expires.
+      // The fallback sweep still runs once the rest expires. Both Runs settled
+      // unchanged, so it reads the scan pages but delivers nothing.
       f.advance(60_000);
-      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_1_1', 'evt_2_0']);
+      expect(await sweep(scanner, f.cursors)).toEqual([]);
       expect(scan).toHaveBeenCalled();
     } finally { await f.close(); }
   });
@@ -86,10 +89,11 @@ describe('Run scan idle gate', () => {
       await sweep(scanner, f.cursors);
       // A change landed mid-sweep, so the next tick sweeps again; that quiet
       // sweep is the one that rests.
-      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_2_0']);
-      expect((await scanner.batch(10)).entries).toEqual([]);
       const scan = vi.spyOn(f.runs, 'scanEventsPage');
-      await scanner.batch(10);
+      expect(await sweep(scanner, f.cursors)).toEqual([]);
+      expect(scan).toHaveBeenCalled();
+      scan.mockClear();
+      expect((await scanner.batch(10)).entries).toEqual([]);
       expect(scan).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
@@ -120,7 +124,8 @@ describe('Run scan idle gate', () => {
       const retry = await scanner.batch(10);
       expect(retry.entries.map(entry => entry.event.id)).toEqual(['evt_1_0']);
       await retry.commit();
-      expect(await sweep(scanner, f.cursors)).toEqual(['evt_2_0']);
+      // Run 2 settled in the earlier sweep and has not changed.
+      expect(await sweep(scanner, f.cursors)).toEqual([]);
       // Only a sweep in which every batch settled rests.
       const scan = vi.spyOn(f.runs, 'scanEventsPage');
       expect((await scanner.batch(10)).entries).toEqual([]);
@@ -168,11 +173,15 @@ describe('Run scan idle gate', () => {
       const before = new RunEventScanner(f.runs, f.cursors, 'idle', 1, { useEventProjection: true, idle: f.gate });
       await (await before.batch(10)).commit();
       // A restarted process cannot know whether changes were missed before it
-      // subscribed, so its first finished sweep is followed by a full one.
+      // subscribed, so its first finished sweep is followed by another one
+      // instead of a rest. Run 1 was handled by the old process, so this one
+      // reads it again; Run 2 settled here and is skipped.
       const after = new RunEventScanner(f.runs, f.cursors, 'idle', 1, { useEventProjection: true, idle: f.gate });
       expect(await sweep(after, f.cursors)).toEqual(['evt_2_0']);
-      expect(await sweep(after, f.cursors)).toEqual(['evt_1_0', 'evt_2_0']);
+      expect(await sweep(after, f.cursors)).toEqual(['evt_1_0']);
+      const scan = vi.spyOn(f.runs, 'scanEventsPage');
       expect((await after.batch(10)).entries).toEqual([]);
+      expect(scan).not.toHaveBeenCalled();
     } finally { await f.close(); }
   });
 
@@ -199,5 +208,139 @@ describe('Run scan idle gate', () => {
       // pump's own writes do not wake the gate and the next pass rests.
       expect((await pump.pump()).inspected).toBe(0);
     } finally { await f.close(); }
+  });
+});
+
+describe('Skipping unchanged Runs', () => {
+  const ids = (batchEntries: Array<{ event: { id: string } }>) => batchEntries.map(entry => entry.event.id);
+
+  it('re-reads a changed Run from its first event and skips the rest', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 2)); await f.runs.create(scanRun(2, 1));
+      f.gate.enable(60_000);
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 1, { useEventProjection: true, idle: f.gate });
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_1_1', 'evt_2_0']);
+      await f.runs.mutate(scanRun(1).id, run => { run.events.push({ ...run.events[0]!, id: 'evt_1_2', seq: 3 }); });
+      f.gate.wake();
+      // The whole changed Run comes back, as before; the unchanged one does not.
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_1_1', 'evt_1_2']);
+    } finally { await f.close(); }
+  });
+
+  it('finishes a quiet sweep in one batch', async () => {
+    const f = await fixture();
+    try {
+      for (let n = 1; n <= 5; n++) await f.runs.create(scanRun(n, 1));
+      f.gate.enable(60_000);
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 1, { useEventProjection: true, idle: f.gate });
+      await sweep(scanner, f.cursors);
+      f.gate.wake();
+      const quiet = await scanner.batch(10);
+      expect(quiet.entries).toEqual([]);
+      await quiet.commit();
+      expect((await f.cursors.get('idle')).cursor).toEqual({});
+    } finally { await f.close(); }
+  });
+
+  it('re-reads every Run after a replay and after the replay interval', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 1)); await f.runs.create(scanRun(2, 1));
+      f.gate.enable(60_000, { replayMs: 1_800_000 });
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 5, { useEventProjection: true, idle: f.gate });
+      await sweep(scanner, f.cursors);
+      f.gate.replay();
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_2_0']);
+      f.advance(60_000);
+      expect(await sweep(scanner, f.cursors)).toEqual([]);
+      f.advance(1_800_000);
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0', 'evt_2_0']);
+    } finally { await f.close(); }
+  });
+
+  it('does not remember a Run split across a restart, nor one from an unsettled batch', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 3)); await f.runs.create(scanRun(2, 1));
+      f.gate.enable(60_000);
+      const before = new RunEventScanner(f.runs, f.cursors, 'idle', 5, { useEventProjection: true, idle: f.gate });
+      const part = await before.batch(1);
+      expect(ids(part.entries)).toEqual(['evt_1_0']);
+      await part.commit();
+      // A new process finishes Run 1, so it cannot know how the first part went.
+      const after = new RunEventScanner(f.runs, f.cursors, 'idle', 5, { useEventProjection: true, idle: f.gate });
+      const rest = await after.batch(10);
+      expect(ids(rest.entries)).toEqual(['evt_1_1', 'evt_1_2', 'evt_2_0']);
+      await rest.commit();
+      // Run 2 settled whole in this process; Run 1 did not, so it is read again.
+      expect(await sweep(after, f.cursors)).toEqual(['evt_1_0', 'evt_1_1', 'evt_1_2']);
+      expect(await sweep(after, f.cursors)).toEqual([]);
+      // An unsettled batch is not remembered either.
+      await f.runs.mutate(scanRun(2).id, run => { run.events.push({ ...run.events[0]!, id: 'evt_2_1', seq: 2 }); });
+      f.gate.wake();
+      const failed = await after.batch(10);
+      expect(ids(failed.entries)).toEqual(['evt_2_0', 'evt_2_1']);
+      await failed.commit({ settled: false });
+      expect(await sweep(after, f.cursors)).toEqual(['evt_2_0', 'evt_2_1']);
+    } finally { await f.close(); }
+  });
+
+  it('never skips while the gate is disabled', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 1));
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 5, { useEventProjection: true, idle: f.gate });
+      await sweep(scanner, f.cursors);
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_1_0']);
+    } finally { await f.close(); }
+  });
+
+  it('keeps a Run whose RSI signal another worker holds', async () => {
+    const f = await fixture();
+    const candidates = new FileEvolutionRepository(join(f.directory, 'evolution')); await candidates.init();
+    const rsi = new RsiService(candidates);
+    let held = true;
+    const claimStore = {
+      claim: vi.fn(async () => held ? { claimed: false as const } : { claimed: true as const, token: 't' }),
+      release: vi.fn(async () => undefined),
+    };
+    try {
+      const run = runWithSignals(); run.events = [run.events[1]!]; await f.runs.create(run);
+      f.gate.enable(60_000);
+      const pump = new RsiProposalPump(f.runs, rsi, { scanCursorStore: f.cursors, scanIdle: f.gate, claimStore });
+      expect((await pump.pump()).skipped).toBe(1);
+      held = false;
+      // Neither rested nor skipped: the held signal comes straight back.
+      expect((await pump.pump()).proposed).toBe(1);
+    } finally { await f.close(); }
+  });
+
+  it('asks for a replay when a trigger policy is created or changed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aeeis-policy-replay-'));
+    try {
+      const repository = new FileCollaborationRepository(join(directory, 'collaboration')); await repository.init();
+      const store = new FileCollaborationTriggerStore(join(directory, 'triggers')); await store.init();
+      const onPoliciesChanged = vi.fn();
+      const triggers = new CollaborationTriggerService(store, new CollaborationService(repository), undefined, { onPoliciesChanged });
+      const scope = { owner: 'owner', tenantId: 'local' };
+      await triggers.createPolicy({ id: 'policy.replay', name: 'Replay', enabled: false, eventTypes: ['review.completed'], action: { type: 'debate', participantAgentIds: ['agent.one', 'agent.two'] } }, scope);
+      expect(onPoliciesChanged).toHaveBeenCalledTimes(1);
+      await triggers.updatePolicy('policy.replay', { enabled: true }, scope);
+      expect(onPoliciesChanged).toHaveBeenCalledTimes(2);
+      const gate = new RunScanIdleGate();
+      const before = gate.replayGeneration; const wakes = gate.generation;
+      gate.replay();
+      expect(gate.replayGeneration).toBe(before + 1);
+      expect(gate.generation).toBe(wakes + 1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('rejects replay intervals outside the supported range', () => {
+    const gate = new RunScanIdleGate();
+    expect(() => gate.enable(60_000, { replayMs: 59_999 })).toThrow(/replay interval/);
+    expect(() => gate.enable(60_000, { replayMs: 86_400_001 })).toThrow(/replay interval/);
+    gate.enable(60_000, { replayMs: 0 });
+    expect(gate.replayMs).toBe(0);
   });
 });

@@ -176,6 +176,10 @@ await runScanCursors.init();
 // below only once the change feed is subscribed.
 const runScanIdle = new RunScanIdleGate();
 const runScanIdleMs = Number(process.env.AEEIS_RUN_SCAN_IDLE_MS ?? 60_000);
+// While resting is on, sweeps skip Runs that settled unchanged; this often they
+// forget that and re-read every Run anyway (0 = only on restart or policy change).
+const runScanReplayMs = Number(process.env.AEEIS_RUN_SCAN_REPLAY_MS ?? 1_800_000);
+if (!Number.isInteger(runScanReplayMs) || (runScanReplayMs !== 0 && (runScanReplayMs < 60_000 || runScanReplayMs > 86_400_000))) throw new Error('AEEIS_RUN_SCAN_REPLAY_MS must be 0 or between 60000 and 86400000 milliseconds');
 if (!Number.isInteger(runScanIdleMs) || (runScanIdleMs !== 0 && (runScanIdleMs < 1000 || runScanIdleMs > 3_600_000))) throw new Error('AEEIS_RUN_SCAN_IDLE_MS must be 0 or between 1000 and 3600000 milliseconds');
 const rsiProposalPump = new RsiProposalPump(repository, rsi, {
   maxSignalsPerPass: Number(process.env.AEEIS_RSI_PROPOSAL_BATCH ?? 100),
@@ -197,7 +201,7 @@ const collaborationTriggerStore = process.env.DATABASE_URL
   : new FileCollaborationTriggerStore(process.env.AEEIS_COLLABORATION_TRIGGERS_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/collaboration-triggers`);
 await collaborationTriggerStore.init();
 const maxDerivationDepth = maxDerivationDepthFromEnv(process.env);
-const collaborationTriggers = new CollaborationTriggerService(collaborationTriggerStore, collaboration, undefined, { maxDerivationDepth });
+const collaborationTriggers = new CollaborationTriggerService(collaborationTriggerStore, collaboration, undefined, { maxDerivationDepth, onPoliciesChanged: () => runScanIdle.replay() });
 const collaborationTriggerPump = new CollaborationTriggerPump(repository, collaborationTriggers, {
   scanCursorStore: runScanCursors,
   scanIdle: runScanIdle,
@@ -793,7 +797,7 @@ try {
   sandboxReaper?.unref();
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
-  const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25, { idle: runScanIdle });
+  const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25, { useEventProjection: true, idle: runScanIdle });
   let boardWork: Promise<void> | undefined;
   const boardPump = () => {
     if (boardWork) return boardWork;
@@ -840,7 +844,7 @@ try {
           trackBackground(rsiWork);
         }
       });
-      if (runScanIdleMs > 0) runScanIdle.enable(runScanIdleMs);
+      if (runScanIdleMs > 0) runScanIdle.enable(runScanIdleMs, { replayMs: runScanReplayMs });
     } catch (error) {
       // Notifications are an optional latency optimization. Startup and the
       // durable polling pumps remain available when LISTEN is unavailable.

@@ -105,6 +105,8 @@ export class RsiProposalPump {
   async drain(): Promise<void> { await this.inFlight; }
   private async runPass(): Promise<RsiProposalPumpResult> {
     const result: RsiProposalPumpResult = { inspected: 0, signalled: 0, proposed: 0, skipped: 0, failed: 0 };
+    // A signal another worker holds has not been handled yet; keep it in the sweep.
+    let contested = false;
     const pending: Array<{ run: AgentRun; event: Event; signal: ImprovementSignal }> = [];
     const append = (run: AgentRun, only?: Event): void => { for (const item of only ? [only] : run.events) {
       result.inspected += 1;
@@ -125,7 +127,7 @@ export class RsiProposalPump {
       try {
         if (this.claimStore) {
           const claim = await this.claimStore.claim(current.signal.id, scope, this.claimLeaseMs);
-          if (!claim.claimed) { result.skipped += 1; continue; }
+          if (!claim.claimed) { result.skipped += 1; contested = true; continue; }
           claimToken = claim.token;
         }
         // Another worker may have finished since list() returned. Re-read
@@ -165,7 +167,7 @@ export class RsiProposalPump {
     }
     // Individual failures are retried next sweep, so one poison signal cannot
     // starve every later Run. A crash before this commit replays the batch.
-    if (batch) await batch.commit({ settled: result.failed === 0 });
+    if (batch) await batch.commit({ settled: result.failed === 0 && !contested });
     this.cursor = (start + count) % pending.length;
     return result;
   }
