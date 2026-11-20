@@ -71,7 +71,7 @@ import { HermesDebateIngress, hermesDebateRouteSchema } from './hermes-debate-in
 import { CollaborationTriggerService, FileCollaborationTriggerStore, PostgresCollaborationTriggerStore } from './collaboration-triggers.js';
 import { CollaborationTriggerPump } from './collaboration-trigger-pump.js';
 import { RsiProposalPump } from './rsi-proposal-pump.js';
-import { RunEventScanner, FileRunScanCursorStore, PostgresRunScanCursorStore, RunScanIdleGate, type RunScanCursorStore } from './run-scan-cursor.js';
+import { RunEventScanner, FileRunScanCursorStore, PostgresRunScanCursorStore, RunScanIdleGate, RunScanIdlePass, type RunScanCursorStore } from './run-scan-cursor.js';
 import { FileRsiProposalClaimStore, PostgresRsiProposalClaimStore, type RsiProposalClaimStore } from './rsi-proposal-claims.js';
 import { DurableRsiProposalSynthesis, HttpRsiProposalSynthesizer } from './rsi-proposal-synthesizer.js';
 import { defaultRsiEvaluationSuite, RsiAutomationPump, type RsiAutomationOptions } from './rsi-automation.js';
@@ -798,6 +798,8 @@ try {
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
   const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25, { useEventProjection: true, idle: runScanIdle });
+  const boardScanPass = new RunScanIdlePass(runScanIdle);
+  const boardRecoveryPass = new RunScanIdlePass(runScanIdle);
   let boardWork: Promise<void> | undefined;
   const boardPump = () => {
     if (boardWork) return boardWork;
@@ -805,7 +807,11 @@ try {
       const batch = await boardScanner.batch(100);
       const scopes = new Map(batch.entries.map(({ run }) => [JSON.stringify([run.tenantId ?? 'local',run.owner]),{ tenantId: run.tenantId ?? 'local',owner: run.owner }]));
       for (const scope of scopes.values()) await app.aeeisBoardRecover?.(scope);
-      await app.aeeisBoardScan?.(); await app.aeeisBoard?.pump(); await batch.commit();
+      // The relation scan and board recovery read every conversation and Room
+      // board in full; they rest with the Run scanners while nothing changes.
+      await boardScanPass.run(async () => await app.aeeisBoardScan?.() ?? true);
+      await boardRecoveryPass.run(async () => await app.aeeisBoard?.pump() ?? true);
+      await batch.commit();
     })().catch(error => console.error('AEEIS task board recovery failed', error instanceof Error ? error.message : error)).finally(() => { boardWork = undefined; });
     return boardWork;
   };

@@ -142,10 +142,14 @@ export class ChannelBoardService {
 
   private discoveryAfter: string | undefined;
   private scanAfter: string | undefined;
-  private pumping: Promise<void> | undefined;
+  private pumping: Promise<boolean> | undefined;
+  /** Whether each inventory reached its end since the current pass began. */
+  private discoveryWrapped = false;
+  private scanWrapped = false;
   /** API-process recovery: bounded relation inventory; changefeed is a wake hint.
-   * All Run snapshots are loaded outside Run locks, including delayed events. */
-  pump(): Promise<void> {
+   * All Run snapshots are loaded outside Run locks, including delayed events.
+   * Resolves true when this step finished a pass over both inventories. */
+  pump(): Promise<boolean> {
     if (this.pumping) return this.pumping;
     const work = async () => {
       const discovery = await this.events.boardRoomsPage(this.discoveryAfter);
@@ -156,6 +160,10 @@ export class ChannelBoardService {
         catch (error) { if (!(error instanceof AeeisNotFound)) throw error; }
       }
       this.scanAfter = page.next; this.discoveryAfter = discovery.next;
+      this.scanWrapped ||= page.next === undefined; this.discoveryWrapped ||= discovery.next === undefined;
+      if (!this.scanWrapped || !this.discoveryWrapped) return false;
+      this.scanWrapped = false; this.discoveryWrapped = false;
+      return true;
     };
     this.pumping = work().finally(() => { this.pumping = undefined; }); return this.pumping;
   }

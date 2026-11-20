@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileRunRepository } from '../src/runtime/repository.js';
-import { FileRunScanCursorStore, RunEventScanner, RunScanIdleGate } from '../src/run-scan-cursor.js';
+import { FileRunScanCursorStore, RunEventScanner, RunScanIdleGate, RunScanIdlePass } from '../src/run-scan-cursor.js';
 import { FileEvolutionRepository, RsiService } from '../src/rsi.js';
 import { RsiProposalPump } from '../src/rsi-proposal-pump.js';
 import { runWithSignals } from './support/rsi-proposal.js';
@@ -342,5 +342,59 @@ describe('Skipping unchanged Runs', () => {
     expect(() => gate.enable(60_000, { replayMs: 86_400_001 })).toThrow(/replay interval/);
     gate.enable(60_000, { replayMs: 0 });
     expect(gate.replayMs).toBe(0);
+  });
+});
+
+describe('Idle passes outside the Run scanners', () => {
+  function pass() {
+    let now = 1_000_000;
+    const gate = new RunScanIdleGate(() => now);
+    return { gate, idle: new RunScanIdlePass(gate), advance(ms: number) { now += ms; } };
+  }
+
+  it('rests after a quiet whole pass and resumes after the rest or on a change', async () => {
+    const p = pass(); p.gate.enable(60_000);
+    const step = vi.fn(async () => true);
+    expect(await p.idle.run(step)).toBe(true);
+    expect(await p.idle.run(step)).toBe(false);
+    p.advance(59_999); expect(await p.idle.run(step)).toBe(false);
+    p.advance(1); expect(await p.idle.run(step)).toBe(true);
+    expect(await p.idle.run(step)).toBe(false);
+    p.gate.wake(); expect(await p.idle.run(step)).toBe(true);
+    expect(step).toHaveBeenCalledTimes(3);
+  });
+
+  it('rests only once a multi-step pass finishes', async () => {
+    const p = pass(); p.gate.enable(60_000);
+    const steps = [false, false, true];
+    const step = vi.fn(async () => steps.shift() ?? true);
+    for (let i = 0; i < 3; i++) expect(await p.idle.run(step)).toBe(true);
+    expect(await p.idle.run(step)).toBe(false);
+  });
+
+  it('does not rest after a pass during which a Run changed', async () => {
+    const p = pass(); p.gate.enable(60_000);
+    expect(await p.idle.run(async () => false)).toBe(true);
+    p.gate.wake();
+    expect(await p.idle.run(async () => true)).toBe(true);
+    // That pass saw a change, so the next one runs; it is quiet and rests.
+    expect(await p.idle.run(async () => true)).toBe(true);
+    expect(await p.idle.run(async () => true)).toBe(false);
+  });
+
+  it('does not rest after a pass with a failed step, and rethrows the failure', async () => {
+    const p = pass(); p.gate.enable(60_000);
+    await expect(p.idle.run(async () => { throw new Error('board unavailable'); })).rejects.toThrow('board unavailable');
+    expect(await p.idle.run(async () => true)).toBe(true);
+    expect(await p.idle.run(async () => true)).toBe(true);
+    expect(await p.idle.run(async () => true)).toBe(false);
+  });
+
+  it('never rests while the gate is disabled', async () => {
+    const p = pass();
+    for (let i = 0; i < 3; i++) expect(await p.idle.run(async () => true)).toBe(true);
+    p.gate.enable(60_000); await p.idle.run(async () => true);
+    p.gate.disable();
+    expect(await p.idle.run(async () => true)).toBe(true);
   });
 });
