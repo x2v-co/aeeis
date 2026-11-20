@@ -634,6 +634,14 @@ export class PostgresRunRepository implements RunRepository {
       await client.query(threadsMigration);
       await client.query(threadFollowupsMigration);
       await client.query(threadSharesMigration);
+      // Stored copies of what the event scan pages need, so listing Runs does
+      // not decompress every Run's whole state. Postgres keeps them in step
+      // with `state` on every write.
+      await client.query(`ALTER TABLE aeeis_runs
+        ADD COLUMN IF NOT EXISTS scan_owner text GENERATED ALWAYS AS (COALESCE(state->>'owner', 'owner')) STORED,
+        ADD COLUMN IF NOT EXISTS scan_tenant_id text GENERATED ALWAYS AS (COALESCE(state->>'tenantId', 'local')) STORED,
+        ADD COLUMN IF NOT EXISTS scan_event_count integer GENERATED ALWAYS AS (jsonb_array_length(COALESCE(state->'events', '[]'::jsonb))) STORED,
+        ADD COLUMN IF NOT EXISTS scan_last_event_seq integer GENERATED ALWAYS AS (COALESCE((state->'events'->-1->>'seq')::integer, 0)) STORED`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_owner_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')))`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (COALESCE(state->>'owner', 'owner')), updated_at DESC, id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS aeeis_runs_shared_recent_idx ON aeeis_runs ((COALESCE(state->>'tenantId', 'local')), (state->>'goalId'), updated_at DESC, id) WHERE COALESCE(state->>'privacy', 'internal') IN ('public', 'internal')`);
@@ -987,11 +995,8 @@ export class PostgresRunRepository implements RunRepository {
     const throughId = query.throughId ?? (await this.pool.query<{ id: string }>('SELECT id FROM aeeis_runs ORDER BY id DESC LIMIT 1')).rows[0]?.id;
     if (!throughId) return { runs: [], done: true };
     const result = await this.pool.query<{ id: string; owner: string; tenant_id: string; event_count: number; last_event_seq: number }>(
-      `SELECT id,
-              COALESCE(state->>'owner', 'owner') AS owner,
-              COALESCE(state->>'tenantId', 'local') AS tenant_id,
-              jsonb_array_length(COALESCE(state->'events', '[]'::jsonb)) AS event_count,
-              COALESCE((state->'events'->-1->>'seq')::integer, 0) AS last_event_seq
+      `SELECT id, scan_owner AS owner, scan_tenant_id AS tenant_id,
+              scan_event_count AS event_count, scan_last_event_seq AS last_event_seq
          FROM aeeis_runs
         WHERE id > $1 AND id <= $2
         ORDER BY id ASC

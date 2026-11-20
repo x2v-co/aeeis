@@ -87,7 +87,7 @@ import type { HostWait, MachineView } from '../docker-sandbox.js';
 import { runMetrics } from './run-metrics.js';
 import { previewServerFactory, type PreviewProxy } from '../preview-proxy.js';
 
-declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<void>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<boolean>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
 interface RunComputer {
   observe(runId: string, live: boolean): Promise<MachineView>;
@@ -2620,11 +2620,13 @@ export function buildApp(options: Options) {
   if (routines) app.decorate('aeeisRoutines', routines);
   app.decorate('aeeisBoard', channelBoard);
   let boardConversationAfter: string | undefined;
+  /** One page of the conversation relation scan; true when it finished a whole pass. */
   app.decorate('aeeisBoardScan', async () => {
     const page = await options.conversationStore?.scanPage?.(boardConversationAfter,25);
-    if (!page) return;
+    if (!page) return true;
     for (const current of page.items) await registerTaskRelations(current.id,{ owner: current.owner,tenantId: current.tenantId });
     boardConversationAfter = page.next;
+    return page.next === undefined;
   });
   app.decorate('aeeisBoardRecover', async (scope: Ownership) => {
     if (!dialogues || !channelBoard) return;

@@ -141,6 +141,45 @@ export class RunScanIdleGate {
   get clock(): number { return this.now(); }
 }
 
+/** A repeating paged pass outside the Run scanners (for example the task
+ * board's recovery loops) that rests the same way: once a whole cycle started
+ * and finished with no Run change and no failure, calls are skipped until the
+ * rest ends or a change arrives. A disabled gate never rests. */
+export class RunScanIdlePass {
+  private cycleGeneration: number | undefined;
+  private cycleFailed = false;
+  private restUntil = 0;
+  private restGeneration = -1;
+  constructor(private readonly gate: RunScanIdleGate) {}
+  /** Whether to run a step now. */
+  begin(): boolean {
+    const gate = this.gate;
+    if (gate.restMs > 0 && gate.generation === this.restGeneration && gate.clock < this.restUntil) return false;
+    this.restUntil = 0;
+    if (this.cycleGeneration === undefined) { this.cycleGeneration = gate.generation; this.cycleFailed = false; }
+    return true;
+  }
+  /** After a step that `begin()` allowed; `cycleDone` when it finished a whole pass. */
+  end(outcome: { ok: boolean; cycleDone: boolean }): void {
+    if (!outcome.ok) this.cycleFailed = true;
+    if (!outcome.cycleDone) return;
+    const gate = this.gate;
+    if (gate.restMs > 0 && !this.cycleFailed && this.cycleGeneration === gate.generation) {
+      this.restUntil = gate.clock + gate.restMs;
+      this.restGeneration = gate.generation;
+    }
+    this.cycleGeneration = undefined;
+  }
+  /** Runs `step` unless resting; returns false when it rested. */
+  async run(step: () => Promise<boolean>): Promise<boolean> {
+    if (!this.begin()) return false;
+    let ok = false; let cycleDone = false;
+    try { cycleDone = await step(); ok = true; }
+    finally { this.end({ ok, cycleDone }); }
+    return true;
+  }
+}
+
 export interface RunEventScannerOptions {
   /** Read the bounded event projection and load full Run state only for Runs
    * that actually contain events. The canonical Run remains authoritative. */
