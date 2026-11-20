@@ -71,7 +71,7 @@ import { HermesDebateIngress, hermesDebateRouteSchema } from './hermes-debate-in
 import { CollaborationTriggerService, FileCollaborationTriggerStore, PostgresCollaborationTriggerStore } from './collaboration-triggers.js';
 import { CollaborationTriggerPump } from './collaboration-trigger-pump.js';
 import { RsiProposalPump } from './rsi-proposal-pump.js';
-import { RunEventScanner, FileRunScanCursorStore, PostgresRunScanCursorStore, type RunScanCursorStore } from './run-scan-cursor.js';
+import { RunEventScanner, FileRunScanCursorStore, PostgresRunScanCursorStore, RunScanIdleGate, type RunScanCursorStore } from './run-scan-cursor.js';
 import { FileRsiProposalClaimStore, PostgresRsiProposalClaimStore, type RsiProposalClaimStore } from './rsi-proposal-claims.js';
 import { DurableRsiProposalSynthesis, HttpRsiProposalSynthesizer } from './rsi-proposal-synthesizer.js';
 import { defaultRsiEvaluationSuite, RsiAutomationPump, type RsiAutomationOptions } from './rsi-automation.js';
@@ -172,12 +172,18 @@ const runScanCursors: RunScanCursorStore = process.env.DATABASE_URL
   ? new PostgresRunScanCursorStore(process.env.DATABASE_URL)
   : new FileRunScanCursorStore(process.env.AEEIS_RUN_SCAN_CURSOR_PATH ?? `${process.env.AEEIS_DATA_DIR ?? 'data/runs'}/run-scan-cursors.json`);
 await runScanCursors.init();
+// Scanners rest after a quiet sweep and wake on Run change hints; enabled
+// below only once the change feed is subscribed.
+const runScanIdle = new RunScanIdleGate();
+const runScanIdleMs = Number(process.env.AEEIS_RUN_SCAN_IDLE_MS ?? 60_000);
+if (!Number.isInteger(runScanIdleMs) || (runScanIdleMs !== 0 && (runScanIdleMs < 1000 || runScanIdleMs > 3_600_000))) throw new Error('AEEIS_RUN_SCAN_IDLE_MS must be 0 or between 1000 and 3600000 milliseconds');
 const rsiProposalPump = new RsiProposalPump(repository, rsi, {
   maxSignalsPerPass: Number(process.env.AEEIS_RSI_PROPOSAL_BATCH ?? 100),
   lowConfidenceThreshold: Number(process.env.AEEIS_RSI_LOW_CONFIDENCE_THRESHOLD ?? 0.5),
   claimLeaseMs: Number(process.env.AEEIS_RSI_PROPOSAL_CLAIM_LEASE_MS ?? 30_000),
   claimStore: rsiProposalClaims,
   scanCursorStore: runScanCursors,
+  scanIdle: runScanIdle,
   onError: (error, run, event) => console.error('AEEIS RSI proposal pump failed', { runId: run.id, eventId: event.id, error: error instanceof Error ? error.message : error }),
 });
 let rsiProposalSynthesis: DurableRsiProposalSynthesis | undefined;
@@ -194,6 +200,7 @@ const maxDerivationDepth = maxDerivationDepthFromEnv(process.env);
 const collaborationTriggers = new CollaborationTriggerService(collaborationTriggerStore, collaboration, undefined, { maxDerivationDepth });
 const collaborationTriggerPump = new CollaborationTriggerPump(repository, collaborationTriggers, {
   scanCursorStore: runScanCursors,
+  scanIdle: runScanIdle,
   scanCursorName: 'collaboration-trigger-pump',
   onError: (error, run, event) => console.error('AEEIS collaboration trigger pump failed', { runId: run.id, eventId: event.id, error: error instanceof Error ? error.message : error }),
 });
@@ -786,7 +793,7 @@ try {
   sandboxReaper?.unref();
   const projectionPump = setInterval(() => { if (!closing) trackBackground(runProjectionPump()); }, 1000);
   projectionPump.unref();
-  const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25);
+  const boardScanner = new RunEventScanner(repository, runScanCursors, 'task-board-controls', 25, { idle: runScanIdle });
   let boardWork: Promise<void> | undefined;
   const boardPump = () => {
     if (boardWork) return boardWork;
@@ -822,6 +829,7 @@ try {
     try {
       unsubscribeRunChanges = await repository.subscribeChanges(() => {
         if (closing) return;
+        runScanIdle.wake();
         if (Date.now() - lastChangeWakeAt < 250) return;
         lastChangeWakeAt = Date.now();
         trackBackground(boardPump());
@@ -832,6 +840,7 @@ try {
           trackBackground(rsiWork);
         }
       });
+      if (runScanIdleMs > 0) runScanIdle.enable(runScanIdleMs);
     } catch (error) {
       // Notifications are an optional latency optimization. Startup and the
       // durable polling pumps remain available when LISTEN is unavailable.

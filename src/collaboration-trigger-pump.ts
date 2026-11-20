@@ -1,6 +1,6 @@
 import type { AgentRun, Event } from './runtime/contracts.js';
 import type { RunRepository } from './runtime/repository.js';
-import { RunEventScanner, type RunScanCursorStore } from './run-scan-cursor.js';
+import { RunEventScanner, type RunScanCursorStore, type RunScanIdleGate } from './run-scan-cursor.js';
 import { lineageOf, type DerivationBlock } from './lineage.js';
 import { event as runEvent } from './runtime/engine.js';
 import {
@@ -92,6 +92,8 @@ export interface CollaborationTriggerPumpOptions {
   maxEventsPerPass?: number;
   scanCursorStore?: RunScanCursorStore;
   scanCursorName?: string;
+  /** Pauses sweeps while no Run changes; see RunScanIdleGate. */
+  scanIdle?: RunScanIdleGate;
   scanPageSize?: number;
   onError?: (error: unknown, run: AgentRun, event: Event) => void;
 }
@@ -113,7 +115,7 @@ export class CollaborationTriggerPump {
     if (!Number.isInteger(this.maxEventsPerPass) || this.maxEventsPerPass < 1 || this.maxEventsPerPass > 1000) throw new Error('maxEventsPerPass must be between 1 and 1000');
     this.onError = options.onError ?? (() => undefined);
     this.scanner = options.scanCursorStore && this.repository.scanPage
-      ? new RunEventScanner(this.repository, options.scanCursorStore, options.scanCursorName ?? 'collaboration-trigger-pump', options.scanPageSize ?? 25, { useEventProjection: true })
+      ? new RunEventScanner(this.repository, options.scanCursorStore, options.scanCursorName ?? 'collaboration-trigger-pump', options.scanPageSize ?? 25, { useEventProjection: true, ...(options.scanIdle ? { idle: options.scanIdle } : {}) })
       : undefined;
   }
 
@@ -159,7 +161,7 @@ export class CollaborationTriggerPump {
         if (!event) continue;
         pending.push({ run, item, event });
       }
-      if (pending.length === 0) { if (scanned) await scanned.commit(); return { evaluated, failed }; }
+      if (pending.length === 0) { if (scanned) await scanned.commit({ settled: failed === 0 }); return { evaluated, failed }; }
       const start = this.cursor % pending.length;
       const count = Math.min(this.maxEventsPerPass, pending.length);
       for (let offset = 0; offset < count; offset += 1) {
@@ -173,7 +175,7 @@ export class CollaborationTriggerPump {
           this.onError(error, current.run, current.item);
         }
       }
-      if (scanned) await scanned.commit();
+      if (scanned) await scanned.commit({ settled: failed === 0 });
       this.cursor = (start + count) % pending.length;
     } finally {
       this.busy = false;
