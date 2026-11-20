@@ -105,6 +105,48 @@ describe('Run scan idle gate', () => {
     } finally { await f.close(); }
   });
 
+  it('does not rest when an earlier batch failed and the last one settled', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 1)); await f.runs.create(scanRun(2, 1));
+      f.gate.enable(60_000);
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 1, { useEventProjection: true, idle: f.gate });
+      const failed = await scanner.batch(10);
+      expect(failed.entries.map(entry => entry.event.id)).toEqual(['evt_1_0']);
+      await failed.commit({ settled: false });
+      // The rest of the sweep settles, including its final batch.
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_2_0']);
+      // The failed event is retried on the next tick, not after the rest.
+      const retry = await scanner.batch(10);
+      expect(retry.entries.map(entry => entry.event.id)).toEqual(['evt_1_0']);
+      await retry.commit();
+      expect(await sweep(scanner, f.cursors)).toEqual(['evt_2_0']);
+      // Only a sweep in which every batch settled rests.
+      const scan = vi.spyOn(f.runs, 'scanEventsPage');
+      expect((await scanner.batch(10)).entries).toEqual([]);
+      expect(scan).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
+  it('does not rest when one Run was split across batches and its first part failed', async () => {
+    const f = await fixture();
+    try {
+      await f.runs.create(scanRun(1, 3));
+      f.gate.enable(60_000);
+      const scanner = new RunEventScanner(f.runs, f.cursors, 'idle', 5, { useEventProjection: true, idle: f.gate });
+      const seen: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const batch = await scanner.batch(1);
+        seen.push(...batch.entries.map(entry => entry.event.id));
+        await batch.commit({ settled: i !== 0 });
+      }
+      expect(seen).toEqual(['evt_1_0', 'evt_1_1', 'evt_1_2']);
+      expect((await f.cursors.get('idle')).cursor).toEqual({});
+      const retry = await scanner.batch(1);
+      expect(retry.entries.map(entry => entry.event.id)).toEqual(['evt_1_0']);
+    } finally { await f.close(); }
+  });
+
   it('sweeps continuously while the gate is disabled', async () => {
     const f = await fixture();
     try {

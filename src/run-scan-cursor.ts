@@ -141,6 +141,8 @@ export class RunEventScanner {
   /** Gate generation when the current sweep started from an empty cursor;
    * undefined after a restart mid-sweep, so that sweep never rests. */
   private sweepGeneration: number | undefined;
+  /** Any batch of the current sweep failed; cleared only when a new sweep starts. */
+  private sweepUnsettled = false;
   private restUntil = 0;
   private restGeneration = -1;
   constructor(private readonly repository: RunRepository, private readonly store: RunScanCursorStore, private readonly name: string, private readonly pageSize = 25, private readonly options: RunEventScannerOptions = {}) {
@@ -158,7 +160,7 @@ export class RunEventScanner {
     this.restUntil = 0;
     const checkpoint = await this.store.get(this.name);
     const previous = checkpoint.cursor;
-    if (!previous.afterId && !previous.throughId && !previous.resume) this.sweepGeneration = gate?.generation;
+    if (!previous.afterId && !previous.throughId && !previous.resume) { this.sweepGeneration = gate?.generation; this.sweepUnsettled = false; }
     const projection = this.options.useEventProjection;
     const page = projection
       ? await this.repository.scanEventsPage!({
@@ -223,15 +225,17 @@ export class RunEventScanner {
     return {
       entries,
       commit: async (options = {}) => {
+        if (options.settled === false) this.sweepUnsettled = true;
         const advanced = await this.store.advance(this.name, checkpoint.revision, next);
         if (advanced && finished) {
           // Rest only when nothing changed since this sweep began and every
-          // entry settled; otherwise the next tick starts a fresh sweep.
-          if (gate && gate.restMs > 0 && options.settled !== false && this.sweepGeneration !== undefined && this.sweepGeneration === gate.generation) {
+          // batch of it settled; otherwise the next tick starts a fresh sweep.
+          if (gate && gate.restMs > 0 && !this.sweepUnsettled && this.sweepGeneration !== undefined && this.sweepGeneration === gate.generation) {
             this.restUntil = gate.clock + gate.restMs;
             this.restGeneration = gate.generation;
           }
           this.sweepGeneration = undefined;
+          this.sweepUnsettled = false;
         }
         return advanced;
       },
