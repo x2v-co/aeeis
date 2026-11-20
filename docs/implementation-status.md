@@ -477,3 +477,7 @@ AEEIS 现在支持 Web、CLI、桌面或移动端共享同一 Principal 的设�
 验证覆盖滑动窗口第 6/7 条、并发、窗口恢复、摘要间隔与空队列、频率范围、JSON 与 PostgreSQL 重启、多个进程并发 pump、受众分组、跨午夜/时区/DST、三个推送通道的非紧急抑制和审批豁免、群主/成员/跨租户权限、热闹限流、前端保存设置与展开摘要。PostgreSQL 使用非表主应用角色验证新表的租户隔离。
 
 最终验证：`npm run verify` 通过（2798 passed / 144 skipped）；按指定本机数据库运行 `AEEIS_VERIFY_POSTGRES=1 AEEIS_TEST_DATABASE_URL=postgresql://aeeis@127.0.0.1:55434/aeeis npm run verify` 通过（串行 2932 passed / 10 skipped，PostgreSQL 专项 33 个文件、138 个测试通过）。两次的 typecheck 与 build 均通过，`git diff --check` 通过。
+
+### 2026-11-20：计划并行度测量
+
+Run 进入 `succeeded` 或 `failed` 后，引擎为最新计划版本记一条 `plan.parallelism` 事件（每个计划 hash 一次，失败只打日志，不影响 Run）：任务数、无依赖任务数、同一依赖层最多的任务数（`width`）、各任务耗时之和（`serialMs`，每个任务取第一次执行调用开始到最后一次执行调用结束）、按依赖计算的最长链（`criticalPathMs`）和两者之差（`savableMs`，即同时执行独立任务最多能省的时间）。有任务没跑过时后两项为 `null`。这些字段不含用户内容，在 `aeeis_run_events.data` 里与加密副本并存，可以直接用 SQL 统计；其他事件仍整体加密，后台补加密也按同样规则处理。用途见 `docs/design/2026-11-20-parallel-task-execution.md` 第 5 节。

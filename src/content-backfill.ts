@@ -4,6 +4,7 @@ import { sealConversation } from './adapters/conversation-store.js';
 import { sealMemory } from './adapters/postgres-store.js';
 import { contentEncryption, isSealed, sealAggregate, SEALED } from './content-encryption.js';
 import { sealRun } from './runtime/repository.js';
+import { runEventPlain } from './runtime/plan-parallelism.js';
 import { sealEvent } from './session-events.js';
 import { brainStateSchema } from './brain.js';
 
@@ -28,7 +29,7 @@ const TARGETS: Target[] = [
   { table: 'aeeis_conversations', column: 'state', seal: value => sealConversation(value) },
   { table: 'aeeis_session_events', column: 'state', seal: value => sealEvent(value) },
   { table: 'aeeis_memories', column: 'state', seal: value => sealMemory(value) },
-  { table: 'aeeis_run_events', column: 'data', select: 'tenant_id, event_id', seal: (value, row) => sealAggregate('run-event', row.tenant_id, row.event_id, value) },
+  { table: 'aeeis_run_events', column: 'data', select: 'tenant_id, event_id, type', seal: (value, row) => sealAggregate('run-event', row.tenant_id, row.event_id, value, data => runEventPlain(row.type, data)) },
   { table: 'aeeis_thread_followups', column: 'request', select: 'f.thread_id, f.key_hash, t.tenant_id', from: 'aeeis_thread_followups f JOIN aeeis_threads t ON t.id = f.thread_id', seal: (value, row) => sealAggregate('followup-request', row.tenant_id, `${row.thread_id}:${row.key_hash}`, value) },
   { table: 'aeeis_thread_followups', column: 'context_snapshot', select: 'f.thread_id, f.key_hash, t.tenant_id', from: 'aeeis_thread_followups f JOIN aeeis_threads t ON t.id = f.thread_id', seal: (value, row) => sealAggregate('followup-context', row.tenant_id, `${row.thread_id}:${row.key_hash}`, value) },
 ];

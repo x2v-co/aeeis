@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { principalAudience, validatePrincipal, type Ownership } from '../security/principal.js';
 import { approvalBudgetsSchema, approvePlanSchema, editPlanSchema, revisePlanSchema, decisionSchema, projectPulseArtifactSchema, requestSchema, reviewSchema, normalizeModelJson, validatePlan, websiteBuilderArtifactSchema, fillablePdfArtifactSchema } from './contracts.js';
+import { PLAN_PARALLELISM_EVENT, planParallelism } from './plan-parallelism.js';
 import { automaticReviewCanClear, directApprovalReason, directPlanDraft, planningDecision, planningRefusal } from './planning-shape.js';
 import { actionRef, approveActionSchema, decideAction, normalizeActionPolicy, withActionDecision, type ActionCandidate, type ActionVerdict } from './action-policy.js';
 import { actionPolicyDigest, frozenRunPolicy, type ActionPolicyStore } from '../action-policy-store.js';
@@ -1966,6 +1967,7 @@ export class AgentEngine {
     } finally {
       this.active.delete(runId);
       await this.recordSkillOutcome(runId);
+      await this.recordPlanParallelism(runId);
     }
     return (await this.repository.get(runId)).status;
   }
@@ -4210,6 +4212,21 @@ export class AgentEngine {
     } };
   }
 
+  /** Measurement only (docs/design/2026-11-20-parallel-task-execution.md): never fails the Run. */
+  private async recordPlanParallelism(runId: string): Promise<void> {
+    const recorded = (run: AgentRun) => !['succeeded', 'failed'].includes(run.status) || !run.plans.at(-1)
+      || run.events.some(item => item.type === PLAN_PARALLELISM_EVENT && item.data.planHash === run.plans.at(-1)!.hash);
+    try {
+      if (recorded(await this.repository.get(runId))) return;
+      await this.repository.mutate(runId, current => {
+        if (recorded(current)) return;
+        const measured = planParallelism(current);
+        if (measured) event(current, PLAN_PARALLELISM_EVENT, { ...measured });
+      });
+    } catch (error) {
+      console.error('AEEIS plan parallelism measurement failed', runId, error instanceof Error ? error.message : error);
+    }
+  }
   private async recordSkillOutcome(runId: string): Promise<void> {
     if (!this.skills) return;
     const run = await this.repository.get(runId);
