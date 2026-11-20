@@ -11,7 +11,7 @@ const at = (seconds: number) => new Date(Date.UTC(2026, 10, 20, 0, 0, seconds)).
 function shaped(nodes: Array<{ id: string; dependsOn: string[] }>, calls: Array<[taskId: string, start: number, end: number]>): AgentRun {
   return {
     status: 'succeeded',
-    plans: [{ version: 2, hash: 'h'.repeat(64), createdAt: at(0), summary: 'plan', nodes: nodes.map(node => ({ ...node, title: node.id, instruction: node.id })) }],
+    plans: [{ version: 2, hash: 'h'.repeat(64), createdAt: at(0), modelCallOffset: 1, summary: 'plan', nodes: nodes.map(node => ({ ...node, title: node.id, instruction: node.id })) }],
     calls: [
       { id: 'model_plan', phase: 'planner', state: 'completed', inputHash: 'x', startedAt: at(0), endedAt: at(500) },
       ...calls.map(([taskId, start, end], index) => ({ id: `model_${index}`, phase: 'executor', taskId, state: 'completed', inputHash: 'x', startedAt: at(start), endedAt: at(end) })),
@@ -41,6 +41,20 @@ describe('plan parallelism measurement', () => {
   it('leaves the critical path unknown when a task never ran', () => {
     const run = shaped([{ id: 'a', dependsOn: [] }, { id: 'b', dependsOn: [] }], [['a', 0, 30]]);
     expect(planParallelism(run)).toMatchObject({ tasks: 2, width: 2, measuredTasks: 1, serialMs: 30_000, criticalPathMs: null, savableMs: null });
+  });
+
+  it('ignores calls made under an earlier plan version, even for reused task IDs', () => {
+    const nodes = [{ id: 'a', dependsOn: [] }, { id: 'b', dependsOn: [] }];
+    const run = shaped(nodes, [['a', 0, 10], ['b', 10, 20], ['a', 100, 110], ['b', 110, 120]]);
+    // Calls 0–2 (planner, old a, old b) belong to version 1; version 2 starts at call 3.
+    run.plans = [{ ...run.plans[0]!, version: 1 }, { ...run.plans[0]!, version: 2, modelCallOffset: 3 }];
+    expect(planParallelism(run)).toMatchObject({ planVersion: 2, measuredTasks: 2, serialMs: 20_000, criticalPathMs: 10_000, savableMs: 10_000 });
+  });
+
+  it('does not count a reused task as measured when only the old plan ran it', () => {
+    const run = shaped([{ id: 'a', dependsOn: [] }, { id: 'b', dependsOn: [] }], [['a', 0, 10], ['b', 10, 20], ['a', 100, 110]]);
+    run.plans = [{ ...run.plans[0]!, version: 1 }, { ...run.plans[0]!, version: 2, modelCallOffset: 3 }];
+    expect(planParallelism(run)).toMatchObject({ measuredTasks: 1, serialMs: 10_000, criticalPathMs: null, savableMs: null });
   });
 
   it('keeps only the measurement numbers readable next to the encrypted event', async () => {

@@ -1,4 +1,5 @@
 import type { AgentRun } from './contracts.js';
+import { nodeModelCalls } from './execution-limits.js';
 
 /**
  * How much a finished Run's plan could have gained from running independent
@@ -18,7 +19,7 @@ export interface PlanParallelism {
   roots: number;
   /** Most tasks at one dependency depth: how many could run at once. */
   width: number;
-  /** Tasks whose time is known: they have at least one finished executor call. */
+  /** Tasks whose time is known: they have at least one finished executor call under this plan version. */
   measuredTasks: number;
   /** Sum of task times, first executor call start to last executor call end. */
   serialMs: number;
@@ -31,13 +32,14 @@ export interface PlanParallelism {
 export function planParallelism(run: AgentRun): PlanParallelism | undefined {
   const plan = run.plans.at(-1);
   if (!plan?.nodes.length) return undefined;
+  // Only this plan version's calls: a replan keeps earlier calls and may reuse task IDs.
   const span = new Map<string, { start: number; end: number }>();
-  for (const call of run.calls) {
-    if (call.phase !== 'executor' || !call.taskId || !call.endedAt) continue;
+  for (const node of plan.nodes) for (const call of nodeModelCalls(run, node.id)) {
+    if (!call.endedAt) continue;
     const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
-    const current = span.get(call.taskId);
-    span.set(call.taskId, current ? { start: Math.min(current.start, start), end: Math.max(current.end, end) } : { start, end });
+    const current = span.get(node.id);
+    span.set(node.id, current ? { start: Math.min(current.start, start), end: Math.max(current.end, end) } : { start, end });
   }
   const nodes = new Map(plan.nodes.map(node => [node.id, node]));
   const duration = (id: string) => { const value = span.get(id); return value ? value.end - value.start : 0; };
