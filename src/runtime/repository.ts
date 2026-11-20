@@ -6,6 +6,7 @@ import { isOwnedBy, type Ownership } from '../security/principal.js';
 import { FileRunShareStore, PostgresRunShareStore, runSharesMigration, type RunShareStore } from './run-shares.js';
 import { FileThreadShareStore, PostgresThreadShareStore, threadSharesMigration, type ThreadShareStore } from './thread-shares.js';
 import type { AgentRun } from './contracts.js';
+import { runEventPlain } from './plan-parallelism.js';
 import { withPostgresMigrationLock } from '../adapters/postgres-migration.js';
 import { scopedRecent, validateCollectionLimit } from '../adapters/collection-query.js';
 import { assertFollowupParent, assertMembershipUnchanged, assertUnthreaded, prepareAttachment, threadSchema, threadsMigration, ThreadConflict, validateThreadSequence, type Thread, type ThreadRepository } from './threads.js';
@@ -679,7 +680,7 @@ export class PostgresRunRepository implements RunRepository {
   }
   private async insertEvents(client: pg.PoolClient, run: AgentRun, from: number): Promise<void> {
     for (const item of run.events.slice(from)) {
-      await client.query('INSERT INTO aeeis_run_events(run_id,seq,event_id,type,at,data,owner,tenant_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING', [run.id, item.seq, item.id, item.type, item.at, await sealAggregate('run-event', run.tenantId, item.id, item.data), run.owner ?? 'owner', run.tenantId ?? 'local']);
+      await client.query('INSERT INTO aeeis_run_events(run_id,seq,event_id,type,at,data,owner,tenant_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING', [run.id, item.seq, item.id, item.type, item.at, await sealAggregate('run-event', run.tenantId, item.id, item.data, data => runEventPlain(item.type, data)), run.owner ?? 'owner', run.tenantId ?? 'local']);
     }
   }
   private async notifyChange(client: pg.PoolClient, run: AgentRun): Promise<void> {
