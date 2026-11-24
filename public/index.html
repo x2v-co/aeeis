@@ -792,10 +792,11 @@
 <option value="weekly">每周</option>
 <option value="webhook">收到 Webhook</option>
 </select>
-<select id="routine-weekday" aria-label="星期几" hidden>
-<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
-</select>
+<fieldset id="routine-weekdays" class="routine-weekdays" aria-label="星期几" hidden>
+<label><input type="checkbox" value="1" checked>周一</label><label><input type="checkbox" value="2" checked>周二</label><label><input type="checkbox" value="3" checked>周三</label><label><input type="checkbox" value="4" checked>周四</label><label><input type="checkbox" value="5" checked>周五</label><label><input type="checkbox" value="6">周六</label><label><input type="checkbox" value="7">周日</label>
+</fieldset>
 <input id="routine-time" type="time" value="09:00" aria-label="几点">
+<input id="routine-max-calls" type="number" min="3" max="100" step="1" inputmode="numeric" placeholder="模型调用上限" aria-label="每次最多调用模型几次（3–100，空着用默认 20）" title="每次最多调用模型几次（3–100，空着用默认 20）">
 <select id="routine-review" aria-label="审批档位">
 <option value="required">每一步都问我</option>
 <option value="auto">自动判断</option>

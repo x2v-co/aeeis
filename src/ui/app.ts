@@ -120,6 +120,7 @@ interface ConversationMessageView {
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
   trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
+  runOptions?: { maxModelCalls?: number };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -1567,12 +1568,14 @@ function renderRoutines(): void {
     const timing = routine.status === 'paused' ? '已暂停'
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
       : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.trigger.kind === 'manual' ? '等你叫它' : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
-    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
+    const cap = routine.runOptions?.maxModelCalls ? ` · 每次最多 ${routine.runOptions.maxModelCalls} 次模型调用` : '';
+    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]}${cap} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
     actions.append(toggle);
-    if (routine.trigger.kind === 'manual' && routine.status === 'active') {
+    // Any active routine can be tried once now; the server still refuses while its last Run is going.
+    if (routine.status === 'active') {
       const now = button('现在做一次', async () => { await runRoutineNow(routine.id, routine.name); }); now.type = 'button'; now.dataset.routineRun = routine.id;
       actions.append(now);
     }
@@ -1602,7 +1605,7 @@ function renderRoutines(): void {
   secret.hidden = !shown;
   secret.textContent = shown ? `「${shown.name}」的密钥只显示这一次：${routineSecret!.secret}\n用它对「时间戳.投递 id.请求体」做 HMAC-SHA256，放在 x-aeeis-signature: sha256=…，同时带上 x-aeeis-timestamp（秒）和 x-aeeis-delivery。同一投递 id 只开始一次。` : '';
   const kind = $<HTMLSelectElement>('routine-kind').value;
-  $('routine-weekday').hidden = kind !== 'weekly';
+  $('routine-weekdays').hidden = kind !== 'weekly';
   $('routine-time').hidden = kind === 'webhook';
 }
 function replaceRoutine(next: RoutineView): void {
@@ -1619,11 +1622,17 @@ async function addRoutine(): Promise<void> {
   const kind = $<HTMLSelectElement>('routine-kind').value;
   const time = $<HTMLInputElement>('routine-time').value || '09:00';
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const daysOfWeek = [...$('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]:checked')].map(box => Number(box.value));
+  if (kind === 'weekly' && !daysOfWeek.length) throw new Error('每周至少选一天');
+  const capText = $<HTMLInputElement>('routine-max-calls').value.trim();
+  const maxModelCalls = capText ? Number(capText) : undefined;
+  if (maxModelCalls !== undefined && (!Number.isInteger(maxModelCalls) || maxModelCalls < 3 || maxModelCalls > 100)) throw new Error('模型调用上限填 3 到 100 的整数，或空着用默认');
   const trigger = kind === 'webhook' ? { kind: 'webhook' }
-    : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek: [Number($<HTMLSelectElement>('routine-weekday').value)] } : {}) } };
+    : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek } : {}) } };
   const result = await api<{ routine: RoutineView; webhookSecret?: string }>('/routines', {
     agentId, name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value,
     trigger, executionReview: $<HTMLSelectElement>('routine-review').value,
+    ...(maxModelCalls !== undefined ? { runOptions: { maxModelCalls } } : {}),
   });
   if (result.webhookSecret) routineSecret = { routineId: result.routine.id, secret: result.webhookSecret };
   $<HTMLFormElement>('routine-form').reset();
