@@ -1260,6 +1260,11 @@ body.conversation-mode #routine-form input, body.conversation-mode #routine-form
 body.conversation-mode #routine-form textarea { min-height: 44px; resize: vertical; }
 body.conversation-mode #routine-form .standing-actions { flex-wrap: wrap; }
 body.conversation-mode #routine-form .standing-actions select, body.conversation-mode #routine-form .standing-actions input { width: auto; min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #routine-form .routine-weekdays { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0; padding: 0; border: 0; }
+body.conversation-mode #routine-form .routine-weekdays[hidden] { display: none; }
+body.conversation-mode #routine-form .routine-weekdays label { display: inline-flex; align-items: center; gap: 2px; }
+body.conversation-mode #routine-form .routine-weekdays input { width: auto; min-height: 0; margin: 0; padding: 0; }
+body.conversation-mode #routine-form #routine-max-calls { width: 9em; }
 body.conversation-mode #last-delivery { flex: none; padding: 8px 16px 0; }
 body.conversation-mode #last-delivery h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #last-delivery p { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
