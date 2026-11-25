@@ -58,7 +58,8 @@ function observationMetadata(observation: Step['observations'][number]) {
   if (result && typeof result === 'object' && result.error && typeof result.error === 'object' && (result.error as Record<string, unknown>).recoverable === true) {
     return { error: result.error, receiptId: result.receiptId };
   }
-  const web = webEvidenceDigest(result);
+  // Source and PDF readers keep their own page and hash metadata below, even when a file looks like a search result.
+  const web = observation.tool.startsWith('sources.') || observation.tool.startsWith('pdf.') ? undefined : webEvidenceDigest(result);
   if (web) return { ...web, ...(typeof result?.receiptId === 'string' ? { receiptId: result.receiptId } : {}) };
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
@@ -89,9 +90,12 @@ export function boundedObservations(observations: Step['observations'], refs: (v
     const observation = observations[index]!;
     let projected = observation;
     if (size(observation.result) > (index === observations.length - 1 ? LATEST_OBSERVATION_RESULT_CHARS : 1000) || size(observation) + 1 > remaining) {
+      const metadata = observationMetadata(observation);
+      // A web digest already carries the readable part; a raw JSON preview beside it would only crowd it out.
+      const web = 'webResults' in metadata || 'webPage' in metadata;
       const projection = { ...compact(observation.result, `observations/${index}`, refs(observation.result)),
-        ...observationMetadata(observation),
-        ...(index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
+        ...metadata,
+        ...(!web && index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
       // The preview is itself JSON-escaped when the observation enters the prompt.
       while (projection.preview?.length && (size(projection) > LATEST_OBSERVATION_RESULT_CHARS || size({ ...observation, result: projection }) + 1 > remaining)) {
         projection.preview = projection.preview.slice(0, Math.floor(projection.preview.length / 2));

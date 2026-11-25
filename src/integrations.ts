@@ -301,6 +301,8 @@ export class ToolkitRegistryGateway implements ToolGateway {
   private manifestCache = new Map<string, { id: string; version: string; capabilities: string[]; inputSchema: unknown; outputSchema: unknown; endpoint: string; description?: string }>();
   private verifiedManifests = new Map<string, Record<string, unknown>>();
   private loading?: Promise<ToolDescriptor[]>;
+  /** Registry tools hidden by a pinned entry of the same id and version, as of the last load. */
+  private shadowedPins: string[] = [];
   reconcile?: ToolGateway['reconcile'];
 
   constructor(private readonly registryUrl: string, private readonly token?: string, private readonly options: { verifySignatures?: boolean; trustBundleUrl?: string; rootPublicJwk?: Record<string, unknown>; reconcileUrl?: string; additionalTools?: ToolkitPinnedTool[] } = {}) {
@@ -332,7 +334,8 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const checkedAt = new Date().toISOString();
     try {
       const tools = await this.listTools();
-      return { ready: true, detail: `Toolkit Registry reachable (${tools.length} tools)`, checkedAt };
+      const shadowed = this.shadowedPins.length ? `; pinned entries override the Registry for ${this.shadowedPins.join(', ')}` : '';
+      return { ready: true, detail: `Toolkit Registry reachable (${tools.length} tools)${shadowed}`, checkedAt };
     } catch (error) {
       return { ready: false, detail: `Toolkit Registry unavailable: ${error instanceof Error ? error.message : 'unknown error'}`.slice(0, 500), checkedAt };
     }
@@ -431,16 +434,19 @@ export class ToolkitRegistryGateway implements ToolGateway {
     for (const key of this.verifiedManifests.keys()) if (!activeKeys.has(key)) this.verifiedManifests.delete(key);
     const resolved: ToolDescriptor[] = [];
     const pinned = new Set((this.options.additionalTools ?? []).map(extra => `${extra.id}@${extra.version}`));
+    const shadowed: string[] = [];
     for (const manifest of manifests) {
       // The operator's pinned entry for the same id and version wins: it declares the capabilities (a pinned
       // web-fetch may be read + network), while the Registry never does and would turn it into execute.
-      if (pinned.has(`${manifest.slug}@${manifest.version}`)) continue;
+      // Health reports it, so a pin that hides a changed Registry tool is visible.
+      if (pinned.has(`${manifest.slug}@${manifest.version}`)) { shadowed.push(`${manifest.slug}@${manifest.version}`); continue; }
       const tool = {
         id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: manifest.outputSchema ?? {}, ...(manifest.description === undefined ? {} : { description: manifest.description }), endpoint: this.endpointFor(manifest.endpoints.rest),
       };
       this.manifestCache.set(`${tool.id}@${tool.version}`, tool);
       resolved.push({ id: tool.id, version: tool.version, capabilities: tool.capabilities, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, ...(tool.description === undefined ? {} : { description: tool.description }) });
     }
+    this.shadowedPins = shadowed;
     for (const extra of this.options.additionalTools ?? []) {
       const tool = this.manifestCache.get(`${extra.id}@${extra.version}`)!;
       if (!resolved.some(candidate => candidate.id === tool.id && candidate.version === tool.version)) {
