@@ -80,6 +80,35 @@ describe('ToolkitRegistryGateway', () => {
     expect(isRecoverableToolFailure(toolFailureDetails(result.output, result.receipt.errorCode))).toBe(example.recoverable);
   });
 
+  it('claims the capabilities the pinned tool declares on completed, failed and unknown receipts', async () => {
+    const replies = [
+      { status: 200, body: { output: { text: 'ok' }, receipt: { id: 'r-ok' } } },
+      { status: 200, body: { error: '网页抓取失败（HTTP 404）', receipt: { id: 'r-failed' } } },
+      { status: 403, body: { error: 'Forbidden' } },
+    ];
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/registry/manifest') { response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [] })); return; }
+      const reply = replies.shift()!;
+      response.statusCode = reply.status; response.end(JSON.stringify(reply.body));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [
+      { id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, capabilities: ['read', 'network'] },
+      { id: 'legacy', version: '1', endpoint: `${origin}/legacy` },
+    ] });
+    const call = (toolId: string, key: string) => gateway.invoke({ toolId, toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: `run:test:${toolId}`, idempotencyKey: key, timeoutMs: 5000 });
+    expect((await call('web-fetch', 'a')).receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
+    expect((await call('web-fetch', 'b')).receipt).toMatchObject({ status: 'failed', capabilitiesUsed: ['read', 'network'] });
+    expect((await call('web-fetch', 'c')).receipt).toMatchObject({ status: 'unknown', capabilitiesUsed: ['read', 'network'] });
+    // A pinned tool without declared capabilities still counts as execute; a tool that never resolved used nothing.
+    replies.push({ status: 200, body: { output: 'ok', receipt: { id: 'r-legacy' } } });
+    expect((await call('legacy', 'd')).receipt.capabilitiesUsed).toEqual(['execute']);
+    expect((await call('missing', 'e')).receipt).toMatchObject({ status: 'unknown', capabilitiesUsed: [] });
+  });
+
   it('keeps non-2xx responses without a provider receipt unknown', async () => {
     const server = createServer((_request, response) => {
       response.statusCode = 403;

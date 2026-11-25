@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryRunRepository } from '../src/adapters/in-memory-run-repository.js';
 import { AgentEngine, Conflict } from '../src/runtime/engine.js';
 import { explainRun } from '../src/runtime/explanation.js';
 import type { ModelRequest } from '../src/runtime/model.js';
-import type { ToolGateway } from '../src/integrations.js';
+import { ToolkitRegistryGateway, type ToolGateway } from '../src/integrations.js';
+import { createServer, type Server } from 'node:http';
 import { decideAction, isReadOnlyAction, normalizeActionPolicy, withActionDecision, type ActionCandidate } from '../src/runtime/action-policy.js';
 import { ActionPolicyConflict, InMemoryActionPolicyStore, JsonActionPolicyStore, actionPolicyDigest, frozenRunPolicy, type ActionPolicyStore } from '../src/action-policy-store.js';
 import { mkdtemp } from 'node:fs/promises';
@@ -70,15 +71,16 @@ describe('action policy decisions', () => {
   });
 });
 
-function harness(capabilities: string[], options: { judge?: (request: ModelRequest) => unknown; actionPolicies?: ActionPolicyStore; calls?: number } = {}) {
+function harness(capabilities: string[], options: { judge?: (request: ModelRequest) => unknown; actionPolicies?: ActionPolicyStore; calls?: number; tools?: ToolGateway; toolId?: string } = {}) {
+  const toolId = options.toolId ?? 'publish';
   const repository = new InMemoryRunRepository();
-  const invoke = vi.fn<ToolGateway['invoke']>(async request => ({ status: 'completed',
+  const invoke = vi.fn<ToolGateway['invoke']>(async request => options.tools ? options.tools.invoke(request) : ({ status: 'completed',
     output: { published: true }, outputRefs: ['post'], receipt: {
       schemaVersion: 'receipt/1', receiptId: `receipt_00000000-0000-0000-0000-${String(invoke.mock.calls.length).padStart(12, '0')}`, provider: 'toolkit_new', operation: request.toolId,
       requestHash: 'a'.repeat(64), inputRefs: [request.taskId], outputRefs: ['post'], capabilitiesUsed: capabilities,
       startedAt: new Date().toISOString(), status: 'completed',
     } }));
-  const tools: ToolGateway = { listTools: async () => [{ id: 'publish', version: '1', capabilities, inputSchema: {}, outputSchema: {} }], invoke };
+  const tools: ToolGateway = { listTools: async () => options.tools ? options.tools.listTools() : [{ id: 'publish', version: '1', capabilities, inputSchema: {}, outputSchema: {} }], invoke };
   const complete = vi.fn(async (request: ModelRequest) => {
     const input = request.input as any;
     if (request.system.includes('Plan a real deliverable')) return { value: { summary: 'Publish the note', nodes: [{ id: 'post', title: 'Publish the note', instruction: 'Publish the release note', dependsOn: [] }] } };
@@ -88,7 +90,7 @@ function harness(capabilities: string[], options: { judge?: (request: ModelReque
       return { value: options.judge(request) };
     }
     if (input.observations.length < (options.calls ?? 1) && !input.executionBudget.finalOnly) {
-      return { value: { type: 'capability', toolId: 'publish', toolVersion: '1', purpose: 'Publish the release note', input: { text: `Release 1.${input.observations.length + 2}` } } };
+      return { value: { type: 'capability', toolId, toolVersion: '1', purpose: 'Publish the release note', input: { text: `Release 1.${input.observations.length + 2}` } } };
     }
     const refs = (input.availableEvidenceRefs as string[]).slice(0, 1);
     return { value: { type: 'finish', title: 'Release note', content: `Release note handled. [${refs[0]}]`, evidenceRefs: refs, limitations: invoke.mock.calls.length ? [] : ['The publish action did not run.'] } };
@@ -283,6 +285,46 @@ describe('action approval in the engine', () => {
     expect(await h.settle(run.id)).toBe('succeeded');
     expect(h.invoke).toHaveBeenCalledTimes(1);
     expect((await h.repository.get(run.id)).actionApproval).toBeUndefined();
+  });
+});
+
+describe('read-only Toolkit tools through the real gateway', () => {
+  const servers: Server[] = [];
+  afterEach(async () => { await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
+  async function toolkit(status: number, body: unknown): Promise<ToolkitRegistryGateway> {
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/registry/manifest') { response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [] })); return; }
+      response.statusCode = status; response.end(JSON.stringify(body));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    return new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, capabilities: ['read', 'network'] }] });
+  }
+
+  it('uses a pinned read + network web tool in a yolo routine run and keeps its completed result', async () => {
+    const gateway = await toolkit(200, { output: { text: 'Release 1.2 notes' }, receipt: { id: 'provider-receipt-1', credits: 1 } });
+    const h = harness([], { tools: gateway, toolId: 'web-fetch' });
+    const run = await h.engine.create({ goal: 'Read the release note page', allowedTools: ['web-fetch@1'], materials: h.materials, origin: 'routine', executionReview: 'yolo' });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const finished = await h.repository.get(run.id);
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    expect(finished.events.some(event => event.type === 'action.refused' || event.type === 'action.approval_requested')).toBe(false);
+    const receipt = finished.toolReceipts.find(item => item.operation === 'web-fetch')!;
+    expect(receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
+    expect(finished.steps[0]!.observations.find(item => item.tool === 'web-fetch')?.result).toMatchObject({ output: { text: 'Release 1.2 notes' }, receiptId: receipt.receiptId });
+  });
+
+  it('keeps an unknown Toolkit result unknown, claiming only the declared capabilities', async () => {
+    const gateway = await toolkit(403, { error: 'Forbidden' });
+    const h = harness([], { tools: gateway, toolId: 'web-fetch' });
+    const run = await h.engine.create({ goal: 'Read the release note page', allowedTools: ['web-fetch@1'], materials: h.materials, origin: 'routine', executionReview: 'yolo' });
+    await h.settle(run.id);
+    const finished = await h.repository.get(run.id);
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    const receipt = finished.toolReceipts.find(item => item.operation === 'web-fetch')!;
+    expect(receipt).toMatchObject({ status: 'unknown', errorCode: 'transport_or_protocol', capabilitiesUsed: ['read', 'network'] });
   });
 });
 
