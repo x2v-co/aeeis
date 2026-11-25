@@ -446,7 +446,7 @@ export class ToolkitRegistryGateway implements ToolGateway {
     return resolved;
   }
 
-  private async tool(request: ToolInvocation): Promise<{ id: string; version: string; endpoint: string }> {
+  private async tool(request: ToolInvocation): Promise<{ id: string; version: string; endpoint: string; capabilities: string[] }> {
     const cached = this.manifestCache.get(`${request.toolId}@${request.toolVersion}`);
     if (cached) return cached;
     await this.listTools();
@@ -458,8 +458,12 @@ export class ToolkitRegistryGateway implements ToolGateway {
   async invoke(request: ToolInvocation): Promise<ToolResult> {
     const started = new Date();
     const requestHash = digest(request);
+    // The receipt claims what the approved manifest declares for this tool (a pinned web tool may be read + network).
+    // Before the tool resolves, nothing was used.
+    let capabilities: string[] = [];
     try {
       const tool = await this.tool(request);
+      capabilities = tool.capabilities;
       const payload = normalizeToolkitInput(request.input);
       const response = await fetch(tool.endpoint, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(request.timeoutMs),
@@ -494,10 +498,10 @@ export class ToolkitRegistryGateway implements ToolGateway {
       }
       const result = completed ? (body.structuredContent ?? body.output ?? null)
         : { error: failure!.message, errorCode: failure!.errorCode, ...(failure!.httpStatus === undefined ? {} : { httpStatus: failure!.httpStatus }) };
-      const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(failure ? { errorCode: failure.errorCode } : {}), ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
+      const receipt = makeToolkitReceipt({ request, requestHash, started, status, capabilities, response: body, ...(failure ? { errorCode: failure.errorCode } : {}), ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
       return { status, output: result, ...(providerReceiptId ? { outputRefs: [`toolkit-receipt:${providerReceiptId}`] } : {}), receipt };
     } catch (error) {
-      return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
+      return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', capabilities, errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
     }
   }
 
@@ -538,12 +542,12 @@ export function toolkitCredits(response: unknown): number | undefined {
   return pick(receipt?.credits) ?? pick(cost?.amount);
 }
 
-function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
+function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; capabilities: string[]; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
   const credits = toolkitCredits(input.response);
   return receiptSchema.parse({
     schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_new', operation: input.request.toolId,
     requestHash: input.requestHash, ...(input.response === undefined ? {} : { responseHash: digest(input.response) }),
-    inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: ['execute'],
+    inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: [...input.capabilities],
     startedAt: input.started.toISOString(), completedAt: new Date().toISOString(), status: input.status, ...(input.errorCode ? { errorCode: input.errorCode } : {}),
     ...(credits === undefined ? { costStatus: input.response === undefined ? 'interrupted' : 'unreported' } : { cost: { credits }, costStatus: 'reported' }),
   });

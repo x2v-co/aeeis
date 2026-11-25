@@ -120,7 +120,7 @@ interface ConversationMessageView {
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
   trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
-  runOptions?: { maxModelCalls?: number };
+  runOptions?: { maxModelCalls?: number; allowedTools?: string[] };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -1569,7 +1569,8 @@ function renderRoutines(): void {
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
       : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.trigger.kind === 'manual' ? '等你叫它' : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
     const cap = routine.runOptions?.maxModelCalls ? ` · 每次最多 ${routine.runOptions.maxModelCalls} 次模型调用` : '';
-    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]}${cap} · ${timing}`), element('span', routine.prompt));
+    const tools = routine.runOptions?.allowedTools?.length ? ` · 工具：${routine.runOptions.allowedTools.join('、')}` : ' · 不用工具';
+    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]}${cap}${tools} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
@@ -1627,12 +1628,14 @@ async function addRoutine(): Promise<void> {
   const capText = $<HTMLInputElement>('routine-max-calls').value.trim();
   const maxModelCalls = capText ? Number(capText) : undefined;
   if (maxModelCalls !== undefined && (!Number.isInteger(maxModelCalls) || maxModelCalls < 3 || maxModelCalls > 100)) throw new Error('模型调用上限填 3 到 100 的整数，或空着用默认');
+  const allowedTools = listedIds('routine-tools');
+  const runOptions = { ...(maxModelCalls !== undefined ? { maxModelCalls } : {}), ...(allowedTools.length ? { allowedTools } : {}) };
   const trigger = kind === 'webhook' ? { kind: 'webhook' }
     : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek } : {}) } };
   const result = await api<{ routine: RoutineView; webhookSecret?: string }>('/routines', {
     agentId, name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value,
     trigger, executionReview: $<HTMLSelectElement>('routine-review').value,
-    ...(maxModelCalls !== undefined ? { runOptions: { maxModelCalls } } : {}),
+    ...(Object.keys(runOptions).length ? { runOptions } : {}),
   });
   if (result.webhookSecret) routineSecret = { routineId: result.routine.id, secret: result.webhookSecret };
   $<HTMLFormElement>('routine-form').reset();
@@ -9583,6 +9586,12 @@ async function initialize(): Promise<void> {
         if (!allowedTools.value.trim()) allowedTools.value = toolCatalog.defaultAllowedTools.join(', ');
         syncEntryDefaults();
         allowedTools.dataset.initialized = 'true';
+      }
+      // Routines start with the server's default tools too; set as the default value so the form's reset keeps them.
+      const routineTools = $<HTMLInputElement>('routine-tools');
+      if (routineTools && !routineTools.dataset.initialized) {
+        if (!routineTools.value.trim()) routineTools.defaultValue = routineTools.value = toolCatalog.defaultAllowedTools.join(', ');
+        routineTools.dataset.initialized = 'true';
       }
       if (toolHelp) toolHelp.textContent = toolCatalog.tools.length
         ? `已连接：${toolCatalog.tools.map(tool => tool.id).join('、')}。默认选择来自服务端配置；清空可禁用本次运行的外部工具。`
