@@ -823,7 +823,9 @@ setAttentionInboxOpen(false);
 });
 function showEntry(): void {
   // With chats on, the entry is AEEIS's own conversation: open it, so the page does not follow the previous Bot's
-  // chat straight back to that Bot. openLifeThread selects AEEIS once its conversation is in.
+  // chat straight back to that Bot. openLifeThread selects AEEIS once its conversation is in. It cannot start while
+  // a message is still being sent; say so rather than half-switching to the entry under the Bot's chat.
+  if (conversationEnabled && (conversationBusy || conversationAttempt || lifeOpening.has('aeeis'))) { message('上一条消息还在发送，发完再回到 AEEIS。'); return; }
   if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
   else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   entryEpoch += 1;

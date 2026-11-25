@@ -3578,6 +3578,45 @@ describe('entry bots and group chats', () => {
     expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
   });
 
+  it('explains instead of half-switching when AEEIS is chosen while a message is still sending', async () => {
+    const h = harness(fixture('bot'), { handler: (url, request) => url.endsWith('/messages') && request?.method === 'POST' ? new Promise(() => {}) : undefined });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready(); await sendReady();
+    fill('conversation-text', '整理一下周报'); submit();
+    await vi.waitFor(() => expect(h.fetch.mock.calls.some(([url, request]: any) => String(url).endsWith('/messages') && request?.method === 'POST')).toBe(true));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    expect(el('error').textContent).toContain('上一条消息还在发送');
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe(ownedBot.id);
+    expect(el('bot-note-title').textContent).toBe('阿研');
+    expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(false);
+  });
+
+  it('returns to AEEIS after archiving a group opened from a Bot chat, and stays there', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date, revision: 0 };
+    const h = harness(fixture('bot'), { handler(url, request) {
+      if (url === '/api/rooms') return response(room.status === 'active' ? [room] : []);
+      if (url === '/api/rooms/room_team' && request?.method === 'PATCH') { Object.assign(room, JSON.parse(request.body)); return response(room); }
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'member_1', roomId: 'room_team', principalId: ownedBot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
+    dom.window.confirm = () => true;
+    el('chat-archive').click();
+    await vi.waitFor(() => expect(room.status).toBe('archived'));
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(true));
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis'));
+    // The open conversation is AEEIS's now, so refreshes leave AEEIS selected.
+    for (const { callback } of intervals) callback();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
+  });
+
   it('resends a schedule only when it changed, whatever order its weekdays were stored in', async () => {
     const routines: any[] = [{ id: 'routine_1', agentId: 'aeeis', name: '周报', prompt: '写周报', executionReview: 'required', status: 'active', revision: 0, webhookEnabled: false,
       trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '09:00', daysOfWeek: [5, 1] } } }];
