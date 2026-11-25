@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
+import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS, OBSERVATION_PROMPT_CHARS, webEvidenceDigest } from '../src/runtime/prompt-context.js';
 import { digest } from '../src/runtime/engine.js';
 import { decisionSchema } from '../src/runtime/contracts.js';
 import { queryCsvSource } from '../src/runtime/csv-query.js';
@@ -65,14 +65,14 @@ describe('executor context budget', () => {
     expect(omitted.count).toBeGreaterThan(0);
     expect(omitted.contentHash).toBe(digest(observations.slice(0, omitted.count)));
     expect(projected.at(-1)).toEqual(observations.at(-1));
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
   });
   it('compacts old large observations to references and exact hashes while retaining the latest page', () => {
     const observations = Array.from({ length: 5 }, (_, i) => ({ tool: 'sources.read', argument: 'source.csv', result: { id: 'source.csv', content: `page ${i} ` + 'x'.repeat(3000) } }));
     const projected = boundedObservations(observations, () => ['source.csv']);
     expect(projected.at(-1)).toEqual(observations.at(-1));
     expect(projected[0]!.result).toMatchObject({ reference: 'observations/0', contentHash: digest(observations[0]!.result), evidenceRefs: ['source.csv'] });
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
     expect(observations[0]!.result.content).toHaveLength(3007);
   });
 
@@ -90,7 +90,7 @@ describe('executor context budget', () => {
     expect(projected.at(-1)!.result).toMatchObject({ schemaVersion: 'context-reference/1', previewTruncated: true, page: result.page, sourceContentHash: result.sourceContentHash });
     expect(JSON.stringify(projected.at(-1)!.result).length).toBeLessThanOrEqual(6000);
     expect(projected[0]!.result).toMatchObject({ page: result.page, contentHash: digest(result) });
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
   });
 
   it.each([
@@ -120,6 +120,38 @@ describe('executor context budget', () => {
     expect((projected.dependencies as any[])[0]).toMatchObject({ id: 'artifact_1', taskId: 'inspect', evidenceRefs: ['source.csv'], schemaVersion: 'context-reference/1' });
     expect((projected.dependencies as any[])[0].preview.length).toBeLessThanOrEqual(2000);
     expect(input.dependencies[0]!.content).toHaveLength(80_000);
+  });
+
+  it('keeps every web search citable after older results are compacted', () => {
+    // A search observation as the engine stores it: the tool's structured output plus its receipt.
+    const search = (n: number) => ({ tool: 'web-search', argument: JSON.stringify({ input: `query ${n}` }), result: {
+      output: { schemaVersion: 'toolkit.web-search.v1', query: `query ${n}`, depth: 'basic', usage: { credits: 1 },
+        results: Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `Title ${n}-${i}`, url: `https://news.example/${n}/${i}`,
+          snippet: `Snippet ${n}-${i} ` + 'x'.repeat(600), publishedAt: '2026-11-25' })) },
+      outputRefs: [`toolkit-receipt:p${n}`], receiptId: `receipt_${n}` } });
+    const observations = Array.from({ length: 5 }, (_, n) => search(n));
+    const projected = boundedObservations(observations, () => []);
+    expect(projected).toHaveLength(5);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
+    for (const [n, observation] of projected.entries()) {
+      const result = observation.result as any;
+      expect(result.schemaVersion).toBe('context-reference/1');
+      expect(result.receiptId).toBe(`receipt_${n}`);
+      expect(result.webResults.query).toBe(`query ${n}`);
+      expect(result.webResults.totalResults).toBe(10);
+      expect(result.webResults.results).toHaveLength(8);
+      expect(result.webResults.results[0]).toEqual({ rank: 1, title: `Title ${n}-0`, url: `https://news.example/${n}/0`, snippet: (`Snippet ${n}-0 ` + 'x'.repeat(600)).slice(0, 300), publishedAt: '2026-11-25' });
+    }
+    // The executor-wide projection keeps the digests too.
+    const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(60_000), observations: projected }).observations as any[];
+    expect(overall.every((observation, n) => observation.result.webResults?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+  });
+
+  it('digests a fetched page to its link, title and a bounded excerpt', () => {
+    const page = { schemaVersion: 'toolkit.web-fetch.v1', url: 'https://a.example/p', finalUrl: 'https://a.example/p', title: 'Pricing', text: 't'.repeat(5000), markdown: 'm'.repeat(6000), truncated: false };
+    expect(webEvidenceDigest({ output: page, receiptId: 'r' })).toEqual({ webPage: { url: page.url, finalUrl: page.finalUrl, title: 'Pricing', excerpt: 't'.repeat(2000), excerptTruncated: true } });
+    expect(webEvidenceDigest({ output: { text: 'no link' } })).toBeUndefined();
+    expect(webEvidenceDigest({ content: 'source page' })).toBeUndefined();
   });
 
   it('rejects an oversized fixed core before invoking a provider', () => {

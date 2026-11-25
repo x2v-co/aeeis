@@ -109,6 +109,36 @@ describe('ToolkitRegistryGateway', () => {
     expect((await call('missing', 'e')).receipt).toMatchObject({ status: 'unknown', capabilitiesUsed: [] });
   });
 
+  it('keeps the pinned capabilities and endpoint when the Registry also lists the same tool and version', async () => {
+    const calls: string[] = [];
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      const port = (server.address() as { port: number }).port;
+      calls.push(request.url ?? '');
+      if (request.url === '/registry/manifest') {
+        response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [
+          { slug: 'web-fetch', version: 1, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-fetch/manifest` },
+          { slug: 'web-search', version: 2, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-search/manifest` },
+        ] }));
+        return;
+      }
+      const slug = /\/registry\/tools\/([^/]+)\/manifest/.exec(request.url ?? '')?.[1];
+      if (slug) { response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.tool.v1', slug, version: slug === 'web-fetch' ? 1 : 2, endpoints: { rest: `http://127.0.0.1:${port}/registry-${slug}` } })); return; }
+      response.end(JSON.stringify({ output: { url: 'https://example.com', text: 'ok' }, receipt: { id: 'r-pinned' } }));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, capabilities: ['read', 'network'] }] });
+    const tools = await gateway.listTools();
+    expect(tools.filter(tool => tool.id === 'web-fetch')).toEqual([expect.objectContaining({ version: '1', capabilities: ['read', 'network'] })]);
+    // A different version from the Registry is still its own tool, and still execute.
+    expect(tools.find(tool => tool.id === 'web-search')).toMatchObject({ version: '2', capabilities: ['execute'] });
+    const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'pinned', timeoutMs: 5000 });
+    expect(result.receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
+    expect(calls.at(-1)).toBe('/fetch');
+  });
+
   it('keeps non-2xx responses without a provider receipt unknown', async () => {
     const server = createServer((_request, response) => {
       response.statusCode = 403;

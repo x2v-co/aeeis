@@ -8,7 +8,7 @@ import { FileRunRepository } from '../src/runtime/repository.js';
 import type { ProjectPulseArtifact } from '../src/runtime/contracts.js';
 import { ModelOutcomeUnknown } from '../src/runtime/model.js';
 import { materialContentHash } from '../src/runtime/materials.js';
-import { EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
+import { EXECUTOR_PROMPT_CHARS, OBSERVATION_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
 import type { ModelAdapter, ModelRequest } from '../src/runtime/model.js';
 import type { ExecutionLimits } from '../src/runtime/execution-limits.js';
 
@@ -102,7 +102,7 @@ describe('Project Pulse finish output', () => {
     const { engine, repository, run } = await setup((ref, input) => {
       if (!inspected) return { type: 'tool', tool: 'sources.read', argument: ref };
       const observations = input.observations as Array<{ result: any }>;
-      expect(JSON.stringify(observations).length).toBeLessThanOrEqual(10_000);
+      expect(JSON.stringify(observations).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
       expect(observations[0]!.result).toMatchObject({ schemaVersion: 'context-reference/1', contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
       return finish(ref);
     }, {}, [{ title: 'tasks.csv', source: 'browser-file:tasks.csv', content: csv }]);

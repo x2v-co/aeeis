@@ -4,7 +4,8 @@ import { isSourceReadTool, isStructuredSourceTool } from './source-tools.js';
 
 /** Includes system and serialized input, measured before sending or reserving billing. */
 export const EXECUTOR_PROMPT_CHARS = 96_000;
-export const OBSERVATION_PROMPT_CHARS = 10_000;
+// Room for several web searches as citable digests (about 3–5k each), well inside the executor budget.
+export const OBSERVATION_PROMPT_CHARS = 32_000;
 export const LATEST_OBSERVATION_RESULT_CHARS = 6000;
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -21,11 +22,41 @@ function compact(value: unknown, reference: string, evidenceRefs: string[] = [])
     instructions: 'Payload omitted from this prompt; the full result is retained in the Run. A reference or hash alone does not support claims about omitted details.' };
 }
 
+const clip = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : undefined;
+const record = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+/**
+ * The citable core of a web search or page fetch: titles, links, dates and bounded text. Without it an older
+ * result becomes a bare hash, and a later step cannot name a single link it found.
+ */
+export function webEvidenceDigest(value: unknown): Record<string, unknown> | undefined {
+  const outer = record(value);
+  const result = record(outer?.output) ?? outer;
+  if (!result) return undefined;
+  if (Array.isArray(result.results) && result.results.some(item => typeof record(item)?.url === 'string')) {
+    const results = result.results.flatMap(item => {
+      const entry = record(item);
+      if (typeof entry?.url !== 'string') return [];
+      return [Object.fromEntries(Object.entries({ rank: entry.rank, title: clip(entry.title, 160), url: entry.url.slice(0, 500),
+        snippet: clip(entry.snippet, 300), publishedAt: entry.publishedAt }).filter(([, field]) => field !== undefined))];
+    }).slice(0, 8);
+    return { webResults: { ...(typeof result.query === 'string' ? { query: result.query.slice(0, 300) } : {}), results, totalResults: result.results.length } };
+  }
+  const text = typeof result.text === 'string' ? result.text : typeof result.markdown === 'string' ? result.markdown : undefined;
+  if (typeof result.url === 'string' && text !== undefined) {
+    return { webPage: { url: result.url.slice(0, 500), ...(typeof result.finalUrl === 'string' ? { finalUrl: result.finalUrl.slice(0, 500) } : {}),
+      ...(typeof result.title === 'string' ? { title: result.title.slice(0, 200) } : {}), excerpt: text.slice(0, 2000), excerptTruncated: text.length > 2000 || result.truncated === true } };
+  }
+  return undefined;
+}
+
 function observationMetadata(observation: Step['observations'][number]) {
   const result = observation.result as Record<string, unknown> | null;
   if (result && typeof result === 'object' && result.error && typeof result.error === 'object' && (result.error as Record<string, unknown>).recoverable === true) {
     return { error: result.error, receiptId: result.receiptId };
   }
+  const web = webEvidenceDigest(result);
+  if (web) return { ...web, ...(typeof result?.receiptId === 'string' ? { receiptId: result.receiptId } : {}) };
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated,
@@ -87,7 +118,8 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
       if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
       const item = items[index] as Record<string, unknown>;
       const reference = typeof item.id === 'string' ? item.id : `${key}/${index}`;
-      if (key === 'observations' && (isSourceReadTool(item.tool) || 'error' in observationMetadata(item as Step['observations'][number]))) {
+      const metadata = key === 'observations' ? observationMetadata(item as Step['observations'][number]) : {};
+      if (key === 'observations' && (isSourceReadTool(item.tool) || 'error' in metadata || 'webResults' in metadata || 'webPage' in metadata)) {
         // Preserve the newest bounded page through the overall executor projection too.
         if (index === items.length - 1 && size(item.result) <= LATEST_OBSERVATION_RESULT_CHARS) continue;
         projected[index] = { ...item, result: { ...compact(item.result, reference),
