@@ -111,6 +111,39 @@ describe('Google sign-in', () => {
     expect(await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie)).toMatchObject({ ok: false, status: 403 });
   });
 
+  it('admits a listed third-party address only when the entry pins its Google account', async () => {
+    // Google vouches for this address only as of when the Google account verified it; it may have changed hands since.
+    const listedThirdParty = { 'owner@x2v.co': { id: 'owner', tenantId: 'local', roles: ['owner', 'operator'] as Array<'owner' | 'operator'> } };
+    let signIn = new GoogleSignIn(config({ users: listedThirdParty }));
+    let attempt = begin(signIn);
+    fake.claims = nonce => validClaims(nonce, { sub: '9999', hd: undefined });
+    const refused = await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie);
+    expect(refused).toMatchObject({ ok: false, status: 403 });
+    expect(refused.ok ? '' : refused.message).toContain('"sub": "9999"');
+
+    signIn = new GoogleSignIn(config({ users: { 'owner@x2v.co': { ...listedThirdParty['owner@x2v.co'], sub: '1001' } } }));
+    attempt = begin(signIn);
+    expect(await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie)).toMatchObject({ ok: false, status: 403 });
+    attempt = begin(signIn);
+    fake.claims = nonce => validClaims(nonce, { sub: '1001', hd: undefined });
+    const pinned = await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie);
+    expect(signIn.session(sessionFrom(pinned.cookies))?.principal.id).toBe('owner');
+
+    // A Gmail address needs no pin: Google is authoritative for it.
+    signIn = new GoogleSignIn(config({ users: { 'someone@gmail.com': { id: 'someone', tenantId: 'local', roles: ['owner'] } } }));
+    attempt = begin(signIn);
+    fake.claims = nonce => validClaims(nonce, { sub: '4004', email: 'someone@gmail.com', hd: undefined });
+    expect(await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie)).toMatchObject({ ok: true });
+  });
+
+  it('re-checks a pinned account on every request', async () => {
+    const signIn = new GoogleSignIn(config());
+    const attempt = begin(signIn);
+    const session = sessionFrom((await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie)).cookies)!;
+    expect(new GoogleSignIn(config({ users: { 'owner@x2v.co': { id: 'owner', tenantId: 'local', roles: ['owner'], sub: '1001' } } })).session(session)?.principal.id).toBe('owner');
+    expect(new GoogleSignIn(config({ users: { 'owner@x2v.co': { id: 'owner', tenantId: 'local', roles: ['owner'], sub: 'someone-else' } } })).session(session)).toBeUndefined();
+  });
+
   it('rejects a tampered or expired session and drops someone removed from the list', async () => {
     const signIn = new GoogleSignIn(config());
     const attempt = begin(signIn);

@@ -4,8 +4,11 @@ import { JwksKeySet, isLoopback } from './jwks.js';
 import { audienceContains } from './oidc.js';
 import { principalSchema, type Principal } from './principal.js';
 
-/** Who may sign in, and as whom. Emails are matched lower-cased; a listed email keeps its identity across sign-ins. */
-const userSchema = z.object({ id: principalSchema.shape.id, tenantId: principalSchema.shape.tenantId, roles: principalSchema.shape.roles }).strict();
+/** Who may sign in, and as whom. Emails are matched lower-cased; a listed email keeps its identity across sign-ins.
+ * `sub` pins the entry to one Google account. It is required for an address Google is not authoritative for (not
+ * Gmail, not a Workspace account of its own domain): such an address may have changed hands since that Google
+ * account verified it. */
+const userSchema = z.object({ id: principalSchema.shape.id, tenantId: principalSchema.shape.tenantId, roles: principalSchema.shape.roles, sub: z.string().trim().min(1).max(500).optional() }).strict();
 export const googleUsersSchema = z.record(z.string().trim().toLowerCase().email().max(320), userSchema);
 const roleSchema = z.enum(['owner', 'agent', 'operator']);
 
@@ -112,7 +115,13 @@ export class GoogleSignIn {
     const claims = await this.keySet.verify(idToken);
     const identity = claims ? this.verifiedIdentity(claims, pending.nonce) : undefined;
     if (!identity) return { ok: false, status: 401, message: 'Google 登录结果无法验证，请重新登录。', cookies: clear };
-    if (!this.principalFor(identity)) return { ok: false, status: 403, message: `${identity.email} 没有权限使用这个 AEEIS。请让管理员把这个地址加进名单。`, cookies: clear };
+    if (!this.principalFor(identity)) {
+      const listed = this.config.users[identity.email];
+      const message = listed && !listed.sub && !googleAuthoritative(identity)
+        ? `${identity.email} 不是 Gmail 或这个域自己的 Google Workspace 账号，Google 不能保证它现在仍属于你。请让管理员在名单里为这个地址写上 "sub": "${identity.sub}"，确认是这个 Google 账号。`
+        : `${identity.email} 没有权限使用这个 AEEIS。请让管理员把这个地址加进名单。`;
+      return { ok: false, status: 403, message, cookies: clear };
+    }
     const issuedAt = now();
     const session = seal({ v: 1 as const, sub: identity.sub, email: identity.email, ...(identity.hd ? { hd: identity.hd } : {}), iat: issuedAt, exp: issuedAt + this.config.sessionTtlSeconds }, this.sessionKey);
     return { ok: true, location: pending.returnTo, cookies: [...clear, cookie(SESSION_COOKIE, session, this.config.sessionTtlSeconds)] };
@@ -143,7 +152,11 @@ export class GoogleSignIn {
 
   private principalFor(identity: { sub: string; email: string; hd?: string | undefined }): Principal | undefined {
     const listed = this.config.users[identity.email];
-    if (listed) return principalSchema.parse(structuredClone(listed));
+    if (listed) {
+      // A pinned entry admits only that Google account; an unpinned one only an address Google vouches for today.
+      if (listed.sub ? listed.sub !== identity.sub : !googleAuthoritative(identity)) return undefined;
+      return principalSchema.parse({ id: listed.id, tenantId: listed.tenantId, roles: [...listed.roles] });
+    }
     if (identity.hd && this.config.allowedDomains.includes(identity.hd) && identity.email.endsWith(`@${identity.hd}`)) {
       const id = `google:${identity.sub}`;
       return principalSchema.safeParse({ id, tenantId: this.config.domainTenantId, roles: this.config.domainRoles }).success
@@ -154,6 +167,12 @@ export class GoogleSignIn {
   }
 }
 
+/** Google is authoritative for an address only when it is a Gmail address, or a Workspace account whose `hd` is the
+ * address's own domain. Any other address was verified once, when the Google account was set up. */
+function googleAuthoritative(identity: { email: string; hd?: string | undefined }): boolean {
+  const domain = identity.email.slice(identity.email.lastIndexOf('@') + 1);
+  return domain === 'gmail.com' || domain === 'googlemail.com' || (identity.hd !== undefined && identity.hd === domain);
+}
 /** Only a same-site path: never another origin, a protocol-relative URL or a back-slashed path. */
 export function safeReturnPath(value: string | undefined): string {
   if (!value || value.length > 2000 || !value.startsWith('/') || value.startsWith('//') || value.includes('\\') || /[\u0000-\u001f]/.test(value)) return '/';

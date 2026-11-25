@@ -258,7 +258,10 @@ AEEIS_GOOGLE_CLIENT_SECRET_FILE=/run/aeeis-secrets/google-client-secret
 AEEIS_GOOGLE_REDIRECT_URI=https://aeeis.example/auth/google/callback
 AEEIS_SESSION_SECRET_FILE=/run/aeeis-secrets/session-secret
 # Who may sign in, and as whom. Map the existing owner's address to id "owner",
-# tenant "local" to keep everything created before the switch.
+# tenant "local" to keep everything created before the switch. Gmail addresses and
+# Workspace accounts of their own domain need nothing more. Any other address
+# also needs "sub" (the sign-in error page shows it): Google verified such an
+# address only once, and it may have changed hands since.
 AEEIS_GOOGLE_USERS={"you@example.com":{"id":"owner","tenantId":"local","roles":["owner","operator"]}}
 # Optional: every verified account of a Google Workspace domain (checked by the
 # token's hd claim, not the address), each as its own user google:<sub>.
