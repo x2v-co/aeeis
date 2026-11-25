@@ -50,6 +50,7 @@ import { CombinedProjectSourceProvider, GitProjectSourceProvider, gitProjectConf
 import { LinearProjectSourceProvider, linearProjectConfigSchema } from './adapters/linear-project-sources.js';
 import { JiraProjectSourceProvider, jiraProjectConfigSchema } from './adapters/jira-project-sources.js';
 import { principalTokensSchema } from './security/principal.js';
+import { GoogleSignIn, googleUsersSchema } from './security/google-signin.js';
 import { OidcPrincipalResolver, type OidcConfig } from './security/oidc.js';
 import { z } from 'zod';
 import type { ProjectionTarget } from './application/aeeis-service.js';
@@ -112,6 +113,19 @@ if (oidcEnvPresent) {
   };
   oidcResolver = new OidcPrincipalResolver(config).resolver();
 }
+// Google sign-in: each person signs in with their own Google account; there is no shared access token.
+const googleSignIn = process.env.AEEIS_GOOGLE_CLIENT_ID?.trim() ? new GoogleSignIn({
+  clientId: process.env.AEEIS_GOOGLE_CLIENT_ID,
+  clientSecret: process.env.AEEIS_GOOGLE_CLIENT_SECRET ?? '',
+  redirectUri: process.env.AEEIS_GOOGLE_REDIRECT_URI ?? '',
+  sessionSecret: process.env.AEEIS_SESSION_SECRET ?? '',
+  ...(process.env.AEEIS_GOOGLE_USERS ? { users: googleUsersSchema.parse(JSON.parse(process.env.AEEIS_GOOGLE_USERS)) } : {}),
+  ...(process.env.AEEIS_GOOGLE_ALLOWED_DOMAINS?.trim() ? { allowedDomains: process.env.AEEIS_GOOGLE_ALLOWED_DOMAINS.split(',').map(domain => domain.trim()).filter(Boolean) } : {}),
+  ...(process.env.AEEIS_GOOGLE_DOMAIN_TENANT?.trim() ? { domainTenantId: process.env.AEEIS_GOOGLE_DOMAIN_TENANT.trim() } : {}),
+  ...(process.env.AEEIS_GOOGLE_DOMAIN_ROLES?.trim() ? { domainRoles: process.env.AEEIS_GOOGLE_DOMAIN_ROLES.split(',').map(role => role.trim()).filter(Boolean) as Array<'owner' | 'agent' | 'operator'> } : {}),
+  ...(process.env.AEEIS_SESSION_TTL_HOURS?.trim() ? { sessionTtlSeconds: Math.round(Number(process.env.AEEIS_SESSION_TTL_HOURS) * 3600) } : {}),
+}) : undefined;
+if (googleSignIn && (accessToken || oidcResolver)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN or OIDC authentication');
 if (principalTokens !== undefined && (accessToken || oidcResolver)) throw new Error('Configure only one of AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC authentication');
 if (oidcResolver && accessToken) throw new Error('OIDC authentication cannot be combined with AEEIS_ACCESS_TOKEN');
 const projectionTargets: ProjectionTarget[] = process.env.AEEIS_PROJECTION_TARGETS === undefined ? [] : z.array(z.object({
@@ -617,7 +631,7 @@ try {
     ...(process.env.AEEIS_WORKER_TOKEN ? { workerToken: process.env.AEEIS_WORKER_TOKEN } : {}),
     ...(principalTokens ? { principalTokens } : {}),
     ...(oidcResolver ? { principalResolver: oidcResolver } : {}),
-    ...(oidcResolver ? { authMode: 'oidc-principal-scoped' } : principalTokens ? { authMode: 'static-principal-scoped' } : {}),
+    ...(googleSignIn ? { googleSignIn, authMode: 'google-principal-scoped' } : oidcResolver ? { authMode: 'oidc-principal-scoped' } : principalTokens ? { authMode: 'static-principal-scoped' } : {}),
     agentDirectory,
     grantLedger,
     ...(principalDirectory ? { principalDirectory } : {}),

@@ -236,6 +236,53 @@ repository as a `bot/<name>` branch with a draft pull request:
   AEEIS's own screenshots, `artifacts/source.tar.gz` and `.previous-artifacts`
   are never pushed.
 
+## Sign-in: Google accounts, no shared token
+
+With Google sign-in each person signs in with their own Google account and gets
+their own identity; there is no shared `AEEIS_ACCESS_TOKEN`. The server runs the
+sign-in itself (authorization code with PKCE): the browser never holds a Google
+token, only an HttpOnly, `Secure`, `SameSite=Lax` session cookie
+(`__Host-aeeis_session`) that the server signs. Every request re-checks the
+signed-in address against the current allow-list, so removing an address takes
+effect at once; changing `AEEIS_SESSION_SECRET` signs everyone out.
+
+1. In Google Cloud Console, create an OAuth client of type **Web application**
+   with the authorized redirect URI `https://<public host>/auth/google/callback`.
+2. Put the client secret and a session secret (`openssl rand -base64 48`) in
+   `secrets/` (uid 1000, mode 0400) and set, with `AEEIS_ACCESS_TOKEN` left empty:
+
+```dotenv
+AEEIS_ACCESS_TOKEN=
+AEEIS_GOOGLE_CLIENT_ID=1234-abc.apps.googleusercontent.com
+AEEIS_GOOGLE_CLIENT_SECRET_FILE=/run/aeeis-secrets/google-client-secret
+AEEIS_GOOGLE_REDIRECT_URI=https://aeeis.example/auth/google/callback
+AEEIS_SESSION_SECRET_FILE=/run/aeeis-secrets/session-secret
+# Who may sign in, and as whom. Map the existing owner's address to id "owner",
+# tenant "local" to keep everything created before the switch. Gmail addresses and
+# Workspace accounts of their own domain need nothing more. Any other address
+# also needs "sub" (the sign-in error page shows it): Google verified such an
+# address only once, and it may have changed hands since.
+AEEIS_GOOGLE_USERS={"you@example.com":{"id":"owner","tenantId":"local","roles":["owner","operator"]}}
+# Optional: every verified account of a Google Workspace domain (checked by the
+# token's hd claim, not the address), each as its own user google:<sub>.
+# AEEIS_GOOGLE_ALLOWED_DOMAINS=example.com
+# AEEIS_GOOGLE_DOMAIN_TENANT=example
+# AEEIS_GOOGLE_DOMAIN_ROLES=owner
+# AEEIS_SESSION_TTL_HOURS=168
+```
+
+3. Several users need `perPrincipal.maxMachines` in `local-tools.json` (see
+   Bot computer). `AEEIS_TRUSTED_ORIGINS` must include the public origin, as for
+   any browser use.
+
+Google sign-in cannot be combined with `AEEIS_ACCESS_TOKEN` or OIDC. Machines
+(a `/metrics` scraper, scripts) get their own entries in `AEEIS_PRINCIPAL_TOKENS`
+beside it, one token per machine; give a scraper only `["operator"]`. A request
+that sends `Authorization: Bearer …` is judged by that token alone and never by a
+session cookie. Readiness probes (`bin/health.sh`, `bin/deploy.sh`) call
+`/readyz`, which needs no credentials. To go back, clear the Google settings and
+set `AEEIS_ACCESS_TOKEN` again.
+
 ## Network and trust
 
 `netns` owns a stable network namespace shared by API and worker. Worker → API
