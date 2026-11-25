@@ -190,8 +190,13 @@ describe('Google sign-in over HTTP', () => {
       // Google sends the browser back with a cross-site top-level navigation.
       const callback = await app.inject({ method: 'GET', url: `/auth/google/callback?code=abc&state=${google.searchParams.get('state')}`,
         headers: { cookie: signinCookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } });
-      expect(callback.statusCode).toBe(302);
-      expect(callback.headers.location).toBe('/#room=1');
+      // A redirect would carry the cross-site mark on to `/` and be refused; a page of our own moves on instead.
+      expect(callback.statusCode).toBe(200);
+      expect(callback.headers.location).toBeUndefined();
+      expect(callback.body).toContain('<meta http-equiv="refresh" content="0;url=/#room=1">');
+      // The request that follows is a same-origin navigation and reaches the page; a cross-site one still does not.
+      expect((await app.inject({ method: 'GET', url: '/', headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: '/', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).statusCode).toBe(403);
       const session = sessionFrom([callback.headers['set-cookie']].flat() as string[])!;
 
       const status = await app.inject({ method: 'GET', url: '/api/status', headers: { cookie: session } });
@@ -230,8 +235,24 @@ describe('Google sign-in over HTTP', () => {
     } finally { await app.close(); }
   });
 
-  it('refuses to combine Google sign-in with a token', () => {
+  it('refuses to combine Google sign-in with a shared token', () => {
     expect(() => buildApp({ repository: new InMemoryRunRepository(), token: 't', googleSignIn: new GoogleSignIn(config()) })).toThrow(/cannot be combined/);
+  });
+
+  it('lets a machine use its own principal token beside Google sign-in, without falling back to a cookie', async () => {
+    const signIn = new GoogleSignIn(config());
+    const app = buildApp({ repository: new InMemoryRunRepository(), googleSignIn: signIn, principalTokens: { 'scraper-token': { id: 'metrics', tenantId: 'local', roles: ['operator'] } } });
+    try {
+      expect((await app.inject({ method: 'GET', url: '/metrics', headers: { authorization: 'Bearer scraper-token' } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: '/metrics' })).statusCode).toBe(401);
+      const attempt = begin(signIn);
+      const session = sessionFrom((await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie)).cookies)!;
+      expect((await app.inject({ method: 'GET', url: '/api/status', headers: { cookie: session } })).json()).toMatchObject({ principal: 'owner' });
+      // A wrong bearer is refused even next to a valid session cookie.
+      expect((await app.inject({ method: 'GET', url: '/api/status', headers: { cookie: session, authorization: 'Bearer wrong' } })).statusCode).toBe(401);
+      // The scraper's principal has no owner role: it cannot act as a person.
+      expect((await app.inject({ method: 'GET', url: '/api/bots', headers: { authorization: 'Bearer scraper-token' } })).statusCode).toBe(403);
+    } finally { await app.close(); }
   });
 });
 
@@ -240,6 +261,7 @@ describe('Google sign-in configuration', () => {
   it('accepts Google sign-in as the only sign-in method and checks its settings', () => {
     expect(() => validateRuntimeConfig(base)).not.toThrow();
     expect(() => validateRuntimeConfig({ ...base, AEEIS_ACCESS_TOKEN: 'x' })).toThrow(/cannot be combined/);
+    expect(() => validateRuntimeConfig({ ...base, AEEIS_PRINCIPAL_TOKENS: '{"scraper-token":{"id":"metrics","tenantId":"local","roles":["operator"]}}' })).not.toThrow();
     expect(() => validateRuntimeConfig({ ...base, AEEIS_SESSION_SECRET: 'short' })).toThrow(/32 characters/);
     expect(() => validateRuntimeConfig({ ...base, AEEIS_GOOGLE_USERS: undefined })).toThrow(/nobody else may sign in/);
     expect(() => validateRuntimeConfig({ ...base, AEEIS_GOOGLE_CLIENT_SECRET: undefined })).toThrow(/AEEIS_GOOGLE_CLIENT_SECRET/);

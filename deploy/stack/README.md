@@ -275,9 +275,11 @@ AEEIS_GOOGLE_USERS={"you@example.com":{"id":"owner","tenantId":"local","roles":[
    Bot computer). `AEEIS_TRUSTED_ORIGINS` must include the public origin, as for
    any browser use.
 
-Google sign-in cannot be combined with `AEEIS_ACCESS_TOKEN`,
-`AEEIS_PRINCIPAL_TOKENS` or OIDC, and the API ignores an `Authorization` header
-while it is on. Readiness probes (`bin/health.sh`, `bin/deploy.sh`) call
+Google sign-in cannot be combined with `AEEIS_ACCESS_TOKEN` or OIDC. Machines
+(a `/metrics` scraper, scripts) get their own entries in `AEEIS_PRINCIPAL_TOKENS`
+beside it, one token per machine; give a scraper only `["operator"]`. A request
+that sends `Authorization: Bearer …` is judged by that token alone and never by a
+session cookie. Readiness probes (`bin/health.sh`, `bin/deploy.sh`) call
 `/readyz`, which needs no credentials. To go back, clear the Google settings and
 set `AEEIS_ACCESS_TOKEN` again.
 

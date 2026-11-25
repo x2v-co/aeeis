@@ -125,7 +125,7 @@ const googleSignIn = process.env.AEEIS_GOOGLE_CLIENT_ID?.trim() ? new GoogleSign
   ...(process.env.AEEIS_GOOGLE_DOMAIN_ROLES?.trim() ? { domainRoles: process.env.AEEIS_GOOGLE_DOMAIN_ROLES.split(',').map(role => role.trim()).filter(Boolean) as Array<'owner' | 'agent' | 'operator'> } : {}),
   ...(process.env.AEEIS_SESSION_TTL_HOURS?.trim() ? { sessionTtlSeconds: Math.round(Number(process.env.AEEIS_SESSION_TTL_HOURS) * 3600) } : {}),
 }) : undefined;
-if (googleSignIn && (accessToken || principalTokens !== undefined || oidcResolver)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC authentication');
+if (googleSignIn && (accessToken || oidcResolver)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN or OIDC authentication');
 if (principalTokens !== undefined && (accessToken || oidcResolver)) throw new Error('Configure only one of AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC authentication');
 if (oidcResolver && accessToken) throw new Error('OIDC authentication cannot be combined with AEEIS_ACCESS_TOKEN');
 const projectionTargets: ProjectionTarget[] = process.env.AEEIS_PROJECTION_TARGETS === undefined ? [] : z.array(z.object({

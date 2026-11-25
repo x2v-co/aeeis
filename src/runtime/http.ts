@@ -277,12 +277,16 @@ export function buildApp(options: Options) {
     })
     : undefined;
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
-  if (options.googleSignIn && (options.token !== undefined || options.principalTokens !== undefined || options.principalResolver !== undefined)) throw new Error('Google sign-in cannot be combined with an access token, principal tokens or OIDC');
+  if (options.googleSignIn && (options.token !== undefined || options.principalResolver !== undefined)) throw new Error('Google sign-in cannot be combined with a shared access token or OIDC');
   const googleSignIn = options.googleSignIn;
-  // With Google sign-in the only credential is the signed session cookie; an Authorization header is not accepted.
+  const tokenResolver = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
+  // With Google sign-in, people use the signed session cookie. Machines (a metrics scraper, scripts) may use their own
+  // principal tokens; a request that sends a bearer is judged by that bearer alone and never falls back to a cookie.
   const resolvePrincipal: (authorization: string | undefined, cookie: string | undefined) => Principal | undefined | Promise<Principal | undefined> = googleSignIn
-    ? (_authorization, cookie) => googleSignIn.session(cookie)?.principal
-    : (() => { const resolver = options.principalResolver ?? staticPrincipalResolver(options.principalTokens); return (authorization: string | undefined) => resolver(authorization); })();
+    ? (authorization, cookie) => authorization !== undefined
+      ? (options.principalTokens !== undefined ? tokenResolver(authorization) : undefined)
+      : googleSignIn.session(cookie)?.principal
+    : authorization => tokenResolver(authorization);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const publicHosts = new Set((options.publicHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const trustedOrigins = new Set((options.trustedOrigins ?? []).map(origin => origin.trim()).filter(Boolean));
@@ -682,7 +686,9 @@ export function buildApp(options: Options) {
     app.get(GOOGLE_CALLBACK_PATH, async (request, reply) => {
       const result = await googleSignIn.callback(request.query as Record<string, unknown>, request.headers.cookie);
       reply.header('set-cookie', result.cookies);
-      if (result.ok) return reply.redirect(result.location, 302);
+      // Not a redirect: the request that follows a redirect out of Google still counts as cross-site and would be
+      // refused. A page of our own moves on, so the next request comes from this site.
+      if (result.ok) return reply.type('text/html; charset=utf-8').send(signedInPage(result.location));
       return reply.code(result.status).type('text/html; charset=utf-8').send(signInProblemPage(result.message));
     });
     app.post('/auth/signout', async (_request, reply) => reply.header('set-cookie', googleSignIn.signOutCookie()).code(204).send());
@@ -2772,8 +2778,16 @@ function classificationRank(value: 'public' | 'internal' | 'confidential' | 'pri
   return { public: 0, internal: 1, confidential: 2, private: 3 }[value];
 }
 
+/** The page after a successful sign-in: it goes straight on to where the person started. */
+function signedInPage(location: string): string {
+  const escaped = escapeHtml(location);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escaped}"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AEEIS 登录</title></head><body><p>已登录。<a href="${escaped}">继续</a></p></body></html>`;
+}
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+}
 /** A plain page for a sign-in that did not finish: what happened, and a way to try again. */
 function signInProblemPage(message: string): string {
-  const escaped = message.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+  const escaped = escapeHtml(message);
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AEEIS 登录</title></head><body><h1>没有登录成功</h1><p>${escaped}</p><p><a href="${GOOGLE_START_PATH}">重新用 Google 登录</a> · <a href="/">返回</a></p></body></html>`;
 }

@@ -522,7 +522,8 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
     if (!hasAccessToken && !hasPrincipalTokens && presentOidc !== oidcFields.length && !googleSignIn) {
       throw new Error('API authentication requires Google sign-in, AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or complete OIDC authentication; use AEEIS_AUTH_DISABLED=1 only for loopback development');
     }
-    if (googleSignIn && (hasAccessToken || hasPrincipalTokens || presentOidc)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC');
+    // Per-machine principal tokens may sit beside Google sign-in; one shared access token may not.
+    if (googleSignIn && (hasAccessToken || presentOidc)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN or OIDC');
     if (hasPrincipalTokens && hasAccessToken) throw new Error('AEEIS_ACCESS_TOKEN and AEEIS_PRINCIPAL_TOKENS cannot both be configured');
     if (presentOidc && (hasAccessToken || hasPrincipalTokens)) throw new Error('OIDC cannot be combined with static token authentication');
   }
