@@ -3416,12 +3416,13 @@ describe('entry bots and group chats', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
   });
 
-  it('schedules a routine on several weekdays with a model-call cap, and runs a scheduled routine once on request', async () => {
+  it('schedules a routine on several weekdays with a model-call cap and the default tools, and runs a scheduled routine once on request', async () => {
     const routines: any[] = [];
     const calls: Array<{ url: string; method: string; body?: any }> = [];
     const h = harness(fixture(), { handler: (url, request) => {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/tools') return response({ tools: [{ id: 'web-search' }, { id: 'web-fetch' }], defaultAllowedTools: ['web-search@1', 'web-fetch@1'] });
       if (!url.startsWith('/api/routines')) return undefined;
       const body = request?.body ? JSON.parse(request.body) : undefined;
       calls.push({ url, method, body });
@@ -3438,6 +3439,8 @@ describe('entry bots and group chats', () => {
     await ready();
     await vi.waitFor(() => expect(el('routines').hidden).toBe(false));
     const posted = () => calls.filter(call => call.url === '/api/routines' && call.method === 'POST');
+    // A routine starts with the server's default tools, like the composer does.
+    await vi.waitFor(() => expect(el<HTMLInputElement>('routine-tools').value).toBe('web-search@1, web-fetch@1'));
 
     fill('routine-kind', 'weekly');
     expect(el('routine-weekdays').hidden).toBe(false);
@@ -3449,9 +3452,13 @@ describe('entry bots and group chats', () => {
     fill('routine-max-calls', '12');
     el<HTMLFormElement>('routine-form').requestSubmit();
     await vi.waitFor(() => expect(el('routine-list').textContent).toContain('工作日简报'));
-    expect(posted()[0]!.body).toMatchObject({ trigger: { kind: 'schedule', calendar: { frequency: 'weekly', time: '07:50', daysOfWeek: [1, 2, 3, 4, 5] } }, runOptions: { maxModelCalls: 12 } });
+    expect(posted()[0]!.body).toMatchObject({ trigger: { kind: 'schedule', calendar: { frequency: 'weekly', time: '07:50', daysOfWeek: [1, 2, 3, 4, 5] } } });
+    expect(posted()[0]!.body.runOptions).toEqual({ maxModelCalls: 12, allowedTools: ['web-search@1', 'web-fetch@1'] });
     expect(el('routine-list').textContent).toContain('周一、周二、周三、周四、周五 07:50');
     expect(el('routine-list').textContent).toContain('每次最多 12 次模型调用');
+    expect(el('routine-list').textContent).toContain('工具：web-search@1、web-fetch@1');
+    // Resetting the form after adding keeps the default tools for the next routine.
+    expect(el<HTMLInputElement>('routine-tools').value).toBe('web-search@1, web-fetch@1');
 
     clickText('现在做一次', el('routine-list'));
     await vi.waitFor(() => expect(calls.some(call => call.url === '/api/routines/routine_1/run' && call.method === 'POST')).toBe(true));
@@ -3469,11 +3476,14 @@ describe('entry bots and group chats', () => {
     el<HTMLFormElement>('routine-form').requestSubmit();
     expect(posted()).toHaveLength(1);
     fill('routine-max-calls', '');
+    fill('routine-tools', '');
     fill('routine-kind', 'daily');
     el<HTMLFormElement>('routine-form').requestSubmit();
     await vi.waitFor(() => expect(posted()).toHaveLength(2));
     expect(posted()[1]!.body).not.toHaveProperty('runOptions');
     expect(posted()[1]!.body.trigger.calendar).not.toHaveProperty('daysOfWeek');
+    await vi.waitFor(() => expect(el('routine-list').children).toHaveLength(2));
+    expect(el('routine-list').lastElementChild!.textContent).toContain('不用工具');
   });
 
   it('pins, clears, and keeps a standing sentence on this person without sending it as execution authority', async () => {

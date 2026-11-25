@@ -797,6 +797,7 @@
 </fieldset>
 <input id="routine-time" type="time" value="09:00" aria-label="几点">
 <input id="routine-max-calls" type="number" min="3" max="100" step="1" inputmode="numeric" placeholder="模型调用上限" aria-label="每次最多调用模型几次（3–100，空着用默认 20）" title="每次最多调用模型几次（3–100，空着用默认 20）">
+<input id="routine-tools" maxlength="2000" placeholder="可用工具，例如 web-search@1, web-fetch@1" aria-label="每次可用的工具，用逗号分隔；空着就不用工具" title="每次可用的工具，用逗号分隔；空着就不用工具">
 <select id="routine-review" aria-label="审批档位">
 <option value="required">每一步都问我</option>
 <option value="auto">自动判断</option>
