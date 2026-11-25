@@ -3591,6 +3591,19 @@ describe('entry bots and group chats', () => {
     expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(false);
   });
 
+  it('says an earlier action is unfinished, not that a message is sending, when the chat is busy otherwise', async () => {
+    // Opening another chat keeps the conversation busy without sending anything.
+    const h = harness(fixture('bot'), { handler: (url, request) => url === '/api/conversations' && request?.method === 'POST' ? new Promise(() => {}) : undefined });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    await vi.waitFor(() => expect(h.fetch.mock.calls.some(([url, request]: any) => url === '/api/conversations' && request?.method === 'POST')).toBe(true));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    expect(el('error').textContent).toContain('上一个操作还没做完');
+    expect(el('error').textContent).not.toContain('发送');
+  });
+
   it('returns to AEEIS after archiving a group opened from a Bot chat, and stays there', async () => {
     const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date, revision: 0 };
     const h = harness(fixture('bot'), { handler(url, request) {
