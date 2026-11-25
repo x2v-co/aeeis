@@ -1581,6 +1581,14 @@ async function runRoutineNow(id: string, name: string): Promise<void> {
   const result = await api<{ status: string; runId?: string }>(`/routines/${encodeURIComponent(id)}/run`, {});
   message(result.status === 'started' ? `已让它按「${name}」做一次。` : result.status === 'pending' ? `「${name}」排上了，稍后开始。` : `「${name}」没能开始，稍后会再试。`);
   await refresh();
+  reloadRoutines();
+}
+/** Re-read the open person's routines: runs change their revision and next time behind the page's back. */
+function reloadRoutines(): void {
+  const agentId = routinePerson();
+  const section = $<HTMLDetailsElement>('routines');
+  if (!agentId || !routinesConfigured || !section || section.hidden || routineLoading === agentId) return;
+  void loadRoutines(agentId);
 }
 function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
 function syncRoutines(agentId: string): void {
@@ -1638,7 +1646,7 @@ function renderRoutines(): void {
       }); rotate.type = 'button'; rotate.className = 'quiet-button';
       actions.append(rotate);
     }
-    const edit = button('修改', async () => { startRoutineEdit(routine); }); edit.type = 'button'; edit.className = 'quiet-button'; edit.dataset.routineEdit = routine.id;
+    const edit = button('修改', () => startRoutineEdit(routine)); edit.type = 'button'; edit.className = 'quiet-button'; edit.dataset.routineEdit = routine.id;
     actions.append(edit);
     const remove = button('删除', async () => {
       if (!confirm(`删除例程「${routine.name}」？已经开始的工作不受影响。`)) return;
@@ -1706,9 +1714,15 @@ async function addRoutine(): Promise<void> {
   $<HTMLFormElement>('routine-form').reset();
   replaceRoutine(result.routine);
 }
-function startRoutineEdit(routine: RoutineView): void {
-  routineEditing = routine;
+async function startRoutineEdit(listed: RoutineView): Promise<void> {
   $('routine-error').textContent = '';
+  // Every run moves the routine's revision on, and the list on the page may be older than the last run. Edit the
+  // current one, so the save is refused only when someone really changed it meanwhile.
+  let routine: RoutineView;
+  try { routine = (await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(listed.id)}`)).routine; }
+  catch (error) { $('routine-error').textContent = errorMessage(error); return; }
+  replaceRoutine(routine);
+  routineEditing = routine;
   $<HTMLInputElement>('routine-name').value = routine.name;
   $<HTMLTextAreaElement>('routine-prompt').value = routine.prompt;
   $<HTMLSelectElement>('routine-review').value = routine.executionReview;
@@ -7367,6 +7381,7 @@ async function refresh(background = false): Promise<void> {
     ownedBotRecords = owned.map(ownedRosterBot);
     if (conversationEnabled) { followConversationBot(); updateConversationControls(); }
   }
+  if (full) reloadRoutines();
   await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();

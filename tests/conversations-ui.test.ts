@@ -3499,6 +3499,7 @@ describe('entry bots and group chats', () => {
       const body = request?.body ? JSON.parse(request.body) : undefined;
       calls.push({ url, method, body });
       if (url.startsWith('/api/routines?') && method === 'GET') return response({ routines });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: routines[0], deliveries: [] });
       if (url === '/api/routines/routine_1' && method === 'PATCH') {
         const { expectedRevision: _, runOptions, ...change } = body;
         Object.assign(routines[0], change, { revision: routines[0].revision + 1 });
@@ -3514,6 +3515,7 @@ describe('entry bots and group chats', () => {
 
     // Editing loads the routine into the form; cancelling sends nothing and puts the add form back.
     clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
     expect(el<HTMLInputElement>('routine-name').value).toBe('工作日简报');
     expect(el<HTMLSelectElement>('routine-kind').value).toBe('weekly');
     expect(el<HTMLInputElement>('routine-time').value).toBe('07:50');
@@ -3531,6 +3533,7 @@ describe('entry bots and group chats', () => {
 
     // Only the call cap changes: the schedule is not resent, and options the form does not show are kept.
     clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
     fill('routine-max-calls', '100');
     el<HTMLFormElement>('routine-form').requestSubmit();
     await vi.waitFor(() => expect(patches()).toHaveLength(1));
@@ -3541,6 +3544,7 @@ describe('entry bots and group chats', () => {
 
     // A new time is sent in the routine's own time zone, not the browser's.
     clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
     fill('routine-time', '08:05');
     el<HTMLFormElement>('routine-form').requestSubmit();
     await vi.waitFor(() => expect(patches()).toHaveLength(2));
@@ -3630,6 +3634,44 @@ describe('entry bots and group chats', () => {
     expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
   });
 
+  it('edits the routine as it is now, after a run moved its revision past the listed one', async () => {
+    const listed = { id: 'routine_1', agentId: 'aeeis', name: '每日出稿', prompt: '出今天的稿', executionReview: 'yolo', status: 'active', revision: 3, webhookEnabled: false,
+      trigger: { kind: 'schedule', calendar: { frequency: 'daily', timeZone: 'Asia/Singapore', time: '08:10' } }, runOptions: { maxModelCalls: 20 } };
+    // A run since the list loaded: the server's copy is two revisions on.
+    const current = { ...listed, revision: 5, lastRunId: 'run_now' };
+    const patches: any[] = [];
+    const listCalls: string[] = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) { listCalls.push(url); return response({ routines: [listCalls.length === 1 ? listed : current] }); }
+      if (url === '/api/routines/routine_1/run' && method === 'POST') return response({ status: 'started', deliveryId: 'manual:1', runId: 'run_now' });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: current, deliveries: [] });
+      if (url === '/api/routines/routine_1' && method === 'PATCH') {
+        const body = JSON.parse(request.body);
+        patches.push(body);
+        if (body.expectedRevision !== current.revision) return response({ error: '例程已经变化，请刷新后再改' }, 409);
+        Object.assign(current, { revision: current.revision + 1, runOptions: body.runOptions });
+        return response({ routine: current });
+      }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每日出稿'));
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    fill('routine-max-calls', '100');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].expectedRevision).toBe(5);
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每次最多 100 次模型调用'));
+    expect(el('routine-error').textContent).toBe('');
+    // Running it now also re-reads the list, so the card's own buttons carry the new revision.
+    clickText('现在做一次', el('routine-list'));
+    await vi.waitFor(() => expect(listCalls.length).toBeGreaterThan(1));
+  });
+
   it('resends a schedule only when it changed, whatever order its weekdays were stored in', async () => {
     const routines: any[] = [{ id: 'routine_1', agentId: 'aeeis', name: '周报', prompt: '写周报', executionReview: 'required', status: 'active', revision: 0, webhookEnabled: false,
       trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '09:00', daysOfWeek: [5, 1] } } }];
@@ -3638,6 +3680,7 @@ describe('entry bots and group chats', () => {
       const method = request?.method ?? 'GET';
       if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
       if (url.startsWith('/api/routines?')) return response({ routines });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: routines[0], deliveries: [] });
       if (url === '/api/routines/routine_1' && method === 'PATCH') { const body = JSON.parse(request.body); patches.push(body); Object.assign(routines[0], { prompt: body.prompt, revision: routines[0].revision + 1 }); return response({ routine: routines[0] }); }
       return undefined;
     } });
@@ -3645,6 +3688,7 @@ describe('entry bots and group chats', () => {
     await ready();
     await vi.waitFor(() => expect(el('routine-list').textContent).toContain('周报'));
     clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
     expect([...el('routine-weekdays').querySelectorAll<HTMLInputElement>('input:checked')].map(box => box.value)).toEqual(['1', '5']);
     fill('routine-prompt', '写周报，附上下周计划');
     el<HTMLFormElement>('routine-form').requestSubmit();
