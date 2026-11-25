@@ -822,8 +822,10 @@ setAttentionInboxOpen(false);
   }
 });
 function showEntry(): void {
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // With chats on, the entry is AEEIS's own conversation: open it, so the page does not follow the previous Bot's
+  // chat straight back to that Bot. openLifeThread selects AEEIS once its conversation is in.
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   entryEpoch += 1;
   leaveGroup();
   stopRunEventStream();
@@ -1735,7 +1737,10 @@ async function saveRoutineEdit(routine: RoutineView): Promise<void> {
   const form = readRoutineForm(schedule?.timeZone ?? 'UTC');
   const change: Record<string, unknown> = { expectedRevision: routine.revision, name: form.name, prompt: form.prompt, executionReview: form.executionReview };
   // Sending a schedule restarts its count from now, so send it only when it changed.
-  if (schedule && form.calendar && JSON.stringify(form.calendar) !== JSON.stringify({ frequency: schedule.frequency, timeZone: schedule.timeZone, time: schedule.time, ...(schedule.frequency === 'weekly' ? { daysOfWeek: schedule.daysOfWeek ?? [] } : {}) })) {
+  const days = (list: unknown) => Array.isArray(list) ? [...list].sort((a, b) => a - b).join(',') : '';
+  const calendar = form.calendar as { frequency: string; time: string; daysOfWeek?: number[] } | undefined;
+  if (schedule && calendar && (calendar.frequency !== schedule.frequency || calendar.time !== schedule.time
+    || (calendar.frequency === 'weekly' && days(calendar.daysOfWeek) !== days(schedule.daysOfWeek)))) {
     change.trigger = { kind: 'schedule', calendar: form.calendar };
   }
   const { maxModelCalls: _calls, allowedTools: _tools, ...kept } = routine.runOptions ?? {};
@@ -3811,8 +3816,9 @@ async function archiveOpenChat(): Promise<void> {
   directMembers.delete(id);
   directIndexKey = '';
   clearOpenGroup();
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // Back to AEEIS's own conversation, not the archived chat's, which may belong to a Bot.
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   message('');
   renderBotRoster();
   renderGroups(roomSummaries);

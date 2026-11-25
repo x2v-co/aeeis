@@ -3564,6 +3564,43 @@ describe('entry bots and group chats', () => {
     expect(calls.some(url => url.endsWith('agentId=aeeis'))).toBe(false);
   });
 
+  it('goes to AEEIS from a Bot chat through the command palette and stays there', async () => {
+    const h = harness(fixture('bot'));
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    // The entry opens AEEIS's own conversation, so later refreshes have nothing to pull it back to the Bot.
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis'));
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(true));
+    for (const { callback } of intervals) callback();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
+  });
+
+  it('resends a schedule only when it changed, whatever order its weekdays were stored in', async () => {
+    const routines: any[] = [{ id: 'routine_1', agentId: 'aeeis', name: '周报', prompt: '写周报', executionReview: 'required', status: 'active', revision: 0, webhookEnabled: false,
+      trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '09:00', daysOfWeek: [5, 1] } } }];
+    const patches: any[] = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) return response({ routines });
+      if (url === '/api/routines/routine_1' && method === 'PATCH') { const body = JSON.parse(request.body); patches.push(body); Object.assign(routines[0], { prompt: body.prompt, revision: routines[0].revision + 1 }); return response({ routine: routines[0] }); }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('周报'));
+    clickText('修改', el('routine-list'));
+    expect([...el('routine-weekdays').querySelectorAll<HTMLInputElement>('input:checked')].map(box => box.value)).toEqual(['1', '5']);
+    fill('routine-prompt', '写周报，附上下周计划');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).not.toHaveProperty('trigger');
+    expect(patches[0].prompt).toBe('写周报，附上下周计划');
+  });
+
   it('remembers that the routine list was left open', async () => {
     const h = harness(fixture(), { handler: (url) => {
       if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });

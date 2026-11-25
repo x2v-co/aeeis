@@ -59,7 +59,8 @@ function observationMetadata(observation: Step['observations'][number]) {
     return { error: result.error, receiptId: result.receiptId };
   }
   // Source and PDF readers keep their own page and hash metadata below, even when a file looks like a search result.
-  const web = observation.tool.startsWith('sources.') || observation.tool.startsWith('pdf.') ? undefined : webEvidenceDigest(result);
+  const tool = typeof observation.tool === 'string' ? observation.tool : '';
+  const web = tool.startsWith('sources.') || tool.startsWith('pdf.') ? undefined : webEvidenceDigest(result);
   if (web) return { ...web, ...(typeof result?.receiptId === 'string' ? { receiptId: result.receiptId } : {}) };
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,

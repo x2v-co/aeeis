@@ -188,6 +188,10 @@ describe('executor context budget', () => {
     const projected = boundedObservations([read, { tool: 'sources.read', argument: 'other', result: { content: 'x' } }], () => ['source.json'])[0]!.result as any;
     expect(projected).toMatchObject({ id: 'source.json', page, sourceContentHash: 'a'.repeat(64) });
     expect(projected.webResults).toBeUndefined();
+    // An observation stored without a tool name is still projected, not a crash.
+    const untagged = [{ argument: 'x', result: { content: 'y'.repeat(3000) } }, { tool: 'sources.read', argument: 'z', result: { content: 'z' } }] as any;
+    expect(() => boundedObservations(untagged, () => [])).not.toThrow();
+    expect(() => boundedExecutorInput('system', { fixed: 'x'.repeat(94_000), observations: untagged })).not.toThrow();
   });
 
   it('rejects an oversized fixed core before invoking a provider', () => {
