@@ -120,7 +120,8 @@ interface ConversationMessageView {
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
   trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
-  runOptions?: { maxModelCalls?: number; allowedTools?: string[] };
+  /** Other run options (privacy, budgets, agents) the form does not show are kept as they are on edit. */
+  runOptions?: { maxModelCalls?: number; allowedTools?: string[]; [option: string]: unknown };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -237,6 +238,8 @@ let routineState: { agentId: string; items: RoutineView[] } | undefined;
 let routineLoading = '';
 /** A webhook secret is shown once, right after it is made. */
 let routineSecret: { routineId: string; secret: string } | undefined;
+/** The routine the form is editing; the form adds a new one when unset. */
+let routineEditing: RoutineView | undefined;
 let runtimeModel = '';
 let taskModelBound = '';
 let evolutionConfigured = false;
@@ -819,8 +822,16 @@ setAttentionInboxOpen(false);
   }
 });
 function showEntry(): void {
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // With chats on, the entry is AEEIS's own conversation: open it, so the page does not follow the previous Bot's
+  // chat straight back to that Bot. openLifeThread selects AEEIS once its conversation is in. It cannot start while
+  // a message is still being sent; say so rather than half-switching to the entry under the Bot's chat.
+  if (conversationEnabled && (conversationBusy || conversationAttempt || lifeOpening.has('aeeis'))) {
+    // Only a pending message is "sending"; switching Bots, task actions and the like are just unfinished.
+    message(conversationAttempt ? '上一条消息还在发送，发完再回到 AEEIS。' : '上一个操作还没做完，做完再回到 AEEIS。');
+    return;
+  }
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   entryEpoch += 1;
   leaveGroup();
   stopRunEventStream();
@@ -1570,6 +1581,14 @@ async function runRoutineNow(id: string, name: string): Promise<void> {
   const result = await api<{ status: string; runId?: string }>(`/routines/${encodeURIComponent(id)}/run`, {});
   message(result.status === 'started' ? `已让它按「${name}」做一次。` : result.status === 'pending' ? `「${name}」排上了，稍后开始。` : `「${name}」没能开始，稍后会再试。`);
   await refresh();
+  reloadRoutines();
+}
+/** Re-read the open person's routines: runs change their revision and next time behind the page's back. */
+function reloadRoutines(): void {
+  const agentId = routinePerson();
+  const section = $<HTMLDetailsElement>('routines');
+  if (!agentId || !routinesConfigured || !section || section.hidden || routineLoading === agentId) return;
+  void loadRoutines(agentId);
 }
 function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
 function syncRoutines(agentId: string): void {
@@ -1577,6 +1596,7 @@ function syncRoutines(agentId: string): void {
   if (!section) return;
   section.hidden = !agentId || !routinesConfigured;
   if (section.hidden) return;
+  if (routineEditing && routineEditing.agentId !== agentId) endRoutineEdit();
   if (routineState?.agentId !== agentId && routineLoading !== agentId) void loadRoutines(agentId);
   renderRoutines();
 }
@@ -1626,11 +1646,14 @@ function renderRoutines(): void {
       }); rotate.type = 'button'; rotate.className = 'quiet-button';
       actions.append(rotate);
     }
+    const edit = button('修改', () => startRoutineEdit(routine)); edit.type = 'button'; edit.className = 'quiet-button'; edit.dataset.routineEdit = routine.id;
+    actions.append(edit);
     const remove = button('删除', async () => {
       if (!confirm(`删除例程「${routine.name}」？已经开始的工作不受影响。`)) return;
       await api<unknown>(`/routines/${encodeURIComponent(routine.id)}`, undefined, 'DELETE');
       if (routineState) routineState = { ...routineState, items: routineState.items.filter(item => item.id !== routine.id) };
       if (routineSecret?.routineId === routine.id) routineSecret = undefined;
+      if (routineEditing?.id === routine.id) endRoutineEdit();
       renderRoutines();
     }); remove.type = 'button'; remove.className = 'quiet-button';
     actions.append(remove);
@@ -1642,8 +1665,11 @@ function renderRoutines(): void {
   secret.hidden = !shown;
   secret.textContent = shown ? `「${shown.name}」的密钥只显示这一次：${routineSecret!.secret}\n用它对「时间戳.投递 id.请求体」做 HMAC-SHA256，放在 x-aeeis-signature: sha256=…，同时带上 x-aeeis-timestamp（秒）和 x-aeeis-delivery。同一投递 id 只开始一次。` : '';
   const kind = $<HTMLSelectElement>('routine-kind').value;
-  $('routine-weekdays').hidden = kind !== 'weekly';
-  $('routine-time').hidden = kind === 'webhook';
+  // A monthly or on-demand routine keeps its timing on edit: the form cannot show it.
+  const fixedTiming = Boolean(routineEditing && !formSchedule(routineEditing) && routineEditing.trigger.kind !== 'webhook');
+  $('routine-kind').hidden = fixedTiming;
+  $('routine-weekdays').hidden = fixedTiming || kind !== 'weekly';
+  $('routine-time').hidden = fixedTiming || kind === 'webhook';
 }
 function replaceRoutine(next: RoutineView): void {
   if (routineState?.agentId === next.agentId) routineState = { ...routineState, items: routineState.items.some(item => item.id === next.id) ? routineState.items.map(item => item.id === next.id ? next : item) : [...routineState.items, next] };
@@ -1653,29 +1679,96 @@ async function changeRoutine(routine: RoutineView, change: Record<string, unknow
   const result = await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(routine.id)}`, { expectedRevision: routine.revision, ...change }, 'PATCH');
   replaceRoutine(result.routine);
 }
-async function addRoutine(): Promise<void> {
-  const agentId = routinePerson();
-  if (!agentId) throw new Error('先打开这个人');
+/** A daily or weekly schedule the form can show and change; undefined for anything else. */
+function formSchedule(routine: RoutineView): { frequency: 'daily' | 'weekly'; timeZone: string; time: string; daysOfWeek?: number[] } | undefined {
+  if (routine.trigger.kind !== 'schedule') return undefined;
+  const calendar = routine.trigger.calendar;
+  return calendar.frequency === 'daily' || calendar.frequency === 'weekly' ? { ...calendar, frequency: calendar.frequency } : undefined;
+}
+function readRoutineForm(timeZone: string): { name: string; prompt: string; kind: string; calendar?: Record<string, unknown>; executionReview: string; maxModelCalls?: number; allowedTools: string[] } {
   const kind = $<HTMLSelectElement>('routine-kind').value;
   const time = $<HTMLInputElement>('routine-time').value || '09:00';
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   const daysOfWeek = [...$('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]:checked')].map(box => Number(box.value));
   if (kind === 'weekly' && !daysOfWeek.length) throw new Error('每周至少选一天');
   const capText = $<HTMLInputElement>('routine-max-calls').value.trim();
   const maxModelCalls = capText ? Number(capText) : undefined;
   if (maxModelCalls !== undefined && (!Number.isInteger(maxModelCalls) || maxModelCalls < 3 || maxModelCalls > 100)) throw new Error('模型调用上限填 3 到 100 的整数，或空着用默认');
-  const allowedTools = listedIds('routine-tools');
-  const runOptions = { ...(maxModelCalls !== undefined ? { maxModelCalls } : {}), ...(allowedTools.length ? { allowedTools } : {}) };
-  const trigger = kind === 'webhook' ? { kind: 'webhook' }
-    : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek } : {}) } };
+  return {
+    name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value, kind,
+    ...(kind === 'webhook' ? {} : { calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek } : {}) } }),
+    executionReview: $<HTMLSelectElement>('routine-review').value,
+    ...(maxModelCalls !== undefined ? { maxModelCalls } : {}), allowedTools: listedIds('routine-tools'),
+  };
+}
+async function addRoutine(): Promise<void> {
+  const agentId = routinePerson();
+  if (!agentId) throw new Error('先打开这个人');
+  const form = readRoutineForm(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const runOptions = { ...(form.maxModelCalls !== undefined ? { maxModelCalls: form.maxModelCalls } : {}), ...(form.allowedTools.length ? { allowedTools: form.allowedTools } : {}) };
+  const trigger = form.calendar ? { kind: 'schedule', calendar: form.calendar } : { kind: 'webhook' };
   const result = await api<{ routine: RoutineView; webhookSecret?: string }>('/routines', {
-    agentId, name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value,
-    trigger, executionReview: $<HTMLSelectElement>('routine-review').value,
+    agentId, name: form.name, prompt: form.prompt, trigger, executionReview: form.executionReview,
     ...(Object.keys(runOptions).length ? { runOptions } : {}),
   });
   if (result.webhookSecret) routineSecret = { routineId: result.routine.id, secret: result.webhookSecret };
   $<HTMLFormElement>('routine-form').reset();
   replaceRoutine(result.routine);
+}
+async function startRoutineEdit(listed: RoutineView): Promise<void> {
+  $('routine-error').textContent = '';
+  // Every run moves the routine's revision on, and the list on the page may be older than the last run. Edit the
+  // current one, so the save is refused only when someone really changed it meanwhile.
+  let routine: RoutineView;
+  try { routine = (await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(listed.id)}`)).routine; }
+  catch (error) { $('routine-error').textContent = errorMessage(error); return; }
+  replaceRoutine(routine);
+  routineEditing = routine;
+  $<HTMLInputElement>('routine-name').value = routine.name;
+  $<HTMLTextAreaElement>('routine-prompt').value = routine.prompt;
+  $<HTMLSelectElement>('routine-review').value = routine.executionReview;
+  $<HTMLInputElement>('routine-max-calls').value = routine.runOptions?.maxModelCalls ? String(routine.runOptions.maxModelCalls) : '';
+  $<HTMLInputElement>('routine-tools').value = (routine.runOptions?.allowedTools ?? []).join(', ');
+  const kind = $<HTMLSelectElement>('routine-kind');
+  const schedule = formSchedule(routine);
+  // A schedule stays a schedule and a webhook stays a webhook; the server refuses to switch them.
+  if (schedule) {
+    kind.value = schedule.frequency; $<HTMLInputElement>('routine-time').value = schedule.time;
+    for (const box of $('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]')) box.checked = (schedule.daysOfWeek ?? []).includes(Number(box.value));
+  } else if (routine.trigger.kind === 'webhook') kind.value = 'webhook';
+  // Monthly and on-demand timing stays as it is; a neutral value keeps the hidden weekday check quiet.
+  else kind.value = 'daily';
+  for (const option of kind.options) option.disabled = routine.trigger.kind === 'webhook' ? option.value !== 'webhook' : option.value === 'webhook';
+  $('routine-add').textContent = '保存修改';
+  $('routine-cancel').hidden = false;
+  renderRoutines();
+  $<HTMLInputElement>('routine-name').focus();
+}
+function endRoutineEdit(): void {
+  routineEditing = undefined;
+  $<HTMLFormElement>('routine-form').reset();
+  for (const option of $<HTMLSelectElement>('routine-kind').options) option.disabled = false;
+  $('routine-add').textContent = '添加例程';
+  $('routine-cancel').hidden = true;
+  renderRoutines();
+}
+async function saveRoutineEdit(routine: RoutineView): Promise<void> {
+  const schedule = formSchedule(routine);
+  // Keep the routine's own time zone: the browser's may differ from where it was set up.
+  const form = readRoutineForm(schedule?.timeZone ?? 'UTC');
+  const change: Record<string, unknown> = { expectedRevision: routine.revision, name: form.name, prompt: form.prompt, executionReview: form.executionReview };
+  // Sending a schedule restarts its count from now, so send it only when it changed.
+  const days = (list: unknown) => Array.isArray(list) ? [...list].sort((a, b) => a - b).join(',') : '';
+  const calendar = form.calendar as { frequency: string; time: string; daysOfWeek?: number[] } | undefined;
+  if (schedule && calendar && (calendar.frequency !== schedule.frequency || calendar.time !== schedule.time
+    || (calendar.frequency === 'weekly' && days(calendar.daysOfWeek) !== days(schedule.daysOfWeek)))) {
+    change.trigger = { kind: 'schedule', calendar: form.calendar };
+  }
+  const { maxModelCalls: _calls, allowedTools: _tools, ...kept } = routine.runOptions ?? {};
+  const runOptions = { ...kept, ...(form.maxModelCalls !== undefined ? { maxModelCalls: form.maxModelCalls } : {}), ...(form.allowedTools.length ? { allowedTools: form.allowedTools } : {}) };
+  change.runOptions = Object.keys(runOptions).length ? runOptions : null;
+  const result = await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(routine.id)}`, change, 'PATCH');
+  replaceRoutine(result.routine);
+  endRoutineEdit();
 }
 function deliveryDraft(delivery: LastDelivery): string {
   const parts = [delivery.taskTitle.trim()];
@@ -3743,8 +3836,9 @@ async function archiveOpenChat(): Promise<void> {
   directMembers.delete(id);
   directIndexKey = '';
   clearOpenGroup();
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // Back to AEEIS's own conversation, not the archived chat's, which may belong to a Bot.
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   message('');
   renderBotRoster();
   renderGroups(roomSummaries);
@@ -5046,10 +5140,22 @@ function acceptConversation(view: ConversationView): void {
     view = { ...view, messages: [...conversation.messages.filter(message => !ids.has(message.id)), ...view.messages], ...(conversation.hasEarlierMessages === undefined ? {} : { hasEarlierMessages: conversation.hasEarlierMessages }) };
   }
   conversation = view;
+  followConversationBot();
   if (finished?.runId && rosterView() === 'entry') void revealFinishedRun(finished.runId).catch(() => undefined);
   rememberLifeSummary(view);
   localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
   renderConversation();
+}
+/**
+ * A Bot's own conversation makes it the selected Bot. The two are saved apart, so a reload could otherwise show one
+ * Bot's name and settings above another Bot's chat and routines. Runs again once the Bot list arrives.
+ */
+function followConversationBot(): void {
+  const owner = lifeAgent(conversation);
+  if (!owner || owner === selectedBotId || openGroupId || groupDraftOpen || !rosterBots().some(bot => bot.id === owner)) return;
+  selectedBotId = owner;
+  localStorage.setItem('aeeis.bot', owner);
+  renderBotRoster();
 }
 async function initializeConversations(status: RuntimeStatus): Promise<void> {
   botDialogueRouting = status.botDialogueRouting === true;
@@ -5598,9 +5704,14 @@ $('routine-form')?.addEventListener('submit', event => {
   $('routine-error').textContent = '';
   const add = $<HTMLButtonElement>('routine-add');
   add.disabled = true;
-  void addRoutine().catch(error => { $('routine-error').textContent = errorMessage(error); }).finally(() => { add.disabled = false; });
+  const editing = routineEditing;
+  void (editing ? saveRoutineEdit(editing) : addRoutine()).catch(error => { $('routine-error').textContent = errorMessage(error); }).finally(() => { add.disabled = false; });
 });
 $('routine-kind')?.addEventListener('change', () => renderRoutines());
+$('routine-cancel')?.addEventListener('click', () => endRoutineEdit());
+// Remember whether the routine list was left open; a reload otherwise always starts it closed.
+$('routines')?.addEventListener('toggle', () => { try { localStorage.setItem('aeeis.routines-open', $<HTMLDetailsElement>('routines').open ? '1' : '0'); } catch { /* storage may be blocked */ } });
+try { if (localStorage.getItem('aeeis.routines-open') === '1') $<HTMLDetailsElement>('routines').open = true; } catch { /* storage may be blocked */ }
 $('standing-form')?.addEventListener('submit', event => {
   event.preventDefault();
   void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
@@ -7268,8 +7379,9 @@ async function refresh(background = false): Promise<void> {
   agentsLoaded = true;
   if (owned) {
     ownedBotRecords = owned.map(ownedRosterBot);
-    if (conversationEnabled) updateConversationControls();
+    if (conversationEnabled) { followConversationBot(); updateConversationControls(); }
   }
+  if (full) reloadRoutines();
   await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();

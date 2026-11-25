@@ -177,6 +177,23 @@ describe('executor context budget', () => {
     expect(webEvidenceDigest({ content: 'source page' })).toBeUndefined();
   });
 
+  it('gives the newest large search its digest without a raw preview, and leaves source reads to their own metadata', () => {
+    const results = Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `T${i}`, url: `https://news.example/${i}`, snippet: 's'.repeat(600) }));
+    const latest = boundedObservations([{ tool: 'web-search', argument: 'q', result: { output: { query: 'q', results }, receiptId: 'r' } }], () => []).at(-1)!.result as any;
+    expect(latest.webResults.results[0].url).toBe('https://news.example/0');
+    expect(latest.preview).toBeUndefined();
+    // An uploaded JSON shaped like a search export is still a source read: it keeps its page and continuation.
+    const page = { mode: 'characters', characterOffset: 0, nextRead: { argument: 'source.json', characterOffset: 4000 } };
+    const read = { tool: 'sources.jsonRead', argument: 'source.json', result: { id: 'source.json', sourceContentHash: 'a'.repeat(64), page, results, truncated: true } };
+    const projected = boundedObservations([read, { tool: 'sources.read', argument: 'other', result: { content: 'x' } }], () => ['source.json'])[0]!.result as any;
+    expect(projected).toMatchObject({ id: 'source.json', page, sourceContentHash: 'a'.repeat(64) });
+    expect(projected.webResults).toBeUndefined();
+    // An observation stored without a tool name is still projected, not a crash.
+    const untagged = [{ argument: 'x', result: { content: 'y'.repeat(3000) } }, { tool: 'sources.read', argument: 'z', result: { content: 'z' } }] as any;
+    expect(() => boundedObservations(untagged, () => [])).not.toThrow();
+    expect(() => boundedExecutorInput('system', { fixed: 'x'.repeat(94_000), observations: untagged })).not.toThrow();
+  });
+
   it('rejects an oversized fixed core before invoking a provider', () => {
     expect(() => boundedExecutorInput('s', { goal: 'x'.repeat(EXECUTOR_PROMPT_CHARS) })).toThrow('Executor context exceeds');
   });

@@ -137,6 +137,8 @@ describe('ToolkitRegistryGateway', () => {
     const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'pinned', timeoutMs: 5000 });
     expect(result.receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
     expect(calls.at(-1)).toBe('/fetch');
+    // Health names the pin that hides a Registry tool, and only that one.
+    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools); pinned entries override the Registry for web-fetch@1');
   });
 
   it('keeps non-2xx responses without a provider receipt unknown', async () => {
