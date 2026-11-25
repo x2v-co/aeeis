@@ -430,7 +430,11 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const activeKeys = new Set(index.tools.filter(entry => entry.digest).map(entry => `${entry.slug}@${entry.version}:${entry.digest}`));
     for (const key of this.verifiedManifests.keys()) if (!activeKeys.has(key)) this.verifiedManifests.delete(key);
     const resolved: ToolDescriptor[] = [];
+    const pinned = new Set((this.options.additionalTools ?? []).map(extra => `${extra.id}@${extra.version}`));
     for (const manifest of manifests) {
+      // The operator's pinned entry for the same id and version wins: it declares the capabilities (a pinned
+      // web-fetch may be read + network), while the Registry never does and would turn it into execute.
+      if (pinned.has(`${manifest.slug}@${manifest.version}`)) continue;
       const tool = {
         id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: manifest.outputSchema ?? {}, ...(manifest.description === undefined ? {} : { description: manifest.description }), endpoint: this.endpointFor(manifest.endpoints.rest),
       };
