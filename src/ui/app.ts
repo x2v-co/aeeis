@@ -1268,6 +1268,8 @@ function clearToken(): void {
 }
 class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
+  // Nothing is asked of the server before this page knows how it signs in, or while the sign-in screen is up.
+  if (!readOnlyShare && (!(await signInChecked()) || signInRequired())) throw new ApiError('Sign-in required', 401);
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : getToken();
   const response = await fetch(`/api${path}`, {
@@ -1291,14 +1293,48 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   return (value ?? {}) as T;
 }
 let authRequired = false;
+/** "google" when the server signs people in with Google (no access token); "token" otherwise. */
+let signInMode: 'token' | 'google' = 'token';
+function signInRequired(): boolean { return document.body.dataset.signin === 'required'; }
+let signInCheck: Promise<boolean> | undefined;
+/** Asked once per page load; every API call waits for it. */
+function signInChecked(): Promise<boolean> { return signInCheck ??= prepareSignIn(); }
+function showSignInGate(): void {
+  const gate = document.getElementById('signin-gate');
+  if (!gate) return;
+  const back = `${location.pathname}${location.search}${location.hash}`;
+  $<HTMLAnchorElement>('signin-google').href = `/auth/google/start?return=${encodeURIComponent(back)}`;
+  gate.hidden = false;
+  document.body.dataset.signin = 'required';
+}
+/** Ask the server how this page signs in. With Google sign-in, show who is signed in, or the sign-in screen;
+ * returns whether the page may go on to load. A server without /auth/session uses the access token. */
+async function prepareSignIn(): Promise<boolean> {
+  let session: { mode?: string; signedIn?: boolean; email?: string } | undefined;
+  try {
+    const response = await fetch('/auth/session', { headers: { accept: 'application/json' } });
+    session = response.ok ? JSON.parse(await response.text()) as typeof session : undefined;
+  } catch { session = undefined; }
+  if (session?.mode !== 'google') return true;
+  signInMode = 'google';
+  clearToken();
+  $('access-panel').hidden = true;
+  $('signin-panel').hidden = false;
+  if (!session.signedIn) { showSignInGate(); return false; }
+  $('signin-email').textContent = session.email ?? '';
+  return true;
+}
 const SERVER_ERROR_LABELS: Record<string, string> = {
   'Local access token required': '需要访问令牌：点击“输入令牌”，填写本地访问令牌后连接。',
   'Invalid local access token': '访问令牌无效，请重新输入。',
   'Shared runs are read-only': '只读分享页不能执行操作。',
+  'Sign-in required': '需要登录：请用 Google 重新登录。',
 };
 function errorMessage(error: unknown): string {
   const text = error instanceof Error && error.message ? error.message : String(error || '运行服务暂时不可用');
   if (/access token/i.test(text)) { authRequired = true; syncDetailsToggleLabel(); }
+  // An expired or removed Google session: show the sign-in screen again.
+  if (text === 'Sign-in required' && signInMode === 'google') showSignInGate();
   return SERVER_ERROR_LABELS[text] ?? text;
 }
 function formatTime(value: string | number | Date): string {
@@ -9564,6 +9600,11 @@ $('connect').onclick = () => {
   setSystemSignal('loading');
   void initialize().finally(() => { connect.disabled = false; connect.classList.remove('is-busy'); });
 };
+$('signout').onclick = async () => {
+  const button = $<HTMLButtonElement>('signout');
+  button.disabled = true;
+  try { await fetch('/auth/signout', { method: 'POST' }); } finally { location.reload(); }
+};
 $('forget-token').onclick = () => {
   clearToken();
   $<HTMLInputElement>('token').value = '';
@@ -9601,7 +9642,7 @@ async function initialize(): Promise<void> {
     }
 
     const mode = $('instance-mode');
-    const modeLabels: Record<string, string> = { 'single-owner-local': '开发版 · 单用户本地模式', 'static-principal-scoped': '开发版 · Principal / Tenant 隔离', 'oidc-principal-scoped': '开发版 · OIDC Principal / Tenant 隔离', 'principal-scoped': '开发版 · Principal / Tenant 隔离' };
+    const modeLabels: Record<string, string> = { 'single-owner-local': '开发版 · 单用户本地模式', 'static-principal-scoped': '开发版 · Principal / Tenant 隔离', 'oidc-principal-scoped': '开发版 · OIDC Principal / Tenant 隔离', 'google-principal-scoped': 'Google 登录 · 多用户', 'principal-scoped': '开发版 · Principal / Tenant 隔离' };
     mode.textContent = modeLabels[status.mode] ?? `开发版 · ${status.mode}`;
     mode.dataset.state = status.modelConfigured && status.modelHealth?.ready !== false ? 'ready' : 'attention';
     mode.title = status.principal ? `当前身份：${status.principal} · 租户：${status.tenantId ?? 'default'} · 角色：${(status.roles ?? []).join(', ') || '未声明'}` : '';
@@ -9766,7 +9807,7 @@ if (!readOnlyShare) {
   if (saved && token === undefined) { badTokenNotice = true; message(BAD_TOKEN); }
   $<HTMLInputElement>('token').value = token ?? '';
 }
-void initialize();
+void (async () => { if (readOnlyShare || await signInChecked()) await initialize(); })();
 setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh(true).catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {
   if (!document.hidden && current && !DONE_STATUSES.has(current.status)) updateRunActivity(current);

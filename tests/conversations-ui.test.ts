@@ -5029,3 +5029,26 @@ it('uses the authoritative Board column, sends versioned keyboard moves and refr
   await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
   expect(view.tasks[0]!.status).toBe('running');
 });
+
+describe('Google sign-in on the page', () => {
+  it('shows only the sign-in screen and asks nothing else of the server until this browser is signed in', async () => {
+    const h = harness(fixture(), { handler: url => url === '/auth/session' ? response({ mode: 'google', signedIn: false }) : undefined });
+    start(h.fetch, { local: { 'aeeis.token': 'stale-token' } });
+    await vi.waitFor(() => expect(el('signin-gate').hidden).toBe(false));
+    expect(el<HTMLAnchorElement>('signin-google').getAttribute('href')).toMatch(/^\/auth\/google\/start\?return=%2F/);
+    expect(el('access-panel').hidden).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.fetch.mock.calls.map(([url]) => String(url)).filter(url => url.startsWith('/api/'))).toEqual([]);
+  });
+
+  it('shows who is signed in instead of the token box, and signs out', async () => {
+    const h = harness(fixture(), { handler: url => url === '/auth/session' ? response({ mode: 'google', signedIn: true, email: 'owner@x2v.co' }) : undefined });
+    start(h.fetch);
+    await ready();
+    expect(el('signin-gate').hidden).toBe(true);
+    expect(el('signin-panel').hidden).toBe(false);
+    expect(el('access-panel').hidden).toBe(true);
+    expect(el('signin-email').textContent).toBe('owner@x2v.co');
+    expect(h.fetch.mock.calls.some(([, request]) => request?.headers?.authorization)).toBe(false);
+  });
+});

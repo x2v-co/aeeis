@@ -55,6 +55,7 @@ import type { SkillGovernance, ToolGateway } from '../integrations.js';
 import { agentCardSchema } from '../protocol.js';
 import { AgentCallbackAuthenticationError, AgentResponseRejected, agentReputationObservationSchema, HttpAgentCardDiscovery, type AgentDirectoryPort, type AgentTransportResponse } from '../agent-gateway.js';
 import { principalResolver as staticPrincipalResolver, type Principal, type PrincipalResolver } from '../security/principal.js';
+import { GOOGLE_CALLBACK_PATH, GOOGLE_START_PATH, type GoogleSignIn } from '../security/google-signin.js';
 import { publicTaskDispatch, type TaskScheduler, type TaskSchedulerAction } from '../task-scheduler.js';
 import { globalBudgetBillingImportSchema, globalBudgetReconcileSchema, type GlobalBudgetLedger, type GlobalBudgetSelector } from '../global-budget.js';
 import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membership.js';
@@ -99,7 +100,7 @@ interface RunComputer {
   deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
   savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
-interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -276,7 +277,12 @@ export function buildApp(options: Options) {
     })
     : undefined;
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
-  const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
+  if (options.googleSignIn && (options.token !== undefined || options.principalTokens !== undefined || options.principalResolver !== undefined)) throw new Error('Google sign-in cannot be combined with an access token, principal tokens or OIDC');
+  const googleSignIn = options.googleSignIn;
+  // With Google sign-in the only credential is the signed session cookie; an Authorization header is not accepted.
+  const resolvePrincipal: (authorization: string | undefined, cookie: string | undefined) => Principal | undefined | Promise<Principal | undefined> = googleSignIn
+    ? (_authorization, cookie) => googleSignIn.session(cookie)?.principal
+    : (() => { const resolver = options.principalResolver ?? staticPrincipalResolver(options.principalTokens); return (authorization: string | undefined) => resolver(authorization); })();
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const publicHosts = new Set((options.publicHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const trustedOrigins = new Set((options.trustedOrigins ?? []).map(origin => origin.trim()).filter(Boolean));
@@ -509,7 +515,7 @@ export function buildApp(options: Options) {
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
     const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
     const savedSiteRoute = request.method === 'GET' && route === '/saved-site/:runId/:ticket/*';
-    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id')
+    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id' || (googleSignIn !== undefined && route === GOOGLE_CALLBACK_PATH))
       && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
     // A saved site runs as an opaque origin, so its own module scripts and styles arrive with Origin: null.
@@ -529,11 +535,11 @@ export function buildApp(options: Options) {
     // healthcheck and Tailscale Serve call them without credentials): they must
     // stay reachable when an access token is configured. Only /api/ routes and
     // /metrics resolve a principal.
-    if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
+    if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined || googleSignIn !== undefined) && route === '/metrics'))) {
       const tokenFailure = options.token ? localTokenFailure(options.token, request.headers.authorization) : undefined;
       if (tokenFailure) return reply.code(401).send({ error: tokenFailure });
-      const principal = await resolvePrincipal(request.headers.authorization);
-      if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
+      const principal = await resolvePrincipal(request.headers.authorization, request.headers.cookie);
+      if (!principal) return reply.code(401).send({ error: googleSignIn ? 'Sign-in required' : 'Principal authentication required' });
       request.aeeisPrincipal = principal;
       const suppliedDeviceId = request.headers['x-aeeis-device-id'];
       if (suppliedDeviceId !== undefined) {
@@ -662,6 +668,25 @@ export function buildApp(options: Options) {
     }
     return reply.code(202).send({ accepted: true });
   });
+  // Sign-in state for the page. Public: it says only whether sign-in is on and who this browser is signed in as.
+  app.get('/auth/session', async request => {
+    if (!googleSignIn) return { mode: 'token' };
+    const session = googleSignIn.session(request.headers.cookie);
+    return session ? { mode: 'google', signedIn: true, email: session.email } : { mode: 'google', signedIn: false };
+  });
+  if (googleSignIn) {
+    app.get(GOOGLE_START_PATH, async (request, reply) => {
+      const { location, cookie } = googleSignIn.start(typeof (request.query as { return?: unknown }).return === 'string' ? (request.query as { return: string }).return : undefined);
+      return reply.header('set-cookie', cookie).redirect(location, 302);
+    });
+    app.get(GOOGLE_CALLBACK_PATH, async (request, reply) => {
+      const result = await googleSignIn.callback(request.query as Record<string, unknown>, request.headers.cookie);
+      reply.header('set-cookie', result.cookies);
+      if (result.ok) return reply.redirect(result.location, 302);
+      return reply.code(result.status).type('text/html; charset=utf-8').send(signInProblemPage(result.message));
+    });
+    app.post('/auth/signout', async (_request, reply) => reply.header('set-cookie', googleSignIn.signOutCookie()).code(204).send());
+  }
   app.get('/health', async () => ({ status: 'ok', service: 'aeeis-agent', protocol: 'aeeis-health/1' }));
   app.get('/readyz', async (_request, reply) => {
     const readiness = await readinessSnapshot();
@@ -2745,4 +2770,10 @@ function countObject(values: string[]): Record<string, number> {
 function escapeMetricLabel(value: string): string { return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n'); }
 function classificationRank(value: 'public' | 'internal' | 'confidential' | 'private'): number {
   return { public: 0, internal: 1, confidential: 2, private: 3 }[value];
+}
+
+/** A plain page for a sign-in that did not finish: what happened, and a way to try again. */
+function signInProblemPage(message: string): string {
+  const escaped = message.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AEEIS 登录</title></head><body><h1>没有登录成功</h1><p>${escaped}</p><p><a href="${GOOGLE_START_PATH}">重新用 Google 登录</a> · <a href="/">返回</a></p></body></html>`;
 }

@@ -178,13 +178,13 @@ function validatePrivacyList(raw: string | undefined, label: string): void {
 
 /** Local tools run code for the Bot. On a loopback development runtime anything goes. A shared or production
  * runtime may use them only when every tool runs on a separate sandbox host behind the Run's proxy (or with no
- * network). Several users (AEEIS_PRINCIPAL_TOKENS or OIDC) additionally need `perPrincipal`: each user's machines are
+ * network). Several users (AEEIS_PRINCIPAL_TOKENS, OIDC or Google sign-in) additionally need `perPrincipal`: each user's machines are
  * then labelled as theirs, capped per user, and queued apart from other users' calls, on the host `assign` gives them.
  * Anything else needs an isolated remote tool gateway. */
 function validateLocalTools(env: NodeJS.ProcessEnv): void {
   const path = env.AEEIS_LOCAL_TOOLS_CONFIG;
   if (!path) return;
-  const multiOwner = env.AEEIS_PRINCIPAL_TOKENS !== undefined || Boolean(env.AEEIS_OIDC_ISSUER);
+  const multiOwner = env.AEEIS_PRINCIPAL_TOKENS !== undefined || Boolean(env.AEEIS_OIDC_ISSUER) || Boolean(env.AEEIS_GOOGLE_CLIENT_ID?.trim());
   const shared = (env.AEEIS_ENV ?? env.NODE_ENV) === 'production' || env.AEEIS_RUNNER === 'temporal'
     || !['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1');
   if (!multiOwner && !shared) return;
@@ -194,7 +194,7 @@ function validateLocalTools(env: NodeJS.ProcessEnv): void {
   let config: { tools?: unknown; sandbox?: { ssh?: unknown; network?: unknown }; hosts?: Record<string, { ssh?: unknown }>; perPrincipal?: { maxMachines?: unknown } };
   try { config = JSON.parse(readFileSync(path, 'utf8')) as typeof config; }
   catch { return refuse('needs a readable JSON tools config'); }
-  if (multiOwner && typeof config?.perPrincipal?.maxMachines !== 'number') refuse('with several users (AEEIS_PRINCIPAL_TOKENS or AEEIS_OIDC_ISSUER) needs perPrincipal.maxMachines');
+  if (multiOwner && typeof config?.perPrincipal?.maxMachines !== 'number') refuse('with several users (AEEIS_PRINCIPAL_TOKENS, AEEIS_OIDC_ISSUER or Google sign-in) needs perPrincipal.maxMachines');
   const hosts = config?.hosts && typeof config.hosts === 'object' ? Object.entries(config.hosts) : undefined;
   if (hosts) {
     if (!hosts.length) refuse('needs at least one host in hosts');
@@ -500,18 +500,29 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   const hasPrincipalTokens = Boolean(env.AEEIS_PRINCIPAL_TOKENS?.trim());
   const oidcFields = ['AEEIS_OIDC_ISSUER', 'AEEIS_OIDC_AUDIENCE', 'AEEIS_OIDC_JWKS_URL'];
   const presentOidc = oidcFields.filter(name => Boolean(env[name]?.trim())).length;
+  const googleSignIn = Boolean(env.AEEIS_GOOGLE_CLIENT_ID?.trim());
+  if (googleSignIn) {
+    for (const name of ['AEEIS_GOOGLE_CLIENT_SECRET', 'AEEIS_GOOGLE_REDIRECT_URI', 'AEEIS_SESSION_SECRET']) {
+      if (!env[name]?.trim()) throw new Error(`Google sign-in requires ${name}${name.endsWith('SECRET') ? ' (or ' + name + '_FILE)' : ''}`);
+    }
+    if ((env.AEEIS_SESSION_SECRET ?? '').length < 32) throw new Error('AEEIS_SESSION_SECRET must be at least 32 characters');
+    if (!env.AEEIS_GOOGLE_USERS?.trim() && !env.AEEIS_GOOGLE_ALLOWED_DOMAINS?.trim()) throw new Error('Google sign-in requires AEEIS_GOOGLE_USERS or AEEIS_GOOGLE_ALLOWED_DOMAINS: nobody else may sign in');
+    if (env.AEEIS_GOOGLE_ALLOWED_DOMAINS?.trim() && !env.AEEIS_GOOGLE_DOMAIN_TENANT?.trim()) throw new Error('AEEIS_GOOGLE_ALLOWED_DOMAINS requires AEEIS_GOOGLE_DOMAIN_TENANT');
+    if (production && !env.AEEIS_GOOGLE_REDIRECT_URI!.trim().startsWith('https://')) throw new Error('AEEIS_GOOGLE_REDIRECT_URI must use HTTPS in production');
+  }
   if (authDisabled) {
     if (!['127.0.0.1', 'localhost', '::1'].includes(env.AEEIS_HOST ?? '127.0.0.1')) {
       throw new Error('AEEIS_AUTH_DISABLED=1 requires a loopback AEEIS_HOST (127.0.0.1, localhost, or ::1)');
     }
-    if (hasAccessToken || hasPrincipalTokens || presentOidc) {
-      throw new Error('AEEIS_AUTH_DISABLED=1 cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or OIDC authentication');
+    if (hasAccessToken || hasPrincipalTokens || presentOidc || googleSignIn) {
+      throw new Error('AEEIS_AUTH_DISABLED=1 cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, OIDC or Google sign-in');
     }
   } else {
     if (presentOidc !== 0 && presentOidc !== oidcFields.length) throw new Error('OIDC configuration requires issuer, audience, and JWKS URL together');
-    if (!hasAccessToken && !hasPrincipalTokens && presentOidc !== oidcFields.length) {
-      throw new Error('API authentication requires AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or complete OIDC authentication; use AEEIS_AUTH_DISABLED=1 only for loopback development');
+    if (!hasAccessToken && !hasPrincipalTokens && presentOidc !== oidcFields.length && !googleSignIn) {
+      throw new Error('API authentication requires Google sign-in, AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS, or complete OIDC authentication; use AEEIS_AUTH_DISABLED=1 only for loopback development');
     }
+    if (googleSignIn && (hasAccessToken || hasPrincipalTokens || presentOidc)) throw new Error('Google sign-in cannot be combined with AEEIS_ACCESS_TOKEN, AEEIS_PRINCIPAL_TOKENS or OIDC');
     if (hasPrincipalTokens && hasAccessToken) throw new Error('AEEIS_ACCESS_TOKEN and AEEIS_PRINCIPAL_TOKENS cannot both be configured');
     if (presentOidc && (hasAccessToken || hasPrincipalTokens)) throw new Error('OIDC cannot be combined with static token authentication');
   }
@@ -520,7 +531,7 @@ export function validateRuntimeConfig(env: NodeJS.ProcessEnv = process.env): voi
   if (!env.DATABASE_URL) throw new Error('Production configuration requires DATABASE_URL');
   // A one-owner node may run without content encryption and without a separate app role; it is warned on every start.
   const singleNode = env.AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE === '1';
-  if (singleNode && (env.AEEIS_OIDC_ISSUER || env.AEEIS_PRINCIPAL_DIRECTORY_URL)) throw new Error('AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE cannot be combined with multi-user sign-in');
+  if (singleNode && (env.AEEIS_OIDC_ISSUER || env.AEEIS_PRINCIPAL_DIRECTORY_URL || googleSignIn)) throw new Error('AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE cannot be combined with multi-user sign-in');
   if (!singleNode && !env.AEEIS_CONTENT_ENCRYPTION_KEY?.trim()) throw new Error('Production configuration requires AEEIS_CONTENT_ENCRYPTION_KEY_FILE (or AEEIS_ALLOW_UNENCRYPTED_SINGLE_NODE=1 for a one-owner node)');
   if (!singleNode && !env.AEEIS_DATABASE_MIGRATION_URL?.trim()) throw new Error('Production configuration requires AEEIS_DATABASE_MIGRATION_URL: the owner role runs migrations and DATABASE_URL logs in as a role row-level security applies to');
   if (!singleNode && env.AEEIS_DATABASE_MIGRATION_URL?.trim() === env.DATABASE_URL.trim()) throw new Error('AEEIS_DATABASE_MIGRATION_URL and DATABASE_URL must use different roles');
