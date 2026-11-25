@@ -142,9 +142,32 @@ describe('executor context budget', () => {
       expect(result.webResults.results).toHaveLength(8);
       expect(result.webResults.results[0]).toEqual({ rank: 1, title: `Title ${n}-0`, url: `https://news.example/${n}/0`, snippet: (`Snippet ${n}-0 ` + 'x'.repeat(600)).slice(0, 300), publishedAt: '2026-11-25' });
     }
-    // The executor-wide projection keeps the digests too.
-    const overall = boundedExecutorInput('system', { fixed: 'x'.repeat(60_000), observations: projected }).observations as any[];
-    expect(overall.every((observation, n) => observation.result.webResults?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+    // The executor-wide projection keeps the digests too when the prompt is over budget, here
+    // because of a large dependency that it can shrink instead.
+    const input = { fixed: 'x'.repeat(60_000), observations: projected, dependencies: [{ id: 'artifact_1', taskId: 'scan', content: 'y'.repeat(40_000), evidenceRefs: [] }] };
+    expect(JSON.stringify(input).length).toBeGreaterThan(EXECUTOR_PROMPT_CHARS);
+    const overall = boundedExecutorInput('system', input);
+    expect(JSON.stringify(overall).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+    expect((overall.dependencies as any[])[0].schemaVersion).toBe('context-reference/1');
+    expect((overall.observations as any[]).every((observation, n) => observation.result.webResults?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+  });
+
+  it('keeps web digests while other evidence can shrink, and drops the oldest only as a last resort', () => {
+    const search = (n: number) => ({ tool: 'web-search', argument: `query ${n}`, result: { output: { query: `query ${n}`,
+      results: Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `T${n}-${i}`, url: `https://news.example/${n}/${i}`, snippet: 's'.repeat(600) })) }, receiptId: `receipt_${n}` } });
+    // Raw (not yet projected) observations: the second pass must still recognize and keep their digests.
+    const observations = Array.from({ length: 5 }, (_, n) => search(n));
+    const kept = boundedExecutorInput('system', { fixed: 'x'.repeat(70_000), observations }).observations as any[];
+    expect(kept.some(observation => observation.result.schemaVersion === 'context-reference/1')).toBe(true);
+    // Each search is either untouched or compacted to its digest; none is a bare hash.
+    expect(kept.every((observation, n) => (observation.result.webResults ?? observation.result.output)?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+    // Nothing else left to shrink: the oldest digests go first, the call still fits, and the newest stays citable.
+    const tight = boundedExecutorInput('system', { fixed: 'x'.repeat(88_000), observations: boundedObservations(observations, () => []) });
+    expect(JSON.stringify(tight).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+    const result = (tight.observations as any[]).map(observation => observation.result);
+    expect(result[0]).toMatchObject({ schemaVersion: 'context-reference/1', receiptId: 'receipt_0' });
+    expect(result[0].webResults).toBeUndefined();
+    expect(result.at(-1).webResults.results[0].url).toBe('https://news.example/4/0');
   });
 
   it('digests a fetched page to its link, title and a bounded excerpt', () => {

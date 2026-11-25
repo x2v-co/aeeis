@@ -31,6 +31,9 @@ const record = (value: unknown) => value && typeof value === 'object' && !Array.
  */
 export function webEvidenceDigest(value: unknown): Record<string, unknown> | undefined {
   const outer = record(value);
+  // An observation already projected by boundedObservations carries its digest; keep it through the second pass.
+  if (record(outer?.webResults)) return { webResults: outer!.webResults };
+  if (record(outer?.webPage)) return { webPage: outer!.webPage };
   const result = record(outer?.output) ?? outer;
   if (!result) return undefined;
   if (Array.isArray(result.results) && result.results.some(item => typeof record(item)?.url === 'string')) {
@@ -131,6 +134,20 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
         ...(typeof item.taskId === 'string' ? { taskId: item.taskId } : {}), ...(typeof item.title === 'string' ? { title: item.title } : {}),
         ...(typeof item.receiptId === 'string' ? { receiptId: item.receiptId } : {}), ...(Array.isArray(item.outputRefs) ? { outputRefs: item.outputRefs } : {}),
         ...(Array.isArray(item.evidenceRefs) ? { evidenceRefs: item.evidenceRefs } : {}) };
+    }
+  }
+  // Web digests are kept above because a later step must be able to cite them. They barely shrink, so when the
+  // prompt is still over budget after every other reduction, drop them oldest first rather than fail the call.
+  const observations = output.observations;
+  if (system.length + size(output) > EXECUTOR_PROMPT_CHARS && Array.isArray(observations)) {
+    const projected = [...observations]; output.observations = projected;
+    for (const [index, value] of observations.entries()) {
+      if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
+      const item = value as Step['observations'][number];
+      const metadata = observationMetadata(item);
+      if (!('webResults' in metadata) && !('webPage' in metadata)) continue;
+      projected[index] = { ...item, result: { ...compact(item.result, `observations/${index}`),
+        ...(typeof metadata.receiptId === 'string' ? { receiptId: metadata.receiptId } : {}) } };
     }
   }
   if (system.length + size(output) > EXECUTOR_PROMPT_CHARS) throw new Error('Executor context exceeds the 96000 character budget; reduce the goal, tool catalog or fixed context');
