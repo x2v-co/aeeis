@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { loadFileEnvironment } from '../src/config-secrets.js';
 
 describe('file-backed deployment configuration', () => {
-  it('loads AEEIS and database values while removing one trailing newline', () => {
+  it('loads AEEIS and database values without the trailing newline', () => {
     const root = mkdtempSync(join(tmpdir(), 'aeeis-secrets-'));
     const tokenFile = join(root, 'token');
     const databaseFile = join(root, 'database');
@@ -16,6 +16,19 @@ describe('file-backed deployment configuration', () => {
     expect(env.AEEIS_ACCESS_TOKEN).toBe('secret-token');
     expect(env.DATABASE_URL).toBe('postgresql://aeeis@db/aeeis');
     expect(env.AEEIS_ACCESS_TOKEN_FILE).toBe(tokenFile);
+  });
+
+  it('drops whitespace a paste leaves around a secret, and keeps inner lines', () => {
+    const root = mkdtempSync(join(tmpdir(), 'aeeis-secrets-'));
+    const pasted = join(root, 'pasted'), bom = join(root, 'bom'), pem = join(root, 'pem');
+    writeFileSync(pasted, ' GOCSPX-abc123 \r\n');
+    writeFileSync(bom, '\uFEFFsecret\n');
+    writeFileSync(pem, '-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----\n\n');
+    const env: NodeJS.ProcessEnv = { AEEIS_GOOGLE_CLIENT_SECRET_FILE: pasted, AEEIS_SESSION_SECRET_FILE: bom, AEEIS_APNS_KEY_FILE: pem };
+    loadFileEnvironment(env);
+    expect(env.AEEIS_GOOGLE_CLIENT_SECRET).toBe('GOCSPX-abc123');
+    expect(env.AEEIS_SESSION_SECRET).toBe('secret');
+    expect(env.AEEIS_APNS_KEY).toBe('-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----');
   });
 
   it('fails closed on conflicts, missing files, directories, empty values, and NUL bytes', () => {
