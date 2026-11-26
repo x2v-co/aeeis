@@ -253,11 +253,11 @@ describe('share storage and redaction helpers', () => {
     const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
     for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
     // Keys written as one word still count, whatever (or however many) words follow the sensitive one.
-    // Each value is its own word so one redaction cannot hide another (`v-1` inside `v-11`).
+    // Each value ends in `x`, so one redaction cannot hide another (`leak1x` is not inside `leak11x`).
     const keys = ['secretkey', 'SECRETKEY', 'tokenid', 'PASSWORDHASH', 'clientsecretvalue', 'passwordconfirm', 'passwordsalt', 'privatekeypem',
       'secretkeyvalue', 'PASSWORDHASHVALUE', 'tokenomicsKey', 'tokenizerKey', 'Tokenized key', 'tokenized', 'env', 'ENVFILE', 'envKey', 'dev_env', 'environment',
       'envs', 'envkey', 'envvars', 'envjson', 'envfile', 'Envconfig', 'envpwd', 'envcreds'];
-    const values = keys.map((_, i) => `leak${String.fromCharCode(97 + i)}x`);
+    const values = keys.map((_, i) => `leak${i}x`);
     const joined = JSON.stringify(redactRunData({ text: keys.map((key, i) => `${key}=${values[i]}`).join(' ') }));
     for (const value of values) expect(joined).not.toContain(value);
     const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Tokenization: text Secretive: no Environmental: carbon Envoy: proxy envelope=sealed Envision: plan';
