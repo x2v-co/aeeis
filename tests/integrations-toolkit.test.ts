@@ -111,13 +111,14 @@ describe('ToolkitRegistryGateway', () => {
 
   it('keeps the pinned capabilities and endpoint when the Registry also lists the same tool and version', async () => {
     const calls: string[] = [];
+    let listsFetch = true;
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'application/json');
       const port = (server.address() as { port: number }).port;
       calls.push(request.url ?? '');
       if (request.url === '/registry/manifest') {
         response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [
-          { slug: 'web-fetch', version: 1, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-fetch/manifest` },
+          ...(listsFetch ? [{ slug: 'web-fetch', version: 1, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-fetch/manifest` }] : []),
           { slug: 'web-search', version: 2, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-search/manifest` },
         ] }));
         return;
@@ -140,7 +141,13 @@ describe('ToolkitRegistryGateway', () => {
     expect(result.receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
     expect(calls.at(-1)).toBe('/fetch');
     // Health names the pin that hides a Registry tool, and only that one.
-    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools); pinned entries override the Registry for web-fetch@1');
+    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools); pinned entries take precedence over the Registry for web-fetch@1');
+    // Once the Registry stops listing that version, the pin shows only what it declares itself.
+    listsFetch = false;
+    expect((await gateway.listTools()).find(tool => tool.id === 'web-fetch')).toMatchObject({ capabilities: ['read', 'network'], inputSchema: {} });
+    expect((await gateway.listTools()).find(tool => tool.id === 'web-fetch')).not.toHaveProperty('description');
+    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools)');
+    listsFetch = true;
     // What the pin does declare wins over the Registry.
     const own = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, description: 'pinned fetch', inputSchema: { type: 'object' } }] });
     expect((await own.listTools()).find(tool => tool.id === 'web-fetch')).toMatchObject({ description: 'pinned fetch', inputSchema: { type: 'object' } });

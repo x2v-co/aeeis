@@ -255,11 +255,11 @@ describe('share storage and redaction helpers', () => {
     // Keys written as one word still count, whatever (or however many) words follow the sensitive one.
     // Each value is its own word so one redaction cannot hide another (`v-1` inside `v-11`).
     const keys = ['secretkey', 'SECRETKEY', 'tokenid', 'PASSWORDHASH', 'clientsecretvalue', 'passwordconfirm', 'passwordsalt', 'privatekeypem',
-      'secretkeyvalue', 'PASSWORDHASHVALUE', 'tokenomicsKey', 'tokenizerKey', 'Tokenized key', 'tokenized'];
+      'secretkeyvalue', 'PASSWORDHASHVALUE', 'tokenomicsKey', 'tokenizerKey', 'Tokenized key', 'tokenized', 'env', 'ENVFILE', 'envKey', 'dev_env', 'environment'];
     const values = keys.map((_, i) => `leak${String.fromCharCode(97 + i)}x`);
     const joined = JSON.stringify(redactRunData({ text: keys.map((key, i) => `${key}=${values[i]}`).join(' ') }));
     for (const value of values) expect(joined).not.toContain(value);
-    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Tokenization: text Secretive: no';
+    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Tokenization: text Secretive: no Environmental: carbon Envoy: proxy envelope=sealed';
     expect(redactRunData({ text: prose }).text).toBe(prose);
   });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {

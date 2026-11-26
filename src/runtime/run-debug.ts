@@ -6,7 +6,7 @@ import { explainRun } from './explanation.js';
 export const MAX_DEBUG_FIELD_BYTES = 8192;
 export const MAX_DEBUG_ARRAY_ITEMS = 500;
 export const MAX_DEBUG_NODES = 200_000;
-const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|(?:^env|env$|[_-]env[_-])|environment|token|cookie|signature|^sig$|^(?:x-)?auth(?:[_-][\w-]*)?$|session[_-]?(?:key|secret|id))/i;
+const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|environment|(?:^env|env$|[_-]env[_-])|token|cookie|signature|^sig$|^(?:x-)?auth(?:[_-][\w-]*)?$|session[_-]?(?:key|secret|id))/i;
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
@@ -19,6 +19,9 @@ const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
 const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|al(?:ly)?|isms?|i[sz](?:e[sr]?|ers|ing|ations?))$/i;
 const endsWord = (key: string, end: number): boolean => {
   const rest = key.slice(end);
+  // `env` is also the start of everyday words (`Envoy:`, `envelope=`); it is the variable only on its own,
+  // in capitals or before a new camelCase word (`env=`, `ENVFILE=`, `envKey=`).
+  if (/^env$/i.test(key.slice(end - 3, end)) && /^[a-z]/.test(rest)) return false;
   // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
   if (/^[A-Z]/.test(rest) && /[a-z]/.test(key[end - 1] ?? '')) return true;
   const run = (/^[a-z]/.test(rest) ? /^[a-z]+/ : /^[A-Za-z]+/).exec(rest)?.[0];
