@@ -316,14 +316,17 @@ export class ToolkitRegistryGateway implements ToolGateway {
       this.reconcile = (request, receipt) => this.reconcileThroughGateway(request, receipt);
     }
     for (const extra of options.additionalTools ?? []) {
-      const endpoint = this.endpointFor(extra.endpoint);
       if (!extra.id.trim() || !extra.version.trim()) throw new Error('Pinned toolkit tool id and version must be non-empty');
-      this.manifestCache.set(`${extra.id}@${extra.version}`, {
-        id: extra.id, version: extra.version, endpoint,
-        capabilities: extra.capabilities ?? ['execute'], inputSchema: extra.inputSchema ?? {}, outputSchema: extra.outputSchema ?? {},
-        ...(extra.description === undefined ? {} : { description: extra.description }),
-      });
+      this.manifestCache.set(`${extra.id}@${extra.version}`, this.pinnedEntry(extra));
     }
+  }
+
+  private pinnedEntry(extra: ToolkitPinnedTool) {
+    return {
+      id: extra.id, version: extra.version, endpoint: this.endpointFor(extra.endpoint),
+      capabilities: extra.capabilities ?? ['execute'], inputSchema: extra.inputSchema ?? {}, outputSchema: extra.outputSchema ?? {},
+      ...(extra.description === undefined ? {} : { description: extra.description }),
+    };
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -334,7 +337,7 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const checkedAt = new Date().toISOString();
     try {
       const tools = await this.listTools();
-      const shadowed = this.shadowedPins.length ? `; pinned entries override the Registry for ${this.shadowedPins.join(', ')}` : '';
+      const shadowed = this.shadowedPins.length ? `; pinned entries take precedence over the Registry for ${this.shadowedPins.join(', ')}` : '';
       return { ready: true, detail: `Toolkit Registry reachable (${tools.length} tools)${shadowed}`, checkedAt };
     } catch (error) {
       return { ready: false, detail: `Toolkit Registry unavailable: ${error instanceof Error ? error.message : 'unknown error'}`.slice(0, 500), checkedAt };
@@ -433,13 +436,24 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const activeKeys = new Set(index.tools.filter(entry => entry.digest).map(entry => `${entry.slug}@${entry.version}:${entry.digest}`));
     for (const key of this.verifiedManifests.keys()) if (!activeKeys.has(key)) this.verifiedManifests.delete(key);
     const resolved: ToolDescriptor[] = [];
-    const pinned = new Set((this.options.additionalTools ?? []).map(extra => `${extra.id}@${extra.version}`));
     const shadowed: string[] = [];
     for (const manifest of manifests) {
       // The operator's pinned entry for the same id and version wins: it declares the capabilities (a pinned
       // web-fetch may be read + network), while the Registry never does and would turn it into execute.
       // Health reports it, so a pin that hides a changed Registry tool is visible.
-      if (pinned.has(`${manifest.slug}@${manifest.version}`)) { shadowed.push(`${manifest.slug}@${manifest.version}`); continue; }
+      // A pin that leaves out its description or schemas still shows the Registry's, so the model sees the
+      // tool's options (web-search's maxResults, web-fetch's maxChars) and not an empty input. The tool
+      // manifest then follows the Registry's copy of that version; a pin that must not change declares its own.
+      const pin = (this.options.additionalTools ?? []).find(extra => `${extra.id}@${extra.version}` === `${manifest.slug}@${manifest.version}`);
+      if (pin) {
+        shadowed.push(`${manifest.slug}@${manifest.version}`);
+        const description = pin.description ?? manifest.description;
+        this.manifestCache.set(`${pin.id}@${pin.version}`, {
+          ...this.pinnedEntry(pin), inputSchema: pin.inputSchema ?? manifest.inputSchema ?? {}, outputSchema: pin.outputSchema ?? manifest.outputSchema ?? {},
+          ...(description === undefined ? {} : { description }),
+        });
+        continue;
+      }
       const tool = {
         id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: manifest.outputSchema ?? {}, ...(manifest.description === undefined ? {} : { description: manifest.description }), endpoint: this.endpointFor(manifest.endpoints.rest),
       };
@@ -448,6 +462,8 @@ export class ToolkitRegistryGateway implements ToolGateway {
     }
     this.shadowedPins = shadowed;
     for (const extra of this.options.additionalTools ?? []) {
+      // The Registry no longer lists this version: drop what an earlier listing filled in.
+      if (!shadowed.includes(`${extra.id}@${extra.version}`)) this.manifestCache.set(`${extra.id}@${extra.version}`, this.pinnedEntry(extra));
       const tool = this.manifestCache.get(`${extra.id}@${extra.version}`)!;
       if (!resolved.some(candidate => candidate.id === tool.id && candidate.version === tool.version)) {
         resolved.push({ id: tool.id, version: tool.version, capabilities: tool.capabilities, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, ...(tool.description === undefined ? {} : { description: tool.description }) });

@@ -246,6 +246,23 @@ describe('share storage and redaction helpers', () => {
     for (let i = 0; i < 100; i++) deep = { nested: deep };
     expect(JSON.stringify(redactRunData(deep))).not.toContain('deep-secret');
   });
+  it('keeps prose whose key only starts with a sensitive word, and still scrubs real credential keys', () => {
+    const title = '来源：Licenseware《Enterprise AI Tokenomics: Landscape of AI Pricing, Nov 2026》 Secretary: Alice';
+    const kept = redactRunData({ text: `${title}\nLandscape again`, sourceValue: { note: title } }, { capFields: false });
+    expect(kept.text).toBe(`${title}\nLandscape again`);
+    const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
+    for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
+    // Keys written as one word still count, whatever (or however many) words follow the sensitive one.
+    // Each value ends in `x`, so one redaction cannot hide another (`leak1x` is not inside `leak11x`).
+    const keys = ['secretkey', 'SECRETKEY', 'tokenid', 'PASSWORDHASH', 'clientsecretvalue', 'passwordconfirm', 'passwordsalt', 'privatekeypem',
+      'secretkeyvalue', 'PASSWORDHASHVALUE', 'tokenomicsKey', 'tokenizerKey', 'Tokenized key', 'tokenized', 'env', 'ENVFILE', 'envKey', 'dev_env', 'environment',
+      'envs', 'envkey', 'envvars', 'envjson', 'envfile', 'Envconfig', 'envpwd', 'envcreds'];
+    const values = keys.map((_, i) => `leak${i}x`);
+    const joined = JSON.stringify(redactRunData({ text: keys.map((key, i) => `${key}=${values[i]}`).join(' ') }));
+    for (const value of values) expect(joined).not.toContain(value);
+    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Tokenization: text Secretive: no Environmental: carbon Envoy: proxy envelope=sealed Envision: plan';
+    expect(redactRunData({ text: prose }).text).toBe(prose);
+  });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {
     expect((await readFile(new URL('../src/adapters/migrations/001-run-shares.sql', import.meta.url), 'utf8')).trim()).toBe(runSharesMigration);
   });
