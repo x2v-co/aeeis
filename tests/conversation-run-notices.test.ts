@@ -138,6 +138,10 @@ describe('Run notices without opening the chat', () => {
     await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/notifications/sync`, headers: { authorization: 'Bearer alice' }, payload: {} });
     expect(await f.index.get(threadId, scope)).toMatchObject({ conversationId: entry.id });
     expect((await f.notices(entry.id)).map(message => message.text)).toEqual(['等你批准：照常开工']);
+    // Opening it again has nothing new to write, so it does not touch the index.
+    const calls = link.mock.calls.length;
+    await f.app.inject({ method: 'POST', url: `/api/conversations/${entry.id}/notifications/sync`, headers: { authorization: 'Bearer alice' }, payload: {} });
+    expect(link.mock.calls.length).toBe(calls);
     await f.repository.mutate(started.runId, current => { current.status = 'cancelled'; });
     expect(await f.app.aeeisRunNotice!(await f.repository.get(started.runId))).toBe(true);
   });

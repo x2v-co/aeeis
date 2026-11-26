@@ -1365,10 +1365,13 @@ export class ConversationService implements LifeThreadInbox {
     const notifications: ConversationMessage[] = [];
     for (const task of snapshot.tasks) {
       if (!task.latestRunId) continue;
-      await this.linkThread(task.threadId, snapshot.id, task.id, scope);
       const run = await this.runs.get(task.latestRunId, scope);
       if (!noticeStatuses.has(run.status)) continue;
-      notifications.push(runNotice(snapshot, task, run));
+      const notice = runNotice(snapshot, task, run);
+      if (snapshot.messages.some(message => message.keyHash === notice.keyHash)) continue;
+      // A notice the background job missed: its thread may have no link yet, so repair it here.
+      await this.linkThread(task.threadId, snapshot.id, task.id, scope);
+      notifications.push(notice);
     }
     const updated = await this.store.mutate(id, scope, current => {
       for (const message of notifications) if (!current.messages.some(item => item.keyHash === message.keyHash)) current.messages.push(message);
