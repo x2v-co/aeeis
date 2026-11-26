@@ -252,10 +252,11 @@ describe('share storage and redaction helpers', () => {
     expect(kept.text).toBe(`${title}\nLandscape again`);
     const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
     for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
-    // Keys written as one word still count when they end in a credential suffix.
-    const joined = JSON.stringify(redactRunData({ text: 'secretkey=joined-1 SECRETKEY=joined-2 tokenid: joined-3 PASSWORDHASH=joined-4 clientsecretvalue=joined-5' }));
-    for (const secret of ['joined-1', 'joined-2', 'joined-3', 'joined-4', 'joined-5']) expect(joined).not.toContain(secret);
-    expect(redactRunData({ text: 'Tokenizer: BPE Secretary: Alice' }).text).toBe('Tokenizer: BPE Secretary: Alice');
+    // Keys written as one word still count, whatever (or however many) words follow the sensitive one.
+    const joined = JSON.stringify(redactRunData({ text: 'secretkey=joined-1 SECRETKEY=joined-2 tokenid: joined-3 PASSWORDHASH=joined-4 clientsecretvalue=joined-5 passwordconfirm=joined-6 passwordsalt=joined-7 privatekeypem=joined-8 secretkeyvalue=joined-9 PASSWORDHASHVALUE=joined-10 tokenomicsKey=joined-11' }));
+    for (let i = 1; i <= 11; i++) expect(joined).not.toMatch(new RegExp(`joined-${i}(?!\\d)`));
+    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Detokenized: text Secretive: no';
+    expect(redactRunData({ text: prose }).text).toBe(prose);
   });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {
     expect((await readFile(new URL('../src/adapters/migrations/001-run-shares.sql', import.meta.url), 'utf8')).trim()).toBe(runSharesMigration);

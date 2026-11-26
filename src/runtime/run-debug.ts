@@ -10,18 +10,17 @@ const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|acces
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
-// A key written in prose is only a credential when the sensitive word ends there: `accessToken:`,
-// `API_KEY=` and `cookies:` are, but `Tokenomics:` or `Secretary:` in a source title are not.
+// A key written in prose is a credential unless the sensitive word runs on into an ordinary English
+// word: `accessToken:`, `API_KEY=`, `secretkeyvalue=` and `passwordconfirm=` are, but `Tokenomics:`,
+// `Tokenizer:` or `Secretary:` in a source title are not. Unknown continuations stay redacted.
 const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
-// Keys written as one word (`secretkey`, `SECRETKEY`, `tokenid`, `PASSWORDHASH`) end in a credential suffix.
-const credentialSuffix = /^(?:keys?|ids?|values?|hash(?:es)?|json|b64|base64|str(?:ing)?|files?|headers?|codes?|pass)(?![a-z])/i;
+const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|ed|al(?:ly)?|isms?|i[sz](?:e[srd]?|ers|ing|ations?))$/i;
 const endsWord = (key: string, end: number): boolean => {
-  const next = key[end];
-  if (next === undefined || !/[a-z]/i.test(next)) return true;
-  if (credentialSuffix.test(key.slice(end))) return true;
-  if (/[sS]/.test(next) && (end + 1 === key.length || !/[a-z]/i.test(key[end + 1]!))) return true;
+  const rest = key.slice(end);
   // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
-  return /[A-Z]/.test(next) && /[a-z]/.test(key[end - 1] ?? '');
+  if (/^[A-Z]/.test(rest) && /[a-z]/.test(key[end - 1] ?? '')) return true;
+  const run = (/^[a-z]/.test(rest) ? /^[a-z]+/ : /^[A-Za-z]+/).exec(rest)?.[0];
+  return run === undefined || !proseEnding.test(run);
 };
 const isSensitiveAssignment = (key: string): boolean => isSensitive(key)
   && [...key.matchAll(sensitiveKeyEverywhere)].some(match => endsWord(key, match.index + match[0].length));
