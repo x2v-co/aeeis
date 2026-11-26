@@ -17,6 +17,7 @@ import type { RsiService } from '../rsi.js';
 import type { OwnedBotStore } from '../owned-bots.js';
 import { starterBot } from '../starter-bots.js';
 import type { ChannelInboundMessage, LifeThreadInbox } from '../channel-ingress.js';
+import type { ConversationThreadIndex } from '../adapters/conversation-thread-index.js';
 
 /** The Run was committed but the conversation acknowledgement was not. Retry the same idempotency key. */
 export class ReplayablePreparationError extends Conflict {
@@ -139,6 +140,27 @@ function mentionsTitle(text: string, title: string): boolean {
   return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'iu').test(folded);
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
+/** A Run that has finished or stopped to wait for the owner gets one notice per state. */
+const noticeStatuses = new Set([...terminal, 'needs_input', 'needs_approval', 'unknown']);
+export function runNoticeKey(run: AgentRun): string {
+  return followupHash({ runId: run.id, status: run.status, question: run.question, planVersion: run.plans.at(-1)?.version });
+}
+/** Plain words, the same line in the chat and in a list preview; never a raw status name. */
+export function runNoticeText(title: string, status: string, routine: boolean): string {
+  const lead = status === 'succeeded' ? (routine ? '简报到了' : '做完了')
+    : status === 'needs_approval' ? '等你批准'
+    : status === 'needs_input' ? '等你回答'
+    : status === 'failed' ? '没做完'
+    : status === 'cancelled' ? '已取消'
+    : '状态读不到，待核查';
+  return `${lead}：${title}`;
+}
+const routineTask = (conversation: Conversation, taskId: string) => conversation.messages.some(message => message.source?.kind === 'routine' && message.route.taskIds.includes(taskId));
+function runNotice(conversation: Conversation, task: Conversation['tasks'][number], run: AgentRun): ConversationMessage {
+  const keyHash = runNoticeKey(run);
+  return { id: `message_${randomUUID()}`, keyHash, requestHash: keyHash, role: 'notification', text: runNoticeText(task.title, run.status, routineTask(conversation, task.id)), createdAt: new Date().toISOString(), notificationRunId: run.id,
+    route: { status: 'routed', reason: 'explicit', taskIds: [task.id], candidateTaskIds: [], focusEffect: 'keep' } };
+}
 /** Statuses whose next step can still be ordered. Terminal success and cancellation are left alone. */
 const RANKED_RUN_STATUSES = new Set(['queued', 'planning', 'running', 'reviewing', 'needs_approval', 'needs_input', 'paused', 'failed', 'unknown', 'waiting_external']);
 /** Counts only. Summary text and originals stay on the owner memory API. */
@@ -394,7 +416,7 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 
 export class ConversationService implements LifeThreadInbox {
   writeGate?: <T>(id: string, scope: Ownership, work: () => Promise<T>) => Promise<T>;
-  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined, private bots: Pick<OwnedBotStore, 'list'> | undefined = undefined) {}
+  constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined, private bots: Pick<OwnedBotStore, 'list'> | undefined = undefined, private threadIndex: ConversationThreadIndex | undefined = undefined) {}
 
   async create(input: unknown, scope: Ownership, actor?: Principal) {
     const body = z.object({
@@ -1291,6 +1313,9 @@ export class ConversationService implements LifeThreadInbox {
         }
         const thread = await this.runs.getThread(task.threadId, scope);
         if (thread.title !== task.title || thread.createdAt !== task.createdAt) throw new Conflict('Task thread identity changed');
+        // Before the Run exists, so the notifier can find this thread's conversation.
+        // Best effort: a missed link only delays notices until the chat opens (sync links it).
+        await this.linkThread(task.threadId, id, task.id, scope);
         const run = await this.threads.followUp(task.threadId, { request: execution.request, ...(execution.parentRunId ? { parentRunId: execution.parentRunId } : {}) }, scope, message.id);
         if (run.id !== execution.runId) throw new Conflict('Prepared Run does not match the routed execution');
         conversation = await this.store.mutate(id, scope, current => {
@@ -1341,15 +1366,82 @@ export class ConversationService implements LifeThreadInbox {
     for (const task of snapshot.tasks) {
       if (!task.latestRunId) continue;
       const run = await this.runs.get(task.latestRunId, scope);
-      if (!terminal.has(run.status) && !['needs_input', 'needs_approval', 'unknown'].includes(run.status)) continue;
-      const keyHash = followupHash({ runId: run.id, status: run.status, question: run.question, planVersion: run.plans.at(-1)?.version });
-      notifications.push({ id: `message_${randomUUID()}`, keyHash, requestHash: keyHash, role: 'notification', text: `任务「${task.title}」：${run.status}。`, createdAt: new Date().toISOString(), notificationRunId: run.id,
-        route: { status: 'routed', reason: 'explicit', taskIds: [task.id], candidateTaskIds: [], focusEffect: 'keep' } });
+      if (!noticeStatuses.has(run.status)) continue;
+      const notice = runNotice(snapshot, task, run);
+      if (snapshot.messages.some(message => message.keyHash === notice.keyHash)) continue;
+      // A notice the background job missed: its thread may have no link yet, so repair it here.
+      await this.linkThread(task.threadId, snapshot.id, task.id, scope);
+      notifications.push(notice);
     }
     const updated = await this.store.mutate(id, scope, current => {
       for (const message of notifications) if (!current.messages.some(item => item.keyHash === message.keyHash)) current.messages.push(message);
     });
     return this.view(updated, scope, actor);
+  }
+
+  private async linkThread(threadId: string, conversationId: string, taskId: string, scope: Ownership): Promise<void> {
+    if (!this.threadIndex) return;
+    try { await this.threadIndex.link({ threadId, conversationId, taskId, ...scope }); }
+    catch (error) { console.error('AEEIS thread link failed', threadId, error instanceof Error ? error.message : error); }
+  }
+  /**
+   * Writes the notice for a Run that finished or stopped to wait, without the
+   * chat being open. Called for every Run the scanner sees, again and again:
+   * the thread index's last notice makes a repeat cheap (no conversation is
+   * opened), and the notice's key keeps the chat to one line per state.
+   * Only the newest Run of a thread speaks; a replaced one stays quiet.
+   */
+  async noticeRun(run: AgentRun): Promise<boolean> {
+    if (!this.threadIndex || !run.threadId || !noticeStatuses.has(run.status)) return false;
+    const scope = { owner: run.owner, tenantId: run.tenantId ?? 'local' };
+    const link = await this.threadIndex.get(run.threadId, scope);
+    if (!link) return false;
+    const key = runNoticeKey(run);
+    if (link.notified?.runId === run.id && link.notified.key === key) return false;
+    const newest = await this.runs.latestRunByThread(run.threadId, scope);
+    if (newest?.id !== run.id) return false;
+    let written = false;
+    try {
+      await this.store.mutate(link.conversationId, scope, current => {
+        const task = current.tasks.find(item => item.id === link.taskId);
+        if (!task || current.messages.some(message => message.keyHash === key)) return;
+        current.messages.push(runNotice(current, task, run)); written = true;
+      });
+    } catch (error) {
+      // A missing chat, or one that refuses the write (full: 1000 messages), will
+      // refuse it again on every sweep. Record it as handled so the scanner can
+      // rest; opening the chat shows the same refusal as today.
+      if (!(error instanceof NotFound) && !(error instanceof Conflict)) throw error;
+      if (error instanceof Conflict) console.error('AEEIS run notice refused by its chat', run.id, error.message);
+    }
+    await this.threadIndex.markNotified(run.threadId, scope, { runId: run.id, key });
+    return written;
+  }
+  /**
+   * One-time fill of the thread index from existing conversations. Each
+   * thread's current newest Run counts as already noticed, so launch does not
+   * write a notice for every old Run; those still appear when the chat opens.
+   */
+  async seedThreadIndex(): Promise<number> {
+    if (!this.threadIndex || !this.store.scanPage || await this.threadIndex.seeded()) return 0;
+    let linked = 0, after: string | undefined;
+    do {
+      const page = await this.store.scanPage(after, 25);
+      for (const conversation of page.items) {
+        const scope = { owner: conversation.owner, tenantId: conversation.tenantId };
+        for (const task of conversation.tasks) {
+          let newest: AgentRun | undefined;
+          try { newest = await this.runs.latestRunByThread(task.threadId, scope); }
+          catch (error) { if (!(error instanceof NotFound)) throw error; }
+          if (!newest && !task.latestRunId) continue;
+          const notified = newest && noticeStatuses.has(newest.status) ? { runId: newest.id, key: runNoticeKey(newest) } : undefined;
+          if (await this.threadIndex.link({ threadId: task.threadId, conversationId: conversation.id, taskId: task.id, ...scope }, notified)) linked += 1;
+        }
+      }
+      after = page.next;
+    } while (after);
+    await this.threadIndex.markSeeded();
+    return linked;
   }
 
   async taskRun(id: string, taskId: string, runId: string, scope: Ownership) {
