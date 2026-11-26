@@ -253,9 +253,13 @@ describe('share storage and redaction helpers', () => {
     const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
     for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
     // Keys written as one word still count, whatever (or however many) words follow the sensitive one.
-    const joined = JSON.stringify(redactRunData({ text: 'secretkey=joined-1 SECRETKEY=joined-2 tokenid: joined-3 PASSWORDHASH=joined-4 clientsecretvalue=joined-5 passwordconfirm=joined-6 passwordsalt=joined-7 privatekeypem=joined-8 secretkeyvalue=joined-9 PASSWORDHASHVALUE=joined-10 tokenomicsKey=joined-11' }));
-    for (let i = 1; i <= 11; i++) expect(joined).not.toMatch(new RegExp(`joined-${i}(?!\\d)`));
-    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Detokenized: text Secretive: no';
+    // Each value is its own word so one redaction cannot hide another (`v-1` inside `v-11`).
+    const keys = ['secretkey', 'SECRETKEY', 'tokenid', 'PASSWORDHASH', 'clientsecretvalue', 'passwordconfirm', 'passwordsalt', 'privatekeypem',
+      'secretkeyvalue', 'PASSWORDHASHVALUE', 'tokenomicsKey', 'tokenizerKey', 'Tokenized key', 'tokenized'];
+    const values = keys.map((_, i) => `leak${String.fromCharCode(97 + i)}x`);
+    const joined = JSON.stringify(redactRunData({ text: keys.map((key, i) => `${key}=${values[i]}`).join(' ') }));
+    for (const value of values) expect(joined).not.toContain(value);
+    const prose = 'Tokenizer: BPE Secretary: Alice TOKENOMICS: report Passwordless: yes Tokenization: text Secretive: no';
     expect(redactRunData({ text: prose }).text).toBe(prose);
   });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {

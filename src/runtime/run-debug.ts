@@ -12,15 +12,17 @@ const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|ma
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
 // A key written in prose is a credential unless the sensitive word runs on into an ordinary English
 // word: `accessToken:`, `API_KEY=`, `secretkeyvalue=` and `passwordconfirm=` are, but `Tokenomics:`,
-// `Tokenizer:` or `Secretary:` in a source title are not. Unknown continuations stay redacted.
+// `Tokenizer:` or `Secretary:` in a source title are not. Unknown continuations stay redacted, and so does
+// anything after the ordinary word (`tokenizerKey=`, `Tokenomics key:`). `-ed` is not an exemption:
+// `tokenized=` usually holds a payment or vault token.
 const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
-const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|ed|al(?:ly)?|isms?|i[sz](?:e[srd]?|ers|ing|ations?))$/i;
+const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|al(?:ly)?|isms?|i[sz](?:e[sr]?|ers|ing|ations?))$/i;
 const endsWord = (key: string, end: number): boolean => {
   const rest = key.slice(end);
   // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
   if (/^[A-Z]/.test(rest) && /[a-z]/.test(key[end - 1] ?? '')) return true;
   const run = (/^[a-z]/.test(rest) ? /^[a-z]+/ : /^[A-Za-z]+/).exec(rest)?.[0];
-  return run === undefined || !proseEnding.test(run);
+  return run === undefined || run.length !== rest.length || !proseEnding.test(run);
 };
 const isSensitiveAssignment = (key: string): boolean => isSensitive(key)
   && [...key.matchAll(sensitiveKeyEverywhere)].some(match => endsWord(key, match.index + match[0].length));
