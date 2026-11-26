@@ -227,8 +227,12 @@ export class ChatSummaryService {
     private readonly log: (message: string, error: unknown) => void = (message, error) => console.error(message, error instanceof Error ? error.message : error),
   ) {}
   private roomWork = new Map<string, Promise<void>>();
+  /** The conversation revision last summarized here. A write that changed nothing keeps its
+   * revision (the store skips saving it), so it skips the summary too. Set only after a successful put. */
+  private summarized = new Map<string, number>();
   async conversationWritten(conversation: Conversation): Promise<void> {
-    try { await this.store.put(conversationSummary(conversation)); }
+    if (this.summarized.get(conversation.id) === conversation.revision) return;
+    try { await this.store.put(conversationSummary(conversation)); this.summarized.set(conversation.id, conversation.revision); }
     catch (error) { this.log('AEEIS chat summary write failed', error); }
   }
   /** Folds the room's events written since its summary. Safe to call for any event, any number of times. */

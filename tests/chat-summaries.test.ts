@@ -161,7 +161,7 @@ describe('chat list API', () => {
       alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, agent: { id: 'alice', tenantId: 'team-a', roles: ['agent'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] } } });
     cleanup.push(async () => { await app.close(); await store.close(); await repository.close(); await rm(directory, { recursive: true, force: true }); });
     const as = (token: string) => ({ authorization: `Bearer ${token}` });
-    return { app, store, as };
+    return { app, store, summaries, as };
   }
 
   it('lists each chat once with its unread count and marks it read up to what was seen', async () => {
@@ -182,6 +182,10 @@ describe('chat list API', () => {
     // Your own line moves the chat but adds nothing unread.
     await f.store.mutate(created.id, scope, current => { current.messages.push(message('收到')); });
     expect((await list())[0]).toMatchObject({ unread: 1 });
+    // A write that changes nothing (opening the chat) does not rewrite the summary.
+    const put = vi.spyOn(f.summaries, 'put');
+    await f.store.mutate(created.id, scope, () => undefined);
+    expect(put).not.toHaveBeenCalled();
     expect(await list('bob')).toEqual([]);
     expect((await f.app.inject({ method: 'GET', url: '/api/chats', headers: f.as('agent') })).statusCode).toBe(403);
     expect((await read(1, 'agent')).statusCode).toBe(403);
