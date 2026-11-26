@@ -246,6 +246,13 @@ describe('share storage and redaction helpers', () => {
     for (let i = 0; i < 100; i++) deep = { nested: deep };
     expect(JSON.stringify(redactRunData(deep))).not.toContain('deep-secret');
   });
+  it('keeps prose whose key only starts with a sensitive word, and still scrubs real credential keys', () => {
+    const title = '来源：Licenseware《Enterprise AI Tokenomics: Landscape of AI Pricing, Nov 2026》 Secretary: Alice';
+    const kept = redactRunData({ text: `${title}\nLandscape again`, sourceValue: { note: title } }, { capFields: false });
+    expect(kept.text).toBe(`${title}\nLandscape again`);
+    const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
+    for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
+  });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {
     expect((await readFile(new URL('../src/adapters/migrations/001-run-shares.sql', import.meta.url), 'utf8')).trim()).toBe(runSharesMigration);
   });

@@ -10,6 +10,18 @@ const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|acces
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+// A key written in prose is only a credential when the sensitive word ends there: `accessToken:`,
+// `API_KEY=` and `cookies:` are, but `Tokenomics:` or `Secretary:` in a source title are not.
+const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
+const endsWord = (key: string, end: number): boolean => {
+  const next = key[end];
+  if (next === undefined || !/[a-z]/i.test(next)) return true;
+  if (/[sS]/.test(next) && (end + 1 === key.length || !/[a-z]/i.test(key[end + 1]!))) return true;
+  // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
+  return /[A-Z]/.test(next) && /[a-z]/.test(key[end - 1] ?? '');
+};
+const isSensitiveAssignment = (key: string): boolean => isSensitive(key)
+  && [...key.matchAll(sensitiveKeyEverywhere)].some(match => endsWord(key, match.index + match[0].length));
 // Public views must not expose provider completions or schema-repair payloads,
 // even when nested in observations, validation diagnostics or JSON strings.
 const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|modelrequest|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
@@ -148,7 +160,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
     if (typeof item === 'string') {
       if (sensitive && item.length) secrets.add(item);
       for (const match of item.matchAll(credentialAssignment)) {
-        if (!isSensitive(assignmentKey(match[2]!))) continue;
+        if (!isSensitiveAssignment(assignmentKey(match[2]!))) continue;
         const raw = match[3]!;
         if (raw.startsWith('"')) {
           try { const decoded = JSON.parse(raw) as string; if (decoded.length) secrets.add(decoded); } catch { /* incomplete string */ }
@@ -187,7 +199,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
       .replace(/(\/(?:api\/)?share\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
       .replace(/([?&](?:sig|signature|x-amz-[\w-]+|key|apikey|api_key|code|auth|token|access_token|refresh_token|id_token)=)[^&#\s"'<>]+/gi, '$1[REDACTED]')
       .replace(/\btk_[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
-      .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitive(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
+      .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitiveAssignment(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
     return capField(redactEnvBlocks(result));
   };
   const visit = (item: unknown, depth = 0): unknown => {

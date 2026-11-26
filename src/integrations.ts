@@ -433,13 +433,24 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const activeKeys = new Set(index.tools.filter(entry => entry.digest).map(entry => `${entry.slug}@${entry.version}:${entry.digest}`));
     for (const key of this.verifiedManifests.keys()) if (!activeKeys.has(key)) this.verifiedManifests.delete(key);
     const resolved: ToolDescriptor[] = [];
-    const pinned = new Set((this.options.additionalTools ?? []).map(extra => `${extra.id}@${extra.version}`));
     const shadowed: string[] = [];
     for (const manifest of manifests) {
       // The operator's pinned entry for the same id and version wins: it declares the capabilities (a pinned
       // web-fetch may be read + network), while the Registry never does and would turn it into execute.
       // Health reports it, so a pin that hides a changed Registry tool is visible.
-      if (pinned.has(`${manifest.slug}@${manifest.version}`)) { shadowed.push(`${manifest.slug}@${manifest.version}`); continue; }
+      // A pin that leaves out its description or schemas still shows the Registry's, so the model sees the
+      // tool's options (web-search's maxResults, web-fetch's maxChars) and not an empty input.
+      const pin = (this.options.additionalTools ?? []).find(extra => `${extra.id}@${extra.version}` === `${manifest.slug}@${manifest.version}`);
+      if (pin) {
+        shadowed.push(`${manifest.slug}@${manifest.version}`);
+        const entry = this.manifestCache.get(`${pin.id}@${pin.version}`)!;
+        const description = pin.description ?? manifest.description;
+        this.manifestCache.set(`${pin.id}@${pin.version}`, {
+          ...entry, inputSchema: pin.inputSchema ?? manifest.inputSchema ?? {}, outputSchema: pin.outputSchema ?? manifest.outputSchema ?? {},
+          ...(description === undefined ? {} : { description }),
+        });
+        continue;
+      }
       const tool = {
         id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: manifest.outputSchema ?? {}, ...(manifest.description === undefined ? {} : { description: manifest.description }), endpoint: this.endpointFor(manifest.endpoints.rest),
       };
