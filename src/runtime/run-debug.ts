@@ -17,11 +17,13 @@ const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCou
 // `tokenized=` usually holds a payment or vault token.
 const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
 const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|al(?:ly)?|isms?|i[sz](?:e[sr]?|ers|ing|ations?))$/i;
+const envCompound = /^(?:s$|keys?|vars?|variables?|json|ya?ml|files?|b64|base64|str(?:ing)?s?|values?|data|blob|conf(?:ig)?s?|cfg|dump|secrets?|pass|tokens?)/;
 const endsWord = (key: string, end: number): boolean => {
   const rest = key.slice(end);
-  // `env` is also the start of everyday words (`Envoy:`, `envelope=`); it is the variable only on its own,
-  // in capitals or before a new camelCase word (`env=`, `ENVFILE=`, `envKey=`).
-  if (/^env$/i.test(key.slice(end - 3, end)) && /^[a-z]/.test(rest)) return false;
+  // `env` is also the start of everyday words (`Envoy:`, `envelope=`). It is the variable on its own, in
+  // capitals, before a new camelCase word, or run together with a word that holds one (`env=`, `ENVFILE=`,
+  // `envKey=`, `envs=`, `envkey=`, `envjson=`).
+  if (/^env$/i.test(key.slice(end - 3, end)) && /^[a-z]/.test(rest) && !envCompound.test(rest)) return false;
   // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
   if (/^[A-Z]/.test(rest) && /[a-z]/.test(key[end - 1] ?? '')) return true;
   const run = (/^[a-z]/.test(rest) ? /^[a-z]+/ : /^[A-Za-z]+/).exec(rest)?.[0];

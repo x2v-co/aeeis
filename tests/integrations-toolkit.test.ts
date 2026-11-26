@@ -144,8 +144,10 @@ describe('ToolkitRegistryGateway', () => {
     expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools); pinned entries take precedence over the Registry for web-fetch@1');
     // Once the Registry stops listing that version, the pin shows only what it declares itself.
     listsFetch = false;
-    expect((await gateway.listTools()).find(tool => tool.id === 'web-fetch')).toMatchObject({ capabilities: ['read', 'network'], inputSchema: {} });
-    expect((await gateway.listTools()).find(tool => tool.id === 'web-fetch')).not.toHaveProperty('description');
+    const unlisted = (await gateway.listTools()).find(tool => tool.id === 'web-fetch');
+    expect(unlisted).toMatchObject({ capabilities: ['read', 'network'] });
+    expect(unlisted?.inputSchema).toEqual({});
+    expect(unlisted).not.toHaveProperty('description');
     expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools)');
     listsFetch = true;
     // What the pin does declare wins over the Registry.
