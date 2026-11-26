@@ -252,6 +252,10 @@ describe('share storage and redaction helpers', () => {
     expect(kept.text).toBe(`${title}\nLandscape again`);
     const scrubbed = JSON.stringify(redactRunData({ text: 'accessToken: camel-secret ACCESS_TOKEN=caps-secret cookies: crumb-secret sessionId: sid-secret TOKEN: bare-secret' }));
     for (const secret of ['camel-secret', 'caps-secret', 'crumb-secret', 'sid-secret', 'bare-secret']) expect(scrubbed).not.toContain(secret);
+    // Keys written as one word still count when they end in a credential suffix.
+    const joined = JSON.stringify(redactRunData({ text: 'secretkey=joined-1 SECRETKEY=joined-2 tokenid: joined-3 PASSWORDHASH=joined-4 clientsecretvalue=joined-5' }));
+    for (const secret of ['joined-1', 'joined-2', 'joined-3', 'joined-4', 'joined-5']) expect(joined).not.toContain(secret);
+    expect(redactRunData({ text: 'Tokenizer: BPE Secretary: Alice' }).text).toBe('Tokenizer: BPE Secretary: Alice');
   });
   it('ships the SQL migration used by locked adapter bootstrap', async () => {
     expect((await readFile(new URL('../src/adapters/migrations/001-run-shares.sql', import.meta.url), 'utf8')).trim()).toBe(runSharesMigration);

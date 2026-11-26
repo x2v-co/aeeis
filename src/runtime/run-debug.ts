@@ -13,9 +13,12 @@ const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCou
 // A key written in prose is only a credential when the sensitive word ends there: `accessToken:`,
 // `API_KEY=` and `cookies:` are, but `Tokenomics:` or `Secretary:` in a source title are not.
 const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
+// Keys written as one word (`secretkey`, `SECRETKEY`, `tokenid`, `PASSWORDHASH`) end in a credential suffix.
+const credentialSuffix = /^(?:keys?|ids?|values?|hash(?:es)?|json|b64|base64|str(?:ing)?|files?|headers?|codes?|pass)(?![a-z])/i;
 const endsWord = (key: string, end: number): boolean => {
   const next = key[end];
   if (next === undefined || !/[a-z]/i.test(next)) return true;
+  if (credentialSuffix.test(key.slice(end))) return true;
   if (/[sS]/.test(next) && (end + 1 === key.length || !/[a-z]/i.test(key[end + 1]!))) return true;
   // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
   return /[A-Z]/.test(next) && /[a-z]/.test(key[end - 1] ?? '');
