@@ -70,7 +70,7 @@ export const TENANT_POLICIES: ReadonlyArray<{ table: string; using: string }> = 
   ...['aeeis_conversations', 'aeeis_session_events', 'aeeis_run_events', 'aeeis_threads', 'aeeis_routines', 'aeeis_routine_deliveries', 'aeeis_reminders',
     'aeeis_action_policies', 'aeeis_owned_bots', 'aeeis_device_sessions', 'aeeis_ui_event_counts', 'aeeis_push_subscriptions', 'aeeis_push_seen', 'aeeis_room_memberships', 'aeeis_task_dispatches', 'aeeis_projection_events',
     'aeeis_competitions', 'aeeis_debates', 'aeeis_collaboration_trigger_policies', 'aeeis_collaboration_trigger_decisions', 'aeeis_global_budget_accounts',
-    'aeeis_project_source_checkpoints', 'aeeis_channel_noise_settings', 'aeeis_channel_metadata', 'aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations', 'aeeis_room_tasks', 'aeeis_task_board_controls'].map(table => ({ table, using: visible('tenant_id') })),
+    'aeeis_project_source_checkpoints', 'aeeis_channel_noise_settings', 'aeeis_channel_metadata', 'aeeis_bot_dialogues', 'aeeis_bot_dialogue_room_aliases', 'aeeis_bot_dialogue_operations', 'aeeis_room_tasks', 'aeeis_task_board_controls', 'aeeis_conversation_threads'].map(table => ({ table, using: visible('tenant_id') })),
   ...['aeeis_rooms', 'aeeis_memories', 'aeeis_context_manifests'].map(table => ({ table, using: visible("COALESCE(tenant_id, 'local')") })),
   ...['aeeis_runs', 'aeeis_goals'].map(table => ({ table, using: visible("COALESCE(state->>'tenantId', 'local')") })),
   // Knowledge without a tenant is shared by the installation.
@@ -85,7 +85,7 @@ export const TENANT_POLICIES: ReadonlyArray<{ table: string; using: string }> = 
 export const INSTALLATION_TABLES = ['aeeis_brain_state', 'aeeis_brain_embeddings', 'aeeis_agent_registry', 'aeeis_agent_registry_entries', 'aeeis_agent_registry_audit',
   'aeeis_agent_registry_reputations', 'aeeis_agent_registry_observations', 'aeeis_agent_grant_ledger', 'aeeis_agent_grant_registry', 'aeeis_change_audit',
   'aeeis_evolution_candidates', 'aeeis_evolution_activation', 'aeeis_rsi_proposal_claims', 'aeeis_run_scan_cursors', 'aeeis_knowledge_embeddings',
-  'aeeis_knowledge_embedding_reindex', 'aeeis_projection_intents',
+  'aeeis_knowledge_embedding_reindex', 'aeeis_projection_intents', 'aeeis_conversation_thread_seed',
   // Wrapped data keys are useless without the master key; a save that rewrites several tenants' rows needs each tenant's key.
   'aeeis_content_keys'] as const;
 
