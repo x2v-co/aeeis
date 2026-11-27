@@ -117,15 +117,22 @@
 </div>
 </div>
 </div>
-<section id="bot-queue" aria-label="Bot">
+<section id="chat-queue" aria-label="消息">
 <div class="queue-heading">
 <div>
-<h2>Bot</h2>
-<small id="bot-count">
+<h2>消息</h2>
+<small id="chat-count">
 </small>
 </div>
-<button id="gb-new-bot" type="button">新建</button>
+<button id="gb-new-message" type="button" aria-expanded="false" aria-controls="new-chat-menu">新建</button>
 <button id="gb-new-bot-group" type="button">分组</button>
+</div>
+<div id="new-chat-menu" class="new-chat-menu" hidden>
+<p class="new-chat-label">和一位 Bot 说话</p>
+<div id="new-chat-bots" class="new-chat-bots"></div>
+<p class="new-chat-label">和几个人一起</p>
+<button id="gb-new-group" type="button" class="new-chat-item">新建群聊…</button>
+<button id="gb-new-bot" type="button" class="new-chat-item">新建一位 Bot…</button>
 </div>
 <p id="bot-local-note" class="muted" hidden></p>
 <button id="bot-local-claim" type="button" class="quiet-button" hidden>写入这个账号</button>
@@ -133,15 +140,18 @@
 <input id="bot-group-name" maxlength="40" placeholder="分组名称">
 <button type="submit">创建</button>
 </form>
-<div id="bots">
-<button type="button" id="gb-bot" class="bot-row" data-bot-id="aeeis" aria-pressed="true">
-<span class="roster-avatar" data-state="idle">A</span>
+<div id="chat-filters" class="chat-filters" role="toolbar" aria-label="按分组看" hidden></div>
+<nav id="chats" aria-label="消息列表">
+<button type="button" id="gb-bot" class="bot-row chat-row" data-bot-id="aeeis" aria-pressed="true">
+<span class="chat-avatar" data-profile="bot:aeeis"><span class="roster-avatar" data-state="idle">A</span><span class="bot-corner" aria-hidden="true"></span></span>
 <span class="roster-copy">
-<strong>AEEIS</strong>
+<span class="chat-line"><strong>AEEIS</strong></span>
 <small id="gb-bot-presence">空闲</small>
 </span>
 </button>
-</div>
+</nav>
+<p id="chats-empty" class="muted" hidden>还没有消息。</p>
+<details><summary>频道管理 / 归档</summary><div id="channel-manager"></div></details>
 </section>
 <section id="run-queue">
 <div class="queue-heading">
@@ -161,21 +171,8 @@
 </nav>
 <p id="runs-empty" class="muted" hidden="">还没有运行记录。</p>
 </section>
-<section id="group-queue" aria-label="群聊">
-<div class="queue-heading">
-<div>
-<h2>群聊</h2>
-<small id="group-count">
-</small>
-</div>
-<button id="gb-new-group" type="button">新建</button>
-</div>
-<nav id="groups" aria-label="群聊列表">
-</nav>
-<p id="groups-empty" class="muted">还没有群聊。</p>
-<details><summary>频道管理 / 归档</summary><div id="channel-manager"></div></details>
-</section>
 <nav class="gb-roster-foot" aria-label="工作台">
+<button type="button" id="gb-me" class="gb-me" data-profile="person:me" aria-label="你的档案"><span class="roster-avatar" aria-hidden="true">你</span></button>
 <button type="button" data-computer-tab="setup">设置</button>
 <button type="button" data-computer-tab="status">状态</button>
 </nav>
@@ -183,6 +180,7 @@
 <div class="gb-stage">
 <header class="gb-bar">
 <button id="gb-back" type="button">名册</button>
+<button id="entry-avatar" type="button" class="entry-avatar" aria-label="看档案" hidden></button>
 <div class="gb-titles">
 <p id="gb-title">AEEIS</p>
 <p id="gb-presence" data-state="idle">空闲 · 发一条消息开始</p>
@@ -237,6 +235,7 @@
 <button id="conversation-earlier" class="quiet-button" type="button" hidden>读取更早消息</button>
 <ol id="conversation-messages" class="conversation-messages" aria-label="讨论记录"></ol>
 <p id="conversation-empty" class="conversation-welcome">今天要我做什么？</p>
+<p id="retired-note" class="retired-note" hidden>这位 Bot 已经撤下。和它的对话留在这里，只读，不能再发消息。</p>
 <form id="conversation-composer">
 <div id="conversation-reply" class="conversation-reply" hidden>
 <span id="conversation-reply-label"></span>
@@ -1389,6 +1388,21 @@
 <button id="bot-create-save" type="submit">保存</button>
 </div>
 </form>
+</div>
+<div id="profile" class="profile-sheet" hidden>
+<section class="profile-card" role="dialog" aria-modal="true" aria-labelledby="profile-name">
+<header class="profile-head">
+<span id="profile-avatar" class="chat-avatar profile-avatar" aria-hidden="true"></span>
+<div class="profile-titles">
+<h2 id="profile-name"></h2>
+<p id="profile-kind" class="profile-kind"></p>
+</div>
+<button id="profile-close" type="button" class="quiet-button">关闭</button>
+</header>
+<p id="profile-status" class="profile-status"></p>
+<div id="profile-actions" class="profile-actions"></div>
+<div id="profile-sections" class="profile-sections"></div>
+</section>
 </div>
 <script type="module" src="/app.js">
 </script>

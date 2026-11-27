@@ -215,7 +215,9 @@ export class PostgresChatSummaryStore implements ChatSummaryStore {
   async markSeeded(): Promise<void> { await this.pool.query(`INSERT INTO aeeis_chat_summary_seed(name) VALUES('summaries') ON CONFLICT DO NOTHING`); }
 }
 
-export interface ChatListItem { chatId: string; kind: ChatSummary['kind']; backing: ChatSummary['backing']; counterpart?: string; title: string; preview: string; lastActivityAt: string; unread: number }
+/** `newCount` is the running count the page sends back when it has shown the chat to the bottom, so a
+ * line that arrives after the list was read stays unread. */
+export interface ChatListItem { chatId: string; kind: ChatSummary['kind']; backing: ChatSummary['backing']; counterpart?: string; title: string; preview: string; lastActivityAt: string; newCount: number; unread: number }
 
 /** Keeps the summaries current and answers the list. Summary writes are best effort: a failure is
  * logged and the next write to that chat repairs it, so a summary can never block a message. */
@@ -261,7 +263,7 @@ export class ChatSummaryService {
     const read = new Map(reads.map(item => [item.chatId, item.readCount]));
     return summaries.sort((a, b) => a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : a.chatId.localeCompare(b.chatId))
       .map(item => ({ chatId: item.chatId, kind: item.kind, backing: item.backing, ...(item.counterpart ? { counterpart: item.counterpart } : {}), title: item.title, preview: item.preview,
-        lastActivityAt: item.lastActivityAt, unread: Math.max(0, item.newCount - (read.get(item.chatId) ?? 0)) }));
+        lastActivityAt: item.lastActivityAt, newCount: item.newCount, unread: Math.max(0, item.newCount - (read.get(item.chatId) ?? 0)) }));
   }
   /** Marks read up to the count the person saw (never past what exists, never backwards). */
   async markRead(chatId: string, seen: number, scope: Ownership, principalId: string): Promise<ChatListItem['unread']> {

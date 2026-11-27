@@ -501,7 +501,7 @@ function syncBotRow(): void {
   if (avatar) avatar.dataset.state = state.state;
   const pressed = entryShowsBot();
   const visible = activeBotId();
-  document.querySelectorAll<HTMLButtonElement>('#bots [data-bot-id]').forEach(row => {
+  document.querySelectorAll<HTMLButtonElement>('#chats [data-bot-id]').forEach(row => {
     row.setAttribute('aria-pressed', String(pressed && row.dataset.botId === visible));
   });
   syncComposerForBot();
@@ -1542,6 +1542,10 @@ function updateConversationControls(): void {
       $('conversation-execution-note').textContent = '这间私聊只保留会话记录。执行回到这个人的对话里，明确创建 Run。它不会自己回复。';
     }
   }
+  if (retiredOpen()) {
+    $('conversation-composer').querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>('input, button, select, textarea').forEach(control => { control.disabled = true; });
+    $('conversation-execution-note').textContent = '这位 Bot 已经撤下。和它的对话只读，不能再发消息。';
+  }
   if (archivedDialogue()) {
     $('conversation-composer').querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>('input, button, select, textarea').forEach(control => { control.disabled = true; });
     $('conversation-execution-note').textContent = '此私聊已归档，只读。已有 Run 继续运行，可从频道管理恢复。';
@@ -1552,7 +1556,7 @@ function updateConversationControls(): void {
 function syncStandingInstruction(): void {
   const section = $('standing-instruction');
   if (!section) return;
-  const life = rosterView() === 'entry' || rosterView() === 'bot';
+  const life = (rosterView() === 'entry' || rosterView() === 'bot') && !retiredOpen();
   section.hidden = !life;
   const field = $<HTMLTextAreaElement>('standing-text');
   const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life || archivedDialogue();
@@ -2989,9 +2993,11 @@ function renderBotAutonomy(bot: RosterBot | undefined): void {
 }
 async function saveBotAutonomy(): Promise<void> {
   const select = $<HTMLSelectElement>('bot-autonomy');
-  const bot = ownedBotRecords.find(item => item.id === select?.dataset.botId);
-  if (!select || !bot || !bot.mark || !bot.color || !bot.background) return;
-  const autonomy = select.value as BotAutonomy;
+  if (select?.dataset.botId) await saveBotAutonomyFor(select.dataset.botId, select.value as BotAutonomy);
+}
+async function saveBotAutonomyFor(botId: string, autonomy: BotAutonomy): Promise<void> {
+  const bot = ownedBotRecords.find(item => item.id === botId);
+  if (!bot || !bot.mark || !bot.color || !bot.background) return;
   const saved = await api<OwnedBotView>(`/bots/${encodeURIComponent(bot.id)}`, { name: bot.name, mark: bot.mark, color: bot.color, background: bot.background, ...(bot.role ? { role: bot.role } : {}), autonomy }, 'PATCH');
   rememberOwnedBot(saved);
   message(`${bot.name}：${BOT_AUTONOMY_LABEL[autonomy]}。`);
@@ -3009,6 +3015,9 @@ async function loadBotSideThreads(): Promise<void> {
   const list = $('bot-side-thread-list');
   const botId = details?.dataset.botId ?? '';
   if (!list || !botId) return;
+  await readBotSideThreads(botId, list);
+}
+async function readBotSideThreads(botId: string, list: HTMLElement): Promise<void> {
   list.replaceChildren(element('li', '正在读取…'));
   const rows: HTMLElement[] = [];
   for (const room of sideThreadRooms) {
@@ -3023,6 +3032,161 @@ async function loadBotSideThreads(): Promise<void> {
     rows.push(row);
   }
   list.replaceChildren(...(rows.length ? rows : [element('li', '这位还没有和其他 Bot 谈过交接。')]));
+}
+/**
+ * One profile page for people and Bots, opened from an avatar. A subject is `bot:<id>` or `person:<id>`;
+ * today the only person is you (`person:me`). Each kind adds sections to the same page, so adding people
+ * later adds a subject, not a layout.
+ */
+interface ProfileSection { key: string; title: string; body: HTMLElement; collapsed?: boolean; onOpen?: () => void }
+let profileSubject = '';
+let profileEpoch = 0;
+function openProfile(subject: string): void {
+  const [kind] = subject.split(':');
+  if (kind !== 'bot' && kind !== 'person') return;
+  profileSubject = subject;
+  const sheet = $('profile');
+  if (!sheet) return;
+  sheet.hidden = false;
+  renderProfile();
+  $<HTMLButtonElement>('profile-close')?.focus();
+}
+function closeProfile(): void {
+  const sheet = $('profile');
+  if (sheet) sheet.hidden = true;
+  profileSubject = '';
+  profileEpoch += 1;
+}
+function profileList(items: HTMLElement[], empty: string): HTMLElement {
+  const list = element('ul', '', 'profile-list');
+  list.append(...(items.length ? items : [element('li', empty, 'muted')]));
+  return list;
+}
+function profileGroupItems(rooms: RoomSummary[]): HTMLElement[] {
+  return rooms.map(room => {
+    const item = element('li');
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'quiet-button';
+    open.textContent = room.title || '群聊';
+    open.addEventListener('click', () => { closeProfile(); void openGroup(room.id).catch(error => message(errorMessage(error))); });
+    item.append(open);
+    return item;
+  });
+}
+function activeGroupRooms(): RoomSummary[] { return roomSummaries.filter(room => room.status === 'active' && roomChat(room) === 'group'); }
+/** Group chats a Bot is a member of, read on demand from each room's members. */
+function profileBotGroups(botId: string, host: HTMLElement): void {
+  const epoch = profileEpoch;
+  host.replaceChildren(element('p', '正在读取…', 'muted'));
+  void Promise.all(activeGroupRooms().map(async room => {
+    const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`).catch(() => [] as RoomMemberSummary[]);
+    return members.some(member => member.principalId === botId && member.status === 'active') || botId === 'aeeis' ? room : undefined;
+  })).then(rooms => {
+    if (epoch !== profileEpoch) return;
+    host.replaceChildren(profileList(profileGroupItems(rooms.filter((room): room is RoomSummary => Boolean(room))), '还不在哪个群聊里。'));
+  });
+}
+function profileBotSections(botId: string, bot: RosterBot | undefined): ProfileSection[] {
+  const sections: ProfileSection[] = [];
+  const role = element('div');
+  role.append(element('p', bot ? (bot.background || bot.note ? botDutyLine(bot) : '职责：见背景资料。') : '这位 Bot 已经撤下，背景不再保留。'));
+  sections.push({ key: 'role', title: '角色和背景', body: role });
+  const owned = ownedBotRecords.find(item => item.id === botId);
+  if (owned) {
+    const autonomy = element('div');
+    if (botsActive) {
+      const select = document.createElement('select');
+      select.id = 'profile-autonomy';
+      select.setAttribute('aria-label', '自己做多少');
+      for (const [value, label] of Object.entries(BOT_AUTONOMY_LABEL)) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); }
+      select.value = owned.autonomy ?? 'reply';
+      select.addEventListener('change', () => { void saveBotAutonomyFor(owned.id, select.value as BotAutonomy).then(() => renderBotAutonomy(botById(activeBotId()))).catch(error => message(errorMessage(error))); });
+      autonomy.append(select);
+    } else autonomy.append(element('p', BOT_AUTONOMY_LABEL[owned.autonomy ?? 'reply']));
+    sections.push({ key: 'autonomy', title: '自主程度', body: autonomy });
+  }
+  if (bot) {
+    const tools = element('div');
+    tools.append(element('p', defaultTools.length ? `默认可用：${defaultTools.join('、')}` : '运行配置里没有默认工具。'));
+    const routineTools = element('p', '', 'muted');
+    tools.append(routineTools);
+    sections.push({ key: 'tools', title: '工具', body: tools });
+    const routines = element('div');
+    sections.push({ key: 'routines', title: '例程', body: routines });
+    if (!routinesConfigured) routines.append(element('p', '这个工作区没有开例程。', 'muted'));
+    else {
+      const epoch = profileEpoch;
+      routines.append(element('p', '正在读取…', 'muted'));
+      void api<{ routines: RoutineView[] }>(`/routines?agentId=${encodeURIComponent(botId)}`).then(({ routines: items }) => {
+        if (epoch !== profileEpoch) return;
+        routines.replaceChildren(profileList(items.map(item => element('li', `${item.name} · ${routineWhen(item)}${item.status === 'paused' ? ' · 已暂停' : ''}`)), '还没有例程。'));
+        const used = [...new Set(items.flatMap(item => item.runOptions?.allowedTools ?? []))];
+        routineTools.textContent = used.length ? `例程里用到：${used.join('、')}` : '';
+      }).catch(error => { if (epoch === profileEpoch) routines.replaceChildren(element('p', errorMessage(error), 'muted')); });
+    }
+    const groups = element('div');
+    profileBotGroups(botId, groups);
+    sections.push({ key: 'groups', title: '所在群聊', body: groups });
+  }
+  if (botsActive && sideThreadRooms.length) {
+    const threads = element('div');
+    threads.append(element('p', '这位和其他 Bot 谈交接的记录。只读，不进群。', 'muted'));
+    const list = element('ul', '', 'profile-list');
+    threads.append(list);
+    sections.push({ key: 'side-threads', title: '和其他 Bot 的侧线程', body: threads, collapsed: true, onOpen: () => { void readBotSideThreads(botId, list); } });
+  }
+  return sections;
+}
+function profilePersonSections(): ProfileSection[] {
+  const groups = element('div');
+  groups.append(profileList(profileGroupItems(activeGroupRooms()), '还没有群聊。'));
+  return [{ key: 'groups', title: '所在群聊', body: groups }];
+}
+function renderProfile(): void {
+  const subject = profileSubject;
+  const [kind, ...rest] = subject.split(':');
+  const id = rest.join(':');
+  const isBot = kind === 'bot';
+  const bot = isBot ? botById(id) : undefined;
+  const retiredItem = isBot && !bot ? chatItems.find(item => item.backing === 'conversation' && item.counterpart === id) : undefined;
+  const name = isBot ? (bot?.name ?? retiredItem?.title ?? id) : '你';
+  profileEpoch += 1;
+  $('profile-avatar')?.replaceChildren(chatAvatar(name, { ...(bot ? { bot } : {}), isBot, ...(isBot ? {} : { text: '你' }), ...(bot ? { state: lifeAvatarState(id) } : {}) }));
+  $('profile-name').textContent = name;
+  $('profile-kind').textContent = isBot ? `Bot · ${id}${bot ? '' : ' · 已撤下'}` : `你 · ${sessionPrincipal || 'owner'}`;
+  $('profile-status').textContent = isBot
+    ? bot ? lifePresenceLabel(id) : '已撤下。和它的对话留在消息列表里，只读。'
+    : '这个工作区的主人。Bot 和群聊都在你名下。';
+  const actions = $('profile-actions');
+  actions.replaceChildren();
+  const action = (text: string, run: () => void, quiet = false) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    if (quiet) button.className = 'quiet-button';
+    button.addEventListener('click', () => { closeProfile(); run(); });
+    actions.append(button);
+  };
+  if (bot) action('发消息', () => selectBot(bot.id));
+  if (bot && ownedBotRecords.some(item => item.id === bot.id)) action('修改', () => openBotEdit(bot), true);
+  if (retiredItem) action('看历史', () => { void openRetiredChat(retiredItem.chatId).catch(error => message(errorMessage(error))); });
+  const sections = isBot ? profileBotSections(id, bot) : profilePersonSections();
+  const host = $('profile-sections');
+  host.replaceChildren(...sections.map(section => {
+    if (section.collapsed) {
+      const details = document.createElement('details');
+      details.className = 'profile-section';
+      details.dataset.section = section.key;
+      details.append(element('summary', section.title), section.body);
+      details.addEventListener('toggle', () => { if (details.open) section.onOpen?.(); });
+      return details;
+    }
+    const block = element('section', '', 'profile-section');
+    block.dataset.section = section.key;
+    block.append(element('h3', section.title), section.body);
+    return block;
+  }));
 }
 /** The other Bot must accept before the card moves; the two talk it over in their side thread. */
 async function offerChannelTask(view: ConversationView, task: ConversationTaskView, agentId: string): Promise<void> {
@@ -3596,9 +3760,12 @@ function syncEntrySurface(): void {
     empty.hidden = !life || Boolean(conversation?.messages.length);
     empty.textContent = view === 'bot' ? localBotCanExecute() ? '把要做的事直接交给我。' : '这位成员仅支持讨论，不能在这里执行任务。' : '今天要我做什么？';
   }
-  if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct';
-  if (note) note.hidden = view !== 'bot';
-  if (placement) placement.hidden = view !== 'bot' && view !== 'direct';
+  const retired = retiredOpen();
+  if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct' || retired;
+  const retiredNote = $('retired-note');
+  if (retiredNote) retiredNote.hidden = !retired;
+  if (note) note.hidden = view !== 'bot' || retired;
+  if (placement) placement.hidden = (view !== 'bot' && view !== 'direct') || retired;
   if (draft) draft.hidden = view !== 'draft';
   if (panel) panel.hidden = view !== 'group' && view !== 'direct';
   const room = chatRoom();
@@ -3660,8 +3827,8 @@ function syncEntrySurface(): void {
   const personName = view === 'direct' ? (directName || '成员') : (counterpart?.name ?? '成员');
   const entryTitle = $('entry-title');
   const entryPresence = $('entry-presence');
-  const titleText = view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
-  const presenceText = view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
+  const titleText = retired ? (conversation?.title || '已撤下的 Bot') : view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
+  const presenceText = retired ? '已撤下 · 只读' : view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
   if (entryTitle) entryTitle.textContent = titleText;
   if (entryPresence) entryPresence.textContent = presenceText;
   const shellTitle = $('gb-title');
@@ -3673,62 +3840,299 @@ function syncEntrySurface(): void {
   syncShellClasses();
   renderBotPlacement();
 }
+/** The 消息 list's stored summaries (GET /api/chats), latest activity first; unread is per person. */
+interface ChatListItem { chatId: string; kind: 'direct' | 'group'; backing: 'conversation' | 'room'; counterpart?: string; title: string; preview: string; lastActivityAt: string; newCount?: number; unread: number }
+let chatItems: ChatListItem[] = [];
+let ownedBotsLoaded = false;
+/** A Bot group (分组) the list is narrowed to; empty shows everything. */
+let chatFilter = '';
+let defaultTools: string[] = [];
+/** The count last sent as read for each chat, so a re-render does not post again. */
+const readSent = new Map<string, number>();
+function unreadLabel(count: number): string { return count > 99 ? '99+' : String(count); }
+function botChatItem(botId: string): ChatListItem | undefined {
+  return chatItems.find(item => item.backing === 'conversation' && (item.counterpart === botId || (botId === 'aeeis' && !item.counterpart && Boolean(aeeisConversationId) && item.chatId === aeeisConversationId)));
+}
+function roomChatItem(roomId: string): ChatListItem | undefined { return chatItems.find(item => item.backing === 'room' && item.chatId === roomId); }
+/** A Bot taken off the roster (retiredAt) is gone from /api/bots; its conversation stays as read-only history.
+ * Only owned Bots retire, and only once the roster has been read is a missing one called gone. */
+function retiredAgent(agentId: string): boolean { return ownedBotsLoaded && agentId.startsWith('bot_') && !botById(agentId) && !loadCustomBots().some(bot => bot.id === agentId); }
+function retiredBotChats(): ChatListItem[] {
+  const seen = new Set<string>();
+  return chatItems.filter(item => {
+    const id = item.counterpart ?? '';
+    if (item.backing !== 'conversation' || !retiredAgent(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+function retiredOpen(): boolean {
+  const view = rosterView();
+  return (view === 'entry' || view === 'bot') && retiredAgent(lifeAgent(conversation));
+}
+/** A direct room is a Bot conversation's address (bound by /bots/:id/dialogue) unless its member index shows a person. */
+function boundDirectRoom(room: RoomSummary): boolean {
+  if (roomChat(room) !== 'direct') return false;
+  if ([...dialogueRoomIds.values()].includes(room.id)) return true;
+  const member = directMembers.get(room.id);
+  return !member || member === 'aeeis' || member.startsWith('bot_') || Boolean(botById(member));
+}
+/** 频道管理 lists group chats and people's rooms. A Bot's active direct room is its conversation's address and
+ * stays out; an archived one stays under 查看归档 so it can be restored. */
+function managedChannel(room: RoomSummary): boolean { return !(boundDirectRoom(room) && room.status === 'active'); }
+function chatAvatar(name: string, options: { bot?: RosterBot; isBot?: boolean; profile?: string; state?: string; text?: string } = {}): HTMLElement {
+  const wrap = element('span', '', 'chat-avatar');
+  const bot = options.bot;
+  const avatar = element('span', bot?.mark && bot.mark !== 'letter' ? '' : (options.text ?? (name.slice(0, 1) || '·')), 'roster-avatar');
+  if (options.state) avatar.dataset.state = options.state;
+  if (bot?.mark) avatar.dataset.mark = bot.mark;
+  if (bot?.color) avatar.style.background = bot.color;
+  avatar.setAttribute('aria-hidden', 'true');
+  wrap.append(avatar);
+  if (options.isBot ?? Boolean(bot)) {
+    wrap.dataset.kind = 'bot';
+    const corner = element('span', '', 'bot-corner');
+    corner.setAttribute('aria-hidden', 'true');
+    corner.title = 'Bot';
+    wrap.append(corner);
+  }
+  if (options.profile) { wrap.dataset.profile = options.profile; wrap.title = `看${name}的档案`; }
+  return wrap;
+}
+function chatRow(className: string, avatar: HTMLElement, name: string, line: string, unread: number, tag = ''): HTMLButtonElement {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = `${className} chat-row`;
+  const copy = element('span', '', 'roster-copy');
+  const head = element('span', '', 'chat-line');
+  head.append(element('strong', name));
+  if (tag) head.append(element('small', tag, 'chat-tag'));
+  copy.append(head, element('small', line, 'chat-preview'));
+  item.append(avatar, copy);
+  if (unread > 0) {
+    const badge = element('span', unreadLabel(unread), 'chat-unread');
+    badge.setAttribute('aria-label', `${unread} 条未读`);
+    item.append(badge);
+  }
+  return item;
+}
+const DOING_STATUSES = new Set(['running', 'queued', 'preparing', 'planning', 'reviewing']);
+/** 「正在做 N 件」: the Bot's tasks with a Run under way, counting work handed to it and not work it handed away. */
+function doingLabel(agentId: string): string {
+  const open = conversation && lifeAgent(conversation) === agentId ? conversation.tasks : undefined;
+  const listed = lifeSummary(agentId);
+  const own = open ?? (listed && 'tasks' in listed ? (listed as ConversationView).tasks : undefined);
+  const away = new Set(boardHoldings.filter(item => item.fromId === agentId).map(item => item.taskId));
+  const held = boardHoldings.filter(item => item.holderId === agentId && !item.blocked && DOING_STATUSES.has(item.status)).length;
+  if (own) {
+    const count = own.filter(task => !away.has(task.id) && DOING_STATUSES.has(task.status)).length + held;
+    return count ? `正在做 ${count} 件` : '';
+  }
+  const state = lifePresence(agentId).state;
+  return held ? `正在做 ${held} 件` : state === 'working' || state === 'thinking' ? '正在做' : '';
+}
+function renderChatFilters(groups: BotGroups, bots: RosterBot[]): void {
+  const host = $('chat-filters');
+  if (!host) return;
+  if (chatFilter && !groups.groups.some(group => group.id === chatFilter)) chatFilter = '';
+  host.hidden = groups.groups.length === 0;
+  host.replaceChildren();
+  if (host.hidden) return;
+  const chip = (id: string, label: string) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bot-group-label chat-filter';
+    button.dataset.filter = id;
+    if (id) { button.dataset.groupId = id; button.title = '再点一次改名或解散'; }
+    button.textContent = label;
+    button.setAttribute('aria-pressed', String(chatFilter === id));
+    host.append(button);
+  };
+  chip('', '全部');
+  for (const group of groups.groups) chip(group.id, `${group.name} · ${bots.filter(bot => groups.placement[bot.id] === group.id).length}`);
+}
+/** One 消息 list: Bots, retired Bots' history and group chats, latest activity first. Chats with no stored
+ * summary yet (a new Bot, a demo roster) keep roster order below. One row per Bot. */
 function renderBotRoster(): void {
-  const list = $('bots');
+  const list = $('chats');
   if (!list) return;
   const bots = rosterBots();
   const groups = ensureBotGroups();
-  list.replaceChildren();
-  const renderRow = (bot: RosterBot) => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'bot-row';
-    item.dataset.botId = bot.id;
-    if (bot.id === 'aeeis') item.id = 'gb-bot';
-    const avatar = element('span', bot.mark && bot.mark !== 'letter' ? '' : (bot.name.slice(0, 1) || 'B'), 'roster-avatar');
-    avatar.dataset.state = lifeAvatarState(bot.id);
-    if (bot.mark) avatar.dataset.mark = bot.mark;
-    if (bot.color) avatar.style.background = bot.color;
-    avatar.setAttribute('aria-hidden', 'true');
-    const copy = element('span', '', 'roster-copy');
-    const presence = element('small', lifePresenceLabel(bot.id));
-    copy.append(element('strong', bot.name), presence);
-    item.append(avatar, copy);
-    list.append(item);
-  };
-  const known = new Set(groups.groups.map(group => group.id));
-  for (const group of groups.groups) {
-    const members = bots.filter(bot => groups.placement[bot.id] === group.id);
-    const heading = document.createElement('button');
-    heading.type = 'button';
-    heading.className = 'bot-group-label';
-    heading.dataset.groupId = group.id;
-    heading.textContent = `${group.name} · ${members.length}`;
-    list.append(heading);
-    for (const bot of members) renderRow(bot);
-  }
-  const loose = bots.filter(bot => !known.has(groups.placement[bot.id] ?? ''));
-  if (loose.length && groups.groups.length) list.append(element('p', '未分组', 'bot-group-label'));
-  for (const bot of loose) renderRow(bot);
-  renderLocalBotNote();
-  for (const room of roomSummaries.filter(item => item.status === 'active' && roomChat(item) === 'direct')) {
-    const principalId = directMembers.get(room.id);
-    if (principalId && rosterBots().some(bot => bot.id === principalId)) continue;
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'bot-row';
-    item.dataset.roomId = room.id;
-    const avatar = element('span', room.title.slice(0, 1) || '成', 'roster-avatar');
-    const copy = element('span', '', 'roster-copy');
-    copy.append(element('strong', room.title), element('small', '私聊'));
-    item.append(avatar, copy);
-    list.append(item);
-  }
-  const viewingBot = rosterView() === 'entry' || rosterView() === 'bot' || rosterView() === 'direct';
+  renderChatFilters(groups, bots);
+  const rows: Array<{ at: string; node: HTMLButtonElement }> = [];
+  const view = rosterView();
+  const retired = retiredOpen();
+  const viewingBot = (view === 'entry' || view === 'bot' || view === 'direct') && !retired;
   const visible = activeBotId();
-  list.querySelectorAll<HTMLButtonElement>('[data-bot-id]').forEach(row => {
-    row.setAttribute('aria-pressed', String(viewingBot && row.dataset.botId === visible));
+  for (const bot of bots) {
+    if (chatFilter && groups.placement[bot.id] !== chatFilter) continue;
+    const item = botChatItem(bot.id);
+    const row = chatRow('bot-row', chatAvatar(bot.name, { bot, isBot: true, profile: `bot:${bot.id}`, state: lifeAvatarState(bot.id) }), bot.name, item?.preview || lifePresenceLabel(bot.id), item?.unread ?? 0, doingLabel(bot.id));
+    row.dataset.botId = bot.id;
+    if (item) row.dataset.chatId = item.chatId;
+    if (bot.id === 'aeeis') { row.id = 'gb-bot'; row.querySelector('.chat-preview')!.id = 'gb-bot-presence'; }
+    row.setAttribute('aria-pressed', String(viewingBot && bot.id === visible));
+    rows.push({ at: item?.lastActivityAt ?? '', node: row });
+  }
+  if (!chatFilter) {
+    for (const item of retiredBotChats()) {
+      const name = item.title || '已撤下的 Bot';
+      const row = chatRow('bot-row retired-row', chatAvatar(name, { isBot: true, profile: `bot:${item.counterpart}` }), name, item.preview || '只读的历史', item.unread, '已撤下');
+      row.dataset.chatId = item.chatId;
+      row.dataset.retired = item.counterpart ?? '';
+      row.setAttribute('aria-pressed', String(retired && conversation?.id === item.chatId));
+      rows.push({ at: item.lastActivityAt, node: row });
+    }
+    for (const room of roomSummaries.filter(item => item.status === 'active' && roomChat(item) === 'group')) {
+      const item = roomChatItem(room.id);
+      const row = chatRow(`group-row${room.id === openGroupId ? ' selected' : ''}`, chatAvatar(room.title, { text: room.title.slice(0, 1) || '群' }), room.title, item?.preview || '群聊', item?.unread ?? 0);
+      row.dataset.roomId = room.id;
+      row.dataset.chatId = room.id;
+      rows.push({ at: item?.lastActivityAt ?? '', node: row });
+    }
+    // A direct room with a person, not a Bot's address: those open as the Bot's conversation above.
+    for (const room of roomSummaries.filter(item => item.status === 'active' && roomChat(item) === 'direct' && !boundDirectRoom(item))) {
+      const row = chatRow(`group-row${room.id === openGroupId ? ' selected' : ''}`, chatAvatar(room.title, { text: room.title.slice(0, 1) || '成' }), room.title, '私聊', 0);
+      row.dataset.roomId = room.id;
+      rows.push({ at: '', node: row });
+    }
+  }
+  const ordered = rows.map((row, index) => ({ ...row, index })).sort((a, b) => a.at === b.at ? a.index - b.index : a.at < b.at ? 1 : -1);
+  // Unchanged rows stay in place, so a click is not lost to a background refresh.
+  const markup = ordered.map(row => row.node.outerHTML).join('');
+  if (list.innerHTML !== markup || !list.dataset.rendered) {
+    for (const row of ordered) row.node.addEventListener('click', chatRowClick);
+    list.replaceChildren(...ordered.map(row => row.node));
+    list.dataset.rendered = 'true';
+  }
+  const empty = $('chats-empty');
+  if (empty) empty.hidden = ordered.length > 0;
+  const count = $('chat-count');
+  const unread = chatItems.reduce((sum, item) => sum + item.unread, 0);
+  if (count) count.textContent = unread ? `${unreadLabel(unread)} 条未读` : '';
+  renderLocalBotNote();
+  renderNewChatMenu();
+  syncEntryAvatar();
+  scheduleMarkRead();
+}
+/** A row's own handler: a row kept from an earlier render still opens its chat. The avatar opens the profile. */
+function chatRowClick(event: Event): void {
+  const row = event.currentTarget as HTMLButtonElement;
+  const avatar = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-profile]');
+  if (avatar && row.contains(avatar)) { event.preventDefault(); openProfile(avatar.dataset.profile ?? ''); return; }
+  if (row.dataset.retired !== undefined) void openRetiredChat(row.dataset.chatId ?? '').catch(error => message(errorMessage(error)));
+  else if (row.dataset.botId) selectBot(row.dataset.botId);
+  else if (row.dataset.roomId) void openGroup(row.dataset.roomId).catch(error => message(errorMessage(error)));
+}
+async function loadChats(): Promise<void> {
+  if (!conversationEnabled) { chatItems = []; return; }
+  const page = await api<{ items?: ChatListItem[] } | ChatListItem[]>('/chats').catch(() => undefined);
+  if (!page) return;
+  const items = Array.isArray(page) ? [] : Array.isArray(page.items) ? page.items : [];
+  // A read this page already sent stays read until the server has counted past it.
+  chatItems = items.map(item => {
+    const sent = readSent.get(item.chatId);
+    return sent !== undefined && typeof item.newCount === 'number' && item.newCount <= sent ? { ...item, unread: 0 } : item;
   });
+}
+/** The chat on screen: a Bot's conversation (also a retired one) or a group room. */
+function openChatItem(): ChatListItem | undefined {
+  const view = rosterView();
+  if (view === 'group') return roomChatItem(openGroupId);
+  if ((view === 'entry' || view === 'bot') && conversation) return chatItems.find(item => item.chatId === conversation!.id);
+  return undefined;
+}
+/** True when every scrolling box around the transcript is at its end. */
+function scrolledToEnd(node: HTMLElement | null): boolean {
+  for (let box: HTMLElement | null = node; box; box = box.parentElement) {
+    if (box.scrollHeight <= box.clientHeight + 1) continue;
+    const overflow = getComputedStyle(box).overflowY;
+    if (overflow !== 'auto' && overflow !== 'scroll') continue;
+    if (box.scrollTop + box.clientHeight < box.scrollHeight - 32) return false;
+  }
+  const page = document.scrollingElement as HTMLElement | null;
+  return !page || page.scrollHeight <= page.clientHeight + 1 || page.scrollTop + page.clientHeight >= page.scrollHeight - 32;
+}
+let markReadTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleMarkRead(): void {
+  if (markReadTimer) return;
+  markReadTimer = setTimeout(() => { markReadTimer = undefined; void markOpenChatRead(); }, 150);
+}
+/** Opened and read to the bottom: the chat's unread count clears, on the server too, so it stays cleared after a
+ * refresh or on another device. The count sent is the one the list showed, so a line that came in since stays unread. */
+async function markOpenChatRead(): Promise<void> {
+  const item = openChatItem();
+  if (!item || item.unread <= 0 || document.visibilityState === 'hidden') return;
+  const transcript = rosterView() === 'group' ? $('group-transcript') : $('conversation-messages');
+  if (!transcript || transcript.hidden || !scrolledToEnd(transcript)) return;
+  const count = typeof item.newCount === 'number' ? item.newCount : 1_000_000;
+  if ((readSent.get(item.chatId) ?? -1) >= count) return;
+  readSent.set(item.chatId, count);
+  item.unread = 0;
+  renderBotRoster();
+  try {
+    const result = await api<{ unread: number }>(`/chats/${encodeURIComponent(item.chatId)}/read`, { count });
+    const latest = chatItems.find(entry => entry.chatId === item.chatId);
+    if (latest && typeof result?.unread === 'number' && result.unread > 0 && latest.newCount === item.newCount) { latest.unread = result.unread; renderBotRoster(); }
+  } catch { readSent.delete(item.chatId); }
+}
+function renderNewChatMenu(): void {
+  const host = $('new-chat-bots');
+  if (!host) return;
+  host.replaceChildren(...rosterBots().map(bot => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'new-chat-item';
+    button.dataset.newChatBot = bot.id;
+    button.append(chatAvatar(bot.name, { bot, isBot: true }), element('span', bot.name));
+    return button;
+  }));
+}
+function setNewChatMenu(open: boolean): void {
+  const menu = $('new-chat-menu');
+  if (menu) menu.hidden = !open;
+  $('gb-new-message')?.setAttribute('aria-expanded', String(open));
+}
+/** A retired Bot's conversation, opened read-only: no composer; the server refuses writes to it anyway. */
+async function openRetiredChat(chatId: string): Promise<void> {
+  if (!conversationEnabled || conversationBusy || !chatId) return;
+  const epoch = conversationEpoch;
+  conversationBusy = true;
+  updateConversationControls();
+  try {
+    const view = conversation?.id === chatId ? conversation : await api<ConversationView>(`/conversations/${encodeURIComponent(chatId)}`);
+    if (epoch !== conversationEpoch) return;
+    groupDraftOpen = false;
+    clearOpenGroup();
+    showRoster(false);
+    if (conversation?.id !== view.id) {
+      conversationReplyId = undefined;
+      conversationCorrectionId = undefined;
+      conversationNeedsRefresh = false;
+      $<HTMLFormElement>('conversation-composer').reset();
+      $('conversation-status').textContent = '';
+      $('conversation-error').textContent = '';
+    }
+    acceptConversation(view);
+    renderBotRoster();
+    renderGroups(roomSummaries);
+  } finally {
+    if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); }
+  }
+}
+/** The header avatar opens the profile of whoever this conversation is with. */
+function syncEntryAvatar(): void {
+  const button = $<HTMLButtonElement>('entry-avatar');
+  if (!button) return;
+  const view = rosterView();
+  const agent = retiredOpen() ? lifeAgent(conversation) : view === 'entry' || view === 'bot' ? activeBotId() : '';
+  button.hidden = !agent || !conversationEnabled;
+  if (button.hidden) { button.replaceChildren(); return; }
+  const bot = botById(agent);
+  const name = bot?.name ?? conversation?.title ?? agent;
+  button.replaceChildren(chatAvatar(name, { ...(bot ? { bot } : {}), isBot: true, state: bot ? lifeAvatarState(agent) : '' }));
+  button.dataset.profile = `bot:${agent}`;
+  button.setAttribute('aria-label', `看${name}的档案`);
 }
 function renderBotPlacement(): void {
   const host = $('bot-placement');
@@ -3895,7 +4299,7 @@ function indexDirectRooms(rooms: RoomSummary[]): void {
     const members = await api<RoomMemberSummary[]>(`/rooms/${encodeURIComponent(room.id)}/members`).catch(() => [] as RoomMemberSummary[]);
     const other = members.find(member => member.status === 'active');
     if (other) directMembers.set(room.id, other.principalId);
-  })).then(() => { if (directIndexKey === key && $('bots')) renderBotRoster(); });
+  })).then(() => { if (directIndexKey !== key) return; renderBotRoster(); const manager = $('channel-manager'); if (manager) renderChannelManager(manager, roomSummaries.filter(managedChannel), api, refresh, message, canCreateChannels, openGroup); });
 }
 async function openDirect(principalId: string): Promise<void> {
   if (!principalId) return;
@@ -4061,34 +4465,20 @@ function renderGroups(all: RoomSummary[]): void {
   if (!openGroupId && !groupDraftOpen) {
     const saved = localStorage.getItem('aeeis.group') ?? '';
     const savedRoom = rooms.find(room => room.id === saved);
-    if (savedRoom && isManagedChat(savedRoom)) openGroupId = saved;
+    // A saved Bot address opens that Bot's conversation, as an old room link does.
+    if (savedRoom && isManagedChat(savedRoom) && botDialogueRouting && conversationEnabled && boundDirectRoom(savedRoom)) { localStorage.removeItem('aeeis.group'); void openGroup(saved).catch(error => message(errorMessage(error))); }
+    else if (savedRoom && isManagedChat(savedRoom)) openGroupId = saved;
     else if (saved) localStorage.removeItem('aeeis.group');
   }
-  const list = $('groups');
-  if (!list) return;
   const manager = $('channel-manager');
-  if (manager) renderChannelManager(manager, rooms, api, refresh, message, canCreateChannels, openGroup);
-  const visible = rooms.filter(room => room.status === 'active' && roomChat(room) === 'group');
+  // A Bot's direct room is its conversation's address, not a channel to manage.
+  if (manager) renderChannelManager(manager, rooms.filter(managedChannel), api, refresh, message, canCreateChannels, openGroup);
   if (openGroupId && !rooms.some(room => room.id === openGroupId && isManagedChat(room))) {
     openGroupId = '';
     groupMembers = [];
     resetChannelLog();
     localStorage.removeItem('aeeis.group');
   }
-  list.replaceChildren();
-  for (const room of visible) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = `group-row${room.id === openGroupId ? ' selected' : ''}`;
-    item.addEventListener('click', () => { void openGroup(room.id).catch(error => message(errorMessage(error))); });
-    const avatar = element('span', room.title.slice(0, 1) || '群', 'roster-avatar');
-    const copy = element('span', '', 'roster-copy');
-    copy.append(element('strong', room.title), element('small', '群聊'));
-    item.append(avatar, copy);
-    list.append(item);
-  }
-  const empty = $('groups-empty');
-  if (empty) empty.hidden = visible.length > 0;
   if (openGroupId) void loadGroup(openGroupId);
   renderBotRoster();
   syncEntrySurface();
@@ -4338,6 +4728,7 @@ function upgradeCard(item: ChannelUpgradeView, roomId: string): HTMLElement {
   return card;
 }
 function renderGroupTranscript(): void {
+  scheduleMarkRead();
   const list = $('group-transcript');
   const empty = $('group-thread-empty');
   if (!list) return;
@@ -5040,6 +5431,7 @@ async function cancelConversationTask(task: ConversationTaskView, from: 'plan' |
   } finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 }
 function renderConversation(): void {
+  scheduleMarkRead();
   $('conversation-panel').hidden = !conversationEnabled;
   document.body.classList.toggle('conversation-mode', conversationEnabled);
   if (!conversationEnabled) return;
@@ -5974,13 +6366,29 @@ $('conversation-new').addEventListener('click', async () => {
   } catch (error) { if (epoch === conversationEpoch) $('conversation-error').textContent = errorMessage(error); }
   finally { if (epoch === conversationEpoch) { conversationBusy = false; updateConversationControls(); } }
 });
-$('bots')?.addEventListener('click', event => {
-  const target = (event.target as HTMLElement | null)?.closest('button');
-  if (!target || !$('bots')?.contains(target)) return;
-  if (target.dataset.botId) selectBot(target.dataset.botId);
-  else if (target.dataset.roomId) void openGroup(target.dataset.roomId).catch(error => message(errorMessage(error)));
-  else if (target.dataset.groupId) renameBotGroup(target.dataset.groupId);
+$('chat-filters')?.addEventListener('click', event => {
+  const chip = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('button[data-filter]');
+  if (!chip) return;
+  const id = chip.dataset.filter ?? '';
+  if (id && id === chatFilter) { renameBotGroup(id); return; }
+  chatFilter = id;
+  renderBotRoster();
 });
+$('gb-new-message')?.addEventListener('click', () => setNewChatMenu($('new-chat-menu')?.hidden ?? false));
+$('new-chat-bots')?.addEventListener('click', event => {
+  const pick = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('button[data-new-chat-bot]');
+  if (!pick?.dataset.newChatBot) return;
+  setNewChatMenu(false);
+  selectBot(pick.dataset.newChatBot);
+});
+$('entry-avatar')?.addEventListener('click', () => openProfile($('entry-avatar')?.dataset.profile ?? ''));
+$('gb-me')?.addEventListener('click', () => openProfile('person:me'));
+$('profile-close')?.addEventListener('click', closeProfile);
+$('profile')?.addEventListener('click', event => { if (event.target === $('profile')) closeProfile(); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('profile')?.hidden) closeProfile(); });
+// Reading to the bottom of an open chat clears its unread count.
+document.addEventListener('scroll', () => scheduleMarkRead(), { capture: true, passive: true });
+document.addEventListener('visibilitychange', () => scheduleMarkRead());
 $('bot-group-draft')?.addEventListener('submit', createBotGroup);
 $('gb-new-bot-group')?.addEventListener('click', () => {
   const draft = $('bot-group-draft');
@@ -6158,7 +6566,7 @@ async function generateBotBackground(): Promise<void> {
     if (ticket === botCreateTicket) setBotCreatePending(false);
   }
 }
-$('gb-new-bot')?.addEventListener('click', () => openBotCreate());
+$('gb-new-bot')?.addEventListener('click', () => { setNewChatMenu(false); openBotCreate(); });
 $('bot-local-claim')?.addEventListener('click', () => { void claimLocalBots().catch(error => { localBotNote = errorMessage(error); renderLocalBotNote(); }); });
 $('bot-profile-edit')?.addEventListener('click', () => { const bot = botById(activeBotId()); if (bot) openBotEdit(bot); });
 $('bot-autonomy')?.addEventListener('change', () => { void saveBotAutonomy().catch(error => message(errorMessage(error))); });
@@ -6168,7 +6576,7 @@ $('bot-create-cancel')?.addEventListener('click', () => closeBotCreate());
 $('bot-create-generate')?.addEventListener('click', () => { void generateBotBackground(); });
 $('bot-create-name')?.addEventListener('input', () => paintBotCreate());
 $('bot-create-form')?.addEventListener('submit', event => { void saveCreatedBot(event).catch(error => botCreateStatus(backgroundFailure(error))); });
-$('gb-new-group')?.addEventListener('click', () => showGroupDraft());
+$('gb-new-group')?.addEventListener('click', () => { setNewChatMenu(false); showGroupDraft(); });
 $('group-add-person')?.addEventListener('click', () => addDraftPerson());
 $('group-reuse')?.addEventListener('click', () => reuseRoster());
 $('group-cap')?.addEventListener('input', () => commitGroupCap(false));
@@ -7554,7 +7962,7 @@ async function refresh(background = false): Promise<void> {
     : Promise.resolve(slowLists!);
   const [runPage, goals, allRooms, owned, lists] = await Promise.all([
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms'),
-    api<OwnedBotView[]>('/bots').catch(() => null), slow,
+    api<OwnedBotView[]>('/bots').catch(() => null), slow, loadChats(),
   ]);
   if (full) { slowLists = lists; slowRefreshAt = Date.now(); }
   const { candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage } = lists;
@@ -7568,6 +7976,7 @@ async function refresh(background = false): Promise<void> {
   agentsLoaded = true;
   if (owned) {
     ownedBotRecords = owned.map(ownedRosterBot);
+    ownedBotsLoaded = true;
     if (conversationEnabled) { followConversationBot(); updateConversationControls(); }
   }
   if (full) reloadRoutines();
@@ -9923,6 +10332,7 @@ async function initialize(): Promise<void> {
     const toolHelp = $('tool-config-summary');
     try {
       const toolCatalog = await api<{ tools: { id: string }[]; defaultAllowedTools: string[] }>('/tools');
+      defaultTools = Array.isArray(toolCatalog.defaultAllowedTools) ? toolCatalog.defaultAllowedTools : [];
       const allowedTools = $<HTMLInputElement>('allowed-tools');
       if (!allowedTools.dataset.initialized) {
         if (!allowedTools.value.trim()) allowedTools.value = toolCatalog.defaultAllowedTools.join(', ');

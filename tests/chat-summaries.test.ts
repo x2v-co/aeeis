@@ -110,7 +110,7 @@ describe('chat summaries', () => {
     await service.roomWritten('room_1', scope);
     written = 3;
     await Promise.all([service.roomWritten('room_1', scope), service.roomWritten('room_1', scope)]);
-    expect((await service.list(scope, 'alice'))[0]).toMatchObject({ chatId: 'room_1', unread: 2, preview: '第 2 句' });
+    expect((await service.list(scope, 'alice'))[0]).toMatchObject({ chatId: 'room_1', newCount: 2, unread: 2, preview: '第 2 句' });
     expect(page.mock.calls.map(call => call[3])).toEqual([0, 1, 3]);
     const side = new ChatSummaryService(new InMemoryChatSummaryStore(), { page }, { getRoom: async () => room({ description: '侧线程' }) });
     await side.roomWritten('room_1', scope);

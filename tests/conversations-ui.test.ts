@@ -1,308 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { JSDOM } from 'jsdom';
-import { build } from 'esbuild';
-import { readFile } from 'node:fs/promises';
+import { describe, expect, it, vi } from 'vitest';
 import { projectChannelBoard, taskActionLine, type BoardConversationView } from '../src/channel-task-action.js';
-
-// slow on 2-core sg deploy host (5990ms observed at 0f59391).
-vi.setConfig({ testTimeout: 15000 });
-
-let source: string, html: string, css: string;
-let dom: JSDOM;
-beforeAll(async () => {
-  source = (await build({ entryPoints: ['src/ui/app.ts'], bundle: true, format: 'iife', target: 'es2022', write: false })).outputFiles![0]!.text;
-  [html, css] = await Promise.all([readFile('public/index.html', 'utf8'), readFile('public/style.css', 'utf8')]);
-});
-afterEach(() => dom?.window.close());
-const response = (data: unknown, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(data) });
-const date = '2026-10-21T10:00:00Z';
-const scope = JSON.stringify(['single-owner-local', 'local', 'owner']);
-const runId = 'run_00000000-0000-4000-8000-000000000001';
-const ownedBot = { id: 'bot_00000001', name: '阿研', mark: 'letter', color: '#176b45', background: '负责研究', role: '研究', autonomy: 'quiet' };
-function fixture(surface = 'entry') {
-  return { ...(surface === 'bot' ? { agentId: ownedBot.id } : {}), id: 'conv_00000000-0000-4000-8000-000000000001', title: '项目讨论', revision: 1, focusTaskId: 'task_a' as string | undefined,
-    tasks: [{ id: 'task_a', title: '发布方案', threadId: 'thread_a', status: 'discussion' }, { id: 'task_b', title: '周报', threadId: 'thread_b', status: 'succeeded', runId, latestRunId: runId }],
-    messages: [] as any[], hasEarlierMessages: false };
-}
-function runFixture() {
-  return { id: runId, revision: 1, goal: '周报执行', status: 'succeeded', canEdit: true, workingMemoryEnabled: true, privacy: 'internal',
-    plans: [{ version: 1, hash: 'plan-hash', summary: 'Plan', nodes: [{ id: 'node_report', title: '核对证据', dependsOn: [] }] }],
-    steps: [{ taskId: 'node_report', status: 'succeeded' }], events: [], artifacts: [], calls: [], context: { sources: [] } };
-}
-function harness(view = fixture(), options: { enabled?: boolean; model?: boolean; owned?: boolean; handler?: (url: string, options: any) => any } = {}) {
-  const posts: Array<{ url: string; body: any; key: string; raw: string }> = [];
-  const uiEvents: Array<{ name: string; roomId: string }> = [];
-  const lives = new Map<string, any>();
-  const conversationFor = (requestUrl: string) => {
-    const match = String(requestUrl).match(/\/api\/conversations\/([^/?]+)/);
-    if (!match) return undefined;
-    const id = decodeURIComponent(match[1] ?? '');
-    if (id === view.id) return view;
-    return lives.get(id);
-  };
-  let principal = 'owner';
-  const ownedBots: Array<Record<string, unknown>> = options.owned || view.agentId === ownedBot.id ? [{ ...ownedBot }] : [];
-  const demoNames: Record<string, string> = { aeeis: 'AEEIS', 'demo.release': '发布', 'demo.research': '研究', 'demo.brief': '纪要' };
-  const nameOf = (id: string) => demoNames[id] ?? String(ownedBots.find(bot => bot.id === id)?.name ?? id);
-  const readHandler = async (path: string, init: Record<string, unknown>) => {
-    const result = await options.handler?.(path, { headers: {}, ...init });
-    return result === undefined ? undefined : JSON.parse(await result.text());
-  };
-  /** Stands in for the server's /board: the real projection over the events
-   * and conversations this test's handler serves. */
-  const mockBoard = async (roomId: string) => {
-    const raw: Array<Record<string, any>> = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < 50; page += 1) {
-      const listed = await readHandler(`/api/rooms/${encodeURIComponent(roomId)}/session-events?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { method: 'GET' });
-      const items = Array.isArray(listed) ? listed : listed?.items ?? [];
-      for (const item of items) if (!raw.some(seen => seen.id === item.id)) raw.push(item);
-      const next = Array.isArray(listed) ? undefined : listed?.nextCursor;
-      if (!next || next === cursor) break;
-      cursor = next;
-    }
-    const items = raw.map((event, index) => ({ sequence: index + 1, owner: principal, ...event }));
-    const ids = new Set<string>();
-    for (const event of items) for (const ref of event.evidenceRefs ?? []) if (String(ref).startsWith('conv_')) ids.add(String(ref));
-    const conversations = new Map<string, BoardConversationView | undefined>();
-    for (const id of ids) {
-      const served = await readHandler(`/api/conversations/${id}`, { method: 'GET' }).catch(() => undefined);
-      conversations.set(id, served && !served.error ? served : conversationFor(`/api/conversations/${id}`));
-    }
-    return projectChannelBoard(roomId, items, conversations, nameOf);
-  };
-  const fetch = vi.fn(async (url: string, request: any) => {
-    // §18.2 counts change no state; `uiEvents` keeps them apart from the writes these tests guard.
-    if (request.method === 'POST' && url === '/api/ui-events') uiEvents.push(JSON.parse(request.body));
-    else if (request.method === 'POST') posts.push({ url, body: JSON.parse(request.body), raw: request.body, key: request.headers['Idempotency-Key'] });
-    const boardRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/board$/)?.[1];
-    if (boardRoom) return options.handler?.(url, request) ?? response(await mockBoard(decodeURIComponent(boardRoom)));
-    const actionRoom = String(url).match(/^\/api\/rooms\/([^/?]+)\/task-actions$/)?.[1];
-    if (actionRoom && request.method === 'POST') {
-      const roomId = decodeURIComponent(actionRoom);
-      const body = JSON.parse(request.body);
-      const card = (await mockBoard(roomId)).cards.find(item => item.conversationId === body.conversationId && item.taskId === body.taskId);
-      if (!card) return response({ error: '这件事不在这个频道的任务板上' }, 404);
-      if (body.kind === 'claim' && card.decision.assigneeId) return response({ error: card.decision.assigneeId === body.agentId ? '已经领取这件事' : `${nameOf(card.decision.assigneeId)}已领取` }, 409);
-      if (body.kind === 'accept' && card.status !== 'succeeded') return response({ error: '只有已成功的事可以验收' }, 409);
-      const action = { schemaVersion: 'channel-task-action/1' as const, kind: body.kind, conversationId: body.conversationId, taskId: body.taskId, ...(body.kind === 'accept' && card.runId ? { acceptedRunId: card.runId } : {}), ...(body.agentId ? { agentId: body.agentId } : {}), ...(body.reason ? { reason: body.reason } : {}) };
-      const event = await readHandler(`/api/rooms/${encodeURIComponent(roomId)}/session-events`, { method: 'POST', body: JSON.stringify({ goalId: body.goalId, type: 'task_update', content: taskActionLine(action, body.agentId ? nameOf(body.agentId) : undefined), contextManifestId: body.contextManifestId, idempotencyKey: body.idempotencyKey, evidenceRefs: [body.conversationId, body.taskId, ...(body.agentId ? [body.agentId] : [])], taskAction: action }) });
-      return response({ event, board: await mockBoard(roomId) });
-    }
-    const custom = options.handler?.(url, request);
-    if (custom !== undefined) return custom;
-    if (url === '/api/status') return response({ modelConfigured: options.model ?? true, runner: 'fixture', mode: 'single-owner-local', principal, tenantId: 'local', conversationRouting: options.enabled ?? true });
-    if (url === '/api/tools') return response({ tools: [], defaultAllowedTools: [] });
-    if (url === '/api/conversations' && request.method === 'POST') {
-      const body = JSON.parse(request.body);
-      if (body?.agentId) {
-        const known = [view, ...lives.values()].find(item => item.agentId === body.agentId);
-        if (known) return response(known);
-        if (body.claimId) {
-          const claimed = body.claimId === view.id ? view : lives.get(body.claimId);
-          if (!claimed) return response({ error: 'Unknown conversation' }, 404);
-          if (claimed.agentId && claimed.agentId !== body.agentId) return response({ error: '这条对话已经属于另一个人' }, 409);
-          claimed.agentId = body.agentId;
-          return response(claimed);
-        }
-        const created = { id: `conv_life_${lives.size + 1}`, title: body.title || body.agentId, revision: 0, agentId: body.agentId, tasks: [] as any[], messages: [] as any[], hasEarlierMessages: false };
-        lives.set(created.id, created);
-        return response(created);
-      }
-      return response(view);
-    }
-    if (url === '/api/conversations') return response([view, ...lives.values()]);
-    if (url.endsWith('/notifications/sync')) {
-      const target = conversationFor(url) ?? view;
-      if (!target.messages.some((item: { id: string }) => item.id === 'notice')) target.messages.push({ id: 'notice', role: 'notification', text: '周报已完成', createdAt: date, notificationRunId: runId, route: { status: 'routed', reason: 'explicit', taskIds: ['task_b'], candidateTaskIds: [], focusEffect: 'keep' } });
-      target.revision++; return response(target);
-    }
-    if (url.endsWith('/focus')) { const target = conversationFor(url) ?? view; const body = JSON.parse(request.body); target.focusTaskId = body.taskId ?? undefined; target.revision++; return response(target); }
-    if (url.endsWith('/standing')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再改这句话' }, 409);
-      const text = String(body.text ?? '').trim();
-      if (text) target.standingInstruction = text;
-      else delete target.standingInstruction;
-      target.revision++;
-      return response(target);
-    }
-    if (url.endsWith('/practice/retract')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再撤回这句' }, 409);
-      if (!target.acceptedPractice || target.acceptedPractice.claimId !== body.claimId) return response({ error: '这个人还没有收下的做法' }, 409);
-      delete target.acceptedPractice;
-      return response(target);
-    }
-    if (url.endsWith('/task-kind/propose')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (Object.keys(body).sort().join() !== 'expectedRevision,taskKind') return response({ error: 'Invalid request' }, 400);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再送去评测' }, 409);
-      const compare = target.taskSettings?.comparisons?.find((item: { taskKind: string; methodId?: string; version?: string; profileMethodId?: string; profileVersion?: string }) => item.taskKind === body.taskKind);
-      if (!compare?.methodId || !compare.profileMethodId || (compare.methodId === compare.profileMethodId && compare.version === compare.profileVersion)) return response({ error: '这次做成的技能和档案一样，不用送去评测' }, 409);
-      compare.proposal = { candidateId: 'evo_lineup', status: 'proposed' };
-      return response(target);
-    }
-    if (url.endsWith('/task-kind/keep')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再留下这份档案' }, 409);
-      const compare = target.taskSettings?.comparisons?.find((item: { taskKind: string; differs?: boolean; profileMethodId?: string; profileModel?: string; kept?: boolean }) => item.taskKind === body.taskKind);
-      if (!compare || (!compare.profileMethodId && !compare.profileModel)) return response({ error: '这个任务种类还没有可留下的档案' }, 409);
-      if (!compare.differs) return response({ error: '这次做成和档案一样，不用留下' }, 409);
-      compare.kept = true;
-      return response(target);
-    }
-    if (url.endsWith('/skill-profile/rollback')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再回滚' }, 409);
-      const skill = target.taskSettings?.skills?.find((item: { taskKind: string; previous?: { methodId: string; version: string; runId: string }; methodId: string; version: string; runId: string }) => item.taskKind === body.taskKind);
-      if (!skill?.previous) return response({ error: '这个任务种类还没有可回滚的上一版' }, 409);
-      skill.methodId = skill.previous.methodId;
-      skill.version = skill.previous.version;
-      skill.runId = skill.previous.runId;
-      delete skill.previous;
-      return response(target);
-    }
-    if (url.endsWith('/skill-profile/retract')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再撤回这份档案' }, 409);
-      const skills = target.taskSettings?.skills ?? [];
-      if (!skills.some((item: { claimId: string }) => item.claimId === body.claimId)) return response({ error: '这个任务种类还没有技能档案' }, 409);
-      target.taskSettings.skills = skills.filter((item: { claimId: string }) => item.claimId !== body.claimId);
-      if (!target.taskSettings.skills.length && !(target.taskSettings.models?.length)) delete target.taskSettings;
-      return response(target);
-    }
-    if (url.endsWith('/skill-profile')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再晋升' }, 409);
-      const compared = target.taskSettings?.comparisons?.some((item: { taskKind: string; runId: string }) => item.taskKind === body.taskKind && item.runId === body.runId);
-      if ((!target.lastDelivery || body.runId !== target.lastDelivery.runId) && !compared) return response({ error: '只能晋升这个人做成过的那一次' }, 409);
-      target.taskSettings ??= { skills: [], models: target.taskSettings?.models ?? [] };
-      const existing = target.taskSettings.skills.find((item: { taskKind: string }) => item.taskKind === body.taskKind);
-      const next = { claimId: 'brain_skill', taskKind: body.taskKind, methodId: 'project-pulse', version: existing ? '2' : '1', runId: body.runId, evidenceRefs: ['artifact_later'], ...(existing ? { previous: { methodId: existing.methodId, version: existing.version, runId: existing.runId } } : {}) };
-      target.taskSettings.skills = [next, ...target.taskSettings.skills.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind)];
-      return response(target);
-    }
-    if (url.endsWith('/task-model')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再改这个任务种类的模型' }, 409);
-      target.taskSettings ??= { skills: target.taskSettings?.skills ?? [], models: [] };
-      if (!body.model) {
-        if (!target.taskSettings.models.some((item: { taskKind: string }) => item.taskKind === body.taskKind)) return response({ error: '这个任务种类还没有选定模型' }, 409);
-        target.taskSettings.models = target.taskSettings.models.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind);
-      } else {
-        const model = { claimId: 'brain_model', taskKind: body.taskKind, model: body.model, ...(body.provider ? { provider: body.provider } : {}) };
-        target.taskSettings.models = [model, ...target.taskSettings.models.filter((item: { taskKind: string }) => item.taskKind !== body.taskKind)];
-      }
-      if (!target.taskSettings.skills.length && !target.taskSettings.models.length) delete target.taskSettings;
-      return response(target);
-    }
-    if (url.endsWith('/practice')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      if (body.expectedRevision !== target.revision) return response({ error: '对话已变化，请先刷新再收下这句' }, 409);
-      const text = String(body.text ?? '').trim();
-      if (!target.lastDelivery || body.runId !== target.lastDelivery.runId) return response({ error: '只能收下这个人上次做成的那一次' }, 409);
-      target.acceptedPractice = { claimId: 'brain_practice', text, runId: body.runId, evidenceRefs: ['artifact_later'] };
-      return response(target);
-    }
-    if (url.endsWith('/messages')) {
-      const target = conversationFor(url);
-      if (!target) return response({ error: 'Unknown conversation' }, 404);
-      const body = JSON.parse(request.body);
-      const replied = target.messages.find((item: { id: string }) => item.id === body.replyTo);
-      const created = body.newTask ? { id: `task_new_${target.tasks.length}`, title: body.newTask.title, threadId: `thread_new_${target.tasks.length}`, status: 'discussion' } : undefined;
-      if (created) {
-        target.tasks.push(created);
-        if (body.focus === 'switch') target.focusTaskId = created.id;
-      }
-      const route = { status: 'routed', reason: created ? 'new-task' : body.replyTo ? 'reply' : body.taskIds ? 'explicit' : 'focus', taskIds: created ? [created.id] : body.taskIds ?? (body.replyTo ? replied?.effectiveTaskIds ?? replied?.route.taskIds : [target.focusTaskId]), candidateTaskIds: [], focusEffect: body.focus };
-      const message = { id: `message_${target.messages.length}`, role: 'user', speaker: body.speaker ?? { role: 'user', id: principal }, text: body.text, createdAt: date, route, ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(body.correctsMessageId ? { correctsMessageId: body.correctsMessageId } : {}), ...(body.intent === 'execute' ? { execution: { taskId: route.taskIds[0], runId, state: 'completed' } } : {}) };
-      if (body.correctsMessageId) target.messages.find((item: { id: string }) => item.id === body.correctsMessageId).effectiveTaskIds = body.taskIds;
-      target.messages.push(message); target.revision++;
-      return response({ conversation: target, message, response: body.correctsMessageId ? '已追加归属纠正，仅影响后续消息和新执行上下文；已有执行记录不变。' : body.intent === 'execute' ? '已创建执行，仍需计划审批。' : '已记录讨论，未触发执行。', ...(body.intent === 'execute' ? { runId } : {}) });
-    }
-    if (/^\/api\/conversations\/[^/]+$/.test(url)) {
-      const target = conversationFor(url);
-      if (target) return response(target);
-    }
-    if (url === `/api/runs/${runId}`) return response(runFixture());
-    if (url.endsWith('/graphs')) return response({ execution: { nodes: [], edges: [] }, evidence: { nodes: [], edges: [] } });
-    if (url.endsWith('/explanation')) return response({ schemaVersion: 'run-explanation/1', run: { id: runId, status: 'succeeded', privacy: 'internal', updatedAt: date }, attention: { kind: 'none', nextAction: 'done', blockers: [] }, plan: { tasks: { total: 1, pending: 0, running: 0, succeeded: 1 }, readyTaskIds: [], pendingTaskIds: [] }, execution: { eventCount: 0, modelCalls: { total: 0, started: 0, completed: 0, failed: 0, unknown: 0, discarded: 0 }, tools: { total: 0, completed: 0, failed: 0, unknown: 0 }, delegations: { total: 0, completed: 0, failed: 0, unknown: 0 } }, evidence: { sourceCount: 0, artifactCount: 0, receiptCount: 0, evidenceNodeCount: 0, memoryRefs: [] }, governance: { tools: [], agents: [] }, budget: {} });
-    if (url.startsWith('/api/bots/') && url !== '/api/bots/background') {
-      const id = decodeURIComponent(url.slice('/api/bots/'.length));
-      if (request?.method === 'DELETE') {
-        const type = request.headers?.['content-type'];
-        if (typeof type === 'string' && type.includes('application/json') && (request.body === undefined || request.body === '')) return response({ error: 'Invalid HTTP request' }, 400);
-        const index = ownedBots.findIndex(bot => bot.id === id);
-        if (index >= 0) ownedBots.splice(index, 1);
-        return response({ removed: true, id });
-      }
-      if (request?.method === 'PATCH') {
-        const body = JSON.parse(request.body);
-        const bot = ownedBots.find(item => item.id === id);
-        if (!bot) return response({ error: '没有这位 Bot' }, 404);
-        Object.assign(bot, body);
-        return response(bot);
-      }
-    }
-    if (url === '/api/bots' && request?.method === 'POST') {
-      const body = JSON.parse(request.body);
-      const existing = ownedBots.find(bot => bot.id === body.id);
-      if (existing) return response(existing);
-      const bot = { id: body.id ?? `bot_${String(ownedBots.length + 1).padStart(8, '0')}`, name: body.name, mark: body.mark ?? 'letter', color: body.color, background: body.background, ...(body.role ? { role: body.role } : {}) };
-      ownedBots.push(bot);
-      return response(bot);
-    }
-    if (url === '/api/bots') return response(ownedBots);
-    if (url.includes('/page?')) return response({ items: [], goals: [] });
-    return response([]);
-  });
-  return { view, fetch, posts, uiEvents, setPrincipal(value: string) { principal = value; } };
-}
-/** Interval callbacks the page registered; tests fire them by hand. */
-let intervals: Array<{ callback: () => void; ms: number }> = [];
-function start(fetch: any, saved: { local?: Record<string, string>; session?: Record<string, string>; setup?: (window: any) => void; path?: string } = {}) {
-  dom = new JSDOM(html, { url: `http://localhost${saved.path ?? '/'}`, runScripts: 'outside-only', pretendToBeVisual: true });
-  const style = dom.window.document.createElement('style'); style.textContent = css; dom.window.document.head.append(style);
-  if (!Object.prototype.hasOwnProperty.call(saved.local ?? {}, 'aeeis.demo-roster')) dom.window.localStorage.setItem('aeeis.demo-roster', '1');
-  for (const [key, value] of Object.entries(saved.local ?? {})) {
-    if (value === '') dom.window.localStorage.removeItem(key);
-    else dom.window.localStorage.setItem(key, value);
-  }
-  for (const [key, value] of Object.entries(saved.session ?? {})) dom.window.sessionStorage.setItem(key, value);
-  intervals = [];
-  dom.window.fetch = fetch; dom.window.setInterval = ((callback: () => void, ms: number) => { intervals.push({ callback, ms }); return intervals.length; }) as any;
-  dom.window.HTMLElement.prototype.scrollIntoView = () => {};
-  dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
-  saved.setup?.(dom.window);
-  dom.window.eval(source);
-}
-const doc = () => dom.window.document;
-const el = <T extends HTMLElement = HTMLElement>(id: string) => doc().getElementById(id) as T;
-function fill(id: string, value: string) { const input = el<HTMLInputElement>(id); input.value = value; input.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }
-function submit() { el('conversation-composer').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); }
-function clickText(text: string, root: ParentNode = doc()) { const control = [...root.querySelectorAll('button')].find(button => button.textContent === text); expect(control, text).toBeDefined(); control!.click(); }
-async function sendReady(label = '发送') { await vi.waitFor(() => { expect(el('conversation-send').textContent).toBe(label); expect(el<HTMLButtonElement>('conversation-send').disabled).toBe(false); }); }
-async function ready() { await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案')); }
-const messagePosts = (h: ReturnType<typeof harness>) => h.posts.filter(post => post.url.endsWith('/messages'));
+import { response, date, scope, runId, ownedBot, fixture, runFixture, harness, intervals, start, doc, el, fill, submit, clickText, sendReady, ready, messagePosts, dom, css } from './support/conversations-ui.js';
 
 describe('single-entry conversation workbench', () => {
   it('routes the old quick composer through the selected OwnedBot conversation', async () => {
@@ -1820,7 +1518,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('发布'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('发布'));
     const release = doc().querySelector<HTMLElement>('[data-bot-id="demo.release"]')!;
     const research = doc().querySelector<HTMLElement>('[data-bot-id="demo.research"]')!;
     expect(release.textContent).toContain('等你 · 发布口径');
@@ -1923,7 +1621,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     await vi.waitFor(() => expect(el('group-members').textContent).toContain('阿研'));
@@ -1982,7 +1680,7 @@ describe('entry bots and group chats', () => {
       if (url === '/api/rooms/room_team/upgrades') return response({ items: upgrades });
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('东云'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('东云'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     const fold = () => doc().querySelector<HTMLDetailsElement>('#channel-upgrades > details.upgrade-fold');
@@ -2032,7 +1730,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     const card = (id: string) => doc().querySelector<HTMLElement>(`#channel-upgrades [data-upgrade="${id}"]`);
@@ -2103,7 +1801,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     await vi.waitFor(() => expect(h.uiEvents).toContainEqual({ name: 'ui.channel.open', roomId: 'room_team' }));
@@ -2160,7 +1858,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     await vi.waitFor(() => expect(doc().querySelector('#group-transcript [data-card="takeover"]')?.textContent).toContain('人已接管'));
@@ -2190,7 +1888,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     await vi.waitFor(() => expect(groupRow()).toBeTruthy());
     groupRow()!.click();
     await vi.waitFor(() => expect(doc().querySelector('#group-transcript [data-card="question"][data-run="run_q"]')).not.toBeNull());
@@ -2226,9 +1924,9 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('发布'));
-    const bots = el('bots');
-    expect(bots.textContent).toContain('工作');
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('发布'));
+    const bots = el('chats');
+    expect(el('chat-filters').textContent).toContain('工作');
     expect(bots.textContent).toContain('研究');
     expect(bots.textContent).toContain('纪要');
     expect(bots.textContent).toContain('空闲');
@@ -2266,14 +1964,17 @@ describe('entry bots and group chats', () => {
     expect(h.posts).toHaveLength(postsBeforeComputer);
     el('entry-computer').click();
     expect(doc().body.classList.contains('computer-open')).toBe(false);
-    expect(el('bots').textContent).not.toContain('私聊');
-    expect(el('groups').textContent ?? '').not.toContain('发布');
+    expect(el('chats').textContent).not.toContain('私聊');
+    expect([...doc().querySelectorAll('#chats .group-row')].map(row => row.textContent).join('')).not.toContain('发布');
     (el<HTMLInputElement>('bot-group-name')).value = '值班';
     el<HTMLFormElement>('bot-group-draft').requestSubmit();
     const duty = [...doc().querySelectorAll<HTMLButtonElement>('#bot-placement button')].find(button => button.textContent === '值班');
     duty?.click();
-    const heading = [...doc().querySelectorAll('.bot-group-label')].find(item => item.textContent?.startsWith('值班'));
-    expect(heading?.nextElementSibling?.textContent).toContain('发布');
+    const heading = [...doc().querySelectorAll<HTMLButtonElement>('#chat-filters .bot-group-label')].find(item => item.textContent?.startsWith('值班'));
+    expect(heading?.textContent).toBe('值班 · 1');
+    heading!.click();
+    expect([...doc().querySelectorAll('#chats .chat-row')].map(row => row.querySelector('strong')?.textContent)).toEqual(['发布']);
+    doc().querySelector<HTMLButtonElement>('#chat-filters [data-filter=""]')!.click();
     el('gb-bot').click();
     await vi.waitFor(() => expect(el('conversation-focus').textContent).toContain('发布方案'));
     expect(el('bot-note').hidden).toBe(true);
@@ -2295,8 +1996,8 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('发布核对'));
-    const text = el('bots').textContent ?? '';
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('发布核对'));
+    const text = el('chats').textContent ?? '';
     expect(text).not.toContain('纪要');
     expect(text).toContain('AEEIS');
     // An admitted external agent still only discusses.
@@ -2310,8 +2011,8 @@ describe('entry bots and group chats', () => {
     const h = harness();
     start(h.fetch, { local: { 'aeeis.demo-roster': '' } });
     await ready();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('AEEIS'));
-    expect(el('bots').textContent).toContain('纪要');
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('AEEIS'));
+    expect(el('chats').textContent).toContain('纪要');
     expect(el('bot-create').hidden).toBe(true);
     el('gb-new-bot').click();
     expect(el('bot-create').hidden).toBe(false);
@@ -2319,7 +2020,7 @@ describe('entry bots and group chats', () => {
     el<HTMLTextAreaElement>('bot-create-background').value = '核对清单上的每一项，自己不发对外消息。';
     doc().querySelector<HTMLButtonElement>('#bot-create-colors button[data-color="#176b45"]')!.click();
     el<HTMLFormElement>('bot-create-form').requestSubmit();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('阿核'));
     expect(el('bot-create').hidden).toBe(true);
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
     expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '阿核', color: '#176b45', background: '核对清单上的每一项，自己不发对外消息。', mark: 'letter' });
@@ -2329,12 +2030,12 @@ describe('entry bots and group chats', () => {
     expect(el('bot-create').hidden).toBe(false);
     el<HTMLInputElement>('bot-create-name').value = '阿核二';
     el<HTMLFormElement>('bot-create-form').requestSubmit();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿核二'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('阿核二'));
     const patch = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/bot_') && call[1]?.method === 'PATCH');
     expect(patch).toBeTruthy();
     expect(JSON.parse(patch?.[1].body).name).toBe('阿核二');
     expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
-    expect(el('bots').textContent).not.toContain('纪要');
+    expect(el('chats').textContent).not.toContain('纪要');
     el('gb-new-group').click();
     expect(el('group-candidates').textContent ?? '').toContain('阿核二');
     el('group-reuse').click();
@@ -2342,7 +2043,7 @@ describe('entry bots and group chats', () => {
     expect(el('group-candidates').textContent ?? '').toContain('阿核二');
     dom.window.confirm = () => true;
     el('bot-profile-remove').click();
-    await vi.waitFor(() => expect(el('bots').textContent).not.toContain('阿核'));
+    await vi.waitFor(() => expect(el('chats').textContent).not.toContain('阿核'));
     const deletion = h.fetch.mock.calls.find(call => String(call[0]).startsWith('/api/bots/') && call[1]?.method === 'DELETE');
     expect(deletion?.[1].headers['content-type']).toBeUndefined();
   });
@@ -2352,10 +2053,10 @@ describe('entry bots and group chats', () => {
     start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_migrated1', name: '阿迁', mark: 'letter', color: '#171717', background: '从这台浏览器迁到账号。' }]) } });
     await ready();
     expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
-    expect(el('bots').textContent).not.toContain('阿迁');
+    expect(el('chats').textContent).not.toContain('阿迁');
     expect(el('bot-local-note').textContent).toContain('阿迁');
     el('bot-local-claim').click();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('阿迁'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('阿迁'));
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
     expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ id: 'bot_migrated1', name: '阿迁' });
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
@@ -2377,7 +2078,7 @@ describe('entry bots and group chats', () => {
     el('bot-local-claim').click();
     await vi.waitFor(() => expect(el('bot-local-note').textContent).toContain('这个名字已经在名单上'));
     expect(h.posts.filter(post => post.url === '/api/bots')).toHaveLength(1);
-    expect(el('bots').textContent).not.toContain('纪要');
+    expect(el('chats').textContent).not.toContain('纪要');
     const calls = h.fetch.mock.calls.length;
     intervals.find(item => item.ms === 2000)!.callback();
     await vi.waitFor(() => expect(h.fetch.mock.calls.length).toBeGreaterThan(calls));
@@ -2389,7 +2090,7 @@ describe('entry bots and group chats', () => {
     start(h.fetch, { local: { 'aeeis.demo-roster': '0', 'aeeis.run': runId, 'aeeis.custom-bots-account': 'someone-else', 'aeeis.custom-bots': JSON.stringify([{ id: 'bot_leftover1', name: '阿留', mark: 'letter', color: '#171717', background: '上一个账号留下的。' }]) } });
     await ready();
     expect(h.posts.some(post => post.url === '/api/bots')).toBe(false);
-    expect(el('bots').textContent).not.toContain('阿留');
+    expect(el('chats').textContent).not.toContain('阿留');
     expect(el('bot-local-note').textContent).toContain('上一个账号');
     expect(el('bot-local-claim').hidden).toBe(true);
     const calls = h.fetch.mock.calls.length;
@@ -2414,9 +2115,9 @@ describe('entry bots and group chats', () => {
     el('bot-create-generate').click();
     await vi.waitFor(() => expect(el<HTMLTextAreaElement>('bot-create-background').value).toContain('把讨论收成可以核对的纪要'));
     expect(el('bot-create-status').textContent).toContain('看过之后再保存');
-    expect(el('bots').textContent).not.toContain('纪要');
+    expect(el('chats').textContent).not.toContain('纪要');
     el<HTMLFormElement>('bot-create-form').requestSubmit();
-    await vi.waitFor(() => expect(el('bots').textContent).toContain('纪要'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('纪要'));
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
     expect(h.posts.find(post => post.url === '/api/bots')?.body).toMatchObject({ name: '纪要', role: '把讨论收成可以核对的纪要', background: '负责把讨论收成可以核对的纪要。自己不代替人做决定。' });
     expect(h.posts.filter(post => post.url === '/api/bots/background')).toHaveLength(1);
@@ -2437,7 +2138,7 @@ describe('entry bots and group chats', () => {
     el<HTMLFormElement>('bot-create-form').requestSubmit();
     expect(el('bot-create-status').textContent).toContain('先写下背景');
     expect(h.posts.some(post => post.url === '/api/bots/background')).toBe(false);
-    expect(el('bots').textContent).not.toContain('阿核');
+    expect(el('chats').textContent).not.toContain('阿核');
     el<HTMLInputElement>('bot-create-name').value = '所有人';
     el<HTMLTextAreaElement>('bot-create-background').value = '点名会重叠。';
     el<HTMLFormElement>('bot-create-form').requestSubmit();
@@ -2457,7 +2158,7 @@ describe('entry bots and group chats', () => {
     expect(dom.window.localStorage.getItem('aeeis.custom-bots')).toBeNull();
     el('gb-new-bot').click();
     expect(el<HTMLTextAreaElement>('bot-create-background').value).toBe('');
-    expect(el('bots').textContent).not.toContain('阿核');
+    expect(el('chats').textContent).not.toContain('阿核');
   });
 
   it('starts a new group at ten people and keeps a chosen limit', async () => {
@@ -2527,7 +2228,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    expect(el('groups').textContent ?? '').not.toContain('后台房间');
+    expect(el('chats').textContent ?? '').not.toContain('后台房间');
     el('gb-new-group').click();
     expect(el('group-draft').hidden).toBe(false);
     expect(el('group-count-live').textContent).toContain('1 / 10');
@@ -2573,7 +2274,7 @@ describe('entry bots and group chats', () => {
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(1);
     expect(h.posts.filter(post => post.url.endsWith('/focus'))).toHaveLength(0);
-    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
     await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
     const asked: string[] = [];
@@ -2586,7 +2287,7 @@ describe('entry bots and group chats', () => {
     dom.window.confirm = () => true;
     el('chat-archive').click();
     await vi.waitFor(() => expect(el('group-panel').hidden).toBe(true));
-    expect(el('groups').textContent ?? '').not.toContain('发布协作');
+    expect(el('chats').textContent ?? '').not.toContain('发布协作');
     expect(el('conversation-focus').textContent).toContain('发布方案');
     expect(typed.value).toBe('还留在入口');
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(1);
@@ -2699,7 +2400,7 @@ describe('entry bots and group chats', () => {
     expect(messagePosts(h)[3]?.body).toMatchObject({ text: '发布口径先记在这里', expectedRevision: 0, intent: 'execute' });
     expect(messagePosts(h)[3]?.body).not.toHaveProperty('speaker');
     expect(el('conversation-tasks').textContent ?? '').not.toContain('整理发布风险');
-    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
     await vi.waitFor(() => expect(el('group-members').textContent).toContain('member.editor'));
     clickText('member.editor', el('group-members'));
@@ -2876,7 +2577,7 @@ describe('entry bots and group chats', () => {
       pendingQuestion: { text: '哪一版说明？' },
       execution: { steps: [{ title: '核对清单', state: 'waiting' }, { title: '写下结论', state: 'current' }], evidence: ['工作区清单'] },
     };
-    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     groupRow?.click();
     await vi.waitFor(() => expect(cards().find(item => item.dataset.card === 'approval')?.textContent).toContain('待批准：核对发布说明'));
     const updated = cards().find(item => item.dataset.handoff === 'task_new_1' && item.dataset.card === 'handoff');
@@ -3061,7 +2762,7 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(boardText()).toContain('乙房间的事'));
     expect(boardText()).not.toContain('甲房间的事');
     expect(boardText()).not.toContain('生命线上的私事');
-    const alpha = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('甲房间'));
+    const alpha = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('甲房间'));
     alpha?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('甲房间的事'));
     el('channel-board-open').click();
@@ -3620,8 +3321,8 @@ describe('entry bots and group chats', () => {
     start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
     await ready();
     await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
-    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'))!.click();
     await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
     dom.window.confirm = () => true;
     el('chat-archive').click();
@@ -4102,7 +3803,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'));
+    const groupRow = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'));
     expect(groupRow).toBeDefined();
     groupRow!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('房主自己的交接'));
@@ -4146,7 +3847,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'))!.click();
     await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
     // The note under the composer describes Bot replies, not the old 👍 receipts.
     expect(el('group-send-note').textContent).toContain('没有点名时 AEEIS 回复');
@@ -4194,10 +3895,10 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    const groups = [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].map(button => button.textContent ?? '');
+    const groups = [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].map(button => button.textContent ?? '');
     expect(groups.some(text => text.includes('发布协作'))).toBe(true);
     expect(groups.some(text => text.includes('阿研 ↔ AEEIS'))).toBe(false);
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'))!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('我请阿研整理风险。'));
     const reply = [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')].find(item => item.textContent?.includes('我请阿研整理风险。'))!;
     expect(reply.dataset.auto).toBe('true');
@@ -4324,7 +4025,7 @@ describe('entry bots and group chats', () => {
       { id: 'evt_up', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '交给入口', evidenceRefs: ['conv_release', 'task_up', 'demo.release'], createdAt: date },
       { id: 'evt_up_hand', operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: '已交给AEEIS，记为讨论「交给入口的纪要」。原来的事还在。', evidenceRefs: ['conv_aeeis', 'task_entry', 'aeeis', 'conv_release', 'task_up'], createdAt: date },
     ]);
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('阶段二'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('引用 task_ready'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
@@ -4372,7 +4073,7 @@ describe('entry bots and group chats', () => {
       release.tasks.push({ id: `task_busy_${index}`, title: `忙碌 ${index}`, threadId: `thread_busy_${index}`, status: 'running', createdAt: date });
       events.get('room_phase')!.push({ id: `evt_busy_${index}`, operation: 'publish', actorType: 'principal', actorId: 'owner', type: 'system', content: `忙碌 ${index}`, evidenceRefs: ['conv_release', `task_busy_${index}`, 'demo.release'], createdAt: date });
     }
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('阶段二'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('阶段二'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('忙碌 2'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(el('channel-board-note').textContent).toContain('发布进行中已有'));
@@ -4428,7 +4129,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('翻页'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('翻页'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('后面的交接'));
     expect(el('group-transcript').textContent).not.toContain('旧消息 0');
     expect(el('group-transcript').textContent).toContain('旧消息 49');
@@ -4454,7 +4155,7 @@ describe('entry bots and group chats', () => {
     const roomReads = () => h.fetch.mock.calls.filter(call => String(call[0]) === '/api/rooms').length;
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('回到名册'))!.click();
     await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
     el('gb-back').click();
     expect(doc().body.classList.contains('roster-focus')).toBe(true);
@@ -4463,7 +4164,7 @@ describe('entry bots and group chats', () => {
     await vi.waitFor(() => expect(roomReads()).toBeGreaterThan(before));
     await vi.waitFor(() => expect(doc().body.classList.contains('group-open')).toBe(true));
     expect(doc().body.classList.contains('roster-focus')).toBe(true);
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('回到名册'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('回到名册'))!.click();
     await vi.waitFor(() => expect(doc().body.classList.contains('roster-focus')).toBe(false));
   });
 
@@ -4481,7 +4182,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('一张审批'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('一张审批'))!.click();
     await vi.waitFor(() => expect(doc().querySelectorAll('#group-transcript [data-card="approval"]')).toHaveLength(1));
     const items = [...doc().querySelectorAll<HTMLElement>('#group-transcript .group-message')];
     expect(items.map(item => item.querySelectorAll('[data-card="handoff"]').length)).toEqual([1, 1, 1]);
@@ -4532,7 +4233,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_keep/session-events') && !url.includes('limit=20'));
-    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('翻页保持'))!;
+    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('翻页保持'))!;
     start(h.fetch);
     await ready();
     openRoom().click();
@@ -4572,7 +4273,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('稍后验收'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('稍后验收'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已验收'));
     expect(el('group-transcript').textContent).toContain('验收通过');
     expect(doc().querySelectorAll('#group-transcript .group-message')).toHaveLength(2);
@@ -4609,7 +4310,7 @@ describe('entry bots and group chats', () => {
       return undefined;
     } });
     const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_still/session-events') && !url.includes('limit=20'));
-    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('按钮还在'))!;
+    const openRoom = () => [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('按钮还在'))!;
     start(h.fetch);
     await ready();
     openRoom().click();
@@ -4649,8 +4350,8 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('抢先领取'))).toBe(true));
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('抢先领取'))!.click();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('抢先领取'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('抢先领取'))!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="ready"]')?.textContent).toContain('待领取的对照'));
@@ -4688,8 +4389,8 @@ describe('entry bots and group chats', () => {
     const reads = () => h.fetch.mock.calls.map(call => String(call[0])).filter(url => url.includes('/rooms/room_long/session-events') && !url.includes('limit=20'));
     start(h.fetch);
     await ready();
-    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('很长的频道'))).toBe(true));
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('很长的频道'))!.click();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('很长的频道'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('很长的频道'))!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('消息 1200'));
     expect(el('group-transcript').textContent).toContain('消息 1151');
     expect(el('group-transcript').textContent).not.toContain('消息 1150');
@@ -4752,7 +4453,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('标注'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('标注'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给已经在跑'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(doc().querySelector('[data-column="doing"]')?.textContent).toContain('已经在跑'));
@@ -4813,9 +4514,9 @@ describe('entry bots and group chats', () => {
     const agent = (agentId: string, name: string, owner: string) => ({ agentId, status: 'admitted', card: { name, owner, capabilities: [] as string[], cardVersion: '1' }, discoveredAt: date, reputation: { samples: 0, dimensions: {} } });
     const h = harness(undefined, { handler: url => url === '/api/agents?limit=50' ? response([agent('aeeis.executor.claude-code', 'Claude Code', 'aeeis'), agent('bot.cto', 'cto', 'owner')]) : undefined });
     start(h.fetch); await ready();
-    await vi.waitFor(() => expect(doc().querySelector('#bots [data-bot-id="bot.cto"]')).not.toBeNull());
-    expect(doc().querySelector('#bots [data-bot-id="aeeis.executor.claude-code"]')).toBeNull();
-    expect(el('bots').textContent).not.toContain('Claude Code');
+    await vi.waitFor(() => expect(doc().querySelector('#chats [data-bot-id="bot.cto"]')).not.toBeNull());
+    expect(doc().querySelector('#chats [data-bot-id="aeeis.executor.claude-code"]')).toBeNull();
+    expect(el('chats').textContent).not.toContain('Claude Code');
   });
   it('counts in-progress channel work by bot id when display names match', async () => {
     const agent = (agentId: string) => ({ agentId, status: 'admitted', card: { name: '同名', owner: 'owner', capabilities: [] as string[], cardVersion: '1' }, discoveredAt: date, reputation: { samples: 0, dimensions: {} } });
@@ -4847,7 +4548,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('同名计数'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('同名计数'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('task_ready'));
     el('channel-board-open').click();
     await vi.waitFor(() => expect(el('channel-board-note').textContent).toContain('同名进行中已有 4'));
@@ -4889,7 +4590,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('空记忆'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('空记忆'))?.click();
     await vi.waitFor(() => expect(el('group-thread-empty').hidden).toBe(false));
     el('channel-memory-open').click();
     await vi.waitFor(() => expect(el('channel-memory-list').textContent).toContain('这个频道还没有记下的事实'));
@@ -4925,7 +4626,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('谁交给谁'))!.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('谁交给谁'))!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('发布接下了'));
     el('channel-studio-open').click();
     await vi.waitFor(() => expect(el('studio-replay-caption').textContent).toContain('可以回放 2 次交接'));
@@ -4954,7 +4655,7 @@ describe('entry bots and group chats', () => {
     await ready();
     expect(css).toContain('#channel-studio-stage { display: none; }');
     expect(css).toContain('prefers-reduced-motion: no-preference');
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('工作室房间'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('工作室房间'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
     el('channel-studio-open').click();
     await vi.waitFor(() => expect(el('channel-studio-body').textContent).toContain('工位区'));
@@ -5049,7 +4750,7 @@ describe('entry bots and group chats', () => {
     } });
     start(h.fetch);
     await ready();
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('复盘房间'))?.click();
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('复盘房间'))?.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('交给发布'));
     el('channel-digest-open').click();
     await vi.waitFor(() => expect(el('channel-digest-body').textContent).toContain(`本周：交接 ${weekHandoffs}，阻塞 1，完成 1。现在需要你 1。`));
@@ -5143,7 +4844,7 @@ describe('entry bots and group chats', () => {
     expect(el('group-proposal').textContent).toContain('原因已写下');
     el<HTMLInputElement>('group-title').value = '只复用';
     el<HTMLFormElement>('group-create').requestSubmit();
-    await vi.waitFor(() => expect(el('groups').textContent).toContain('只复用'));
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('只复用'));
     expect(h.posts.some(post => post.body?.type === 'system')).toBe(false);
     el('gb-new-group').click();
     el('group-reuse').click();
@@ -5186,8 +4887,8 @@ describe('频道防噪设置和摘要卡', () => {
       return undefined;
     } });
     start(h.fetch); await ready();
-    await vi.waitFor(() => expect(el('groups').textContent).toContain('安静协作'));
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('安静协作'))!.click();
+    await vi.waitFor(() => expect(el('chats').textContent).toContain('安静协作'));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('安静协作'))!.click();
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('已合并 1 条'));
     await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('进展预览'));
     expect(doc().querySelectorAll('#group-transcript .group-message')).toHaveLength(1);
@@ -5247,8 +4948,8 @@ it('uses the authoritative Board column, sends versioned keyboard moves and refr
     return undefined;
   } });
   start(h.fetch,{ setup: win => { win.prompt = () => '等待设计确认'; } }); await ready();
-  await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('可整理任务'))).toBe(true));
-  [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('可整理任务'))!.click();
+  await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('可整理任务'))).toBe(true));
+  [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('可整理任务'))!.click();
   await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('联动任务'));
   el('channel-board-open').click();
   await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
@@ -5323,8 +5024,8 @@ describe('handing a sent group line to a Bot', () => {
     } });
     start(h.fetch);
     await ready();
-    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
-    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'))!.click();
     await vi.waitFor(() => expect(doc().querySelector('[data-hand-over="evt_line"]')).not.toBeNull());
     // Every line a person or a Bot said has it; system lines do not.
     expect(doc().querySelector('[data-hand-over="evt_reply"]')).not.toBeNull();
