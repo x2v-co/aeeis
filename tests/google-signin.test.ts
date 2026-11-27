@@ -66,11 +66,13 @@ describe('Google sign-in', () => {
     const signIn = new GoogleSignIn(config());
     const { url, cookie, state } = begin(signIn, '/#room=abc');
     expect(url.origin + url.pathname).toBe('https://accounts.example/auth');
-    expect(Object.fromEntries(url.searchParams)).toMatchObject({ client_id: CLIENT_ID, redirect_uri: REDIRECT, response_type: 'code', scope: 'openid email', code_challenge_method: 'S256' });
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({ client_id: CLIENT_ID, redirect_uri: REDIRECT, response_type: 'code', scope: 'openid email profile', code_challenge_method: 'S256' });
     expect(cookie.startsWith('__Host-aeeis_signin=')).toBe(true);
 
+    fake.claims = nonce => validClaims(nonce, { name: ' Owner\u0007 Name ' });
     const result = await signIn.callback({ code: 'auth-code', state }, cookie);
-    expect(result).toMatchObject({ ok: true, location: '/#room=abc' });
+    expect(result).toMatchObject({ ok: true, location: '/#room=abc', signedIn: { email: 'owner@x2v.co', name: 'Owner Name', via: 'listed', principal: { id: 'owner', tenantId: 'local' } } });
+    expect(signIn.listedUsers()).toEqual([{ email: 'owner@x2v.co', principalId: 'owner', tenantId: 'local' }]);
     const form = fake.tokenRequests[0]!;
     expect(Object.fromEntries(form)).toMatchObject({ code: 'auth-code', client_id: CLIENT_ID, client_secret: 'client-secret', redirect_uri: REDIRECT, grant_type: 'authorization_code' });
     expect(createHash('sha256').update(form.get('code_verifier')!).digest('base64url')).toBe(url.searchParams.get('code_challenge'));
@@ -105,6 +107,7 @@ describe('Google sign-in', () => {
     fake.claims = nonce => validClaims(nonce, { sub: '2002', email: 'pm@x2v.co' });
     const admitted = await signIn.callback({ code: 'c', state: attempt.state }, attempt.cookie);
     expect(signIn.session(sessionFrom(admitted.cookies))?.principal).toEqual({ id: 'google:2002', tenantId: 'x2v', roles: ['owner'] });
+    expect(admitted).toMatchObject({ ok: true, signedIn: { email: 'pm@x2v.co', via: 'domain', principal: { id: 'google:2002', tenantId: 'x2v' } } });
     // A personal account whose address merely ends in the domain has no hd claim.
     attempt = begin(signIn);
     fake.claims = nonce => validClaims(nonce, { sub: '3003', email: 'fake@x2v.co', hd: undefined });
@@ -203,6 +206,8 @@ describe('Google sign-in over HTTP', () => {
       expect(status.statusCode).toBe(200);
       expect(status.json()).toMatchObject({ principal: 'owner', tenantId: 'local', mode: 'google-principal-scoped' });
       expect((await app.inject({ method: 'GET', url: '/auth/session', headers: { cookie: session } })).json()).toEqual({ mode: 'google', signedIn: true, email: 'owner@x2v.co' });
+      // The sign-in is now in the tenant's member list, with the address it came from.
+      expect((await app.inject({ method: 'GET', url: '/api/members', headers: { cookie: session } })).json()).toMatchObject({ signIn: 'google', members: [{ principalId: 'owner', email: 'owner@x2v.co', source: 'listed', isSelf: true, lastSignInAt: expect.any(String) }] });
       // A cross-site request never rides on the cookie.
       expect((await app.inject({ method: 'GET', url: '/api/status', headers: { cookie: session, 'sec-fetch-site': 'cross-site' } })).statusCode).toBe(403);
 

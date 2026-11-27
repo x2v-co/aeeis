@@ -62,7 +62,7 @@ import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membersh
 import type { KnowledgeEmbeddingMaintenance, KnowledgeEmbeddingReindexStatus, KnowledgeProvider } from '../knowledge.js';
 import type { ProjectSourceProvider } from '../project-sources.js';
 import { ContentEncryptionUnavailable } from '../content-encryption.js';
-import { withTenantScope } from '../adapters/postgres-pool.js';
+import { withSystemScope, withTenantScope } from '../adapters/postgres-pool.js';
 import { InMemoryConversationThreadIndex, type ConversationThreadIndex } from '../adapters/conversation-thread-index.js';
 import type { ChatSummaryService } from '../chat-summaries.js';
 import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
@@ -89,6 +89,8 @@ import { releaseHeldBotTasks } from '../release-owned-bot.js';
 import type { HostWait, MachineView } from '../docker-sandbox.js';
 import { runMetrics } from './run-metrics.js';
 import { previewServerFactory, type PreviewProxy } from '../preview-proxy.js';
+import { InMemoryTenantMemberStore, TenantMembers, canNameMembers, displayNameSchema } from '../tenant-members.js';
+import { privacyPage, type PrivacyPageOptions } from '../privacy-page.js';
 
 declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<boolean>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRunNotice?: (run: AgentRun) => Promise<boolean>; aeeisSeedThreadIndex?: () => Promise<number>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
@@ -102,7 +104,7 @@ interface RunComputer {
   deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
   savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
-interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; chatSummaries?: ChatSummaryService; conversationThreads?: ConversationThreadIndex; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; chatSummaries?: ChatSummaryService; conversationThreads?: ConversationThreadIndex; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number; tenantMembers?: TenantMembers; privacy?: PrivacyPageOptions }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -190,7 +192,9 @@ export function buildApp(options: Options) {
   const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots, conversationThreads) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   // A person's display name in this tenant, for lines that name someone other than the reader.
-  const personName = async (principalId: string, tenantId: string): Promise<string | undefined> => (await options.principalDirectory?.lookup(principalId, tenantId).catch(() => undefined))?.displayName;
+  // The tenant's member list knows the names an administrator gave and the Google names; the directory comes after.
+  const tenantMembers = options.tenantMembers ?? new TenantMembers(new InMemoryTenantMemberStore(), options.googleSignIn?.listedUsers() ?? [], options.principalDirectory);
+  const personName = (principalId: string, tenantId: string): Promise<string | undefined> => tenantMembers.label(principalId, tenantId);
   const dialogues = conversations && options.conversationStore && options.domain && options.sessionEvents
     ? new BotDialogueService(options.botDialogues ?? new InMemoryBotDialogueStore(), conversations, options.conversationStore, options.domain, options.sessionEvents, options.ownedBots, personName) : undefined;
   const dialogueService = () => { if (!dialogues) throw new Conflict('Bot dialogue routing is not configured'); return dialogues; };
@@ -525,7 +529,7 @@ export function buildApp(options: Options) {
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
     const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
     const savedSiteRoute = request.method === 'GET' && route === '/saved-site/:runId/:ticket/*';
-    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id' || (googleSignIn !== undefined && route === GOOGLE_CALLBACK_PATH))
+    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id' || route === '/privacy' || (googleSignIn !== undefined && route === GOOGLE_CALLBACK_PATH))
       && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
     // A saved site runs as an opaque origin, so its own module scripts and styles arrive with Origin: null.
@@ -566,7 +570,7 @@ export function buildApp(options: Options) {
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
       if ((route === '/api/bot-dialogues' || route.includes('/dialogue') || route.endsWith('/deliver')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
-      if ((route === '/api/bots' || route === '/api/bots/:id' || route.startsWith('/api/chats')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
+      if ((route === '/api/bots' || route === '/api/bots/:id' || route.startsWith('/api/chats') || route.startsWith('/api/members') || route.startsWith('/api/people/')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       // Installation-wide operator views read as the system; every other principal reads as its tenant.
       if (!operatorRoute) request.aeeisDbTenant = principal.tenantId;
@@ -692,6 +696,9 @@ export function buildApp(options: Options) {
     app.get(GOOGLE_CALLBACK_PATH, async (request, reply) => {
       const result = await googleSignIn.callback(request.query as Record<string, unknown>, request.headers.cookie);
       reply.header('set-cookie', result.cookies);
+      // The member list remembers the address and Google name. A failure here never blocks the sign-in.
+      if (result.ok) await withSystemScope(() => tenantMembers.signedIn(result.signedIn.principal, { email: result.signedIn.email, googleName: result.signedIn.name, via: result.signedIn.via }))
+        .catch(error => console.warn('Could not record the sign-in in the member list', error instanceof Error ? error.name : 'Error'));
       // Not a redirect: the request that follows a redirect out of Google still counts as cross-site and would be
       // refused. A page of our own moves on, so the next request comes from this site.
       if (result.ok) return reply.type('text/html; charset=utf-8').send(signedInPage(result.location));
@@ -699,6 +706,8 @@ export function buildApp(options: Options) {
     });
     app.post('/auth/signout', async (_request, reply) => reply.header('set-cookie', googleSignIn.signOutCookie()).code(204).send());
   }
+  // Public: what AEEIS stores, who can see it, how to delete it. No sign-in, and Google's consent screen links here.
+  app.get('/privacy', async (_request, reply) => reply.header('cache-control', 'public, max-age=3600').type('text/html; charset=utf-8').send(privacyPage({ ...options.privacy, signIn: googleSignIn ? 'google' : 'token' })));
   app.get('/health', async () => ({ status: 'ok', service: 'aeeis-agent', protocol: 'aeeis-health/1' }));
   app.get('/readyz', async (_request, reply) => {
     const readiness = await readinessSnapshot();
@@ -784,7 +793,7 @@ export function buildApp(options: Options) {
     return reply.type('text/plain; version=0.0.4; charset=utf-8').send(lines.join('\n') + '\n');
   });
   const assets: Record<string, [string, string]> = {
-    '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/theme.css': ['theme.css', 'text/css; charset=utf-8'],
+    '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/theme.css': ['theme.css', 'text/css; charset=utf-8'], '/privacy.css': ['privacy.css', 'text/css; charset=utf-8'],
   };
   for (const [route, [file, type]] of Object.entries(assets)) {
     app.get(route, async (_request, reply) => reply.type(type).send(await readFile(file === 'app.js' ? new URL('../../dist/ui/app.js', import.meta.url) : new URL(`../../public/${file}`, import.meta.url), 'utf8')));
@@ -1081,13 +1090,46 @@ export function buildApp(options: Options) {
     if (!options.domain) throw new Error('Goal service is not configured');
     const principal = principalOf(request);
     const members = await options.domain.listRoomMembers(request.params.id, principal.id, principal.tenantId);
-    if (!options.ownedBots) return members;
     return Promise.all(members.map(async member => {
-      if (!member.principalId.startsWith('bot_')) return member;
+      if (!member.principalId.startsWith('bot_')) {
+        if (member.principalId === 'aeeis') return member;
+        const name = await personName(member.principalId, principal.tenantId);
+        return name ? { ...member, displayName: name } : member;
+      }
       const bot = await options.ownedBots?.get(member.principalId);
       if (!bot || bot.tenantId !== principal.tenantId) return member;
       return { ...member, displayName: bot.name };
     }));
+  });
+  // Stage 3a: the people of the viewer's tenant. Adding someone is still configuration; this only names them.
+  app.get('/api/members', async request => {
+    const principal = principalOf(request);
+    return { canName: canNameMembers(principal), signIn: googleSignIn ? 'google' : 'token', members: await tenantMembers.list(principal) };
+  });
+  app.put<{ Params: { principalId: string } }>('/api/members/:principalId', async (request, reply) => {
+    const principal = principalOf(request);
+    if (!canNameMembers(principal)) return reply.code(403).send({ error: '只有管理员能改成员的名字' });
+    const body = z.object({ displayName: z.union([displayNameSchema, z.literal(''), z.null()]) }).strict().parse(request.body);
+    const member = await tenantMembers.rename(principal, request.params.principalId, body.displayName ? body.displayName : undefined);
+    if (!member) return reply.code(404).send({ error: 'Unknown member' });
+    return member;
+  });
+  // A person's profile: who they are, and the group chats the viewer shares with them. Only the viewer's own
+  // groups are read, so a group the viewer is not in never shows, whoever else is in it.
+  app.get<{ Params: { principalId: string } }>('/api/people/:principalId', async (request, reply) => {
+    const principal = principalOf(request);
+    const person = await tenantMembers.find(principal, request.params.principalId);
+    if (!person) return reply.code(404).send({ error: 'Unknown person' });
+    let sharedGroups: Array<{ id: string; title: string }> = [];
+    if (options.domain) {
+      const rooms = await options.domain.listRoomsForPrincipal(principal.id, principal.tenantId);
+      const theirs = new Set(person.isSelf ? [] : await options.domain.activeRoomIdsFor(person.principalId, principal.tenantId));
+      sharedGroups = rooms
+        .filter(room => room.status === 'active' && room.chat === 'group' && (room.tenantId ?? 'local') === principal.tenantId)
+        .filter(room => person.isSelf || theirs.has(room.id) || (room.owner ?? 'owner') === person.principalId)
+        .map(room => ({ id: room.id, title: room.title }));
+    }
+    return { ...person, sharedGroups };
   });
   app.post<{ Params: { id: string } }>('/api/rooms/:id/members', async request => {
     if (!options.domain) throw new Error('Goal service is not configured');

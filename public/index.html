@@ -21,6 +21,7 @@
 <h1 id="signin-title">登录 AEEIS</h1>
 <p id="signin-note">用你的 Google 账号登录。只有名单里的地址能进来。</p>
 <a id="signin-google" class="signin-button" href="/auth/google/start">使用 Google 登录</a>
+<p class="signin-privacy">AEEIS 是你和自己的 Bot 一起做事的工作区。登录前可以先看<a href="/privacy">隐私说明</a>：存什么、谁能看、怎么删。</p>
 </div>
 </section>
 <a class="skip-link" href="#quick-goal">跳到消息</a>
@@ -959,6 +960,7 @@
 <a href="#settings-actions">动作清单</a>
 <a href="#settings-grants">授权</a>
 <a href="#settings-access">访问</a>
+<a href="#settings-members">成员</a>
 <a href="#settings-goals">目标、Room 与提醒</a>
 <a href="#rsi-panel">自我改进</a>
 <a href="#collaboration-panel">协作</a>
@@ -1112,6 +1114,14 @@
 <button id="forget-token" type="button" class="quiet-button">忘记令牌</button>
 <p class="muted">连接后令牌记在这台浏览器上，新标签页和装到主屏幕的应用不用再填。公用设备用完请点「忘记令牌」。</p>
 </div>
+<p class="muted"><a href="/privacy" target="_blank" rel="noopener">隐私说明</a>：AEEIS 存了你什么、谁能看见、怎么删。</p>
+</section>
+<section id="settings-members" class="settings-section" aria-labelledby="settings-members-title">
+<h2 id="settings-members-title">成员</h2>
+<p class="muted">和你在同一个租户里的人：登录名单里的地址，和用允许的 Google Workspace 域登录过的人。别的租户的人不会出现在这里。点名字看这个人的档案和你们共同的群聊。</p>
+<p class="muted">这里不能邀请人。要加人，请管理员把对方的邮箱加进登录名单。</p>
+<div id="member-list" class="member-list"></div>
+<p id="member-note" class="muted" role="status"></p>
 </section>
 <div id="settings-goals" class="settings-group">
 <section class="rail-primary">

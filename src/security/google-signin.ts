@@ -53,8 +53,10 @@ const SIGNIN_COOKIE = '__Host-aeeis_signin';
 const SIGNIN_TTL_SECONDS = 600;
 
 export interface SignInSession { email: string; principal: Principal }
+/** Who just signed in, for the tenant's member list. `via` says whether the allow-list or the domain admitted them. */
+export interface SignedIn { principal: Principal; email: string; name?: string; via: 'listed' | 'domain' }
 export type CallbackResult =
-  | { ok: true; location: string; cookies: string[] }
+  | { ok: true; location: string; cookies: string[]; signedIn: SignedIn }
   | { ok: false; status: number; message: string; cookies: string[] };
 
 const sessionPayloadSchema = z.object({ v: z.literal(1), sub: z.string().min(1).max(500), email: z.string().min(3).max(320), hd: z.string().max(253).optional(), iat: z.number(), exp: z.number() }).strict();
@@ -85,7 +87,7 @@ export class GoogleSignIn {
     const payload = { v: 1 as const, state, nonce, verifier, returnTo: safeReturnPath(returnTo), exp: now() + SIGNIN_TTL_SECONDS };
     const url = new URL(this.config.endpoints.authorize);
     url.search = new URLSearchParams({
-      client_id: this.config.clientId, redirect_uri: this.config.redirectUri, response_type: 'code', scope: 'openid email',
+      client_id: this.config.clientId, redirect_uri: this.config.redirectUri, response_type: 'code', scope: 'openid email profile',
       state, nonce, code_challenge: challenge, code_challenge_method: 'S256', prompt: 'select_account',
       ...(this.config.allowedDomains.length === 1 && !Object.keys(this.config.users).length ? { hd: this.config.allowedDomains[0]! } : {}),
     }).toString();
@@ -115,7 +117,8 @@ export class GoogleSignIn {
     const claims = await this.keySet.verify(idToken);
     const identity = claims ? this.verifiedIdentity(claims, pending.nonce) : undefined;
     if (!identity) return { ok: false, status: 401, message: 'Google 登录结果无法验证，请重新登录。', cookies: clear };
-    if (!this.principalFor(identity)) {
+    const principal = this.principalFor(identity);
+    if (!principal) {
       const listed = this.config.users[identity.email];
       const message = listed && !listed.sub && !googleAuthoritative(identity)
         ? `${identity.email} 不是 Gmail 或这个域自己的 Google Workspace 账号，Google 不能保证它现在仍属于你。请让管理员在名单里为这个地址写上 "sub": "${identity.sub}"，确认是这个 Google 账号。`
@@ -124,7 +127,8 @@ export class GoogleSignIn {
     }
     const issuedAt = now();
     const session = seal({ v: 1 as const, sub: identity.sub, email: identity.email, ...(identity.hd ? { hd: identity.hd } : {}), iat: issuedAt, exp: issuedAt + this.config.sessionTtlSeconds }, this.sessionKey);
-    return { ok: true, location: pending.returnTo, cookies: [...clear, cookie(SESSION_COOKIE, session, this.config.sessionTtlSeconds)] };
+    const signedIn: SignedIn = { principal, email: identity.email, ...(identity.name ? { name: identity.name } : {}), via: this.config.users[identity.email] ? 'listed' : 'domain' };
+    return { ok: true, location: pending.returnTo, cookies: [...clear, cookie(SESSION_COOKIE, session, this.config.sessionTtlSeconds)], signedIn };
   }
 
   /** The signed-in person for this request's cookies, if the session is valid and still allowed. */
@@ -137,7 +141,12 @@ export class GoogleSignIn {
 
   signOutCookie(): string { return cookie(SESSION_COOKIE, '', 0); }
 
-  private verifiedIdentity(claims: Record<string, unknown>, nonce: string): { sub: string; email: string; hd?: string } | undefined {
+  /** The allow-list as addresses and the people they sign in as. Never the pinned Google account. */
+  listedUsers(): Array<{ email: string; principalId: string; tenantId: string }> {
+    return Object.entries(this.config.users).map(([email, user]) => ({ email, principalId: user.id, tenantId: user.tenantId }));
+  }
+
+  private verifiedIdentity(claims: Record<string, unknown>, nonce: string): { sub: string; email: string; hd?: string; name?: string } | undefined {
     const time = now(), skew = this.config.clockSkewSeconds;
     if (typeof claims.iss !== 'string' || !this.config.endpoints.issuers.includes(claims.iss)) return undefined;
     if (!audienceContains(claims.aud, this.config.clientId)) return undefined;
@@ -147,7 +156,9 @@ export class GoogleSignIn {
     if (claims.email_verified !== true || typeof claims.email !== 'string' || typeof claims.sub !== 'string' || !claims.sub || claims.sub.length > 500) return undefined;
     const email = claims.email.trim().toLowerCase();
     if (!z.string().email().max(320).safeParse(email).success) return undefined;
-    return { sub: claims.sub, email, ...(typeof claims.hd === 'string' ? { hd: claims.hd.toLowerCase() } : {}) };
+    // The Google name is only a label for the member list; it never decides access.
+    const name = typeof claims.name === 'string' ? claims.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 200) : '';
+    return { sub: claims.sub, email, ...(typeof claims.hd === 'string' ? { hd: claims.hd.toLowerCase() } : {}), ...(name ? { name } : {}) };
   }
 
   private principalFor(identity: { sub: string; email: string; hd?: string | undefined }): Principal | undefined {
