@@ -2352,7 +2352,12 @@ function syncGroupSpeaker(): void {
   select.hidden = view !== 'group' && view !== 'direct';
   syncGroupHandoff();
 }
+/** Bots in a room speak for its owner; only the owner hands them work until a Bot is opened to others. Older summaries without a role are the reader's own. */
+function ownRoom(room: RoomSummary | undefined): boolean {
+  return !room?.memberRole || room.memberRole === 'owner';
+}
 function handoffChoices(): RosterBot[] {
+  if (rosterView() === 'group' && !ownRoom(roomSummaries.find(item => item.id === openGroupId))) return [];
   const members = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
   return rosterBots().filter(bot => bot.id === 'aeeis' || members.has(bot.id));
 }
@@ -4853,7 +4858,7 @@ function sentHandoffDefault(event: SessionEventSummary, shown: SessionEventSumma
 function sentHandoffAllowed(event: SessionEventSummary): boolean {
   if (!botDialogueRouting || !conversationEnabled || event.type !== 'message' || (event.operation ?? 'publish') !== 'publish' || event.actorType === 'system') return false;
   const room = roomSummaries.find(item => item.id === event.roomId);
-  return Boolean(room && room.status === 'active' && roomChat(room) !== 'direct');
+  return Boolean(room && room.status === 'active' && roomChat(room) !== 'direct' && ownRoom(room));
 }
 function appendSentHandoff(item: HTMLElement, event: SessionEventSummary, shown: SessionEventSummary[]): void {
   if (!sentHandoffAllowed(event)) return;
@@ -5103,6 +5108,11 @@ async function submitGroupMessage(event: Event): Promise<void> {
   const inGroup = roomChat(room) !== 'direct';
   const handTo = (bot: RosterBot, receipt: (title: string) => string, mode: 'intake' | 'entry' | 'handoff', announce = true) => recordRosterHandoff(bot, text, room, spoken, postSession, receipt, mode, announce, sourceEvent.id);
   const home = botById('aeeis');
+  // In someone else's room the Bots are theirs: the server answers this line by the speaker's rules, and nothing is delivered from here.
+  if (!ownRoom(room)) {
+    await loadGroup(roomId);
+    return;
+  }
   if (!inGroup) {
     if (mentionsAeeis(text) && home) handoffError = await handTo(home, title => `已记为入口讨论「${title}」。未执行，讨论焦点不变。`, 'entry');
   } else if (home) {

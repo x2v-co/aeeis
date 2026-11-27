@@ -5054,4 +5054,48 @@ describe('handing a sent group line to a Bot', () => {
     doc().querySelector<HTMLButtonElement>('[data-hand-over="evt_reply"]')!.click();
     await vi.waitFor(() => expect(el<HTMLSelectElement>('hand-over-bot-evt_reply').value).toBe(ownedBot.id));
   });
+
+  it('offers no Bot in someone else\'s group: no 交给它, no send-time pick, and sending delivers nothing', async () => {
+    // bob is an editor in alice's room; the Bots there are alice's, and bob's own 阿研 is not in it.
+    const room = { id: 'room_alice', title: 'alice 的群', description: '群聊', chat: 'group', status: 'active', memberRole: 'editor', canEdit: true, canWrite: true, createdAt: date, updatedAt: date };
+    const member = (principalId: string, role = 'agent') => ({ id: `member_${principalId}`, roomId: room.id, principalId, role, status: 'active', invitedBy: 'alice', createdAt: date, updatedAt: date });
+    const heard = { digest: 'b'.repeat(64), participants: [{ principalId: 'alice', role: 'owner' }, { principalId: 'bob', role: 'editor' }, { principalId: 'bot_alice001', role: 'agent' }] };
+    const events: any[] = [
+      { id: 'evt_alice', roomId: room.id, goalId: 'goal_group', owner: 'alice', operation: 'publish', type: 'message', actorType: 'principal', actorId: 'alice', content: '大家看看发布清单', evidenceRefs: [], audienceSnapshot: heard, idempotencyKey: 'a1', createdAt: date },
+      { id: 'evt_bot', roomId: room.id, goalId: 'goal_group', owner: 'alice', operation: 'publish', type: 'message', actorType: 'agent', actorId: 'bot_alice001', content: '我列了三点。', evidenceRefs: ['evt_alice'], audienceSnapshot: heard, idempotencyKey: 'bot-reply:evt_alice:bot_alice001', createdAt: date },
+    ];
+    const view = { ...fixture(), agentId: 'aeeis' };
+    const h = harness(view as any, { owned: true, handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'principal-scoped', principal: 'bob', tenantId: 'team-a', conversationRouting: true, botDialogueRouting: true, botTeamConfigured: true });
+      if (url === '/api/bots/aeeis/dialogue') return response({ roomId: 'room_aeeis', conversationId: view.id, revision: view.revision, bindingVersion: 2 });
+      if (url === '/api/bots' && method === 'GET') return response([ownedBot]);
+      if (url === '/api/rooms') return response([room]);
+      if (url === `/api/rooms/${room.id}/members`) return response([member('bob', 'editor'), member('bot_alice001')]);
+      if (url.endsWith('/context-manifests')) return response({ id: 'ctx_group' });
+      if (url.endsWith('/deliver')) return response({}, 409);
+      if (url === `/api/rooms/${room.id}/session-events` && method === 'POST') {
+        const event = { id: `evt_${events.length}`, roomId: room.id, goalId: body.goalId, owner: 'alice', operation: 'publish', type: body.type, actorType: 'principal', actorId: 'bob', content: body.content, evidenceRefs: body.evidenceRefs ?? [], audienceSnapshot: heard, idempotencyKey: body.idempotencyKey, createdAt: date };
+        events.push(event);
+        return response(event);
+      }
+      if (url.startsWith(`/api/rooms/${room.id}/session-events`)) return response({ items: events });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('alice 的群'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('alice 的群'))!.click();
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('我列了三点。'));
+    expect(doc().querySelector('[data-hand-over]')).toBeNull();
+    expect([...el<HTMLSelectElement>('group-handoff').options].map(option => option.value)).toEqual(['']);
+    el<HTMLTextAreaElement>('group-text').value = '@AEEIS 帮我排一下';
+    el<HTMLFormElement>('group-composer').requestSubmit();
+    await vi.waitFor(() => expect(events.some(event => event.content === '@AEEIS 帮我排一下')).toBe(true));
+    await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('@AEEIS 帮我排一下'));
+    expect(h.posts.some(post => post.url.endsWith('/deliver') || post.url.endsWith('/messages'))).toBe(false);
+    expect(events.filter(event => event.type === 'system')).toEqual([]);
+    expect(el('error').textContent).toBe('');
+  });
 });

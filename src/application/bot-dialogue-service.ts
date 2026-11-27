@@ -28,7 +28,8 @@ const importedId = (room: string, event: string) => `message_${hash(`${room}:${e
 export class BotDialogueService {
   constructor(readonly store: BotDialogueStore, private readonly conversations: ConversationService,
     private readonly aggregates: ConversationStore, private readonly domain: AeeisService,
-    private readonly events: SessionEventService, private readonly bots?: OwnedBotStore) {}
+    private readonly events: SessionEventService, private readonly bots?: OwnedBotStore,
+    private readonly personName?: (principalId: string, tenantId: string) => Promise<string | undefined>) {}
 
   async inventory(scope: Ownership) {
     const bindings = await this.store.list(scope), operations = await this.store.operations(scope);
@@ -183,11 +184,20 @@ export class BotDialogueService {
     return this.ensure(members[0]!.principalId, scope, actor);
   }
   async deliver(roomId: string, eventId: string, botId: string, kind: 'intake' | 'entry' | 'handoff', scope: Ownership, actor?: Principal) {
+    // A group line goes to a Bot in the clicker's own scope, so only the Bot's owner can hand it over. Every Bot in a
+    // room speaks for the room owner (AEEIS as its front door), and until the owner opens one to others it takes no work from them.
+    const room = await this.domain.getRoomForPrincipal(roomId, scope.owner, scope.tenantId);
+    const roomOwner = room.owner ?? 'owner';
+    if (roomOwner !== scope.owner) {
+      const name = botId === 'aeeis' ? 'AEEIS' : (await this.bots?.get(botId).catch(() => undefined))?.name ?? '这位 Bot';
+      const owner = (await this.personName?.(roomOwner, scope.tenantId).catch(() => undefined))?.trim() || roomOwner;
+      throw new Conflict(`${owner}没有把${name}开放给你，可以请${owner}来交给${name}。`);
+    }
     const event = await this.events.get(eventId, scope.owner, scope.tenantId);
     if (event.roomId !== roomId || event.owner !== scope.owner || event.type !== 'message' || event.operation !== 'publish') throw new NotFound('Unknown channel message');
     // AEEIS is the entry of every group channel without being a listed member: it answers
     // unaddressed messages there, so it may also record them in its own conversation.
-    const entry = botId === 'aeeis' && (await this.domain.getRoom(roomId, scope.owner, scope.tenantId)).chat === 'group';
+    const entry = botId === 'aeeis' && room.chat === 'group';
     const members = entry ? [] : await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
     if (!entry && (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId))) throw new Conflict('Bot is not in the message audience');
     const binding = await this.ensure(botId, scope, actor);

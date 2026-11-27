@@ -21,6 +21,12 @@ import type { Ownership } from './security/principal.js';
  * takes it, refuses, or it goes up to a person. A task that failed twice in a
  * row is handed to someone else the same way. Every write goes through the
  * room owner's existing paths, so the board's rules and locks still apply.
+ *
+ * Who pays is whoever spoke (docs/design/2026-11-27-others-talk-to-your-bot.md §6).
+ * When the person who said the line owns the Bot that answers, everything above
+ * holds. Anyone else in the room gets a discussion reply on their own budget and
+ * nothing more: no task, no Run, no handoff, no reply chain, until the owner opens
+ * the Bot to them.
  */
 export const FRONT_DOOR = 'aeeis';
 export const SIDE_THREAD = '侧线程';
@@ -42,6 +48,8 @@ export interface BotTeamOptions {
   dialogueSweep?: (room: Room, scope: Ownership) => Promise<void>;
   notifyRun(runId: string, scope: Ownership): Promise<void>;
   handoffMaxTurns?: number;
+  /** A person's display name in this tenant, for lines that name them. Falls back to the id. */
+  personName?: (principalId: string, tenantId: string) => Promise<string | undefined>;
   now?: () => number;
   log?: (message: string, detail?: unknown) => void;
 }
@@ -150,13 +158,16 @@ export class BotTeam {
     const responders = await this.responders(event, room, roster);
     if (!responders.length) return;
     const recent = (await this.options.events.pageBefore(room.id, event.owner, event.tenantId, 100)).items;
+    // The person behind the line. A Bot's line is written by the room owner for that Bot, so it counts as the owner's.
+    const asker: Ownership = { owner: event.actorType === 'principal' ? event.actorId : event.owner, tenantId: event.tenantId };
+    const people = await this.people(recent, scope);
     for (const speaker of responders) {
       const replyKey = `bot-reply:${event.id}:${speaker.id}`, failKey = `bot-fail:${event.id}:${speaker.id}`;
       if (recent.some(item => item.idempotencyKey === replyKey || item.idempotencyKey === failKey)) continue;
       const lock = `reply:${event.id}:${speaker.id}`;
       if (this.running.has(lock)) continue;
       this.running.add(lock);
-      try { await this.replyAs(speaker, event, room, roster, recent, scope); }
+      try { await this.replyAs(speaker, event, room, roster, recent, scope, asker, people); }
       catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         this.options.log?.('AEEIS bot reply failed', { roomId: room.id, bot: speaker.id, reason });
@@ -165,11 +176,15 @@ export class BotTeam {
     }
   }
 
-  private async replyAs(speaker: Speaker, event: SessionEvent, room: Room, roster: Speaker[], recent: SessionEvent[], scope: Ownership): Promise<void> {
+  private async replyAs(speaker: Speaker, event: SessionEvent, room: Room, roster: Speaker[], recent: SessionEvent[], scope: Ownership, asker: Ownership, people: Map<string, string>): Promise<void> {
     const board = await this.options.board.board(room.id, scope.owner, scope.tenantId).catch(() => undefined);
     const transcript = recent.filter(item => item.type === 'message' && item.operation === 'publish' && item.sequence <= event.sequence).slice(-TRANSCRIPT)
-      .map(item => ({ speaker: this.nameIn(roster, item.actorId, item.actorType), text: item.content.slice(0, 2000) }));
+      .map(item => ({ speaker: this.nameIn(roster, item.actorId, item.actorType, scope, people), text: item.content.slice(0, 2000) }));
     const standing = await this.standing(speaker.id, scope);
+    // AEEIS in a group is the room owner's front door; any other Bot here is its owner's.
+    const botOwner = speaker.bot?.owner ?? scope.owner;
+    const owned = asker.owner === botOwner && asker.tenantId === scope.tenantId;
+    const ownerName = owned ? '' : await this.personName(botOwner, scope.tenantId);
     const raw = await this.options.complete({
       system: REPLY_SYSTEM,
       idempotencyKey: `bot-reply:${event.id}:${speaker.id}`,
@@ -178,19 +193,27 @@ export class BotTeam {
         room: { title: room.title, kind: room.chat === 'direct' ? '私聊' : '群聊' },
         roster: roster.map(item => ({ name: item.name, ...(item.role ? { role: item.role } : {}), doing: board?.wip.find(load => load.agentId === item.id)?.count ?? 0 })),
         transcript_untrusted: transcript,
-        message: { speaker: this.nameIn(roster, event.actorId, event.actorType), text: event.content },
+        message: { speaker: this.nameIn(roster, event.actorId, event.actorType, scope, people), text: event.content },
+        ...(owned ? {} : { onlyDiscuss: `说这句话的人不是你的主人${ownerName}。${ownerName}没有把你开放给这个人：你只能和这个人讨论，不接任务、不派任务。` }),
       },
-    }, scope);
+    }, asker);
     const parsed = replySchema.safeParse(raw);
     if (!parsed.success) throw new Error('回复格式不对');
     const out = parsed.data;
+    if (!owned) {
+      // Someone the Bot is not open to: the discussion reply, and a line saying who can hand it work when it wanted to do something.
+      const wanted = replyTasks(out).length > 0 || Boolean(out.handoff);
+      const text = wanted ? `${out.reply}\n${ownerName}没有把我开放给你，可以请${ownerName}来交给我。` : out.reply;
+      await this.say(room, event.goalId, scope, speaker, text.slice(0, 2000), `bot-reply:${event.id}:${speaker.id}`, [event.id]);
+      return;
+    }
     const reply = await this.say(room, event.goalId, scope, speaker, out.reply, `bot-reply:${event.id}:${speaker.id}`, [event.id]);
     // A lively room permits one response to a Bot's line. Replays use the same keys; replies to that
     // response do not start another chain, and deferred messages never trigger hidden model chatter.
     if (event.actorType === 'principal' && reply.botDelivery?.mode !== 'digest' && room.chat === 'group'
       && (await this.options.events.noise.get({ roomId: room.id, ...scope })).mode === 'lively') this.enqueue(() => this.respond(reply));
     const tasks = replyTasks(out);
-    const asked = `${this.nameIn(roster, event.actorId, event.actorType)}在群里说：「${event.content}」`;
+    const asked = `${this.nameIn(roster, event.actorId, event.actorType, scope, people)}在群里说：「${event.content}」`;
     const front = speaker.id === FRONT_DOOR;
     for (const [index, task] of tasks.entries()) {
       // The first task keeps the keys a single proposal always had, so a retried older reply lands on the same card.
@@ -563,9 +586,22 @@ export class BotTeam {
     return { id, name: bot.name, ...(bot.role ? { role: bot.role } : {}), background: bot.background, autonomy: botAutonomy(bot), bot };
   }
 
-  private nameIn(roster: Speaker[], actorId: string, actorType: string): string {
-    if (actorType === 'principal') return '主人';
+  /** The room owner is 主人, as before; anyone else in the room goes by their name, so the model never takes them for the owner. */
+  private nameIn(roster: Speaker[], actorId: string, actorType: string, scope?: Ownership, people?: Map<string, string>): string {
+    if (actorType === 'principal') return !scope || actorId === scope.owner ? '主人' : people?.get(actorId) ?? actorId;
     return roster.find(item => item.id === actorId)?.name ?? actorId;
+  }
+
+  /** Names of the people other than the room owner who said something recently. */
+  private async people(recent: SessionEvent[], scope: Ownership): Promise<Map<string, string>> {
+    const ids = new Set(recent.filter(item => item.actorType === 'principal' && item.actorId !== scope.owner).map(item => item.actorId));
+    const names = new Map<string, string>();
+    for (const id of ids) names.set(id, await this.personName(id, scope.tenantId));
+    return names;
+  }
+
+  private async personName(principalId: string, tenantId: string): Promise<string> {
+    return (await this.options.personName?.(principalId, tenantId).catch(() => undefined))?.trim() || principalId;
   }
 
   private async standing(agentId: string, scope: Ownership): Promise<string | undefined> {
