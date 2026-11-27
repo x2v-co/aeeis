@@ -54,11 +54,15 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   // A second person in the same tenant, invited as an editor: someone the Bots are not open to.
   if (options.withBob) expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers, payload: { principalId: 'bob', role: 'editor' } })).statusCode).toBe(200);
   const goalId = (await app.inject({ method: 'POST', url: '/api/goals', headers, payload: { title: '发布协作', roomId } })).json().id as string;
-  // Goal manifests are the room owner's; an editor writes under the owner's room-audience manifest.
-  const manifestId = async () => (await app.inject({ method: 'POST', url: `/api/goals/${goalId}/context-manifests`, headers, payload: { purpose: '群聊消息', audienceMode: 'room' } })).json().id as string;
+  // An editor makes their own room-audience manifest on the owner's Goal, the way the page does.
+  const manifestId = async (as = headers) => {
+    const response = await app.inject({ method: 'POST', url: `/api/goals/${goalId}/context-manifests`, headers: as, payload: { purpose: '群聊消息', audienceMode: 'room' } });
+    expect(response.statusCode, response.body).toBe(200);
+    return response.json().id as string;
+  };
   let n = 0;
   const say = async (content: string, actor?: { type: 'agent'; id: string }, as = headers) => {
-    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/session-events`, headers: as, payload: { goalId, type: 'message', content, contextManifestId: await manifestId(), idempotencyKey: `say-${++n}`, ...(actor ? { actor } : {}) } });
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/session-events`, headers: as, payload: { goalId, type: 'message', content, contextManifestId: await manifestId(as), idempotencyKey: `say-${++n}`, ...(actor ? { actor } : {}) } });
     expect(response.statusCode, response.body).toBe(200);
     await app.aeeisBots!.drain();
     return response.json() as { id: string };
