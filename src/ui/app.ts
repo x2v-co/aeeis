@@ -1042,6 +1042,69 @@ $('work-grant-add')?.addEventListener('submit', event => {
 document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-grants"]')?.addEventListener('click', () => { void loadWorkGrants(); });
 void loadWorkGrants();
 void loadActionPolicy();
+/** Settings → 成员 (stage 3a): the people of this tenant. Adding someone is still configuration; an administrator
+ * can give each person a display name, which everyone in the tenant then sees. */
+interface MemberView { principalId: string; name: string; displayName?: string; googleName?: string; email?: string; source: 'listed' | 'domain' | 'self'; lastSignInAt?: string; isSelf: boolean }
+interface PersonView extends MemberView { sharedGroups: Array<{ id: string; title: string }> }
+const MEMBER_SOURCE: Record<MemberView['source'], string> = { listed: '登录名单', domain: '域名登录', self: '你自己' };
+let memberViews: MemberView[] = [];
+let membersNameable = false;
+function memberLine(member: MemberView): string {
+  const seen = member.lastSignInAt ? `最近登录 ${new Date(member.lastSignInAt).toLocaleString()}` : member.isSelf ? '' : '还没有登录过';
+  return [member.email, member.isSelf ? '你' : MEMBER_SOURCE[member.source], seen].filter(Boolean).join(' · ');
+}
+async function loadMembers(): Promise<void> {
+  const list = $('member-list');
+  if (!list) return;
+  try {
+    const result = await api<{ canName: boolean; members: MemberView[] }>('/members');
+    memberViews = result.members ?? [];
+    membersNameable = result.canName === true;
+  } catch (error) { list.replaceChildren(element('p', `读不到成员：${errorMessage(error)}`, 'muted')); return; }
+  renderMembers();
+}
+function renderMembers(): void {
+  const list = $('member-list');
+  if (!list) return;
+  list.replaceChildren();
+  if (!memberViews.length) { list.append(element('small', '还没有成员。')); return; }
+  for (const member of memberViews) {
+    const row = element('div', '', 'member-row');
+    row.dataset.member = member.principalId;
+    const subject = member.isSelf ? 'person:me' : `person:${member.principalId}`;
+    const avatar = chatAvatar(member.name, { profile: subject, ...(member.isSelf ? { text: '你' } : {}) });
+    avatar.addEventListener('click', () => openProfile(subject));
+    const name = element('button', member.name, 'quiet-button member-name');
+    name.type = 'button';
+    name.addEventListener('click', () => openProfile(subject));
+    row.append(avatar, name, element('small', memberLine(member)));
+    if (membersNameable) {
+      const form = element('form', '', 'member-rename');
+      const input = document.createElement('input');
+      input.maxLength = 80;
+      input.value = member.displayName ?? '';
+      input.placeholder = member.googleName ?? member.email ?? member.principalId;
+      input.setAttribute('aria-label', `${member.name}的显示名`);
+      const save = element('button', '保存名字');
+      save.type = 'submit';
+      form.append(input, save);
+      form.addEventListener('submit', event => { event.preventDefault(); void renameMember(member, input.value.trim()); });
+      row.append(form);
+    }
+    list.append(row);
+  }
+}
+async function renameMember(member: MemberView, displayName: string): Promise<void> {
+  const note = $('member-note');
+  try {
+    const next = await api<MemberView>(`/members/${encodeURIComponent(member.principalId)}`, { displayName: displayName || null }, 'PUT');
+    memberViews = memberViews.map(item => item.principalId === next.principalId ? next : item);
+    renderMembers();
+    if (note) note.textContent = displayName ? `已把 ${member.email ?? member.principalId} 的名字改成「${displayName}」。` : `已去掉 ${member.email ?? member.principalId} 的显示名。`;
+  } catch (error) { if (note) note.textContent = errorMessage(error); }
+}
+document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-members"]')?.addEventListener('click', () => { void loadMembers(); });
+void loadMembers();
 // The Settings page's own index: jump within the open pane without changing the URL.
 document.querySelectorAll<HTMLAnchorElement>('nav.settings-index a').forEach(link => {
   link.addEventListener('click', event => {
@@ -3040,8 +3103,8 @@ async function readBotSideThreads(botId: string, list: HTMLElement): Promise<voi
 }
 /**
  * One profile page for people and Bots, opened from an avatar. A subject is `bot:<id>` or `person:<id>`;
- * today the only person is you (`person:me`). Each kind adds sections to the same page, so adding people
- * later adds a subject, not a layout.
+ * `person:me` is you, any other person is someone in your tenant (Settings → 成员). Each kind adds sections to the
+ * same page.
  */
 interface ProfileSection { key: string; title: string; body: HTMLElement; collapsed?: boolean; onOpen?: () => void }
 let profileSubject = '';
@@ -3148,6 +3211,29 @@ function profilePersonSections(): ProfileSection[] {
   groups.append(profileList(profileGroupItems(activeGroupRooms()), '还没有群聊。'));
   return [{ key: 'groups', title: '所在群聊', body: groups }];
 }
+function personStatus(person: MemberView): string {
+  return person.lastSignInAt ? `和你在同一个租户。最近登录 ${new Date(person.lastSignInAt).toLocaleString()}。` : '和你在同一个租户。还没有登录过。';
+}
+/** Someone else in this tenant: who they are, and only the group chats you are both in. */
+function profileOtherPersonSections(principalId: string): ProfileSection[] {
+  const groups = element('div');
+  groups.append(element('p', '正在读取…', 'muted'));
+  const epoch = profileEpoch;
+  void api<PersonView>(`/people/${encodeURIComponent(principalId)}`).then(person => {
+    if (epoch !== profileEpoch) return;
+    $('profile-avatar')?.replaceChildren(chatAvatar(person.name, { isBot: false }));
+    $('profile-name').textContent = person.name;
+    $('profile-kind').textContent = `成员 · ${person.email ?? person.principalId}`;
+    $('profile-status').textContent = personStatus(person);
+    const rooms = person.sharedGroups.map(group => roomSummaries.find(room => room.id === group.id) ?? ({ id: group.id, title: group.title } as RoomSummary));
+    groups.replaceChildren(profileList(profileGroupItems(rooms), '你们还没有共同的群聊。'));
+  }).catch(error => {
+    if (epoch !== profileEpoch) return;
+    $('profile-status').textContent = '这个人不在你的租户里，或者已经不在登录名单上。';
+    groups.replaceChildren(element('p', errorMessage(error), 'muted'));
+  });
+  return [{ key: 'groups', title: '共同的群聊', body: groups }];
+}
 function renderProfile(): void {
   const subject = profileSubject;
   const [kind, ...rest] = subject.split(':');
@@ -3155,14 +3241,17 @@ function renderProfile(): void {
   const isBot = kind === 'bot';
   const bot = isBot ? botById(id) : undefined;
   const retiredItem = isBot && !bot ? chatItems.find(item => item.backing === 'conversation' && item.counterpart === id) : undefined;
-  const name = isBot ? (bot?.name ?? retiredItem?.title ?? id) : '你';
+  // Another person: anyone but you. Their details come from the member list, then from /api/people.
+  const other = !isBot && id !== 'me' && id !== sessionPrincipal;
+  const member = other ? memberViews.find(item => item.principalId === id) : undefined;
+  const name = isBot ? (bot?.name ?? retiredItem?.title ?? id) : other ? (member?.name ?? id) : '你';
   profileEpoch += 1;
-  $('profile-avatar')?.replaceChildren(chatAvatar(name, { ...(bot ? { bot } : {}), isBot, ...(isBot ? {} : { text: '你' }), ...(bot ? { state: lifeAvatarState(id) } : {}) }));
+  $('profile-avatar')?.replaceChildren(chatAvatar(name, { ...(bot ? { bot } : {}), isBot, ...(isBot || other ? {} : { text: '你' }), ...(bot ? { state: lifeAvatarState(id) } : {}) }));
   $('profile-name').textContent = name;
-  $('profile-kind').textContent = isBot ? `Bot · ${id}${bot ? '' : ' · 已撤下'}` : `你 · ${sessionPrincipal || 'owner'}`;
+  $('profile-kind').textContent = isBot ? `Bot · ${id}${bot ? '' : ' · 已撤下'}` : other ? `成员 · ${member?.email ?? id}` : `你 · ${sessionPrincipal || 'owner'}`;
   $('profile-status').textContent = isBot
     ? bot ? lifePresenceLabel(id) : '已撤下。和它的对话留在消息列表里，只读。'
-    : '这个工作区的主人。Bot 和群聊都在你名下。';
+    : other ? (member ? personStatus(member) : '正在读取…') : '这个工作区的主人。Bot 和群聊都在你名下。';
   const actions = $('profile-actions');
   actions.replaceChildren();
   const action = (text: string, run: () => void, quiet = false) => {
@@ -3176,7 +3265,7 @@ function renderProfile(): void {
   if (bot) action('发消息', () => selectBot(bot.id));
   if (bot && ownedBotRecords.some(item => item.id === bot.id)) action('修改', () => openBotEdit(bot), true);
   if (retiredItem) action('看历史', () => { void openRetiredChat(retiredItem.chatId).catch(error => message(errorMessage(error))); });
-  const sections = isBot ? profileBotSections(id, bot) : profilePersonSections();
+  const sections = isBot ? profileBotSections(id, bot) : other ? profileOtherPersonSections(id) : profilePersonSections();
   const host = $('profile-sections');
   host.replaceChildren(...sections.map(section => {
     if (section.collapsed) {
@@ -4761,7 +4850,17 @@ function renderGroupTranscript(): void {
       openMember.className = 'quiet-button';
       openMember.textContent = participantLabel(member.principalId);
       openMember.addEventListener('click', () => { void openDirect(member.principalId).catch(error => message(errorMessage(error))); });
-      members.append(openMember, archive(member.principalId));
+      const person = member.role !== 'agent' && !member.principalId.startsWith('bot_') && member.principalId !== 'aeeis' && !botById(member.principalId);
+      if (!person) { members.append(openMember, archive(member.principalId)); continue; }
+      // A person in the group: their profile, with the groups you share.
+      const profile = document.createElement('button');
+      profile.type = 'button';
+      profile.className = 'quiet-button';
+      profile.dataset.personProfile = member.principalId;
+      profile.textContent = '档案';
+      profile.title = `看${openMember.textContent}的档案`;
+      profile.addEventListener('click', () => openProfile(member.principalId === sessionPrincipal ? 'person:me' : `person:${member.principalId}`));
+      members.append(openMember, profile);
     }
   }
   const answerDrafts = new Map<string, string>();

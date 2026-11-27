@@ -1,0 +1,11 @@
+/* The public privacy page: plain, readable, uses the app's theme colors. */
+.privacy-page { margin: 0; background: var(--surface, #fff); color: var(--ink, #171717); font: 16px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+.privacy-page main { max-width: 42rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+.privacy-page h1 { font-size: 1.6rem; margin: 0.5rem 0 0.25rem; }
+.privacy-page h2 { font-size: 1.15rem; margin: 2rem 0 0.5rem; }
+.privacy-page ul { padding-left: 1.25rem; }
+.privacy-page li { margin: 0.35rem 0; }
+.privacy-page .muted { color: var(--muted, #6b6b6b); }
+.privacy-page a { color: var(--ink, #171717); }
+.privacy-page code { font-size: 0.9em; }
+.privacy-back { margin: 0; font-size: 0.9rem; }

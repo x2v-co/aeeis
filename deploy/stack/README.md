@@ -269,11 +269,19 @@ AEEIS_GOOGLE_USERS={"you@example.com":{"id":"owner","tenantId":"local","roles":[
 # AEEIS_GOOGLE_DOMAIN_TENANT=example
 # AEEIS_GOOGLE_DOMAIN_ROLES=owner
 # AEEIS_SESSION_TTL_HOURS=168
+# Who to write to about personal data; shown on the public /privacy page.
+# AEEIS_PRIVACY_CONTACT=privacy@example.com
 ```
 
 3. Several users need `perPrincipal.maxMachines` in `local-tools.json` (see
    Bot computer). `AEEIS_TRUSTED_ORIGINS` must include the public origin, as for
    any browser use.
+
+Settings → 成员 lists the people of your tenant: the `AEEIS_GOOGLE_USERS`
+entries for it and everyone who has signed in through the allowed domain. An
+operator can give each person a display name there. Adding people is still this
+configuration. The public `/privacy` page (no sign-in) is the privacy policy
+link for the Google consent screen; the home page is `https://<public host>/`.
 
 Google sign-in cannot be combined with `AEEIS_ACCESS_TOKEN` or OIDC. Machines
 (a `/metrics` scraper, scripts) get their own entries in `AEEIS_PRINCIPAL_TOKENS`

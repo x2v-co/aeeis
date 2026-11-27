@@ -1752,6 +1752,16 @@ body.gb.conversation-mode #conversation-status:empty, body.gb.conversation-mode 
 .signin-card p { margin: 0 0 20px; color: var(--ink-soft, #3f3f3f); line-height: 1.6; }
 .signin-button { display: inline-flex; align-items: center; justify-content: center; width: 100%; min-height: 44px; border-radius: 10px; background: var(--ink, #171717); color: var(--paper, #fff); font-weight: 600; text-decoration: none; }
 .signin-button:focus-visible { outline: 2px solid var(--ink, #171717); outline-offset: 2px; }
+.signin-card .signin-privacy { margin: 16px 0 0; font-size: 0.85rem; color: var(--muted, #737373); }
+.signin-card .signin-privacy a { color: inherit; }
+/* Settings → 成员 */
+.member-list { display: grid; gap: 8px; margin: 12px 0; }
+.member-row { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line, #ececec); border-radius: 10px; }
+.member-row .chat-avatar { grid-row: span 2; cursor: pointer; }
+.member-row .member-name { justify-self: start; font-size: 0.95rem; font-weight: 600; padding: 0; min-height: 0; border: 0; background: none; color: var(--ink, #171717); cursor: pointer; }
+.member-row small { color: var(--muted, #737373); }
+.member-rename { grid-column: 2; display: flex; gap: 8px; margin-top: 4px; }
+.member-rename input { flex: 1; min-width: 0; }
 
 /* 消息: one list of Bots and group chats. The avatar opens the profile; a small corner mark says Bot. */
 .chat-avatar { position: relative; display: inline-grid; width: 28px; height: 28px; cursor: pointer; }
