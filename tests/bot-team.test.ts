@@ -13,6 +13,7 @@ import { AgentEngine } from '../src/runtime/engine.js';
 import type { ModelRequest } from '../src/runtime/model.js';
 
 const headers = { authorization: 'Bearer alice' };
+const bobHeaders = { authorization: 'Bearer bob' };
 const scope = { owner: 'alice', tenantId: 'team-a' };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); delete process.env.AEEIS_BOT_HANDOFF_MAX_TURNS; vi.restoreAllMocks(); });
@@ -23,7 +24,7 @@ type Script = {
   plan?: () => unknown;
 };
 
-async function team(script: Script, options: { quiet?: boolean; writerAutonomy?: string; researcherAutonomy?: string } = {}) {
+async function team(script: Script, options: { quiet?: boolean; writerAutonomy?: string; researcherAutonomy?: string; withBob?: boolean } = {}) {
   const bots = new InMemoryOwnedBotStore();
   const domain = new AeeisService(new InMemoryStore(), [], new InMemoryRoomMembershipRepository(), undefined, bots);
   const conversations = new InMemoryConversationStore();
@@ -43,18 +44,21 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   }) };
   const engine = new AgentEngine(repository, model);
   const notify = vi.fn(async () => undefined);
-  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, routines: new InMemoryRoutineStore(), uiEvents: new InMemoryUiEventCountStore(), principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] } } });
+  const app = buildApp({ repository, engine, dispatcher: { notify, close: async () => undefined }, domain, ownedBots: bots, conversationStore: conversations, sessionEvents, routines: new InMemoryRoutineStore(), uiEvents: new InMemoryUiEventCountStore(), principalTokens: { alice: { id: 'alice', tenantId: 'team-a', roles: ['owner'] }, bob: { id: 'bob', tenantId: 'team-a', roles: ['owner'] } } });
   cleanup.push(() => app.close());
   const bot = async (name: string, role: string, autonomy?: string) => (await app.inject({ method: 'POST', url: '/api/bots', headers, payload: { name, role, mark: 'letter', color: '#176b45', background: `${name}负责${role}。`, ...(autonomy ? { autonomy } : {}) } })).json() as { id: string; name: string };
   const researcher = await bot('阿研', '研究', options.quiet ? 'quiet' : options.researcherAutonomy);
   const writer = await bot('阿写', '写作', options.writerAutonomy);
   const roomId = (await app.inject({ method: 'POST', url: '/api/rooms', headers, payload: { title: '发布协作', description: '群聊' } })).json().id as string;
   for (const member of [researcher, writer]) expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers, payload: { principalId: member.id, role: 'agent' } })).statusCode).toBe(200);
+  // A second person in the same tenant, invited as an editor: someone the Bots are not open to.
+  if (options.withBob) expect((await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/members`, headers, payload: { principalId: 'bob', role: 'editor' } })).statusCode).toBe(200);
   const goalId = (await app.inject({ method: 'POST', url: '/api/goals', headers, payload: { title: '发布协作', roomId } })).json().id as string;
+  // Goal manifests are the room owner's; an editor writes under the owner's room-audience manifest.
   const manifestId = async () => (await app.inject({ method: 'POST', url: `/api/goals/${goalId}/context-manifests`, headers, payload: { purpose: '群聊消息', audienceMode: 'room' } })).json().id as string;
   let n = 0;
-  const say = async (content: string, actor?: { type: 'agent'; id: string }) => {
-    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/session-events`, headers, payload: { goalId, type: 'message', content, contextManifestId: await manifestId(), idempotencyKey: `say-${++n}`, ...(actor ? { actor } : {}) } });
+  const say = async (content: string, actor?: { type: 'agent'; id: string }, as = headers) => {
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/session-events`, headers: as, payload: { goalId, type: 'message', content, contextManifestId: await manifestId(), idempotencyKey: `say-${++n}`, ...(actor ? { actor } : {}) } });
     expect(response.statusCode, response.body).toBe(200);
     await app.aeeisBots!.drain();
     return response.json() as { id: string };
@@ -64,6 +68,98 @@ async function team(script: Script, options: { quiet?: boolean; writerAutonomy?:
   const room = () => domain.getRoomForPrincipal(roomId, 'alice', 'team-a');
   return { app, domain, conversations, repository, engine, notify, calls, researcher, writer, roomId, goalId, manifestId, say, events, board, room };
 }
+
+describe('Bots in a group answer to whoever spoke (others-talk-to-your-bot §6, stage 3b)', () => {
+  const bob = { owner: 'bob', tenantId: 'team-a' };
+  const scopes = (f: Awaited<ReturnType<typeof team>>) => {
+    const seen: Array<{ key: string; owner: string }> = [];
+    const original = f.engine.completeForBot.bind(f.engine);
+    vi.spyOn(f.engine, 'completeForBot').mockImplementation(async (request, scope) => { seen.push({ key: request.idempotencyKey, owner: scope.owner }); return original(request, scope); });
+    return seen;
+  };
+  const replyCalls = (f: Awaited<ReturnType<typeof team>>) => f.calls.filter(call => call.system.includes('回复一条消息')).map(call => call.input as any);
+
+  it('keeps the owner exactly as before in a room with another person', async () => {
+    const f = await team({ reply: input => input.you.name === '阿写' ? { reply: '我来起草。', tasks: [{ title: '起草发布说明', reason: '下周发布' }] } : { reply: '好' } }, { writerAutonomy: 'auto', withBob: true });
+    const seen = scopes(f);
+    const line = await f.say('@阿写 下周发布，起草一份发布说明');
+    const reply = (await f.events()).find(item => item.idempotencyKey === `bot-reply:${line.id}:${f.writer.id}`)!;
+    expect(reply.content).toBe('我来起草。');
+    expect((await f.board()).cards).toEqual([expect.objectContaining({ title: '起草发布说明', ownerId: f.writer.id })]);
+    expect(await f.repository.list()).toHaveLength(1);
+    expect(seen).toEqual([{ key: `bot-reply:${line.id}:${f.writer.id}`, owner: 'alice' }]);
+    const input = replyCalls(f).at(-1)!;
+    expect(input.message.speaker).toBe('主人');
+    expect(input).not.toHaveProperty('onlyDiscuss');
+  });
+
+  it('answers a non-owner @-mention with discussion only, on their budget, and says who can hand it work', async () => {
+    const f = await team({ reply: input => input.you.name === '阿写' ? { reply: '可以这样写：先列改动。', tasks: [{ title: '起草发布说明' }], handoff: { to: '阿研', note: '他查过' } } : { reply: '好' } }, { writerAutonomy: 'auto', withBob: true });
+    const seen = scopes(f);
+    const url = `/api/rooms/${f.roomId}/noise-settings`;
+    // Even a lively room starts no Bot-to-Bot chain off a non-owner's line.
+    expect((await f.app.inject({ method: 'PUT', url, headers, payload: { mode: 'lively' } })).statusCode).toBe(200);
+    const line = await f.say('@阿写 帮我起草发布说明', undefined, bobHeaders);
+    const items = await f.events();
+    const replies = items.filter(item => item.actorType === 'agent' && item.type === 'message');
+    expect(replies).toEqual([expect.objectContaining({ actorId: f.writer.id, evidenceRefs: [line.id], content: '可以这样写：先列改动。\nalice没有把我开放给你，可以请alice来交给我。' })]);
+    // No task, no card, no Run, no handoff, nothing in the owner's conversations.
+    expect(items.filter(item => item.taskAction).map(item => [item.content, item.taskAction])).toEqual([]);
+    expect((await f.board()).cards).toEqual([]);
+    expect(await f.repository.list()).toEqual([]);
+    expect(f.notify).not.toHaveBeenCalled();
+    expect((await f.conversations.list(scope)).flatMap(item => item.tasks)).toEqual([]);
+    expect(await f.conversations.list(bob)).toEqual([]);
+    expect(f.calls.some(call => call.system.includes('在你们的侧线程里谈一件任务的交接'))).toBe(false);
+    // The one model call is charged to the person who spoke, and the model knows who that is.
+    expect(seen).toEqual([{ key: `bot-reply:${line.id}:${f.writer.id}`, owner: 'bob' }]);
+    const input = replyCalls(f).at(-1)!;
+    expect(input.message.speaker).toBe('bob');
+    expect(input.transcript_untrusted.at(-1)).toEqual({ speaker: 'bob', text: '@阿写 帮我起草发布说明' });
+    expect(input.onlyDiscuss).toContain('不是你的主人alice');
+    // A restart sweep does not answer again.
+    await f.app.aeeisBots!.sweep(await f.room(), scope);
+    await f.app.aeeisBots!.drain();
+    expect((await f.events()).length).toBe(items.length);
+  });
+
+  it('lets AEEIS answer a non-owner without splitting the line into tasks for the owner\'s Bots', async () => {
+    const f = await team({ reply: input => input.you.name === 'AEEIS' ? { reply: '拆成两件。', tasks: [{ title: '查竞品的发布节奏', for: '阿研' }, { title: '起草发布说明', for: '阿写' }] } : { reply: '好' } }, { writerAutonomy: 'auto', researcherAutonomy: 'auto', withBob: true });
+    const seen = scopes(f);
+    const line = await f.say('下周发布：查竞品节奏、写发布说明', undefined, bobHeaders);
+    const items = await f.events();
+    expect(items.filter(item => item.actorType === 'agent')).toEqual([expect.objectContaining({ actorId: 'aeeis', content: '拆成两件。\nalice没有把我开放给你，可以请alice来交给我。' })]);
+    expect(items.some(item => item.taskAction || item.content.startsWith('AEEIS提议'))).toBe(false);
+    expect((await f.board()).cards).toEqual([]);
+    expect(await f.repository.list()).toEqual([]);
+    expect(seen).toEqual([{ key: `bot-reply:${line.id}:aeeis`, owner: 'bob' }]);
+    // A plain answer with nothing to do carries no extra line.
+    const f2 = await team({ reply: () => ({ reply: '周三比较合适。' }) }, { withBob: true });
+    await f2.say('哪天发布好？', undefined, bobHeaders);
+    expect((await f2.events()).filter(item => item.actorType === 'agent').map(item => item.content)).toEqual(['周三比较合适。']);
+    // The owner speaking next is still 主人, and bob's line reads as bob's.
+    await f2.say('我觉得周四');
+    const input = replyCalls(f2).at(-1)!;
+    expect(input.transcript_untrusted.map((item: any) => item.speaker)).toEqual(['bob', 'AEEIS', '主人']);
+  });
+
+  it('refuses 「交给它」 from a non-owner with the same explanation, and records nothing', async () => {
+    const f = await team({ reply: () => ({ reply: '好' }) }, { withBob: true });
+    const line = await f.say('这句话谁来接', undefined, bobHeaders);
+    const before = await f.conversations.list(scope);
+    for (const botId of [f.writer.id, 'aeeis']) {
+      const response = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/session-events/${line.id}/deliver`, headers: bobHeaders, payload: { botId, kind: 'handoff' } });
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json().message ?? response.json().error).toContain(`alice没有把${botId === 'aeeis' ? 'AEEIS' : '阿写'}开放给你，可以请alice来交给`);
+    }
+    expect(await f.conversations.list(scope)).toEqual(before);
+    expect(await f.conversations.list(bob)).toEqual([]);
+    // The owner can still hand the same line over.
+    const owner = await f.app.inject({ method: 'POST', url: `/api/rooms/${f.roomId}/session-events/${line.id}/deliver`, headers, payload: { botId: f.writer.id, kind: 'handoff' } });
+    expect(owner.statusCode, owner.body).toBe(200);
+    expect((await f.conversations.list(scope)).find(item => item.agentId === f.writer.id)?.tasks).toHaveLength(1);
+  });
+});
 
 describe('Bots that act on their own', () => {
   it('answers with one voice: AEEIS for an undirected line, the named member otherwise, never a Bot', async () => {

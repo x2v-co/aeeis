@@ -189,8 +189,10 @@ export function buildApp(options: Options) {
   const conversationThreads = options.conversationThreads ?? new InMemoryConversationThreadIndex();
   const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots, conversationThreads) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
+  // A person's display name in this tenant, for lines that name someone other than the reader.
+  const personName = async (principalId: string, tenantId: string): Promise<string | undefined> => (await options.principalDirectory?.lookup(principalId, tenantId).catch(() => undefined))?.displayName;
   const dialogues = conversations && options.conversationStore && options.domain && options.sessionEvents
-    ? new BotDialogueService(options.botDialogues ?? new InMemoryBotDialogueStore(), conversations, options.conversationStore, options.domain, options.sessionEvents, options.ownedBots) : undefined;
+    ? new BotDialogueService(options.botDialogues ?? new InMemoryBotDialogueStore(), conversations, options.conversationStore, options.domain, options.sessionEvents, options.ownedBots, personName) : undefined;
   const dialogueService = () => { if (!dialogues) throw new Conflict('Bot dialogue routing is not configured'); return dialogues; };
   if (dialogues) {
     conversations!.writeGate = (id, scope, work) => dialogues.conversationWrite(id, scope, work);
@@ -276,6 +278,7 @@ export function buildApp(options: Options) {
       canExecute: Boolean(options.engine && options.dispatcher),
       notifyRun: async (runId, scope) => { const run = await options.repository.get(runId, scope); if (isBootRecoverableRun(run.status)) await notify(run.id); },
       ...(process.env.AEEIS_BOT_HANDOFF_MAX_TURNS ? { handoffMaxTurns: Number(process.env.AEEIS_BOT_HANDOFF_MAX_TURNS) } : {}),
+      personName,
       log: (message, detail) => console.error(message, detail ?? ''),
     })
     : undefined;
