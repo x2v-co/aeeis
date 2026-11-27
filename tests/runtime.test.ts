@@ -1045,8 +1045,13 @@ describe('AEEIS runtime', () => {
     await engine.advance(run.id);
     const current = await repo.get(run.id);
     await engine.command(run.id, 'approve', { planHash: current.plans[0]!.hash, planVersion: current.plans[0]!.version });
-    expect(await engine.advance(run.id)).toBe('failed');
-    expect((await repo.get(run.id)).error).toContain('allowedTools');
+    // Each unapproved call is handed back without running anything; this fixture has no valid answer after that, so the Run still fails.
+    let status = await engine.advance(run.id);
+    for (let i = 0; i < 20 && status === 'running'; i++) status = await engine.advance(run.id);
+    expect(status).toBe('failed');
+    const finished = await repo.get(run.id);
+    expect(finished.events.some(item => item.type === 'tool.failed_recoverable' && item.data.errorCode === 'tool_not_approved')).toBe(true);
+    expect(finished.toolReceipts ?? []).toHaveLength(0);
     await repo.close();
   });
 

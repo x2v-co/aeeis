@@ -3071,7 +3071,16 @@ export class AgentEngine {
         assertExternalBudget(current);
         if (!this.tools) throw new Error('This run requested an external tool, but no toolkit gateway is configured');
         const approved = current.approvedTools?.find(tool => tool.id === decision.toolId);
-        if (!approved) throw new Error('External tool is not in the approved allowedTools manifest/version allowlist');
+        if (!approved) {
+          // Naming a tool that was never approved (on 2026-11-27 a brief asked for "capabilityCatalog", the name of its
+          // tool list) ran nothing, so hand it back with the approved names instead of ending the Run. Same budget as a wrong version.
+          const names = (current.approvedTools ?? []).map(tool => `${tool.id}@${tool.version}`).join(', ');
+          const message = `Nothing was run: "${String(decision.toolId).slice(0, 80)}" is not an approved tool. ${names ? `Approved tools: ${names}.` : 'No external tools are approved for this Run.'}`;
+          this.assertRecoverableFailureBudget(current, node.id, 'External tool is not in the approved allowedTools manifest/version allowlist');
+          live.observations.push({ tool: String(decision.toolId).slice(0, 200), argument: '', result: { error: { recoverable: true, errorCode: 'tool_not_approved', message } } });
+          event(current, 'tool.failed_recoverable', { taskId: node.id, toolId: String(decision.toolId).slice(0, 200), errorCode: 'tool_not_approved', message });
+          return;
+        }
         if (approved.version !== decision.toolVersion) {
           // Asking for an approved tool with a wrong version is a slip, and should not end work that is going well.
           const message = `Nothing was run: call ${approved.id} as a capability with toolVersion "${approved.version}".`;
