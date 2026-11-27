@@ -277,10 +277,12 @@ function effectiveTasks(conversation: Conversation, message: ConversationMessage
 }
 function validateCorrection(conversation: Conversation, input: z.infer<typeof messageSchema>): void {
   if (!input.correctsMessageId) return;
-  if (!input.taskIds || input.newTask || input.replyTo || input.intent !== 'discuss') throw new Conflict('A routing correction requires explicit tasks and cannot execute work');
+  if (!input.taskIds === !input.newTask || input.replyTo || input.intent !== 'discuss') throw new Conflict('A routing correction requires explicit tasks or one new task and cannot execute work');
   const original = conversation.messages.find(message => message.id === input.correctsMessageId);
   if (!original) throw new NotFound('Unknown message');
-  if (original.role !== 'user' || original.execution || original.correctsMessageId) throw new Conflict('Only an unexecuted discussion message can be reassigned; execution history is immutable');
+  if (original.role !== 'user' || original.execution || original.correctsMessageId || original.intent === 'execute') throw new Conflict('Only an unexecuted discussion message can be reassigned; execution history is immutable');
+  // A new task only for a message that still belongs to none, counting later corrections, so the same message never opens two tasks.
+  if (input.newTask && effectiveTasks(conversation, original).length) throw new Conflict('Only an unassigned message can open a new task; this one already belongs to a task');
 }
 
 
