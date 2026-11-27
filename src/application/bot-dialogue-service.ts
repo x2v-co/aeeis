@@ -191,19 +191,26 @@ export class BotDialogueService {
     const members = entry ? [] : await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId);
     if (!entry && (!members.some(m => m.principalId === botId && m.status === 'active') || !event.audienceSnapshot.participants.some(p => p.principalId === botId))) throw new Conflict('Bot is not in the message audience');
     const binding = await this.ensure(botId, scope, actor);
-    const sourceId = `${roomId}:${eventId}:${botId}:${kind}`, operationKey = `delivery:${sourceId}`;
+    const keyOf = (mode: typeof kind) => `delivery:${roomId}:${eventId}:${botId}:${mode}`;
     const operation = await this.store.withOwner(scope, async () => {
-      const previous = (await this.store.operations(scope)).find(op => op.operationKey === operationKey);
+      const operations = await this.store.operations(scope), find = (mode: typeof kind) => operations.find(op => op.operationKey === keyOf(mode));
+      // A handoff after the fact returns what an earlier handoff recorded; for AEEIS an entry discussion counts as handed over.
+      const previous = find(kind) ?? (kind === 'handoff' && botId === 'aeeis' ? find('entry') : undefined);
       if (previous) return previous;
+      // The line already reached this Bot as an unassigned intake: reassign that message rather than record it again.
+      const intake = kind === 'handoff' ? find('intake') : undefined;
+      const corrects = intake?.status === 'completed' ? intake.targetId : undefined;
       const current = await this.aggregates.get(binding.conversationId, scope);
-      const pending = { ...scope, botId, operationKey, kind: 'delivery' as const, sourceId, status: 'pending' as const, state: { revision: current.revision } };
+      const pending = { ...scope, botId, operationKey: keyOf(kind), kind: 'delivery' as const, sourceId: keyOf(kind).slice('delivery:'.length), status: 'pending' as const, state: { revision: current.revision, ...(corrects ? { corrects } : {}) } };
       await this.store.operation(pending); return pending;
     });
-    const result = await this.conversations.post(binding.conversationId, {
-      text: event.content.slice(0, 7000), expectedRevision: operation.state.revision,
-      ...(kind === 'intake' ? { unassigned: true } : { newTask: { title: event.content.slice(0, 80).padEnd(2, '。') } }),
-      intent: 'discuss', focus: 'keep', ...(event.actorId !== scope.owner ? { speaker: { role: 'agent', id: event.actorId } } : {}),
-    }, scope, followupHash(operationKey), false, actor, { kind: 'channel', channel: 'room', externalEventId: event.id, receivedAt: event.createdAt });
+    const title = event.content.slice(0, 80).padEnd(2, '。'), corrects = typeof operation.state.corrects === 'string' ? operation.state.corrects : undefined;
+    const body = corrects
+      ? { text: '在群里交给这位 Bot', expectedRevision: operation.state.revision, correctsMessageId: corrects, newTask: { title }, intent: 'discuss', focus: 'keep' }
+      : { text: event.content.slice(0, 7000), expectedRevision: operation.state.revision,
+        ...(kind === 'intake' ? { unassigned: true } : { newTask: { title } }),
+        intent: 'discuss', focus: 'keep', ...(event.actorId !== scope.owner ? { speaker: { role: 'agent', id: event.actorId } } : {}) };
+    const result = await this.conversations.post(binding.conversationId, body, scope, followupHash(operation.operationKey), false, actor, { kind: 'channel', channel: 'room', externalEventId: event.id, receivedAt: event.createdAt });
     await this.store.withOwner(scope, () => this.store.operation({ ...operation, status: 'completed', targetId: result.message.id }));
     return result;
   }
