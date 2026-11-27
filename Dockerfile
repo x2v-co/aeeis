@@ -16,11 +16,13 @@ ENV AEEIS_GIT_COMMIT=${AEEIS_GIT_COMMIT}
 LABEL org.opencontainers.image.revision=${AEEIS_GIT_COMMIT}
 ENV NODE_ENV=production
 # SSH client and CA bundle for a remote Bot sandbox (local-tools sandbox.ssh; the instabox CLI verifies TLS). Host aliases come from
-# ~/.config/instabox/ssh/*.conf, written by scripts/instabox-login.sh (deploy/stack/README.md).
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client ca-certificates \
+# ~/.config/instabox/ssh/*.conf, written by scripts/instabox-login.sh, and from the operator's /run/aeeis-secrets/ssh/*.conf for a
+# plain VPS host (deploy/stack/README.md). git is for repo-push: AEEIS commits and pushes a Bot's work itself, with a token
+# the Run machines never see.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o node -g node -m 0700 /home/node/.ssh /home/node/.config \
-    && printf 'Include ~/.config/instabox/ssh/*.conf\n' > /home/node/.ssh/config \
+    && printf 'Include ~/.config/instabox/ssh/*.conf\nInclude /run/aeeis-secrets/ssh/*.conf\n' > /home/node/.ssh/config \
     && chown node:node /home/node/.ssh/config && chmod 0600 /home/node/.ssh/config
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./

@@ -159,8 +159,16 @@ describe('runtime configuration validation', () => {
       expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write(config) })).toThrow(reason);
     }
     const path = write(remote);
-    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_PRINCIPAL_TOKENS: '{}' })).toThrow('single owner');
-    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_OIDC_ISSUER: 'https://issuer.example' })).toThrow('single owner');
+    // Several users need a per-user machine limit; with one, the tools are shared on the same terms as for one owner.
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_PRINCIPAL_TOKENS: '{}' })).toThrow('perPrincipal.maxMachines');
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: path, AEEIS_OIDC_ISSUER: 'https://issuer.example' })).toThrow('perPrincipal.maxMachines');
+    const limited = write({ ...remote, perPrincipal: { maxMachines: 2 } });
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: limited, AEEIS_OIDC_ISSUER: 'https://issuer.example' })).not.toThrow(/AEEIS_LOCAL_TOOLS_CONFIG/);
+    // Named hosts: each must be a separate SSH host; the deployment's network rule still applies.
+    const hosts = { ...remote, sandbox: { network: 'proxied' }, hosts: { instabox: { ssh: 'instabox-box' }, vps: { ssh: 'aeeis-sandbox-2' } }, assign: { default: 'instabox' } };
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write(hosts) })).not.toThrow();
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write({ ...hosts, hosts: { ...hosts.hosts, vps: {} } }) })).toThrow('hosts.vps.ssh');
+    expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: write({ ...hosts, sandbox: { network: 'bridge' } }) })).toThrow('sandbox.network');
     expect(() => validateRuntimeConfig({ ...shared, AEEIS_LOCAL_TOOLS_CONFIG: join(directory, 'missing.json') })).toThrow('readable JSON');
     expect(() => validateRuntimeConfig({ ...production, AEEIS_LOCAL_TOOLS_CONFIG: path })).not.toThrow(/AEEIS_LOCAL_TOOLS_CONFIG/);
   });

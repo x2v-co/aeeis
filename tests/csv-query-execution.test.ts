@@ -216,13 +216,50 @@ describe('executor CSV query tool', () => {
     expect((await fixture.drain()).status).toBe('succeeded');
   });
 
-  it.each(['missing-source', '../sources/other.csv'])('denies an unknown source id: %s', async argument => {
-    const fixture = await setup(input => ({ ...query(input), argument }));
+  // pulse-csv-followup (live, 2026-11-18): a mistyped id failed the whole Run. It now reads nothing and the model corrects it.
+  it.each(['missing-source', '../sources/other.csv'])('reads nothing for an unknown source id and lets the model correct it: %s', async argument => {
+    const fixture = await setup(input => {
+      if (!input.observations.length) return { ...query(input), argument };
+      return (input.observations.at(-1) as { result?: { error?: unknown } }).result?.error ? query(input) : finish(input);
+    });
     const completed = await fixture.drain();
-    expect(completed.status).toBe('failed');
-    expect(completed.error).toContain('Source tool denied an unknown resource');
-    expect(completed.steps[0]!.observations).toEqual([]);
+    expect(completed.status, completed.error).toBe('succeeded');
+    const [denied, read] = completed.steps[0]!.observations;
+    expect(denied!.result).toEqual({ error: { recoverable: true, errorCode: 'source_ref_unknown', sourceIds: [completed.context.sources[0]!.id],
+      message: `Nothing was read: ${JSON.stringify(argument)} is not a source id. Copy an id exactly from sourceCatalog.` } });
+    expect(read!.result).toMatchObject({ id: completed.context.sources[0]!.id, matchedRowCount: 200 });
+    expect(completed.events.filter(event => event.type === 'tool.failed_recoverable').map(event => event.data.errorCode)).toEqual(['source_ref_unknown']);
     expect(completed.pendingTool).toBeUndefined();
+  });
+
+  // Codex review on #233: a wrong id reads nothing, so it must not spend the page allowance the corrected read needs.
+  it('does not charge a source page for a wrong id, so the last page is left for the corrected read', async () => {
+    const decide = (input: Input) => {
+      if (input.executionBudget.finalOnly) return finish(input);
+      if (!input.observations.length) return { ...query(input), argument: 'missing-source' };
+      return (input.observations.at(-1) as { result?: { error?: unknown } }).result?.error ? query(input) : finish(input);
+    };
+    const fixture = await setup(decide, { limits: { maxNodeSourcePages: 1, maxNodeIterations: 8 } });
+    const completed = await fixture.drain();
+    expect(completed.status, completed.error).toBe('succeeded');
+    const [denied, read] = completed.steps[0]!.observations;
+    expect(denied).toMatchObject({ sourcePageCost: 0, result: { error: { errorCode: 'source_ref_unknown' } } });
+    expect(read!.result).toMatchObject({ matchedRowCount: 200 });
+    // The single page is spent by the corrected read; any limit comes only after it.
+    const types = completed.events.map(event => event.type);
+    const limited = types.indexOf('execution.limited');
+    expect(limited === -1 || limited > types.indexOf('tool.completed')).toBe(true);
+    // The page count lives on the stored observations, so a restarted engine counts the same.
+    expect(sourceReadUsage([completed.steps[0]!]).pages).toBe(sourceReadUsage([{ ...completed.steps[0]!, observations: [read!] }]).pages);
+  });
+
+  it('stops retrying a wrong source id at the node iteration limit', async () => {
+    const fixture = await setup(input => input.executionBudget.finalOnly ? finish(input) : { ...query(input), argument: 'missing-source' });
+    const completed = await fixture.drain();
+    expect(completed.status, completed.error).toBe('succeeded');
+    const observations = completed.steps[0]!.observations;
+    expect(observations.length).toBeGreaterThan(0);
+    for (const observation of observations) expect((observation.result as { error: { errorCode: string } }).error.errorCode).toBe('source_ref_unknown');
   });
 
   it('rejects a non-CSV stored source as a recoverable executor error', async () => {

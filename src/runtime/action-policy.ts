@@ -21,7 +21,11 @@ export const approveActionSchema = z.object({
 export type ActionPolicy = z.infer<typeof actionPolicySchema>;
 export type ActionOrigin = z.infer<typeof actionOriginSchema>;
 export type ActionDecision = z.infer<typeof approveActionSchema>['decision'];
-export interface ActionCandidate { kind: 'tool' | 'agent'; id: string; version?: string | undefined; capabilities?: readonly string[] | undefined }
+export interface ActionCandidate {
+  kind: 'tool' | 'agent'; id: string; version?: string | undefined; capabilities?: readonly string[] | undefined;
+  /** Set only by AEEIS's own connector code for an outward call: the grant entry that may cover it, e.g. `repo-push:sandbox`. */
+  scope?: string | undefined;
+}
 /** `judge` means the approval model decides; any error or doubt turns it into `ask`. */
 export interface ActionVerdict { decision: 'allow' | 'ask' | 'refuse' | 'judge'; rule: 'block' | 'grant' | 'external' | 'untrusted' | 'allow' | 'read' | 'review' | 'auto' | 'yolo'; reason: string }
 /** What the Run has already taken in. Text from an external tool or agent may
@@ -30,7 +34,7 @@ export interface ActionVerdict { decision: 'allow' | 'ask' | 'refuse' | 'judge';
 export interface ActionContext {
   untrusted?: boolean;
   /** The Run's active Work Grant. Missing once it is revoked or expired. */
-  grant?: { grantId: string; containedTools: readonly string[]; agents: readonly string[] } | undefined;
+  grant?: { grantId: string; containedTools: readonly string[]; agents: readonly string[]; connectors?: readonly string[] | undefined } | undefined;
 }
 
 /** Frozen on the Run: deduplicated, ordered, and never widened by later edits. */
@@ -67,6 +71,9 @@ export function isReadOnlyAction(candidate: ActionCandidate): boolean {
  * 1a. Under an active Work Grant, a granted tool whose effects stay in this Run's isolated workspace, or delegation to
  *    a granted agent, proceeds whoever started the Run and whatever text it has read: that text can at most change
  *    files in a workspace that is isolated and disposable. Any other action falls through to the rules below.
+ * 1b. Under an active Work Grant, an outward call whose connector scope (tool and target, e.g. `repo-push:sandbox`) the
+ *    grant lists proceeds the same way. The owner named that exact target; the connector itself keeps the call to Bot
+ *    branches and never overwrites. Outward calls the grant does not name fall through.
  * 2. A non-read-only action in a Run started from outside the owner (routine, webhook, channel, another
  *    agent), or after text from an external tool or agent entered this Run: required and auto ask, yolo
  *    refuses because it cannot wait. The allow list does not lift this.
@@ -81,6 +88,9 @@ export function decideAction(policy: ActionPolicy | undefined, origin: ActionOri
   const grant = context.grant;
   if (grant && (candidate.kind === 'tool' ? grant.containedTools.includes(candidate.id) : grant.agents.includes(candidate.id))) {
     return { decision: 'allow', rule: 'grant', reason: candidate.kind === 'tool' ? `${ref} stays in this Run's workspace and is covered by Work Grant ${grant.grantId}` : `${ref} is a delegate covered by Work Grant ${grant.grantId}` };
+  }
+  if (grant && candidate.kind === 'tool' && candidate.scope && grant.connectors?.includes(candidate.scope)) {
+    return { decision: 'allow', rule: 'grant', reason: `${candidate.scope} is pre-approved by Work Grant ${grant.grantId}` };
   }
   const readOnly = isReadOnlyAction(candidate);
   const outside = (origin ?? 'owner') !== 'owner';

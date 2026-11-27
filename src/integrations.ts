@@ -63,6 +63,9 @@ export interface ToolGateway {
   /** Tool ids whose every effect this gateway's own code confines to the Run's isolated workspace. It is never read
    * from tool metadata: a remote toolkit cannot claim it. A Work Grant lets only these run without asking. */
   workspaceContainedTools?(): Promise<string[]>;
+  /** For a tool this gateway's own code runs against an outside system: the Work Grant entry that may pre-approve this
+   * call (e.g. `repo-push:sandbox`) and what it would do, in one line. Never read from tool metadata. */
+  outwardAction?(toolId: string, input: unknown): { scope: string; summary: string } | undefined;
 }
 
 /** Streamable JSON-RPC MCP client used for the normal AEEIS -> Toolkit path. */
@@ -298,6 +301,8 @@ export class ToolkitRegistryGateway implements ToolGateway {
   private manifestCache = new Map<string, { id: string; version: string; capabilities: string[]; inputSchema: unknown; outputSchema: unknown; endpoint: string; description?: string }>();
   private verifiedManifests = new Map<string, Record<string, unknown>>();
   private loading?: Promise<ToolDescriptor[]>;
+  /** Registry tools hidden by a pinned entry of the same id and version, as of the last load. */
+  private shadowedPins: string[] = [];
   reconcile?: ToolGateway['reconcile'];
 
   constructor(private readonly registryUrl: string, private readonly token?: string, private readonly options: { verifySignatures?: boolean; trustBundleUrl?: string; rootPublicJwk?: Record<string, unknown>; reconcileUrl?: string; additionalTools?: ToolkitPinnedTool[] } = {}) {
@@ -311,14 +316,17 @@ export class ToolkitRegistryGateway implements ToolGateway {
       this.reconcile = (request, receipt) => this.reconcileThroughGateway(request, receipt);
     }
     for (const extra of options.additionalTools ?? []) {
-      const endpoint = this.endpointFor(extra.endpoint);
       if (!extra.id.trim() || !extra.version.trim()) throw new Error('Pinned toolkit tool id and version must be non-empty');
-      this.manifestCache.set(`${extra.id}@${extra.version}`, {
-        id: extra.id, version: extra.version, endpoint,
-        capabilities: extra.capabilities ?? ['execute'], inputSchema: extra.inputSchema ?? {}, outputSchema: extra.outputSchema ?? {},
-        ...(extra.description === undefined ? {} : { description: extra.description }),
-      });
+      this.manifestCache.set(`${extra.id}@${extra.version}`, this.pinnedEntry(extra));
     }
+  }
+
+  private pinnedEntry(extra: ToolkitPinnedTool) {
+    return {
+      id: extra.id, version: extra.version, endpoint: this.endpointFor(extra.endpoint),
+      capabilities: extra.capabilities ?? ['execute'], inputSchema: extra.inputSchema ?? {}, outputSchema: extra.outputSchema ?? {},
+      ...(extra.description === undefined ? {} : { description: extra.description }),
+    };
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -329,7 +337,8 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const checkedAt = new Date().toISOString();
     try {
       const tools = await this.listTools();
-      return { ready: true, detail: `Toolkit Registry reachable (${tools.length} tools)`, checkedAt };
+      const shadowed = this.shadowedPins.length ? `; pinned entries take precedence over the Registry for ${this.shadowedPins.join(', ')}` : '';
+      return { ready: true, detail: `Toolkit Registry reachable (${tools.length} tools)${shadowed}`, checkedAt };
     } catch (error) {
       return { ready: false, detail: `Toolkit Registry unavailable: ${error instanceof Error ? error.message : 'unknown error'}`.slice(0, 500), checkedAt };
     }
@@ -427,14 +436,34 @@ export class ToolkitRegistryGateway implements ToolGateway {
     const activeKeys = new Set(index.tools.filter(entry => entry.digest).map(entry => `${entry.slug}@${entry.version}:${entry.digest}`));
     for (const key of this.verifiedManifests.keys()) if (!activeKeys.has(key)) this.verifiedManifests.delete(key);
     const resolved: ToolDescriptor[] = [];
+    const shadowed: string[] = [];
     for (const manifest of manifests) {
+      // The operator's pinned entry for the same id and version wins: it declares the capabilities (a pinned
+      // web-fetch may be read + network), while the Registry never does and would turn it into execute.
+      // Health reports it, so a pin that hides a changed Registry tool is visible.
+      // A pin that leaves out its description or schemas still shows the Registry's, so the model sees the
+      // tool's options (web-search's maxResults, web-fetch's maxChars) and not an empty input. The tool
+      // manifest then follows the Registry's copy of that version; a pin that must not change declares its own.
+      const pin = (this.options.additionalTools ?? []).find(extra => `${extra.id}@${extra.version}` === `${manifest.slug}@${manifest.version}`);
+      if (pin) {
+        shadowed.push(`${manifest.slug}@${manifest.version}`);
+        const description = pin.description ?? manifest.description;
+        this.manifestCache.set(`${pin.id}@${pin.version}`, {
+          ...this.pinnedEntry(pin), inputSchema: pin.inputSchema ?? manifest.inputSchema ?? {}, outputSchema: pin.outputSchema ?? manifest.outputSchema ?? {},
+          ...(description === undefined ? {} : { description }),
+        });
+        continue;
+      }
       const tool = {
         id: manifest.slug, version: String(manifest.version), capabilities: ['execute'], inputSchema: manifest.inputSchema ?? {}, outputSchema: manifest.outputSchema ?? {}, ...(manifest.description === undefined ? {} : { description: manifest.description }), endpoint: this.endpointFor(manifest.endpoints.rest),
       };
       this.manifestCache.set(`${tool.id}@${tool.version}`, tool);
       resolved.push({ id: tool.id, version: tool.version, capabilities: tool.capabilities, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, ...(tool.description === undefined ? {} : { description: tool.description }) });
     }
+    this.shadowedPins = shadowed;
     for (const extra of this.options.additionalTools ?? []) {
+      // The Registry no longer lists this version: drop what an earlier listing filled in.
+      if (!shadowed.includes(`${extra.id}@${extra.version}`)) this.manifestCache.set(`${extra.id}@${extra.version}`, this.pinnedEntry(extra));
       const tool = this.manifestCache.get(`${extra.id}@${extra.version}`)!;
       if (!resolved.some(candidate => candidate.id === tool.id && candidate.version === tool.version)) {
         resolved.push({ id: tool.id, version: tool.version, capabilities: tool.capabilities, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, ...(tool.description === undefined ? {} : { description: tool.description }) });
@@ -443,7 +472,7 @@ export class ToolkitRegistryGateway implements ToolGateway {
     return resolved;
   }
 
-  private async tool(request: ToolInvocation): Promise<{ id: string; version: string; endpoint: string }> {
+  private async tool(request: ToolInvocation): Promise<{ id: string; version: string; endpoint: string; capabilities: string[] }> {
     const cached = this.manifestCache.get(`${request.toolId}@${request.toolVersion}`);
     if (cached) return cached;
     await this.listTools();
@@ -455,8 +484,12 @@ export class ToolkitRegistryGateway implements ToolGateway {
   async invoke(request: ToolInvocation): Promise<ToolResult> {
     const started = new Date();
     const requestHash = digest(request);
+    // The receipt claims what the approved manifest declares for this tool (a pinned web tool may be read + network).
+    // Before the tool resolves, nothing was used.
+    let capabilities: string[] = [];
     try {
       const tool = await this.tool(request);
+      capabilities = tool.capabilities;
       const payload = normalizeToolkitInput(request.input);
       const response = await fetch(tool.endpoint, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(request.timeoutMs),
@@ -491,10 +524,10 @@ export class ToolkitRegistryGateway implements ToolGateway {
       }
       const result = completed ? (body.structuredContent ?? body.output ?? null)
         : { error: failure!.message, errorCode: failure!.errorCode, ...(failure!.httpStatus === undefined ? {} : { httpStatus: failure!.httpStatus }) };
-      const receipt = makeToolkitReceipt({ request, requestHash, started, status, response: body, ...(failure ? { errorCode: failure.errorCode } : {}), ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
+      const receipt = makeToolkitReceipt({ request, requestHash, started, status, capabilities, response: body, ...(failure ? { errorCode: failure.errorCode } : {}), ...(providerReceiptId ? { providerReceipt: providerReceiptId } : {}) });
       return { status, output: result, ...(providerReceiptId ? { outputRefs: [`toolkit-receipt:${providerReceiptId}`] } : {}), receipt };
     } catch (error) {
-      return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
+      return { status: 'unknown', receipt: makeToolkitReceipt({ request, requestHash, started, status: 'unknown', capabilities, errorCode: error instanceof Error ? 'transport_or_protocol' : 'unknown' }) };
     }
   }
 
@@ -535,12 +568,12 @@ export function toolkitCredits(response: unknown): number | undefined {
   return pick(receipt?.credits) ?? pick(cost?.amount);
 }
 
-function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
+function makeToolkitReceipt(input: { request: ToolInvocation; requestHash: string; started: Date; status: ToolResult['status']; capabilities: string[]; response?: unknown; providerReceipt?: string; errorCode?: string }): Receipt {
   const credits = toolkitCredits(input.response);
   return receiptSchema.parse({
     schemaVersion: 'receipt/1', receiptId: 'receipt_' + randomUUID(), provider: 'toolkit_new', operation: input.request.toolId,
     requestHash: input.requestHash, ...(input.response === undefined ? {} : { responseHash: digest(input.response) }),
-    inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: ['execute'],
+    inputRefs: [input.request.taskId], outputRefs: input.providerReceipt ? [`toolkit-receipt:${input.providerReceipt}`] : [], capabilitiesUsed: [...input.capabilities],
     startedAt: input.started.toISOString(), completedAt: new Date().toISOString(), status: input.status, ...(input.errorCode ? { errorCode: input.errorCode } : {}),
     ...(credits === undefined ? { costStatus: input.response === undefined ? 'interrupted' : 'unreported' } : { cost: { credits }, costStatus: 'reported' }),
   });

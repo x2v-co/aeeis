@@ -18,7 +18,7 @@ const columns: BoardColumn[] = ['capture','ready','doing','blocked','review','do
 describe('task board controls', () => {
   it('keeps migration and embedded SQL identical and installs exactly 39 RLS policies',async () => {
     expect(await readFile('src/adapters/migrations/008-task-board-controls.sql','utf8')).toBe(taskBoardMigration);
-    expect(TENANT_POLICIES).toHaveLength(40);
+    expect(TENANT_POLICIES).toHaveLength(43);
     expect(TENANT_POLICIES.map(item => item.table)).toEqual(expect.arrayContaining(['aeeis_room_tasks','aeeis_task_board_controls']));
   });
   for (const [status,auto] of Object.entries(mappings)) {
@@ -139,7 +139,8 @@ describe('task board controls', () => {
       const view = await f.conversations.get(binding.conversationId,scope);
       const created = await f.conversations.post(binding.conversationId,{ text: '源频道任务',intent: 'discuss',newTask: { title: '源频道任务' },expectedRevision: view.revision },scope,'source-task',false,undefined,{ kind: 'channel',channel: 'room',externalEventId: sourceEvent.id,receivedAt: sourceEvent.createdAt });
       expect(await f.boardControls.list(source.room.id,scope.owner,scope.tenantId)).toEqual([]);
-      await f.app.aeeisBoardScan!(); await f.app.aeeisBoard!.pump();
+      // One small page each, so a single step finishes a whole pass.
+      expect(await f.app.aeeisBoardScan!()).toBe(true); expect(await f.app.aeeisBoard!.pump()).toBe(true);
       expect(await f.boardControls.list(source.room.id,scope.owner,scope.tenantId)).toMatchObject([{ taskId: created.conversation.tasks[0]!.id,sourceId: sourceEvent.id }]);
       const other = await f.domain.createRoom({ title: '无关频道' },undefined,scope.owner,scope.tenantId);
       expect((await f.request(`/rooms/${other.id}/board`)).json().cards).toEqual([]);

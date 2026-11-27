@@ -1,11 +1,19 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { localToolsConfigSchema, LocalToolGateway } from '../src/local-tools.js';
+import { hostConfigs, localToolsConfigSchema, LocalToolGateway } from '../src/local-tools.js';
 import { dockerContextArgs, dockerInvocation } from '../src/docker-sandbox.js';
 
-const action = process.argv[2] ?? 'doctor';
+const args = process.argv.slice(2);
+/** `--host <name>` picks one of the configured sandbox hosts; without it, the default host. */
+const hostFlag = args.indexOf('--host');
+const hostName = hostFlag >= 0 ? args.splice(hostFlag, 2)[1] : undefined;
+const action = args[0] ?? 'doctor';
 const filename = process.env.AEEIS_LOCAL_TOOLS_CONFIG ?? 'local-tools.example.json';
-const config = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
+const parsed = localToolsConfigSchema.parse(JSON.parse(await readFile(filename, 'utf8')));
+const hosts = hostConfigs(parsed);
+const selected = hostName ?? parsed.assign?.default ?? [...hosts.keys()][0]!;
+if (!hosts.has(selected)) throw new Error(`No sandbox host named ${selected}; configured: ${[...hosts.keys()].join(', ')}`);
+const config = { ...parsed, sandbox: hosts.get(selected)! };
 const dockerArgs = dockerContextArgs(config.sandbox);
 const docker = (args: string[], timeoutMs?: number) => { const call = dockerInvocation(config.sandbox, args); return run(call.command, call.args, timeoutMs); };
 /** Empty values are omitted so an unset build matches official PyPI and the Playwright CDN. */
@@ -46,14 +54,14 @@ try {
     await docker(['info', '--format', 'Docker {{.ServerVersion}} · {{.OSType}} · cgroup {{.CgroupVersion}}'], 20000);
     const gateway = await LocalToolGateway.load(filename);
     try {
-      const health = await gateway.health(); console.log(health.detail);
+      const health = await gateway.hosts().find(([name]) => name === selected)![1].health({ probe: true }); console.log(health.detail);
       if (!health.ready) process.exitCode = 1;
     } finally { await gateway.close(); }
-  } else if (action === 'release' && process.argv[3]) {
+  } else if (action === 'release' && args[1]) {
     const gateway = await LocalToolGateway.load(filename);
-    try { await gateway.release(process.argv[3]); console.log('Run sandbox released; artifacts preserved.'); }
+    try { await gateway.release(args[1]); console.log('Run sandbox released; artifacts preserved.'); }
     finally { await gateway.close(); }
-  } else throw new Error('Usage: sandbox.ts up | build | doctor | release <runId>');
+  } else throw new Error('Usage: sandbox.ts [--host <name>] up | build | doctor | release <runId>');
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   console.error(config.sandbox.ssh

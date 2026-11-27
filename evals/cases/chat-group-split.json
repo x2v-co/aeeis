@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "chat-group-split",
+  "title": "Front door splits a group request into tasks for the right members",
+  "source": "evals/README.md#聊天回复",
+  "tags": [
+    "chat"
+  ],
+  "request": {
+    "chat": {
+      "system": "team-reply",
+      "input": {
+        "you": {
+          "name": "AEEIS",
+          "role": "入口，负责接话、拆活和分派",
+          "frontDoor": true
+        },
+        "room": {
+          "title": "发布小组",
+          "kind": "群聊"
+        },
+        "roster": [
+          {
+            "name": "AEEIS",
+            "role": "入口，负责接话、拆活和分派",
+            "doing": 0
+          },
+          {
+            "name": "小研",
+            "role": "调研：竞品、价格、用户反馈",
+            "doing": 1
+          },
+          {
+            "name": "小文",
+            "role": "写作：发布说明、公告、文档",
+            "doing": 0
+          }
+        ],
+        "transcript_untrusted": [],
+        "message": {
+          "speaker": "用户",
+          "text": "帮我查一下竞品定价、整理发布风险、写一份发布说明"
+        }
+      }
+    }
+  },
+  "budget": {
+    "timeoutMs": 30000
+  },
+  "checks": [
+    {
+      "id": "split",
+      "kind": "replyField",
+      "field": "tasks",
+      "min": 2,
+      "max": 5
+    },
+    {
+      "id": "assigned",
+      "kind": "replyField",
+      "field": "tasks",
+      "min": 1,
+      "oneOf": [
+        "小研",
+        "小文"
+      ],
+      "key": "for",
+      "required": false
+    },
+    {
+      "id": "short",
+      "kind": "replyLength",
+      "maxChars": 400
+    },
+    {
+      "id": "fast",
+      "kind": "withinBudget"
+    }
+  ]
+}

@@ -55,6 +55,7 @@ import type { SkillGovernance, ToolGateway } from '../integrations.js';
 import { agentCardSchema } from '../protocol.js';
 import { AgentCallbackAuthenticationError, AgentResponseRejected, agentReputationObservationSchema, HttpAgentCardDiscovery, type AgentDirectoryPort, type AgentTransportResponse } from '../agent-gateway.js';
 import { principalResolver as staticPrincipalResolver, type Principal, type PrincipalResolver } from '../security/principal.js';
+import { GOOGLE_CALLBACK_PATH, GOOGLE_START_PATH, type GoogleSignIn } from '../security/google-signin.js';
 import { publicTaskDispatch, type TaskScheduler, type TaskSchedulerAction } from '../task-scheduler.js';
 import { globalBudgetBillingImportSchema, globalBudgetReconcileSchema, type GlobalBudgetLedger, type GlobalBudgetSelector } from '../global-budget.js';
 import { RoomMembershipConflict, RoomMembershipNotFound } from '../room-membership.js';
@@ -62,6 +63,8 @@ import type { KnowledgeEmbeddingMaintenance, KnowledgeEmbeddingReindexStatus, Kn
 import type { ProjectSourceProvider } from '../project-sources.js';
 import { ContentEncryptionUnavailable } from '../content-encryption.js';
 import { withTenantScope } from '../adapters/postgres-pool.js';
+import { InMemoryConversationThreadIndex, type ConversationThreadIndex } from '../adapters/conversation-thread-index.js';
+import type { ChatSummaryService } from '../chat-summaries.js';
 import { FeishuSignatureError, parseEnvelope, type FeishuDebateIngress } from '../feishu-debate-ingress.js';
 import { FeishuChannelIngress, type FeishuLifeRoute } from '../channel-ingress.js';
 import { BotTeam } from '../bot-team.js';
@@ -85,19 +88,21 @@ import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 import type { HostWait, MachineView } from '../docker-sandbox.js';
 import { runMetrics } from './run-metrics.js';
+import { previewServerFactory, type PreviewProxy } from '../preview-proxy.js';
 
-declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<void>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
+declare module 'fastify' { interface FastifyInstance { aeeisBoard?: ChannelBoardService; aeeisBoardScan?: () => Promise<boolean>; aeeisBoardRecover?: (scope: Ownership) => Promise<void>; aeeisRunNotice?: (run: AgentRun) => Promise<boolean>; aeeisSeedThreadIndex?: () => Promise<number>; aeeisRoutines?: RoutineService; aeeisBots?: BotTeam; aeeisPushMessages?: (scope: Ownership) => Promise<PushMessage[]> } interface FastifyRequest { aeeisPrincipal: Principal | null; aeeisDeviceId?: string; aeeisRawBody?: string; aeeisRequestId: string; aeeisDbTenant?: string; aeeisStartedAt?: bigint } }
 
 interface RunComputer {
   observe(runId: string, live: boolean): Promise<MachineView>;
   screenshots(runId: string): Promise<{ name: string; bytes: number; capturedAt: string }[]>;
   screenshot(runId: string, name: string): Promise<Buffer | undefined>;
   sourceArchive(runId: string): Promise<Buffer | undefined>;
-  hostWait(): Promise<HostWait | undefined>;
+  /** Whether the host this Run's machine is on is being waited for. */
+  hostWait(runId: string): Promise<HostWait | undefined>;
   deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
   savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
-interface Options { runComputer?: RunComputer; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
+interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; chatSummaries?: ChatSummaryService; conversationThreads?: ConversationThreadIndex; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -181,7 +186,8 @@ export const DISCUSSION_REPLY_SYSTEM = '你是用户的 Bot。只讨论，不执
 export function buildApp(options: Options) {
   const siteSecret = randomBytes(32);
   const threads = new ThreadService(options.repository, options.engine, options.threadContextBudgetBytes);
-  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots) : undefined;
+  const conversationThreads = options.conversationThreads ?? new InMemoryConversationThreadIndex();
+  const conversations = options.conversationStore ? new ConversationService(options.conversationStore, options.repository, threads, options.brain, options.rsi, options.runMachines, options.ownedBots, conversationThreads) : undefined;
   const conversationService = () => { if (!conversations) throw new Conflict('Conversation routing is not configured'); return conversations; };
   const dialogues = conversations && options.conversationStore && options.domain && options.sessionEvents
     ? new BotDialogueService(options.botDialogues ?? new InMemoryBotDialogueStore(), conversations, options.conversationStore, options.domain, options.sessionEvents, options.ownedBots) : undefined;
@@ -274,7 +280,16 @@ export function buildApp(options: Options) {
     })
     : undefined;
   if (options.token !== undefined && options.principalTokens !== undefined) throw new Error('Configure either local access token or principal tokens, not both');
-  const resolvePrincipal = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
+  if (options.googleSignIn && (options.token !== undefined || options.principalResolver !== undefined)) throw new Error('Google sign-in cannot be combined with a shared access token or OIDC');
+  const googleSignIn = options.googleSignIn;
+  const tokenResolver = options.principalResolver ?? staticPrincipalResolver(options.principalTokens);
+  // With Google sign-in, people use the signed session cookie. Machines (a metrics scraper, scripts) may use their own
+  // principal tokens; a request that sends a bearer is judged by that bearer alone and never falls back to a cookie.
+  const resolvePrincipal: (authorization: string | undefined, cookie: string | undefined) => Principal | undefined | Promise<Principal | undefined> = googleSignIn
+    ? (authorization, cookie) => authorization !== undefined
+      ? (options.principalTokens !== undefined ? tokenResolver(authorization) : undefined)
+      : googleSignIn.session(cookie)?.principal
+    : authorization => tokenResolver(authorization);
   const trustedHosts = new Set((options.trustedHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const publicHosts = new Set((options.publicHosts ?? []).map(host => host.trim().toLowerCase()).filter(Boolean));
   const trustedOrigins = new Set((options.trustedOrigins ?? []).map(origin => origin.trim()).filter(Boolean));
@@ -290,7 +305,8 @@ export function buildApp(options: Options) {
   };
   const httpMetrics: HttpMetrics = { inFlight: 0, routes: new Map() };
   // One 256 KiB base64 PDF plus the existing text material allowance.
-  const app = Fastify({ bodyLimit: 1_500_000, logger: false, requestTimeout: 0, connectionTimeout: 0 });
+  // Preview hosts (p-<id>.<previewDomain>) never reach the app: they are a Bot's pages, not AEEIS.
+  const app = Fastify({ bodyLimit: 1_500_000, logger: false, requestTimeout: 0, connectionTimeout: 0, ...(options.previewProxy ? { serverFactory: previewServerFactory(options.previewProxy) } : {}) });
   // An empty DELETE still carries application/json from older clients. Fastify
   // rejects that before the route runs. Keep the secure parser and accept no body.
   app.removeContentTypeParser('application/json');
@@ -506,7 +522,7 @@ export function buildApp(options: Options) {
     const agentCallbackRoute = route === '/webhooks/agents/:id/callback';
     const shareReadRoute = request.method === 'GET' && (route === '/api/share/:token' || route === '/api/share/:token/debug-bundle');
     const savedSiteRoute = request.method === 'GET' && route === '/saved-site/:runId/:ticket/*';
-    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id')
+    const runLinkNavigation = request.method === 'GET' && (route === '/share/:token' || route === '/runs/:id' || route === '/threads/:id' || (googleSignIn !== undefined && route === GOOGLE_CALLBACK_PATH))
       && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] !== 'iframe';
     if (!isTrustedHost(host, route.startsWith('/internal/'))) return reply.code(403).send({ error: 'Untrusted host' });
     // A saved site runs as an opaque origin, so its own module scripts and styles arrive with Origin: null.
@@ -526,11 +542,11 @@ export function buildApp(options: Options) {
     // healthcheck and Tailscale Serve call them without credentials): they must
     // stay reachable when an access token is configured. Only /api/ routes and
     // /metrics resolve a principal.
-    if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined) && route === '/metrics'))) {
+    if (!agentCallbackRoute && !shareReadRoute && (route.startsWith('/api/') || ((options.principalTokens !== undefined || options.principalResolver !== undefined || options.token !== undefined || googleSignIn !== undefined) && route === '/metrics'))) {
       const tokenFailure = options.token ? localTokenFailure(options.token, request.headers.authorization) : undefined;
       if (tokenFailure) return reply.code(401).send({ error: tokenFailure });
-      const principal = await resolvePrincipal(request.headers.authorization);
-      if (!principal) return reply.code(401).send({ error: 'Principal authentication required' });
+      const principal = await resolvePrincipal(request.headers.authorization, request.headers.cookie);
+      if (!principal) return reply.code(401).send({ error: googleSignIn ? 'Sign-in required' : 'Principal authentication required' });
       request.aeeisPrincipal = principal;
       const suppliedDeviceId = request.headers['x-aeeis-device-id'];
       if (suppliedDeviceId !== undefined) {
@@ -547,7 +563,7 @@ export function buildApp(options: Options) {
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
       if ((route === '/api/bot-dialogues' || route.includes('/dialogue') || route.endsWith('/deliver')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
-      if ((route === '/api/bots' || route === '/api/bots/:id') && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
+      if ((route === '/api/bots' || route === '/api/bots/:id' || route.startsWith('/api/chats')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       // Installation-wide operator views read as the system; every other principal reads as its tenant.
       if (!operatorRoute) request.aeeisDbTenant = principal.tenantId;
@@ -659,6 +675,27 @@ export function buildApp(options: Options) {
     }
     return reply.code(202).send({ accepted: true });
   });
+  // Sign-in state for the page. Public: it says only whether sign-in is on and who this browser is signed in as.
+  app.get('/auth/session', async request => {
+    if (!googleSignIn) return { mode: 'token' };
+    const session = googleSignIn.session(request.headers.cookie);
+    return session ? { mode: 'google', signedIn: true, email: session.email } : { mode: 'google', signedIn: false };
+  });
+  if (googleSignIn) {
+    app.get(GOOGLE_START_PATH, async (request, reply) => {
+      const { location, cookie } = googleSignIn.start(typeof (request.query as { return?: unknown }).return === 'string' ? (request.query as { return: string }).return : undefined);
+      return reply.header('set-cookie', cookie).redirect(location, 302);
+    });
+    app.get(GOOGLE_CALLBACK_PATH, async (request, reply) => {
+      const result = await googleSignIn.callback(request.query as Record<string, unknown>, request.headers.cookie);
+      reply.header('set-cookie', result.cookies);
+      // Not a redirect: the request that follows a redirect out of Google still counts as cross-site and would be
+      // refused. A page of our own moves on, so the next request comes from this site.
+      if (result.ok) return reply.type('text/html; charset=utf-8').send(signedInPage(result.location));
+      return reply.code(result.status).type('text/html; charset=utf-8').send(signInProblemPage(result.message));
+    });
+    app.post('/auth/signout', async (_request, reply) => reply.header('set-cookie', googleSignIn.signOutCookie()).code(204).send());
+  }
   app.get('/health', async () => ({ status: 'ok', service: 'aeeis-agent', protocol: 'aeeis-health/1' }));
   app.get('/readyz', async (_request, reply) => {
     const readiness = await readinessSnapshot();
@@ -2235,6 +2272,13 @@ export function buildApp(options: Options) {
   });
 
   app.get('/api/conversations', async request => conversationService().list(conversationScope(request)));
+  // The 消息 list: one stored summary per chat, never whole conversations. Unread is per person.
+  const chatSummaries = () => { if (!options.chatSummaries) throw new Conflict('Chat summaries are not configured'); return options.chatSummaries; };
+  app.get('/api/chats', async request => ({ items: await chatSummaries().list(conversationScope(request), principalOf(request).id) }));
+  app.post<{ Params: { id: string } }>('/api/chats/:id/read', async request => {
+    const body = z.object({ count: z.number().int().nonnegative().max(1_000_000) }).strict().parse(request.body);
+    return { unread: await chatSummaries().markRead(request.params.id, body.count, conversationScope(request), principalOf(request).id) };
+  });
   app.post('/api/conversations', async (request, reply) => reply.code(201).send(await conversationService().create(request.body, conversationScope(request), principalOf(request))));
   app.get<{ Params: { id: string } }>('/api/conversations/:id', async request => withTaskBoard(await conversationService().get(request.params.id, conversationScope(request), principalOf(request), messagePage(request.query).before), conversationScope(request)));
   app.post<{ Params: { id: string } }>('/api/conversations/:id/focus', async request => conversationService().focus(request.params.id, request.body, conversationScope(request), principalOf(request)));
@@ -2480,7 +2524,7 @@ export function buildApp(options: Options) {
     if (!options.runComputer) return reply.code(404).send({ error: 'This AEEIS has no Run machines' });
     // Each look reaches the host, and on some hosts that counts as activity, so only working Runs are looked at.
     const live = ['queued', 'planning', 'running', 'reviewing', 'needs_input', 'waiting_external', 'paused'].includes(run.status);
-    const [machine, screenshots, hostWait, delivery] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait(), options.runComputer.deliverables?.(run.id)]);
+    const [machine, screenshots, hostWait, delivery] = await Promise.all([options.runComputer.observe(run.id, live), options.runComputer.screenshots(run.id), options.runComputer.hostWait(run.id), options.runComputer.deliverables?.(run.id)]);
     return { status: run.status, machine, screenshots, ...(hostWait ? { hostWait } : {}), ...(delivery ? { delivery } : {}) };
   });
   // The copy of the site saved when the machine was reclaimed. A browser tab cannot send the owner's token, so the
@@ -2617,12 +2661,19 @@ export function buildApp(options: Options) {
   if (routines) app.decorate('aeeisRoutines', routines);
   app.decorate('aeeisBoard', channelBoard);
   let boardConversationAfter: string | undefined;
+  /** One page of the conversation relation scan; true when it finished a whole pass. */
   app.decorate('aeeisBoardScan', async () => {
     const page = await options.conversationStore?.scanPage?.(boardConversationAfter,25);
-    if (!page) return;
+    if (!page) return true;
     for (const current of page.items) await registerTaskRelations(current.id,{ owner: current.owner,tenantId: current.tenantId });
     boardConversationAfter = page.next;
+    return page.next === undefined;
   });
+  if (conversations) {
+    // The Run notifier and its one-time fill run outside requests, as the system.
+    app.decorate('aeeisRunNotice', (run: AgentRun) => conversations.noticeRun(run));
+    app.decorate('aeeisSeedThreadIndex', () => conversations.seedThreadIndex());
+  }
   app.decorate('aeeisBoardRecover', async (scope: Ownership) => {
     if (!dialogues || !channelBoard) return;
     for (const binding of await dialogues.store.list(scope)) if (binding.phase === 'ready') await channelBoard.board(binding.roomId,scope.owner,scope.tenantId);
@@ -2740,4 +2791,18 @@ function countObject(values: string[]): Record<string, number> {
 function escapeMetricLabel(value: string): string { return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n'); }
 function classificationRank(value: 'public' | 'internal' | 'confidential' | 'private'): number {
   return { public: 0, internal: 1, confidential: 2, private: 3 }[value];
+}
+
+/** The page after a successful sign-in: it goes straight on to where the person started. */
+function signedInPage(location: string): string {
+  const escaped = escapeHtml(location);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escaped}"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AEEIS 登录</title></head><body><p>已登录。<a href="${escaped}">继续</a></p></body></html>`;
+}
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+}
+/** A plain page for a sign-in that did not finish: what happened, and a way to try again. */
+function signInProblemPage(message: string): string {
+  const escaped = escapeHtml(message);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AEEIS 登录</title></head><body><h1>没有登录成功</h1><p>${escaped}</p><p><a href="${GOOGLE_START_PATH}">重新用 Google 登录</a> · <a href="/">返回</a></p></body></html>`;
 }

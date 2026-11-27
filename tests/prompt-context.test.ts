@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS } from '../src/runtime/prompt-context.js';
+import { boundedExecutorInput, boundedObservations, EXECUTOR_PROMPT_CHARS, OBSERVATION_PROMPT_CHARS, webEvidenceDigest } from '../src/runtime/prompt-context.js';
 import { digest } from '../src/runtime/engine.js';
 import { decisionSchema } from '../src/runtime/contracts.js';
 import { queryCsvSource } from '../src/runtime/csv-query.js';
@@ -65,14 +65,14 @@ describe('executor context budget', () => {
     expect(omitted.count).toBeGreaterThan(0);
     expect(omitted.contentHash).toBe(digest(observations.slice(0, omitted.count)));
     expect(projected.at(-1)).toEqual(observations.at(-1));
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
   });
   it('compacts old large observations to references and exact hashes while retaining the latest page', () => {
     const observations = Array.from({ length: 5 }, (_, i) => ({ tool: 'sources.read', argument: 'source.csv', result: { id: 'source.csv', content: `page ${i} ` + 'x'.repeat(3000) } }));
     const projected = boundedObservations(observations, () => ['source.csv']);
     expect(projected.at(-1)).toEqual(observations.at(-1));
     expect(projected[0]!.result).toMatchObject({ reference: 'observations/0', contentHash: digest(observations[0]!.result), evidenceRefs: ['source.csv'] });
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
     expect(observations[0]!.result.content).toHaveLength(3007);
   });
 
@@ -90,7 +90,7 @@ describe('executor context budget', () => {
     expect(projected.at(-1)!.result).toMatchObject({ schemaVersion: 'context-reference/1', previewTruncated: true, page: result.page, sourceContentHash: result.sourceContentHash });
     expect(JSON.stringify(projected.at(-1)!.result).length).toBeLessThanOrEqual(6000);
     expect(projected[0]!.result).toMatchObject({ page: result.page, contentHash: digest(result) });
-    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
   });
 
   it.each([
@@ -120,6 +120,78 @@ describe('executor context budget', () => {
     expect((projected.dependencies as any[])[0]).toMatchObject({ id: 'artifact_1', taskId: 'inspect', evidenceRefs: ['source.csv'], schemaVersion: 'context-reference/1' });
     expect((projected.dependencies as any[])[0].preview.length).toBeLessThanOrEqual(2000);
     expect(input.dependencies[0]!.content).toHaveLength(80_000);
+  });
+
+  it('keeps every web search citable after older results are compacted', () => {
+    // A search observation as the engine stores it: the tool's structured output plus its receipt.
+    const search = (n: number) => ({ tool: 'web-search', argument: JSON.stringify({ input: `query ${n}` }), result: {
+      output: { schemaVersion: 'toolkit.web-search.v1', query: `query ${n}`, depth: 'basic', usage: { credits: 1 },
+        results: Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `Title ${n}-${i}`, url: `https://news.example/${n}/${i}`,
+          snippet: `Snippet ${n}-${i} ` + 'x'.repeat(600), publishedAt: '2026-11-25' })) },
+      outputRefs: [`toolkit-receipt:p${n}`], receiptId: `receipt_${n}` } });
+    const observations = Array.from({ length: 5 }, (_, n) => search(n));
+    const projected = boundedObservations(observations, () => []);
+    expect(projected).toHaveLength(5);
+    expect(JSON.stringify(projected).length).toBeLessThanOrEqual(OBSERVATION_PROMPT_CHARS);
+    for (const [n, observation] of projected.entries()) {
+      const result = observation.result as any;
+      expect(result.schemaVersion).toBe('context-reference/1');
+      expect(result.receiptId).toBe(`receipt_${n}`);
+      expect(result.webResults.query).toBe(`query ${n}`);
+      expect(result.webResults.totalResults).toBe(10);
+      expect(result.webResults.results).toHaveLength(8);
+      expect(result.webResults.results[0]).toEqual({ rank: 1, title: `Title ${n}-0`, url: `https://news.example/${n}/0`, snippet: (`Snippet ${n}-0 ` + 'x'.repeat(600)).slice(0, 300), publishedAt: '2026-11-25' });
+    }
+    // The executor-wide projection keeps the digests too when the prompt is over budget, here
+    // because of a large dependency that it can shrink instead.
+    const input = { fixed: 'x'.repeat(60_000), observations: projected, dependencies: [{ id: 'artifact_1', taskId: 'scan', content: 'y'.repeat(40_000), evidenceRefs: [] }] };
+    expect(JSON.stringify(input).length).toBeGreaterThan(EXECUTOR_PROMPT_CHARS);
+    const overall = boundedExecutorInput('system', input);
+    expect(JSON.stringify(overall).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+    expect((overall.dependencies as any[])[0].schemaVersion).toBe('context-reference/1');
+    expect((overall.observations as any[]).every((observation, n) => observation.result.webResults?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+  });
+
+  it('keeps web digests while other evidence can shrink, and drops the oldest only as a last resort', () => {
+    const search = (n: number) => ({ tool: 'web-search', argument: `query ${n}`, result: { output: { query: `query ${n}`,
+      results: Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `T${n}-${i}`, url: `https://news.example/${n}/${i}`, snippet: 's'.repeat(600) })) }, receiptId: `receipt_${n}` } });
+    // Raw (not yet projected) observations: the second pass must still recognize and keep their digests.
+    const observations = Array.from({ length: 5 }, (_, n) => search(n));
+    const kept = boundedExecutorInput('system', { fixed: 'x'.repeat(70_000), observations }).observations as any[];
+    expect(kept.some(observation => observation.result.schemaVersion === 'context-reference/1')).toBe(true);
+    // Each search is either untouched or compacted to its digest; none is a bare hash.
+    expect(kept.every((observation, n) => (observation.result.webResults ?? observation.result.output)?.results[0]?.url === `https://news.example/${n}/0`)).toBe(true);
+    // Nothing else left to shrink: the oldest digests go first, the call still fits, and the newest stays citable.
+    const tight = boundedExecutorInput('system', { fixed: 'x'.repeat(88_000), observations: boundedObservations(observations, () => []) });
+    expect(JSON.stringify(tight).length + 6).toBeLessThanOrEqual(EXECUTOR_PROMPT_CHARS);
+    const result = (tight.observations as any[]).map(observation => observation.result);
+    expect(result[0]).toMatchObject({ schemaVersion: 'context-reference/1', receiptId: 'receipt_0' });
+    expect(result[0].webResults).toBeUndefined();
+    expect(result.at(-1).webResults.results[0].url).toBe('https://news.example/4/0');
+  });
+
+  it('digests a fetched page to its link, title and a bounded excerpt', () => {
+    const page = { schemaVersion: 'toolkit.web-fetch.v1', url: 'https://a.example/p', finalUrl: 'https://a.example/p', title: 'Pricing', text: 't'.repeat(5000), markdown: 'm'.repeat(6000), truncated: false };
+    expect(webEvidenceDigest({ output: page, receiptId: 'r' })).toEqual({ webPage: { url: page.url, finalUrl: page.finalUrl, title: 'Pricing', excerpt: 't'.repeat(2000), excerptTruncated: true } });
+    expect(webEvidenceDigest({ output: { text: 'no link' } })).toBeUndefined();
+    expect(webEvidenceDigest({ content: 'source page' })).toBeUndefined();
+  });
+
+  it('gives the newest large search its digest without a raw preview, and leaves source reads to their own metadata', () => {
+    const results = Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, title: `T${i}`, url: `https://news.example/${i}`, snippet: 's'.repeat(600) }));
+    const latest = boundedObservations([{ tool: 'web-search', argument: 'q', result: { output: { query: 'q', results }, receiptId: 'r' } }], () => []).at(-1)!.result as any;
+    expect(latest.webResults.results[0].url).toBe('https://news.example/0');
+    expect(latest.preview).toBeUndefined();
+    // An uploaded JSON shaped like a search export is still a source read: it keeps its page and continuation.
+    const page = { mode: 'characters', characterOffset: 0, nextRead: { argument: 'source.json', characterOffset: 4000 } };
+    const read = { tool: 'sources.jsonRead', argument: 'source.json', result: { id: 'source.json', sourceContentHash: 'a'.repeat(64), page, results, truncated: true } };
+    const projected = boundedObservations([read, { tool: 'sources.read', argument: 'other', result: { content: 'x' } }], () => ['source.json'])[0]!.result as any;
+    expect(projected).toMatchObject({ id: 'source.json', page, sourceContentHash: 'a'.repeat(64) });
+    expect(projected.webResults).toBeUndefined();
+    // An observation stored without a tool name is still projected, not a crash.
+    const untagged = [{ argument: 'x', result: { content: 'y'.repeat(3000) } }, { tool: 'sources.read', argument: 'z', result: { content: 'z' } }] as any;
+    expect(() => boundedObservations(untagged, () => [])).not.toThrow();
+    expect(() => boundedExecutorInput('system', { fixed: 'x'.repeat(94_000), observations: untagged })).not.toThrow();
   });
 
   it('rejects an oversized fixed core before invoking a provider', () => {

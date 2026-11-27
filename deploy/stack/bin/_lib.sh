@@ -83,6 +83,12 @@ fi
 [[ "${AEEIS_STACK_SMOKE:-0}" == 1 ]] && compose_files+=(-f "$STACK_DIR/compose.smoke.yml")
 env_args=(--env-file "$ENV_FILE")
 [[ -r "$CURRENT_FILE" ]] && env_args+=(--env-file "$CURRENT_FILE")
+# The API reads its secrets directory only at startup, and compose does not look inside a bind mount. The API carries
+# this fingerprint (names, sizes, modes, times; never contents) as a label, so a changed file restarts it on `up`.
+secrets_dir="${AEEIS_SECRETS_DIR:-./secrets}"
+[[ "$secrets_dir" == /* ]] || secrets_dir="$STACK_DIR/${secrets_dir#./}"
+AEEIS_SECRETS_FINGERPRINT="$(python3 -I "$STACK_DIR/bin/_secrets-fingerprint.py" "$secrets_dir" 2>/dev/null)" || AEEIS_SECRETS_FINGERPRINT=unavailable
+export AEEIS_SECRETS_FINGERPRINT
 dc() {
   local files=("${compose_files[@]}")
   # Omit the environment override when metadata is unavailable, preserving
@@ -102,12 +108,12 @@ dc_run_supports_pull() {
 temporal_cli() { dc exec -T temporal temporal --address temporal:7233 --namespace "${TEMPORAL_NAMESPACE:-aeeis}" "$@"; }
 
 # Probe a URL from inside the stack's shared network namespace (via the api
-# container, which has node). The bearer token is passed by name (-e VAR), so
-# it never appears in argv. Each request is bounded by an abort timeout.
+# container, which has node). Only readiness URLs are probed, which need no
+# credentials. Each request is bounded by an abort timeout.
 wait_http() { # url predicate-json-expr label timeout_s
   local url="$1" expr="$2" label="$3" deadline=$(( $(date +%s) + ${4:-180} ))
   while (( $(date +%s) < deadline )); do
-    if dc exec -T -e AEEIS_ACCESS_TOKEN api node -e "fetch('$url',{headers:{authorization:'Bearer '+(process.env.AEEIS_ACCESS_TOKEN||'')},signal:AbortSignal.timeout(5000)}).then(r=>r.json()).then(j=>process.exit(($expr)?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+    if dc exec -T api node -e "fetch('$url',{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).then(j=>process.exit(($expr)?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
       echo "$label ok"; return 0
     fi
     sleep 2

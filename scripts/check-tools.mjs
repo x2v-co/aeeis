@@ -34,8 +34,10 @@ try {
   }
   if (local) {
     console.log(`executor: ${local.executorTransport() ? 'configured' : 'none'}`);
-    // Reported, not enforced: the server starts without its sandbox host, which may simply be paused.
-    const health = await local.health({ probe: true });
-    console.log(`sandbox host: ${health.ready ? 'reachable' : 'NOT REACHABLE (warning only)'} - ${health.detail}`);
+    // Reported, not enforced: the server starts without its sandbox hosts, which may simply be paused.
+    for (const [name, sandbox] of local.hosts()) {
+      const health = await sandbox.health({ probe: true });
+      console.log(`sandbox host: ${health.ready ? 'reachable' : 'NOT REACHABLE (warning only)'} - ${local.config.hosts ? `${name}: ` : ''}${health.detail}`);
+    }
   }
 } finally { await local?.close(); }

@@ -80,6 +80,81 @@ describe('ToolkitRegistryGateway', () => {
     expect(isRecoverableToolFailure(toolFailureDetails(result.output, result.receipt.errorCode))).toBe(example.recoverable);
   });
 
+  it('claims the capabilities the pinned tool declares on completed, failed and unknown receipts', async () => {
+    const replies = [
+      { status: 200, body: { output: { text: 'ok' }, receipt: { id: 'r-ok' } } },
+      { status: 200, body: { error: '网页抓取失败（HTTP 404）', receipt: { id: 'r-failed' } } },
+      { status: 403, body: { error: 'Forbidden' } },
+    ];
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/registry/manifest') { response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [] })); return; }
+      const reply = replies.shift()!;
+      response.statusCode = reply.status; response.end(JSON.stringify(reply.body));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [
+      { id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, capabilities: ['read', 'network'] },
+      { id: 'legacy', version: '1', endpoint: `${origin}/legacy` },
+    ] });
+    const call = (toolId: string, key: string) => gateway.invoke({ toolId, toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: `run:test:${toolId}`, idempotencyKey: key, timeoutMs: 5000 });
+    expect((await call('web-fetch', 'a')).receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
+    expect((await call('web-fetch', 'b')).receipt).toMatchObject({ status: 'failed', capabilitiesUsed: ['read', 'network'] });
+    expect((await call('web-fetch', 'c')).receipt).toMatchObject({ status: 'unknown', capabilitiesUsed: ['read', 'network'] });
+    // A pinned tool without declared capabilities still counts as execute; a tool that never resolved used nothing.
+    replies.push({ status: 200, body: { output: 'ok', receipt: { id: 'r-legacy' } } });
+    expect((await call('legacy', 'd')).receipt.capabilitiesUsed).toEqual(['execute']);
+    expect((await call('missing', 'e')).receipt).toMatchObject({ status: 'unknown', capabilitiesUsed: [] });
+  });
+
+  it('keeps the pinned capabilities and endpoint when the Registry also lists the same tool and version', async () => {
+    const calls: string[] = [];
+    let listsFetch = true;
+    const server = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      const port = (server.address() as { port: number }).port;
+      calls.push(request.url ?? '');
+      if (request.url === '/registry/manifest') {
+        response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.index.v1', tools: [
+          ...(listsFetch ? [{ slug: 'web-fetch', version: 1, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-fetch/manifest` }] : []),
+          { slug: 'web-search', version: 2, manifestUrl: `http://127.0.0.1:${port}/registry/tools/web-search/manifest` },
+        ] }));
+        return;
+      }
+      const slug = /\/registry\/tools\/([^/]+)\/manifest/.exec(request.url ?? '')?.[1];
+      if (slug) { response.end(JSON.stringify({ schemaVersion: 'toolkit.registry.tool.v1', slug, version: slug === 'web-fetch' ? 1 : 2, description: `${slug} from the Registry`, inputSchema: { type: 'object', properties: { input: { type: 'string' }, maxChars: { type: 'string', enum: ['4000', '12000'] } } }, endpoints: { rest: `http://127.0.0.1:${port}/registry-${slug}` } })); return; }
+      response.end(JSON.stringify({ output: { url: 'https://example.com', text: 'ok' }, receipt: { id: 'r-pinned' } }));
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const gateway = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, capabilities: ['read', 'network'] }] });
+    const tools = await gateway.listTools();
+    // The pin leaves out its description and schema, so the Registry's show: the model sees maxChars.
+    expect(tools.filter(tool => tool.id === 'web-fetch')).toEqual([expect.objectContaining({ version: '1', capabilities: ['read', 'network'],
+      description: 'web-fetch from the Registry', inputSchema: expect.objectContaining({ properties: expect.objectContaining({ maxChars: expect.anything() }) }) })]);
+    // A different version from the Registry is still its own tool, and still execute.
+    expect(tools.find(tool => tool.id === 'web-search')).toMatchObject({ version: '2', capabilities: ['execute'] });
+    const result = await gateway.invoke({ toolId: 'web-fetch', toolVersion: '1', taskId: 'task-1', purpose: 'fetch page', input: 'https://example.com', capabilityGrant: 'run:test:web-fetch', idempotencyKey: 'pinned', timeoutMs: 5000 });
+    expect(result.receipt).toMatchObject({ status: 'completed', capabilitiesUsed: ['read', 'network'] });
+    expect(calls.at(-1)).toBe('/fetch');
+    // Health names the pin that hides a Registry tool, and only that one.
+    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools); pinned entries take precedence over the Registry for web-fetch@1');
+    // Once the Registry stops listing that version, the pin shows only what it declares itself.
+    listsFetch = false;
+    const unlisted = (await gateway.listTools()).find(tool => tool.id === 'web-fetch');
+    expect(unlisted).toMatchObject({ capabilities: ['read', 'network'] });
+    expect(unlisted?.inputSchema).toEqual({});
+    expect(unlisted).not.toHaveProperty('description');
+    expect((await gateway.health()).detail).toBe('Toolkit Registry reachable (2 tools)');
+    listsFetch = true;
+    // What the pin does declare wins over the Registry.
+    const own = new ToolkitRegistryGateway(`${origin}/registry`, 'tk_test', { additionalTools: [{ id: 'web-fetch', version: '1', endpoint: `${origin}/fetch`, description: 'pinned fetch', inputSchema: { type: 'object' } }] });
+    expect((await own.listTools()).find(tool => tool.id === 'web-fetch')).toMatchObject({ description: 'pinned fetch', inputSchema: { type: 'object' } });
+  });
+
   it('keeps non-2xx responses without a provider receipt unknown', async () => {
     const server = createServer((_request, response) => {
       response.statusCode = 403;

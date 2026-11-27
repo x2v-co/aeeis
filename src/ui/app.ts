@@ -3,6 +3,7 @@ import { STARTER_BOTS, starterBot } from '../starter-bots.js';
 import type { PlanComparison } from '../runtime/graphs.js';
 import { planningDecision, planningRefusal } from '../runtime/planning-shape.js';
 import { conversationTaskOrder, type ConversationMessageSource } from '../conversations.js';
+import { answerArtifact, readableAnswer } from '../readable-answer.js';
 import { planReview } from './plan-review.js';
 import { artifactDownloadLink, releaseArtifactDownloads, renderArtifactMarkdown } from './artifact-markdown.js';
 import { isFillablePdfArtifact, renderFillablePdf } from './fillable-pdf.js';
@@ -94,7 +95,7 @@ type ProjectPulseArtifact = {
   unknowns: ProjectPulseItem[];
 };
 interface ConversationTaskView { column?: string; autoColumn?: string; id: string; threadId: string; title: string; createdAt?: string; latestRunId?: string; runId?: string; pendingMessageId?: string; priority?: number; status: string; memory?: { originals: number; activeSummaries: number }; pendingApproval?: { planVersion: number; planHash: string; summary: string }; pendingQuestion?: { text: string }; takenOver?: { at: string }; pendingAction?: { kind: 'tool' | 'agent'; ref: string; reason: string; idempotencyKey: string; step?: string }; putDown?: true; handoff?: TaskHandoffView; machine?: { state: 'absent' | 'present' | 'released' | 'unknown'; ready: boolean }; execution?: { steps: Array<{ title: string; state: 'done' | 'current' | 'waiting' }>; evidence?: string[] }; failure?: string }
-interface ConversationReply { text: string; artifactId: string; truncated?: true }
+interface ConversationReply { text: string; artifactId: string; truncated?: true; partial?: true; pullRequest?: { number: number; url: string } }
 interface TaskHandoffView { offerId: string; from: string; to: string; toName: string; note?: string; state: 'suggested' | 'negotiating' | 'accepted' | 'declined' | 'blocked'; at: string; reason?: string; receiver?: { conversationId: string; taskId: string } }
 /** One line for a task's handoff to another Bot, in the owner's words. */
 function handoffLine(handoff: TaskHandoffView): string {
@@ -119,6 +120,8 @@ interface ConversationMessageView {
 interface RoutineView {
   id: string; agentId: string; name: string; prompt: string; executionReview: 'required' | 'auto' | 'yolo'; status: 'active' | 'paused'; revision: number;
   trigger: { kind: 'schedule'; calendar: { frequency: 'daily' | 'weekly' | 'monthly'; timeZone: string; time: string; daysOfWeek?: number[]; dayOfMonth?: number } } | { kind: 'webhook' } | { kind: 'manual' };
+  /** Other run options (privacy, budgets, agents) the form does not show are kept as they are on edit. */
+  runOptions?: { maxModelCalls?: number; allowedTools?: string[]; [option: string]: unknown };
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
@@ -235,6 +238,8 @@ let routineState: { agentId: string; items: RoutineView[] } | undefined;
 let routineLoading = '';
 /** A webhook secret is shown once, right after it is made. */
 let routineSecret: { routineId: string; secret: string } | undefined;
+/** The routine the form is editing; the form adds a new one when unset. */
+let routineEditing: RoutineView | undefined;
 let runtimeModel = '';
 let taskModelBound = '';
 let evolutionConfigured = false;
@@ -817,8 +822,16 @@ setAttentionInboxOpen(false);
   }
 });
 function showEntry(): void {
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // With chats on, the entry is AEEIS's own conversation: open it, so the page does not follow the previous Bot's
+  // chat straight back to that Bot. openLifeThread selects AEEIS once its conversation is in. It cannot start while
+  // a message is still being sent; say so rather than half-switching to the entry under the Bot's chat.
+  if (conversationEnabled && (conversationBusy || conversationAttempt || lifeOpening.has('aeeis'))) {
+    // Only a pending message is "sending"; switching Bots, task actions and the like are just unfinished.
+    message(conversationAttempt ? '上一条消息还在发送，发完再回到 AEEIS。' : '上一个操作还没做完，做完再回到 AEEIS。');
+    return;
+  }
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   entryEpoch += 1;
   leaveGroup();
   stopRunEventStream();
@@ -942,7 +955,7 @@ $('action-policy-add')?.addEventListener('submit', event => {
 });
 document.querySelector<HTMLAnchorElement>('nav.settings-index a[href="#settings-actions"]')?.addEventListener('click', () => { void loadActionPolicy(); });
 interface WorkGrantView {
-  grantId: string; title: string; tools: string[]; agents: string[]; expiresAt: string; runCount: number;
+  grantId: string; title: string; tools: string[]; agents: string[]; connectors?: string[]; expiresAt: string; runCount: number;
   state: 'active' | 'revoked' | 'expired' | 'exhausted'; remaining: { tokens?: number; moneyUsd?: number };
 }
 const WORK_GRANT_STATE: Record<WorkGrantView['state'], string> = { active: '有效', revoked: '已撤销', expired: '已过期', exhausted: '预算用完' };
@@ -957,7 +970,7 @@ async function loadWorkGrants(): Promise<void> {
 }
 function workGrantSummary(grant: WorkGrantView): string {
   const left = [grant.remaining.tokens === undefined ? '' : `剩 ${grant.remaining.tokens.toLocaleString()} tokens`, grant.remaining.moneyUsd === undefined ? '' : `剩 $${grant.remaining.moneyUsd}`].filter(Boolean).join('、');
-  const scope = [grant.tools.length ? `工具 ${grant.tools.join('、')}` : '', grant.agents.length ? `代理 ${grant.agents.join('、')}` : ''].filter(Boolean).join(' · ');
+  const scope = [grant.tools.length ? `工具 ${grant.tools.join('、')}` : '', grant.agents.length ? `代理 ${grant.agents.join('、')}` : '', grant.connectors?.length ? `不用问就能推送到 ${grant.connectors.map(item => item.replace(/^repo-push:/, '')).join('、')} 的 bot/ 分支` : ''].filter(Boolean).join(' · ');
   return `${WORK_GRANT_STATE[grant.state]} · ${scope} · ${left} · ${grant.runCount} 件 Run · 到 ${new Date(grant.expiresAt).toLocaleString()}`;
 }
 function renderWorkGrants(): void {
@@ -1015,7 +1028,7 @@ $('work-grant-add')?.addEventListener('submit', event => {
   const num = (fieldId: string) => { const value = $<HTMLInputElement>(fieldId)?.value.trim(); return value ? Number(value) : undefined; };
   const perRun = { ...(num('work-grant-run-tokens') === undefined ? {} : { tokens: num('work-grant-run-tokens') }), ...(num('work-grant-run-usd') === undefined ? {} : { moneyUsd: num('work-grant-run-usd') }) };
   const total = { ...(num('work-grant-total-tokens') === undefined ? {} : { tokens: num('work-grant-total-tokens') }), ...(num('work-grant-total-usd') === undefined ? {} : { moneyUsd: num('work-grant-total-usd') }) };
-  const body = { title: $<HTMLInputElement>('work-grant-title')?.value.trim() ?? '', tools: ids('work-grant-tools'), agents: ids('work-grant-agents'), budget: { perRun, total }, durationHours: Number($<HTMLSelectElement>('work-grant-hours')?.value ?? 24) };
+  const body = { title: $<HTMLInputElement>('work-grant-title')?.value.trim() ?? '', tools: ids('work-grant-tools'), agents: ids('work-grant-agents'), connectors: ids('work-grant-repos').map(name => `repo-push:${name}`), budget: { perRun, total }, durationHours: Number($<HTMLSelectElement>('work-grant-hours')?.value ?? 24) };
   void api<WorkGrantView>('/work-grants', body).then(async grant => {
     if (note) note.textContent = `已创建「${grant.title}」。在发送框的「权限」里选它即可。`;
     ($('work-grant-add') as HTMLFormElement).reset();
@@ -1266,6 +1279,8 @@ function clearToken(): void {
 }
 class ApiError extends Error { constructor(message: string, readonly status: number, readonly retrySameRequest = false) { super(message); } }
 async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', idempotencyKey?: string): Promise<T> {
+  // Nothing is asked of the server before this page knows how it signs in, or while the sign-in screen is up.
+  if (!readOnlyShare && (!(await signInChecked()) || signInRequired())) throw new ApiError('Sign-in required', 401);
   if (readOnlyShare && (path !== `/share/${shareToken}` || body !== undefined || (method && method !== 'GET'))) throw new Error('Shared runs are read-only');
   const token = readOnlyShare ? null : getToken();
   const response = await fetch(`/api${path}`, {
@@ -1289,14 +1304,48 @@ async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'P
   return (value ?? {}) as T;
 }
 let authRequired = false;
+/** "google" when the server signs people in with Google (no access token); "token" otherwise. */
+let signInMode: 'token' | 'google' = 'token';
+function signInRequired(): boolean { return document.body.dataset.signin === 'required'; }
+let signInCheck: Promise<boolean> | undefined;
+/** Asked once per page load; every API call waits for it. */
+function signInChecked(): Promise<boolean> { return signInCheck ??= prepareSignIn(); }
+function showSignInGate(): void {
+  const gate = document.getElementById('signin-gate');
+  if (!gate) return;
+  const back = `${location.pathname}${location.search}${location.hash}`;
+  $<HTMLAnchorElement>('signin-google').href = `/auth/google/start?return=${encodeURIComponent(back)}`;
+  gate.hidden = false;
+  document.body.dataset.signin = 'required';
+}
+/** Ask the server how this page signs in. With Google sign-in, show who is signed in, or the sign-in screen;
+ * returns whether the page may go on to load. A server without /auth/session uses the access token. */
+async function prepareSignIn(): Promise<boolean> {
+  let session: { mode?: string; signedIn?: boolean; email?: string } | undefined;
+  try {
+    const response = await fetch('/auth/session', { headers: { accept: 'application/json' } });
+    session = response.ok ? JSON.parse(await response.text()) as typeof session : undefined;
+  } catch { session = undefined; }
+  if (session?.mode !== 'google') return true;
+  signInMode = 'google';
+  clearToken();
+  $('access-panel').hidden = true;
+  $('signin-panel').hidden = false;
+  if (!session.signedIn) { showSignInGate(); return false; }
+  $('signin-email').textContent = session.email ?? '';
+  return true;
+}
 const SERVER_ERROR_LABELS: Record<string, string> = {
   'Local access token required': '需要访问令牌：点击“输入令牌”，填写本地访问令牌后连接。',
   'Invalid local access token': '访问令牌无效，请重新输入。',
   'Shared runs are read-only': '只读分享页不能执行操作。',
+  'Sign-in required': '需要登录：请用 Google 重新登录。',
 };
 function errorMessage(error: unknown): string {
   const text = error instanceof Error && error.message ? error.message : String(error || '运行服务暂时不可用');
   if (/access token/i.test(text)) { authRequired = true; syncDetailsToggleLabel(); }
+  // An expired or removed Google session: show the sign-in screen again.
+  if (text === 'Sign-in required' && signInMode === 'google') showSignInGate();
   return SERVER_ERROR_LABELS[text] ?? text;
 }
 function formatTime(value: string | number | Date): string {
@@ -1532,6 +1581,14 @@ async function runRoutineNow(id: string, name: string): Promise<void> {
   const result = await api<{ status: string; runId?: string }>(`/routines/${encodeURIComponent(id)}/run`, {});
   message(result.status === 'started' ? `已让它按「${name}」做一次。` : result.status === 'pending' ? `「${name}」排上了，稍后开始。` : `「${name}」没能开始，稍后会再试。`);
   await refresh();
+  reloadRoutines();
+}
+/** Re-read the open person's routines: runs change their revision and next time behind the page's back. */
+function reloadRoutines(): void {
+  const agentId = routinePerson();
+  const section = $<HTMLDetailsElement>('routines');
+  if (!agentId || !routinesConfigured || !section || section.hidden || routineLoading === agentId) return;
+  void loadRoutines(agentId);
 }
 function routineWebhookUrl(id: string): string { return `${location.origin}/webhooks/routines/${encodeURIComponent(id)}`; }
 function syncRoutines(agentId: string): void {
@@ -1539,6 +1596,7 @@ function syncRoutines(agentId: string): void {
   if (!section) return;
   section.hidden = !agentId || !routinesConfigured;
   if (section.hidden) return;
+  if (routineEditing && routineEditing.agentId !== agentId) endRoutineEdit();
   if (routineState?.agentId !== agentId && routineLoading !== agentId) void loadRoutines(agentId);
   renderRoutines();
 }
@@ -1566,12 +1624,15 @@ function renderRoutines(): void {
     const timing = routine.status === 'paused' ? '已暂停'
       : routine.pendingDueAt ? `上一件还没做完，${formatTime(routine.pendingDueAt)} 那次等它做完再补`
       : routine.nextDueAt ? `下次 ${formatTime(routine.nextDueAt)}` : routine.trigger.kind === 'manual' ? '等你叫它' : routine.webhookEnabled ? '等 Webhook' : 'Webhook 已关闭';
-    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]} · ${timing}`), element('span', routine.prompt));
+    const cap = routine.runOptions?.maxModelCalls ? ` · 每次最多 ${routine.runOptions.maxModelCalls} 次模型调用` : '';
+    const tools = routine.runOptions?.allowedTools?.length ? ` · 工具：${routine.runOptions.allowedTools.join('、')}` : ' · 不用工具';
+    row.append(element('strong', routine.name), element('small', `${routineWhen(routine)} · ${ROUTINE_REVIEW[routine.executionReview]}${cap}${tools} · ${timing}`), element('span', routine.prompt));
     if (routine.trigger.kind === 'webhook') row.append(element('small', `地址：${routineWebhookUrl(routine.id)}`));
     const actions = element('div', '', 'standing-actions');
     const toggle = button(routine.status === 'active' ? '暂停' : '恢复', () => changeRoutine(routine, { status: routine.status === 'active' ? 'paused' : 'active' })); toggle.type = 'button';
     actions.append(toggle);
-    if (routine.trigger.kind === 'manual' && routine.status === 'active') {
+    // Any active routine can be tried once now; the server still refuses while its last Run is going.
+    if (routine.status === 'active') {
       const now = button('现在做一次', async () => { await runRoutineNow(routine.id, routine.name); }); now.type = 'button'; now.dataset.routineRun = routine.id;
       actions.append(now);
     }
@@ -1585,11 +1646,14 @@ function renderRoutines(): void {
       }); rotate.type = 'button'; rotate.className = 'quiet-button';
       actions.append(rotate);
     }
+    const edit = button('修改', () => startRoutineEdit(routine)); edit.type = 'button'; edit.className = 'quiet-button'; edit.dataset.routineEdit = routine.id;
+    actions.append(edit);
     const remove = button('删除', async () => {
       if (!confirm(`删除例程「${routine.name}」？已经开始的工作不受影响。`)) return;
       await api<unknown>(`/routines/${encodeURIComponent(routine.id)}`, undefined, 'DELETE');
       if (routineState) routineState = { ...routineState, items: routineState.items.filter(item => item.id !== routine.id) };
       if (routineSecret?.routineId === routine.id) routineSecret = undefined;
+      if (routineEditing?.id === routine.id) endRoutineEdit();
       renderRoutines();
     }); remove.type = 'button'; remove.className = 'quiet-button';
     actions.append(remove);
@@ -1601,8 +1665,11 @@ function renderRoutines(): void {
   secret.hidden = !shown;
   secret.textContent = shown ? `「${shown.name}」的密钥只显示这一次：${routineSecret!.secret}\n用它对「时间戳.投递 id.请求体」做 HMAC-SHA256，放在 x-aeeis-signature: sha256=…，同时带上 x-aeeis-timestamp（秒）和 x-aeeis-delivery。同一投递 id 只开始一次。` : '';
   const kind = $<HTMLSelectElement>('routine-kind').value;
-  $('routine-weekday').hidden = kind !== 'weekly';
-  $('routine-time').hidden = kind === 'webhook';
+  // A monthly or on-demand routine keeps its timing on edit: the form cannot show it.
+  const fixedTiming = Boolean(routineEditing && !formSchedule(routineEditing) && routineEditing.trigger.kind !== 'webhook');
+  $('routine-kind').hidden = fixedTiming;
+  $('routine-weekdays').hidden = fixedTiming || kind !== 'weekly';
+  $('routine-time').hidden = fixedTiming || kind === 'webhook';
 }
 function replaceRoutine(next: RoutineView): void {
   if (routineState?.agentId === next.agentId) routineState = { ...routineState, items: routineState.items.some(item => item.id === next.id) ? routineState.items.map(item => item.id === next.id ? next : item) : [...routineState.items, next] };
@@ -1612,21 +1679,96 @@ async function changeRoutine(routine: RoutineView, change: Record<string, unknow
   const result = await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(routine.id)}`, { expectedRevision: routine.revision, ...change }, 'PATCH');
   replaceRoutine(result.routine);
 }
+/** A daily or weekly schedule the form can show and change; undefined for anything else. */
+function formSchedule(routine: RoutineView): { frequency: 'daily' | 'weekly'; timeZone: string; time: string; daysOfWeek?: number[] } | undefined {
+  if (routine.trigger.kind !== 'schedule') return undefined;
+  const calendar = routine.trigger.calendar;
+  return calendar.frequency === 'daily' || calendar.frequency === 'weekly' ? { ...calendar, frequency: calendar.frequency } : undefined;
+}
+function readRoutineForm(timeZone: string): { name: string; prompt: string; kind: string; calendar?: Record<string, unknown>; executionReview: string; maxModelCalls?: number; allowedTools: string[] } {
+  const kind = $<HTMLSelectElement>('routine-kind').value;
+  const time = $<HTMLInputElement>('routine-time').value || '09:00';
+  const daysOfWeek = [...$('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]:checked')].map(box => Number(box.value));
+  if (kind === 'weekly' && !daysOfWeek.length) throw new Error('每周至少选一天');
+  const capText = $<HTMLInputElement>('routine-max-calls').value.trim();
+  const maxModelCalls = capText ? Number(capText) : undefined;
+  if (maxModelCalls !== undefined && (!Number.isInteger(maxModelCalls) || maxModelCalls < 3 || maxModelCalls > 100)) throw new Error('模型调用上限填 3 到 100 的整数，或空着用默认');
+  return {
+    name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value, kind,
+    ...(kind === 'webhook' ? {} : { calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek } : {}) } }),
+    executionReview: $<HTMLSelectElement>('routine-review').value,
+    ...(maxModelCalls !== undefined ? { maxModelCalls } : {}), allowedTools: listedIds('routine-tools'),
+  };
+}
 async function addRoutine(): Promise<void> {
   const agentId = routinePerson();
   if (!agentId) throw new Error('先打开这个人');
-  const kind = $<HTMLSelectElement>('routine-kind').value;
-  const time = $<HTMLInputElement>('routine-time').value || '09:00';
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  const trigger = kind === 'webhook' ? { kind: 'webhook' }
-    : { kind: 'schedule', calendar: { frequency: kind, timeZone, time, ...(kind === 'weekly' ? { daysOfWeek: [Number($<HTMLSelectElement>('routine-weekday').value)] } : {}) } };
+  const form = readRoutineForm(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const runOptions = { ...(form.maxModelCalls !== undefined ? { maxModelCalls: form.maxModelCalls } : {}), ...(form.allowedTools.length ? { allowedTools: form.allowedTools } : {}) };
+  const trigger = form.calendar ? { kind: 'schedule', calendar: form.calendar } : { kind: 'webhook' };
   const result = await api<{ routine: RoutineView; webhookSecret?: string }>('/routines', {
-    agentId, name: $<HTMLInputElement>('routine-name').value, prompt: $<HTMLTextAreaElement>('routine-prompt').value,
-    trigger, executionReview: $<HTMLSelectElement>('routine-review').value,
+    agentId, name: form.name, prompt: form.prompt, trigger, executionReview: form.executionReview,
+    ...(Object.keys(runOptions).length ? { runOptions } : {}),
   });
   if (result.webhookSecret) routineSecret = { routineId: result.routine.id, secret: result.webhookSecret };
   $<HTMLFormElement>('routine-form').reset();
   replaceRoutine(result.routine);
+}
+async function startRoutineEdit(listed: RoutineView): Promise<void> {
+  $('routine-error').textContent = '';
+  // Every run moves the routine's revision on, and the list on the page may be older than the last run. Edit the
+  // current one, so the save is refused only when someone really changed it meanwhile.
+  let routine: RoutineView;
+  try { routine = (await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(listed.id)}`)).routine; }
+  catch (error) { $('routine-error').textContent = errorMessage(error); return; }
+  replaceRoutine(routine);
+  routineEditing = routine;
+  $<HTMLInputElement>('routine-name').value = routine.name;
+  $<HTMLTextAreaElement>('routine-prompt').value = routine.prompt;
+  $<HTMLSelectElement>('routine-review').value = routine.executionReview;
+  $<HTMLInputElement>('routine-max-calls').value = routine.runOptions?.maxModelCalls ? String(routine.runOptions.maxModelCalls) : '';
+  $<HTMLInputElement>('routine-tools').value = (routine.runOptions?.allowedTools ?? []).join(', ');
+  const kind = $<HTMLSelectElement>('routine-kind');
+  const schedule = formSchedule(routine);
+  // A schedule stays a schedule and a webhook stays a webhook; the server refuses to switch them.
+  if (schedule) {
+    kind.value = schedule.frequency; $<HTMLInputElement>('routine-time').value = schedule.time;
+    for (const box of $('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]')) box.checked = (schedule.daysOfWeek ?? []).includes(Number(box.value));
+  } else if (routine.trigger.kind === 'webhook') kind.value = 'webhook';
+  // Monthly and on-demand timing stays as it is; a neutral value keeps the hidden weekday check quiet.
+  else kind.value = 'daily';
+  for (const option of kind.options) option.disabled = routine.trigger.kind === 'webhook' ? option.value !== 'webhook' : option.value === 'webhook';
+  $('routine-add').textContent = '保存修改';
+  $('routine-cancel').hidden = false;
+  renderRoutines();
+  $<HTMLInputElement>('routine-name').focus();
+}
+function endRoutineEdit(): void {
+  routineEditing = undefined;
+  $<HTMLFormElement>('routine-form').reset();
+  for (const option of $<HTMLSelectElement>('routine-kind').options) option.disabled = false;
+  $('routine-add').textContent = '添加例程';
+  $('routine-cancel').hidden = true;
+  renderRoutines();
+}
+async function saveRoutineEdit(routine: RoutineView): Promise<void> {
+  const schedule = formSchedule(routine);
+  // Keep the routine's own time zone: the browser's may differ from where it was set up.
+  const form = readRoutineForm(schedule?.timeZone ?? 'UTC');
+  const change: Record<string, unknown> = { expectedRevision: routine.revision, name: form.name, prompt: form.prompt, executionReview: form.executionReview };
+  // Sending a schedule restarts its count from now, so send it only when it changed.
+  const days = (list: unknown) => Array.isArray(list) ? [...list].sort((a, b) => a - b).join(',') : '';
+  const calendar = form.calendar as { frequency: string; time: string; daysOfWeek?: number[] } | undefined;
+  if (schedule && calendar && (calendar.frequency !== schedule.frequency || calendar.time !== schedule.time
+    || (calendar.frequency === 'weekly' && days(calendar.daysOfWeek) !== days(schedule.daysOfWeek)))) {
+    change.trigger = { kind: 'schedule', calendar: form.calendar };
+  }
+  const { maxModelCalls: _calls, allowedTools: _tools, ...kept } = routine.runOptions ?? {};
+  const runOptions = { ...kept, ...(form.maxModelCalls !== undefined ? { maxModelCalls: form.maxModelCalls } : {}), ...(form.allowedTools.length ? { allowedTools: form.allowedTools } : {}) };
+  change.runOptions = Object.keys(runOptions).length ? runOptions : null;
+  const result = await api<{ routine: RoutineView }>(`/routines/${encodeURIComponent(routine.id)}`, change, 'PATCH');
+  replaceRoutine(result.routine);
+  endRoutineEdit();
 }
 function deliveryDraft(delivery: LastDelivery): string {
   const parts = [delivery.taskTitle.trim()];
@@ -3789,8 +3931,9 @@ async function archiveOpenChat(): Promise<void> {
   directMembers.delete(id);
   directIndexKey = '';
   clearOpenGroup();
-  selectedBotId = 'aeeis';
-  localStorage.setItem('aeeis.bot', 'aeeis');
+  // Back to AEEIS's own conversation, not the archived chat's, which may belong to a Bot.
+  if (conversationEnabled) void openLifeThread('aeeis').catch(error => message(errorMessage(error)));
+  else { selectedBotId = 'aeeis'; localStorage.setItem('aeeis.bot', 'aeeis'); }
   message('');
   renderBotRoster();
   renderGroups(roomSummaries);
@@ -4648,13 +4791,16 @@ function conversationPlanCard(task: ConversationTaskView, feedbackDraft = ''): H
   if (task.pendingApproval) card.append(element('p', task.pendingApproval.summary, 'plan-card-summary'));
   if (steps.length) {
     const list = element('ol', '', 'plan-card-steps');
+    // A plan waiting for "开始" shows its steps; once it runs, they are process and fold away behind one line.
+    const holder: HTMLElement = task.pendingApproval ? card : element('details', '', 'plan-card-steps-fold');
+    if (holder !== card) { holder.append(element('summary', `步骤 · ${steps.filter(step => step.state === 'done').length} / ${steps.length}`)); card.append(holder); }
     for (const step of steps) {
       const item = element('li'); item.dataset.state = step.state;
       const mark = element('span', step.state === 'done' ? '✓' : step.state === 'current' ? '•' : '○', 'plan-card-mark'); mark.setAttribute('aria-hidden', 'true');
       item.append(mark, element('span', step.title), element('span', step.state === 'done' ? '（已完成）' : step.state === 'current' ? '（正在做）' : '', 'sr-only'));
       list.append(item);
     }
-    card.append(list);
+    holder.append(list);
   }
   if (task.runId && task.pendingApproval) {
     const actions = element('div', '', 'plan-card-actions');
@@ -4687,9 +4833,15 @@ function conversationBotReply(answer: ConversationReply, runId: string, title: s
   reply.setAttribute('aria-label', `「${title}」的回答`);
   reply.append(element('small', person ? participantLabel(person) : 'AEEIS', 'message-meta'), element('div', answer.text, 'bot-reply-text'));
   const actions = element('div', '', 'bot-reply-actions');
+  if (answer.pullRequest?.url.startsWith('https://github.com/')) {
+    const pull = element('a', `打开 draft PR #${answer.pullRequest.number} ↗`);
+    pull.href = answer.pullRequest.url; pull.target = '_blank'; pull.rel = 'noopener noreferrer'; pull.dataset.replyPull = runId;
+    actions.append(pull);
+  }
   const copy = button('复制', async () => { await navigator.clipboard?.writeText(answer.text); copy.textContent = '已复制'; });
   copy.type = 'button';
-  const open = button(answer.truncated ? '看完整结果 ↗' : '详情 ↗', async () => openConversationRun(runId));
+  // The reply is the answer only. How it was made, its evidence and anything left unverified open from here.
+  const open = button(answer.partial ? (answer.truncated ? '有些没核实 · 看完整结果 ↗' : '有些没核实 · 详情 ↗') : answer.truncated ? '看完整结果 ↗' : '过程与证据 ↗', async () => openConversationRun(runId));
   open.type = 'button'; open.dataset.replyOpen = runId;
   actions.append(copy, open);
   reply.append(actions);
@@ -4957,7 +5109,10 @@ function renderConversation(): void {
       const row = element('li', '', 'conversation-message'); row.dataset.role = item.role; row.dataset.messageId = item.id;
       if (item.speaker) { row.dataset.speaker = item.speaker.role; row.dataset.speakerId = item.speaker.id; }
       row.append(element('small', `${messageAuthor(item)}${messageSource(item)} · ${formatTime(item.createdAt)}`, 'message-meta'), element('p', item.text, 'message-text'));
-      if (item.replyTo) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
+      // A reply to the message right above it needs no quote: that is how a conversation reads. When that message
+      // carries a Bot's answer, the answer is what sits right above, so the quote says which one is meant.
+      const previous = conversation?.messages[conversation.messages.indexOf(item) - 1];
+      if (item.replyTo && (item.replyTo !== previous?.id || previous.reply)) row.append(element('small', `回复：${conversation?.messages.find(message => message.id === item.replyTo)?.text.slice(0, 100) ?? item.replyTo}`, 'message-reply-to'));
       // Routing, execution receipts and the message's own actions stay one click away, so the transcript reads as a conversation.
       const details = element('details', '', 'message-details');
       details.append(element('summary', '详情'));
@@ -5080,10 +5235,22 @@ function acceptConversation(view: ConversationView): void {
     view = { ...view, messages: [...conversation.messages.filter(message => !ids.has(message.id)), ...view.messages], ...(conversation.hasEarlierMessages === undefined ? {} : { hasEarlierMessages: conversation.hasEarlierMessages }) };
   }
   conversation = view;
+  followConversationBot();
   if (finished?.runId && rosterView() === 'entry') void revealFinishedRun(finished.runId).catch(() => undefined);
   rememberLifeSummary(view);
   localStorage.setItem(CONVERSATION_SELECTION, view.id); localStorage.setItem(CONVERSATION_SCOPE, conversationScope);
   renderConversation();
+}
+/**
+ * A Bot's own conversation makes it the selected Bot. The two are saved apart, so a reload could otherwise show one
+ * Bot's name and settings above another Bot's chat and routines. Runs again once the Bot list arrives.
+ */
+function followConversationBot(): void {
+  const owner = lifeAgent(conversation);
+  if (!owner || owner === selectedBotId || openGroupId || groupDraftOpen || !rosterBots().some(bot => bot.id === owner)) return;
+  selectedBotId = owner;
+  localStorage.setItem('aeeis.bot', owner);
+  renderBotRoster();
 }
 async function initializeConversations(status: RuntimeStatus): Promise<void> {
   botDialogueRouting = status.botDialogueRouting === true;
@@ -5618,7 +5785,7 @@ $('conversation-text').addEventListener('keydown', event => {
   if (!$<HTMLButtonElement>('conversation-send').disabled) $<HTMLFormElement>('conversation-composer').requestSubmit();
 });
 $('conversation-composer').addEventListener('submit', event => { event.preventDefault(); void sendConversation(conversationSendIntent(), false, true).catch(error => { $('conversation-error').textContent = errorMessage(error); }); });
-for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance']) {
+for (const id of ['execution-review', 'model-budget-usd', 'model-budget-tokens', 'allowed-tools', 'privacy', 'acceptance', 'publish-repo']) {
   $(id)?.addEventListener('input', () => syncEntryDefaults());
   $(id)?.addEventListener('change', () => syncEntryDefaults());
 }
@@ -5632,9 +5799,14 @@ $('routine-form')?.addEventListener('submit', event => {
   $('routine-error').textContent = '';
   const add = $<HTMLButtonElement>('routine-add');
   add.disabled = true;
-  void addRoutine().catch(error => { $('routine-error').textContent = errorMessage(error); }).finally(() => { add.disabled = false; });
+  const editing = routineEditing;
+  void (editing ? saveRoutineEdit(editing) : addRoutine()).catch(error => { $('routine-error').textContent = errorMessage(error); }).finally(() => { add.disabled = false; });
 });
 $('routine-kind')?.addEventListener('change', () => renderRoutines());
+$('routine-cancel')?.addEventListener('click', () => endRoutineEdit());
+// Remember whether the routine list was left open; a reload otherwise always starts it closed.
+$('routines')?.addEventListener('toggle', () => { try { localStorage.setItem('aeeis.routines-open', $<HTMLDetailsElement>('routines').open ? '1' : '0'); } catch { /* storage may be blocked */ } });
+try { if (localStorage.getItem('aeeis.routines-open') === '1') $<HTMLDetailsElement>('routines').open = true; } catch { /* storage may be blocked */ }
 $('standing-form')?.addEventListener('submit', event => {
   event.preventDefault();
   void saveStandingInstruction($<HTMLTextAreaElement>('standing-text').value).catch(error => { $('conversation-error').textContent = errorMessage(error); });
@@ -7254,7 +7426,7 @@ async function refresh(background = false): Promise<void> {
       const view = await api<(RunView & { explanation: RunExplanation }) | ThreadShareView>(`/share/${shareToken}`);
       if ('kind' in view && view.kind === 'thread') {
         document.body.classList.add('thread-page');
-        renderThreadTimeline({ ...view.thread, runs: view.runs.map(run => ({ ...run, threadSequence: run.threadSequence!, outputExcerpt: run.artifacts.at(-1)?.content ?? '' })) }, view.throughSequence);
+        renderThreadTimeline({ ...view.thread, runs: view.runs.map(run => ({ ...run, threadSequence: run.threadSequence!, outputExcerpt: answerArtifact(run.artifacts)?.content ?? '' })) }, view.throughSequence);
         const run = view.runs.find(run => run.id === currentId) ?? view.runs.at(-1);
         if (!run) { current = undefined; currentId = ''; $('detail').hidden = true; return; }
         currentId = run.id; current = run;
@@ -7302,8 +7474,9 @@ async function refresh(background = false): Promise<void> {
   agentsLoaded = true;
   if (owned) {
     ownedBotRecords = owned.map(ownedRosterBot);
-    if (conversationEnabled) updateConversationControls();
+    if (conversationEnabled) { followConversationBot(); updateConversationControls(); }
   }
+  if (full) reloadRoutines();
   await adoptLocalBots();
   reminderItems = reminderPage.items; reminderNextCursor = reminderPage.nextCursor;
   await loadBoardHoldings();
@@ -8046,7 +8219,8 @@ function executionReviewNote(): string {
 /** One line under the entry composer: what the next run will use, read from the Settings fields it is sent with. */
 function acceptanceNote(): string {
   const count = ($<HTMLTextAreaElement>('acceptance')?.value ?? '').split('\n').filter(line => line.trim()).length;
-  return count ? ` · 下一次执行带 ${count} 条验收要求` : '';
+  const repo = $<HTMLInputElement>('publish-repo')?.value.trim();
+  return count ? ` · 下一次执行带 ${count} 条验收要求${repo ? `，通过后开 PR 到 ${repo}` : ''}` : '';
 }
 function entryDefaultsText(): string {
   const review = executionReviewValue();
@@ -8084,7 +8258,17 @@ function acceptanceRequirements(): string[] {
 /** Requirements are for one Run: once it exists they would only surprise the next, unrelated one. */
 function clearAcceptance(): void {
   const field = $<HTMLTextAreaElement>('acceptance');
+  const repo = $<HTMLInputElement>('publish-repo');
+  if (repo?.value) repo.value = '';
   if (field?.value) { field.value = ''; syncEntryDefaults(); }
+}
+/** Where the next Run's checked work is published, if anywhere. Only with acceptance requirements. */
+function publishOption(acceptance: string[]): { repo: string } | undefined {
+  const repo = $<HTMLInputElement>('publish-repo')?.value.trim().toLowerCase() ?? '';
+  if (!repo) return undefined;
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(repo)) throw new Error('仓库名只能用小写字母、数字和 -，例如 sandbox');
+  if (!acceptance.length) throw new Error('开 PR 要先填验收要求：只有通过独立检查的成果才会推送');
+  return { repo };
 }
 function runOptions(includeProjectQuery = true, goal = ''): Record<string, unknown> {
   const content = $<HTMLTextAreaElement>('materials').value.trim();
@@ -8119,7 +8303,7 @@ function runOptions(includeProjectQuery = true, goal = ''): Record<string, unkno
   const scope = grant
     ? { workGrantId: grant.grantId, allowedTools: [] as string[] }
     : { executionReview: executionReviewValue(), allowedTools, ...(allowedAgents.length ? { allowedAgents } : {}), ...(modelBudget && Object.keys(modelBudget).length ? { modelBudget } : {}) };
-  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), ...(acceptance.length ? { acceptance } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
+  return { ...scope, ...(planning ? { planning } : {}), ...(builtinSkill ? { builtinSkill } : {}), ...(acceptance.length ? { acceptance } : {}), ...(includeProjectQuery && publishOption(acceptance) ? { publish: publishOption(acceptance) } : {}), materials, privacy: $<HTMLSelectElement>('privacy').value, ...(Object.keys(externalBudget).length ? { externalBudget } : {}), ...(knowledgeQuery ? { knowledgeQuery } : {}), ...(memoryQuery ? { memoryQuery } : {}), ...(brainScope ? { brainScope } : {}), ...(brainQuery ? { brainQuery } : {}), ...(projectSourceQuery ? { projectSourceQuery } : {}) };
 }
 ($('new-goal') as HTMLFormElement).onsubmit = event => {
   event.preventDefault(); message('');
@@ -8815,6 +8999,13 @@ async function showComputerScreenshot(runId: string, shot: ComputerView['screens
   $('computer-shot').hidden = false;
 }
 interface AcceptanceView { round: number; passed: boolean; projectChanged: boolean; error?: string; items: { requirement: string; status: string; notes: string; screenshot?: string }[]; previewUrl?: string; sourceArchive?: string }
+interface PublicationView { round: number; repo: string; branch: string; status: 'completed' | 'failed' | 'unknown' | 'skipped'; pullRequest?: { number: number; url: string; draft: boolean }; compareUrl?: string; error?: string }
+function publicationNote(item: PublicationView): string {
+  if (item.status === 'skipped') return `没有推送到 ${item.repo}：${item.error ?? '没有获得批准'}`;
+  if (item.status === 'failed') return `推送到 ${item.repo} 没成功：${item.error ?? '原因不明'}`;
+  if (item.status === 'unknown') return `推送到 ${item.repo} 的结果不确定：${item.error ?? '没能确认 GitHub 上的状态'}`;
+  return `已推送到 ${item.repo} 的 ${item.branch}，但 PR 没开成${item.error ? `：${item.error}` : ''}`;
+}
 const ACCEPTANCE_STATES: Record<string, string> = { passed: '通过', failed: '没通过', unverified: '没能确认' };
 /** A machine in these states still serves the preview link it delivered. */
 const MACHINE_UP = ['running', 'frozen', 'unknown', 'unreachable'];
@@ -8834,6 +9025,17 @@ function renderAcceptance(run: RunView, view: ComputerView): void {
   }));
   const delivery = $('computer-delivery');
   delivery.replaceChildren();
+  const published = (run as RunView & { publications?: PublicationView[] }).publications?.at(-1);
+  if (published) {
+    $('computer-acceptance').hidden = false;
+    const target = published.pullRequest?.url ?? published.compareUrl;
+    if (target?.startsWith('https://github.com/')) {
+      const link = element('a', published.pullRequest ? `打开 draft PR #${published.pullRequest.number}` : `看 ${published.branch} 的改动`);
+      link.href = target; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      delivery.append(link);
+    }
+    if (published.status !== 'completed' || !published.pullRequest) delivery.append(element('span', publicationNote(published), 'muted'));
+  }
   if (check?.previewUrl?.startsWith('https://')) {
     if (MACHINE_UP.includes(view.machine.state)) {
       const link = element('a', '打开交付的预览');
@@ -8957,6 +9159,7 @@ function render(run: RunView): void {
   syncPresence(run);
   if (intentPresetsOpen) setIntentPresetsOpen(false);
   renderDeliverySummary(run);
+  syncAnswerFirst(run);
   const validationEvent = [...run.events].reverse().find(event => event.type === 'run.failed' && event.data?.validation?.issues?.length);
   const validationText = validationEvent?.data?.validation?.issues?.slice(0, 3).map(issue => `${issue.path ?? '$'}：${issue.message ?? '格式不符合要求'}`).join('；');
   $('run-error').textContent = run.error ? `${run.error}${validationText ? ` · ${validationText}` : ''}` : '';
@@ -9267,6 +9470,25 @@ function memoryWritebackForm(run: RunView, artifact: RunView['artifacts'][number
   details.append(form); return details;
 }
 
+// A finished task opens on its answer, the way a person replies. How it got there (progress, the computer, usage,
+// metrics, the raw output and its evidence) opens from one button, for this task only.
+let processOpenFor = '';
+function answerFirst(run: RunView): boolean { return run.status === 'succeeded' && run.artifacts.length > 0; }
+function syncAnswerFirst(run: RunView): void {
+  const detail = $('detail');
+  const open = processOpenFor === run.id;
+  detail.dataset.answerFirst = String(answerFirst(run));
+  detail.dataset.processOpen = String(open);
+  const toggle = $<HTMLButtonElement>('run-process-toggle');
+  toggle.hidden = !answerFirst(run);
+  toggle.textContent = open ? '收起过程与证据' : '看过程与证据';
+  toggle.setAttribute('aria-expanded', String(open));
+}
+$<HTMLButtonElement>('run-process-toggle').addEventListener('click', () => {
+  if (!current) return;
+  processOpenFor = processOpenFor === current.id ? '' : current.id;
+  syncAnswerFirst(current);
+});
 function renderDeliverySummary(run: RunView): void {
   const messages: Record<string, string> = {
     queued: '已接收目标，等待开始规划。',
@@ -9307,7 +9529,7 @@ function renderDeliveryArtifact(run: RunView): void {
   if (!box) return;
   box.replaceChildren();
   box.hidden = true;
-  const artifact = run.artifacts.at(-1);
+  const artifact = answerArtifact(run.artifacts);
   if (!artifact) {
     const completedCalls = run.calls.filter(call => call.state === 'completed').length;
     const model = run.model?.model ?? run.modelDecision?.selected?.model ?? '固定模型';
@@ -9332,9 +9554,14 @@ function renderDeliveryArtifact(run: RunView): void {
     : '未记录模型调用；当前产物可能来自恢复或历史导入。';
   const runtime = element('small', runtimeText, completedCalls === run.calls.length && run.calls.length ? 'delivery-runtime-ok' : 'delivery-runtime-warning');
   const content = renderArtifactMarkdown(artifact.content);
-  content.classList.add('delivery-artifact-content');
+  content.classList.add('delivery-artifact-content', 'delivery-artifact-full');
+  // What the task page leads with: the answer alone, without evidence IDs, summary blocks or runtime caveats.
+  const readable = readableAnswer(artifact.content);
+  const answer = renderArtifactMarkdown(readable.text);
+  answer.classList.add('delivery-artifact-content', 'delivery-answer');
   const evidence = element('small', `证据引用：${artifact.evidenceRefs.length ? artifact.evidenceRefs.join('、') : '无外部来源引用'}`, 'delivery-artifact-evidence');
-  box.append(element('div', '最终产物', 'delivery-artifact-kicker'), element('h3', artifact.title), runtime, content, evidence);
+  box.append(element('div', '最终产物', 'delivery-artifact-kicker'), element('h3', artifact.title), runtime, answer, content, evidence);
+  if (readable.caveat) box.insertBefore(element('small', '有些内容没核实，在“看过程与证据”里。', 'delivery-answer-caveat'), answer);
   if (isFixture) box.append(element('p', run.toolReceipts?.length
     ? '编排使用的是本地固定协议桩；上面的外部资料来自已授权 Tool，模型本身没有进行真实推理。'
     : '当前使用本地固定协议桩，仅验证 AEEIS 的规划、执行和交付协议；这份内容不能替代真实资料报告。', 'delivery-artifact-warning'));
@@ -9346,7 +9573,7 @@ function renderDeliveryArtifact(run: RunView): void {
   const actions = element('div', '', 'artifact-actions');
   if (!readOnlyShare) actions.append(artifactDownloadLink(run.id, artifact, { getToken, onError: message }));
   actions.append(open);
-  box.insertBefore(actions, content);
+  box.insertBefore(actions, answer);
 }
 
 function renderFollowUpPlan(run: RunView): void {
@@ -9580,6 +9807,11 @@ $('connect').onclick = () => {
   setSystemSignal('loading');
   void initialize().finally(() => { connect.disabled = false; connect.classList.remove('is-busy'); });
 };
+$('signout').onclick = async () => {
+  const button = $<HTMLButtonElement>('signout');
+  button.disabled = true;
+  try { await fetch('/auth/signout', { method: 'POST' }); } finally { location.reload(); }
+};
 $('forget-token').onclick = () => {
   clearToken();
   $<HTMLInputElement>('token').value = '';
@@ -9603,6 +9835,12 @@ async function initialize(): Promise<void> {
         syncEntryDefaults();
         allowedTools.dataset.initialized = 'true';
       }
+      // Routines start with the server's default tools too; set as the default value so the form's reset keeps them.
+      const routineTools = $<HTMLInputElement>('routine-tools');
+      if (routineTools && !routineTools.dataset.initialized) {
+        if (!routineTools.value.trim()) routineTools.defaultValue = routineTools.value = toolCatalog.defaultAllowedTools.join(', ');
+        routineTools.dataset.initialized = 'true';
+      }
       if (toolHelp) toolHelp.textContent = toolCatalog.tools.length
         ? `已连接：${toolCatalog.tools.map(tool => tool.id).join('、')}。默认选择来自服务端配置；清空可禁用本次运行的外部工具。`
         : '尚未配置工具；本次运行只能使用提供的资料。';
@@ -9611,7 +9849,7 @@ async function initialize(): Promise<void> {
     }
 
     const mode = $('instance-mode');
-    const modeLabels: Record<string, string> = { 'single-owner-local': '开发版 · 单用户本地模式', 'static-principal-scoped': '开发版 · Principal / Tenant 隔离', 'oidc-principal-scoped': '开发版 · OIDC Principal / Tenant 隔离', 'principal-scoped': '开发版 · Principal / Tenant 隔离' };
+    const modeLabels: Record<string, string> = { 'single-owner-local': '开发版 · 单用户本地模式', 'static-principal-scoped': '开发版 · Principal / Tenant 隔离', 'oidc-principal-scoped': '开发版 · OIDC Principal / Tenant 隔离', 'google-principal-scoped': 'Google 登录 · 多用户', 'principal-scoped': '开发版 · Principal / Tenant 隔离' };
     mode.textContent = modeLabels[status.mode] ?? `开发版 · ${status.mode}`;
     mode.dataset.state = status.modelConfigured && status.modelHealth?.ready !== false ? 'ready' : 'attention';
     mode.title = status.principal ? `当前身份：${status.principal} · 租户：${status.tenantId ?? 'default'} · 角色：${(status.roles ?? []).join(', ') || '未声明'}` : '';
@@ -9776,7 +10014,7 @@ if (!readOnlyShare) {
   if (saved && token === undefined) { badTokenNotice = true; message(BAD_TOKEN); }
   $<HTMLInputElement>('token').value = token ?? '';
 }
-void initialize();
+void (async () => { if (readOnlyShare || await signInChecked()) await initialize(); })();
 setInterval(() => { if (polling || document.hidden) return; polling = true; void refresh(true).catch(error => message(errorMessage(error))).finally(() => { polling = false; }); }, 2000);
 window.setInterval(() => {
   if (!document.hidden && current && !DONE_STATUSES.has(current.status)) updateRunActivity(current);

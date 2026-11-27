@@ -16,6 +16,13 @@
 <link rel="stylesheet" href="/style.css?v=20261027-phase3">
 </head>
 <body class="gb">
+<section id="signin-gate" class="signin-gate" hidden aria-labelledby="signin-title">
+<div class="signin-card">
+<h1 id="signin-title">登录 AEEIS</h1>
+<p id="signin-note">用你的 Google 账号登录。只有名单里的地址能进来。</p>
+<a id="signin-google" class="signin-button" href="/auth/google/start">使用 Google 登录</a>
+</div>
+</section>
 <a class="skip-link" href="#quick-goal">跳到消息</a>
 <main class="app-shell gb-shell">
 
@@ -668,6 +675,7 @@
 </section>
 <section id="delivery-summary" class="delivery-summary" aria-live="polite">
 <h2>当前交付</h2>
+<button id="run-process-toggle" class="quiet-button run-process-toggle" type="button" aria-expanded="false" hidden="">看过程与证据</button>
 <p id="delivery-message">
 </p>
 <div id="delivery-metrics" class="delivery-metrics">
@@ -791,16 +799,19 @@
 <option value="weekly">每周</option>
 <option value="webhook">收到 Webhook</option>
 </select>
-<select id="routine-weekday" aria-label="星期几" hidden>
-<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>
-</select>
+<fieldset id="routine-weekdays" class="routine-weekdays" aria-label="星期几" hidden>
+<label><input type="checkbox" value="1" checked>周一</label><label><input type="checkbox" value="2" checked>周二</label><label><input type="checkbox" value="3" checked>周三</label><label><input type="checkbox" value="4" checked>周四</label><label><input type="checkbox" value="5" checked>周五</label><label><input type="checkbox" value="6">周六</label><label><input type="checkbox" value="7">周日</label>
+</fieldset>
 <input id="routine-time" type="time" value="09:00" aria-label="几点">
+<input id="routine-max-calls" type="number" min="3" max="100" step="1" inputmode="numeric" placeholder="模型调用上限" aria-label="每次最多调用模型几次（3–100，空着用默认 20）" title="每次最多调用模型几次（3–100，空着用默认 20）">
+<input id="routine-tools" maxlength="2000" placeholder="可用工具，例如 web-search@1, web-fetch@1" aria-label="每次可用的工具，用逗号分隔；空着就不用工具" title="每次可用的工具，用逗号分隔；空着就不用工具">
 <select id="routine-review" aria-label="审批档位">
 <option value="required">每一步都问我</option>
 <option value="auto">自动判断</option>
 <option value="yolo">放手</option>
 </select>
 <button id="routine-add" type="submit">添加例程</button>
+<button id="routine-cancel" type="button" class="quiet-button" hidden>取消修改</button>
 </div>
 <p id="routine-error" class="muted" role="alert"></p>
 </form>
@@ -966,6 +977,9 @@
 <label for="acceptance">验收要求（可选，每行一条）</label>
 <textarea id="acceptance" rows="4" maxlength="15000" placeholder="例如：页面标题是「番茄钟」&#10;打开页面时倒计时显示 25:00"></textarea>
 <p class="muted">填了以后，做完会由另一个会话亲自打开成果逐条检查，全部通过才交付源码和预览。需要 Bot 电脑。只用于下一次执行，创建后清空。</p>
+<label for="publish-repo">检查通过后开 PR 到仓库（可选）</label>
+<input id="publish-repo" maxlength="40" placeholder="仓库名，例如 sandbox；要先填验收要求" autocomplete="off">
+<p class="muted">独立检查通过后，AEEIS 把项目推到这个仓库的 bot/ 分支并开 draft PR。批准计划就是批准这次推送；用授权时，授权里要有这个仓库。和验收要求一起，创建后清空。</p>
 <label for="goal">你想完成什么？</label>
 <textarea id="goal" rows="4" required="" maxlength="8000" placeholder="例如：根据下面的项目资料，梳理发布风险并提出下一周的具体行动计划">
 </textarea>
@@ -1061,6 +1075,8 @@
 <input id="work-grant-tools" maxlength="2000" placeholder="逗号分隔，例如 read, write, shell, process" autocomplete="off">
 <label for="work-grant-agents">代理</label>
 <input id="work-grant-agents" maxlength="2000" placeholder="逗号分隔，可留空" autocomplete="off">
+<label for="work-grant-repos">不用问就能推送的仓库</label>
+<input id="work-grant-repos" maxlength="500" placeholder="仓库名，逗号分隔，可留空；工具里要有 repo-push" autocomplete="off">
 <label for="work-grant-run-tokens">每件 Run tokens 上限</label>
 <input id="work-grant-run-tokens" type="number" min="1" step="1" placeholder="例如 200000">
 <label for="work-grant-total-tokens">总 tokens 上限</label>
@@ -1086,6 +1102,10 @@
 </section>
 <section id="settings-access" class="settings-section" aria-labelledby="settings-access-title">
 <h2 id="settings-access-title">访问</h2>
+<div id="signin-panel" class="access" hidden>
+<p>已用 Google 登录：<strong id="signin-email"></strong></p>
+<button id="signout" type="button" class="quiet-button">退出登录</button>
+</div>
 <div id="access-panel" class="access">
 <label for="token">本地访问令牌（若已配置）</label>
 <input id="token" type="password" autocomplete="off">

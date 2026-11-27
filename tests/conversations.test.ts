@@ -461,16 +461,23 @@ describe('single-entry conversation routing', () => {
       run.artifacts = [
         { id: 'artifact_draft', taskId: 'work', title: '草稿', content: 'draft body', evidenceRefs: [], hash: 'a'.repeat(64), createdAt: run.createdAt },
         { id: 'artifact_titles', taskId: 'work', title: '标题', content: '  1. 按期上线\n2. 风险收敛  ', evidenceRefs: [], hash: 'b'.repeat(64), createdAt: run.createdAt },
+        // A later step that failed leaves a runtime note, not an answer: the reply skips it.
+        { id: 'artifact_note', taskId: 'sum', title: '汇总', content: 'Partial answer — repair exhausted for "汇总".\n\nUnknown: task "汇总" did not produce a valid output.', evidenceRefs: [], hash: 'd'.repeat(64), createdAt: run.createdAt },
       ];
     });
     await f.repository.mutate(second.runId, run => {
       run.status = 'succeeded';
       run.artifacts = [{ id: 'artifact_long', taskId: 'work', title: '说明', content: 'x'.repeat(2500), evidenceRefs: [], hash: 'c'.repeat(64), createdAt: run.createdAt }];
+      // Work that passed its check and was published: the reply carries the draft pull request, a skipped round does not.
+      run.publications = [
+        { round: 0, at: run.createdAt, repo: 'sandbox', branch: 'bot/run-x', status: 'completed', pullRequest: { number: 2, url: 'https://github.com/x2v-co/aeeis-bots-repo/pull/2', draft: true } },
+        { round: 1, at: run.createdAt, repo: 'sandbox', branch: 'bot/run-x', status: 'skipped', error: 'blocked' },
+      ];
     });
     const seen = await f.fresh(entry.id);
     const reply = (runId: string) => seen.messages.find((message: any) => message.execution?.runId === runId)?.reply;
     expect(reply(first.runId)).toEqual({ text: '1. 按期上线\n2. 风险收敛', artifactId: 'artifact_titles' });
-    expect(reply(second.runId)).toMatchObject({ artifactId: 'artifact_long', truncated: true });
+    expect(reply(second.runId)).toMatchObject({ artifactId: 'artifact_long', truncated: true, pullRequest: { number: 2, url: 'https://github.com/x2v-co/aeeis-bots-repo/pull/2' } });
     expect(reply(second.runId).text).toHaveLength(2001);
     expect(reply(pending.runId)).toBeUndefined();
     expect(seen.tasks.every((task: any) => !('reply' in task))).toBe(true);

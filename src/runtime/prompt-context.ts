@@ -4,7 +4,8 @@ import { isSourceReadTool, isStructuredSourceTool } from './source-tools.js';
 
 /** Includes system and serialized input, measured before sending or reserving billing. */
 export const EXECUTOR_PROMPT_CHARS = 96_000;
-export const OBSERVATION_PROMPT_CHARS = 10_000;
+// Room for several web searches as citable digests (about 3–5k each), well inside the executor budget.
+export const OBSERVATION_PROMPT_CHARS = 32_000;
 export const LATEST_OBSERVATION_RESULT_CHARS = 6000;
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -21,11 +22,46 @@ function compact(value: unknown, reference: string, evidenceRefs: string[] = [])
     instructions: 'Payload omitted from this prompt; the full result is retained in the Run. A reference or hash alone does not support claims about omitted details.' };
 }
 
+const clip = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : undefined;
+const record = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+/**
+ * The citable core of a web search or page fetch: titles, links, dates and bounded text. Without it an older
+ * result becomes a bare hash, and a later step cannot name a single link it found.
+ */
+export function webEvidenceDigest(value: unknown): Record<string, unknown> | undefined {
+  const outer = record(value);
+  // An observation already projected by boundedObservations carries its digest; keep it through the second pass.
+  if (record(outer?.webResults)) return { webResults: outer!.webResults };
+  if (record(outer?.webPage)) return { webPage: outer!.webPage };
+  const result = record(outer?.output) ?? outer;
+  if (!result) return undefined;
+  if (Array.isArray(result.results) && result.results.some(item => typeof record(item)?.url === 'string')) {
+    const results = result.results.flatMap(item => {
+      const entry = record(item);
+      if (typeof entry?.url !== 'string') return [];
+      return [Object.fromEntries(Object.entries({ rank: entry.rank, title: clip(entry.title, 160), url: entry.url.slice(0, 500),
+        snippet: clip(entry.snippet, 300), publishedAt: entry.publishedAt }).filter(([, field]) => field !== undefined))];
+    }).slice(0, 8);
+    return { webResults: { ...(typeof result.query === 'string' ? { query: result.query.slice(0, 300) } : {}), results, totalResults: result.results.length } };
+  }
+  const text = typeof result.text === 'string' ? result.text : typeof result.markdown === 'string' ? result.markdown : undefined;
+  if (typeof result.url === 'string' && text !== undefined) {
+    return { webPage: { url: result.url.slice(0, 500), ...(typeof result.finalUrl === 'string' ? { finalUrl: result.finalUrl.slice(0, 500) } : {}),
+      ...(typeof result.title === 'string' ? { title: result.title.slice(0, 200) } : {}), excerpt: text.slice(0, 2000), excerptTruncated: text.length > 2000 || result.truncated === true } };
+  }
+  return undefined;
+}
+
 function observationMetadata(observation: Step['observations'][number]) {
   const result = observation.result as Record<string, unknown> | null;
   if (result && typeof result === 'object' && result.error && typeof result.error === 'object' && (result.error as Record<string, unknown>).recoverable === true) {
     return { error: result.error, receiptId: result.receiptId };
   }
+  // Source and PDF readers keep their own page and hash metadata below, even when a file looks like a search result.
+  const tool = typeof observation.tool === 'string' ? observation.tool : '';
+  const web = tool.startsWith('sources.') || tool.startsWith('pdf.') ? undefined : webEvidenceDigest(result);
+  if (web) return { ...web, ...(typeof result?.receiptId === 'string' ? { receiptId: result.receiptId } : {}) };
   if (observation.tool === 'sources.csvQuery' && result && typeof result === 'object') {
     return { id: result.id, sourceContentHash: result.sourceContentHash,
       matchedRowCount: result.matchedRowCount, totalResultRows: result.totalResultRows, truncated: result.truncated,
@@ -55,9 +91,12 @@ export function boundedObservations(observations: Step['observations'], refs: (v
     const observation = observations[index]!;
     let projected = observation;
     if (size(observation.result) > (index === observations.length - 1 ? LATEST_OBSERVATION_RESULT_CHARS : 1000) || size(observation) + 1 > remaining) {
+      const metadata = observationMetadata(observation);
+      // A web digest already carries the readable part; a raw JSON preview beside it would only crowd it out.
+      const web = 'webResults' in metadata || 'webPage' in metadata;
       const projection = { ...compact(observation.result, `observations/${index}`, refs(observation.result)),
-        ...observationMetadata(observation),
-        ...(index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
+        ...metadata,
+        ...(!web && index === observations.length - 1 && size(observation.result) > LATEST_OBSERVATION_RESULT_CHARS ? { preview: serialized(observation.result).slice(0, 4000), previewTruncated: true } : {}) };
       // The preview is itself JSON-escaped when the observation enters the prompt.
       while (projection.preview?.length && (size(projection) > LATEST_OBSERVATION_RESULT_CHARS || size({ ...observation, result: projection }) + 1 > remaining)) {
         projection.preview = projection.preview.slice(0, Math.floor(projection.preview.length / 2));
@@ -87,7 +126,8 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
       if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
       const item = items[index] as Record<string, unknown>;
       const reference = typeof item.id === 'string' ? item.id : `${key}/${index}`;
-      if (key === 'observations' && (isSourceReadTool(item.tool) || 'error' in observationMetadata(item as Step['observations'][number]))) {
+      const metadata = key === 'observations' ? observationMetadata(item as Step['observations'][number]) : {};
+      if (key === 'observations' && (isSourceReadTool(item.tool) || 'error' in metadata || 'webResults' in metadata || 'webPage' in metadata)) {
         // Preserve the newest bounded page through the overall executor projection too.
         if (index === items.length - 1 && size(item.result) <= LATEST_OBSERVATION_RESULT_CHARS) continue;
         projected[index] = { ...item, result: { ...compact(item.result, reference),
@@ -99,6 +139,20 @@ export function boundedExecutorInput(system: string, input: Record<string, unkno
         ...(typeof item.taskId === 'string' ? { taskId: item.taskId } : {}), ...(typeof item.title === 'string' ? { title: item.title } : {}),
         ...(typeof item.receiptId === 'string' ? { receiptId: item.receiptId } : {}), ...(Array.isArray(item.outputRefs) ? { outputRefs: item.outputRefs } : {}),
         ...(Array.isArray(item.evidenceRefs) ? { evidenceRefs: item.evidenceRefs } : {}) };
+    }
+  }
+  // Web digests are kept above because a later step must be able to cite them. They barely shrink, so when the
+  // prompt is still over budget after every other reduction, drop them oldest first rather than fail the call.
+  const observations = output.observations;
+  if (system.length + size(output) > EXECUTOR_PROMPT_CHARS && Array.isArray(observations)) {
+    const projected = [...observations]; output.observations = projected;
+    for (const [index, value] of observations.entries()) {
+      if (system.length + size(output) <= EXECUTOR_PROMPT_CHARS) break;
+      const item = value as Step['observations'][number];
+      const metadata = observationMetadata(item);
+      if (!('webResults' in metadata) && !('webPage' in metadata)) continue;
+      projected[index] = { ...item, result: { ...compact(item.result, `observations/${index}`),
+        ...(typeof metadata.receiptId === 'string' ? { receiptId: metadata.receiptId } : {}) } };
     }
   }
   if (system.length + size(output) > EXECUTOR_PROMPT_CHARS) throw new Error('Executor context exceeds the 96000 character budget; reduce the goal, tool catalog or fixed context');

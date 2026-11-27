@@ -544,8 +544,8 @@ describe('grant workspaces and preview links (mocked transport)', () => {
   const runA = `run_${'1'.repeat(36)}`, runB = `run_${'2'.repeat(36)}`;
   const previewCommand = { publish: ['publish-port', '{port}'], unpublish: ['unpublish-port', '{port}'] };
   const settings = sandboxConfigSchema.parse({ ssh: 'vps-test-1', network: 'proxied', egressHosts: ['registry.npmjs.org'], workspaceVolumes: true, previewPorts: [3000], previewCommand, sshWaitSeconds: 0 });
-  const harness = () => {
-    const sandbox = new DockerSandbox(settings, root);
+  const harness = (config = settings, options: ConstructorParameters<typeof DockerSandbox>[2] = {}) => {
+    const sandbox = new DockerSandbox(config, root, options);
     const containers = new Map<string, any>(), networks = new Map<string, any>(), volumes = new Map<string, any>();
     const response = { schemaVersion: 'sandbox-output/2', status: 'completed', output: {}, files: [] };
     const restores: any[] = [];
@@ -580,6 +580,32 @@ describe('grant workspaces and preview links (mocked transport)', () => {
     expect(() => sandboxConfigSchema.parse({ previewPorts: [3000], previewCommand })).toThrow(/proxied network/);
     expect(() => sandboxConfigSchema.parse({ network: 'proxied', previewPorts: [3000] })).toThrow(/previewCommand/);
     expect(() => sandboxConfigSchema.parse({ network: 'proxied', previewPorts: [3000, 3000], previewCommand })).toThrow(/unique/);
+    expect(sandboxConfigSchema.parse({ network: 'proxied', previewPorts: [3000], previewDomain: 'aeeis.link' }).previewDomain).toBe('aeeis.link');
+    for (const previewDomain of ['https://aeeis.link', 'aeeis', 'AEEIS.link', '*.aeeis.link', 'aeeis.link/', '-x.aeeis.link']) expect(() => sandboxConfigSchema.parse({ network: 'proxied', previewDomain })).toThrow(/domain name/);
+  });
+  it('issues its own random preview link on a host without a preview command, and finds the Run by it', async () => {
+    const relayed = sandboxConfigSchema.parse({ ssh: 'vps-test-1', network: 'proxied', egressHosts: ['registry.npmjs.org'], previewPorts: [3000], previewDomain: 'aeeis.link', sshWaitSeconds: 0 });
+    const { sandbox, local } = harness(relayed, { host: 'vps' });
+    const first = await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300);
+    expect(first).toMatchObject({ status: 'completed', output: { port: 3000, url: expect.stringMatching(/^https:\/\/p-[a-z2-7]{26}\.aeeis\.link\/$/) } });
+    const url = (first.output as { url: string }).url, id = /p-([a-z2-7]{26})\./.exec(url)![1]!;
+    expect((await sandbox.execute(runA, 'process', { action: 'preview', port: 3000 }, [], 300)).output).toMatchObject({ url });
+    expect(local).not.toHaveBeenCalled();
+    expect(await sandbox.execute(runA, 'process', { action: 'preview', port: 8080 }, [], 300)).toMatchObject({ status: 'failed' });
+    // Another Run's link is its own.
+    const second = await sandbox.execute(runB, 'process', { action: 'preview', port: 3000 }, [], 300);
+    expect((second.output as { url: string }).url).not.toBe(url);
+    expect(await sandbox.previewTarget(id)).toEqual({ runId: runA, port: 3000 });
+    expect(await sandbox.previewTarget('a'.repeat(26))).toBeUndefined();
+    expect(await sandbox.previewTarget('../../etc')).toBeUndefined();
+    // Another host never answers for this host's machines, and a host with its own preview command answers for none.
+    expect(await harness(relayed, { host: 'other', unlabeled: false }).sandbox.previewTarget(id)).toBeUndefined();
+    expect(await harness(sandboxConfigSchema.parse({ ...relayed, previewCommand }), { host: 'vps' }).sandbox.previewTarget(id)).toBeUndefined();
+    // Releasing the machine ends the link; nothing was published, so nothing is unpublished.
+    await sandbox.release(runA, async () => undefined);
+    expect(await sandbox.previewTarget(id)).toBeUndefined();
+    await expect(sandbox.previewRelay(runA, 3000)).rejects.toThrow(/not active/);
+    expect(local).not.toHaveBeenCalled();
   });
   it('publishes preview ports only on the proxy, to the sandbox host loopback', () => {
     const proxy = proxyCreateArgs(settings, 'n', image, 'owner');
@@ -684,15 +710,18 @@ describe('preview forwarding (python, no Docker)', () => {
     const port = (target.address() as { port: number }).port, proxyPort = port === 65535 ? port - 1 : port + 1;
     const child = spawn('python3', ['-I', '-u', join(process.cwd(), 'sandbox/proxy.py')], { env: { PATH: process.env.PATH!, AEEIS_PROXY_PORT: String(proxyPort), AEEIS_PREVIEW_PORTS: String(port), AEEIS_PREVIEW_TARGET: '::1' }, stdio: ['ignore', 'pipe', 'inherit'] });
     const lines: string[] = [];
-    const get = () => new Promise<string>((resolve, reject) => {
+    // With nothing listening the proxy closes at once, before reading the request; on Linux closing with unread data
+    // sends a reset, so for that call a reset is the same answer as a plain close: nothing was forwarded.
+    const get = (resetIsClose = false) => new Promise<string>((resolve, reject) => {
       const socket = netConnect(port, '127.0.0.1', () => socket.write('GET / HTTP/1.1\r\n\r\n'));
-      let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('close', () => resolve(data)); socket.on('error', reject);
+      let data = ''; socket.on('data', chunk => { data += chunk; }); socket.on('close', () => resolve(data));
+      socket.on('error', error => { if (resetIsClose && (error as NodeJS.ErrnoException).code === 'ECONNRESET') resolve(data); else reject(error); });
     });
     try {
       await new Promise<void>((resolve, reject) => { child.stdout!.on('data', chunk => { lines.push(...String(chunk).trim().split('\n')); if (lines.some(line => line.includes('"ready"'))) resolve(); }); child.once('exit', () => reject(new Error('proxy exited'))); });
       expect(await get()).toMatch(/200 OK[\s\S]*ok$/);
       await new Promise<void>(resolve => target.close(() => resolve()));
-      expect(await get()).toBe('');
+      expect(await get(true)).toBe('');
       await vi.waitFor(() => expect(lines.join('\n')).toContain('preview target not listening'));
     } finally { child.kill(); target.close(); }
   });

@@ -6,10 +6,31 @@ import { explainRun } from './explanation.js';
 export const MAX_DEBUG_FIELD_BYTES = 8192;
 export const MAX_DEBUG_ARRAY_ITEMS = 500;
 export const MAX_DEBUG_NODES = 200_000;
-const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|(?:^env|env$|[_-]env[_-])|environment|token|cookie|signature|^sig$|^(?:x-)?auth(?:[_-][\w-]*)?$|session[_-]?(?:key|secret|id))/i;
+const sensitiveKey = /(?:secret|password|passwd|authorization|api[ _-]?key|access[ _-]?key|private[ _-]?key|credential|environment|(?:^env|env$|[_-]env[_-])|token|cookie|signature|^sig$|^(?:x-)?auth(?:[_-][\w-]*)?$|session[_-]?(?:key|secret|id))/i;
 // Usage counters carry no credentials and remain useful for debugging budgets.
 const safeCounter = /^(?:inputTokens|outputTokens|tokens|unreportedTokenCalls|maxTokens|maxOutputTokens)$/;
 const isSensitive = (key: string): boolean => sensitiveKey.test(key) && !safeCounter.test(key);
+// A key written in prose is a credential unless the sensitive word runs on into an ordinary English
+// word: `accessToken:`, `API_KEY=`, `secretkeyvalue=` and `passwordconfirm=` are, but `Tokenomics:`,
+// `Tokenizer:` or `Secretary:` in a source title are not. Unknown continuations stay redacted, and so does
+// anything after the ordinary word (`tokenizerKey=`, `Tokenomics key:`). `-ed` is not an exemption:
+// `tokenized=` usually holds a payment or vault token.
+const sensitiveKeyEverywhere = new RegExp(sensitiveKey.source, 'gi');
+const proseEnding = /^(?:omics?|ar(?:y|ies|ial|iat)|ive(?:s|ly)?|ions?|ly|less(?:ly|ness)?|ings?|al(?:ly)?|isms?|i[sz](?:e[sr]?|ers|ing|ations?))$/i;
+// Everyday words that start with `env`; any other `env…` key stays a variable.
+const envWord = /^(?:oys?|elop(?:e[sd]?|ing)|ision(?:s|ed|ing)?|isag(?:e[sd]?|ing)|y|ie[sd]|ious(?:ly)?|iabl[ey]|irons)$/;
+const endsWord = (key: string, end: number): boolean => {
+  const rest = key.slice(end);
+  // `env` is also the start of everyday words (`Envoy:`, `envelope=`). Anything else stays the variable:
+  // `env=`, `ENVFILE=`, `envKey=`, `envs=`, `envkey=`, `envpwd=`.
+  if (/^env$/i.test(key.slice(end - 3, end)) && envWord.test(rest)) return false;
+  // camelCase: a capital after a lower-case letter starts a new word (all capitals do not).
+  if (/^[A-Z]/.test(rest) && /[a-z]/.test(key[end - 1] ?? '')) return true;
+  const run = (/^[a-z]/.test(rest) ? /^[a-z]+/ : /^[A-Za-z]+/).exec(rest)?.[0];
+  return run === undefined || run.length !== rest.length || !proseEnding.test(run);
+};
+const isSensitiveAssignment = (key: string): boolean => isSensitive(key)
+  && [...key.matchAll(sensitiveKeyEverywhere)].some(match => endsWord(key, match.index + match[0].length));
 // Public views must not expose provider completions or schema-repair payloads,
 // even when nested in observations, validation diagnostics or JSON strings.
 const rawProviderKey = /^(?:raw(?:output|response|text|completion|content)|modelrawoutput|modelrequest|provider(?:raw|response|text|output)|reasoning(?:content|text)?|thinking|plannerrepair|finishrepair|reconciledmodelcall)$/i;
@@ -148,7 +169,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
     if (typeof item === 'string') {
       if (sensitive && item.length) secrets.add(item);
       for (const match of item.matchAll(credentialAssignment)) {
-        if (!isSensitive(assignmentKey(match[2]!))) continue;
+        if (!isSensitiveAssignment(assignmentKey(match[2]!))) continue;
         const raw = match[3]!;
         if (raw.startsWith('"')) {
           try { const decoded = JSON.parse(raw) as string; if (decoded.length) secrets.add(decoded); } catch { /* incomplete string */ }
@@ -187,7 +208,7 @@ export function redactRunData<T>(value: T, options: { capFields?: boolean; crede
       .replace(/(\/(?:api\/)?share\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
       .replace(/([?&](?:sig|signature|x-amz-[\w-]+|key|apikey|api_key|code|auth|token|access_token|refresh_token|id_token)=)[^&#\s"'<>]+/gi, '$1[REDACTED]')
       .replace(/\btk_[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
-      .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitive(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
+      .replace(credentialAssignment, (match, prefix: string, key: string) => isSensitiveAssignment(assignmentKey(key)) ? `${prefix}[REDACTED]` : match);
     return capField(redactEnvBlocks(result));
   };
   const visit = (item: unknown, depth = 0): unknown => {

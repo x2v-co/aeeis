@@ -364,7 +364,8 @@ describe('run link workbench', () => {
     expect(posts[0]![1].headers['Idempotency-Key']).toMatch(/^[a-f0-9-]{36}$/);
     expect(posts[1]![1].headers['Idempotency-Key']).toBe(posts[0]![1].headers['Idempotency-Key']);
     expect(JSON.parse(posts[0]![1].body)).toEqual({ request: { goal: 'Continue the report', privacy: 'internal' }, parentRunId: root.id });
-    expect(fetch.mock.calls.every(([, options]) => options.headers.authorization === 'Bearer saved-auth-secret')).toBe(true);
+    // Every API call carries the saved token; only the public sign-in check does not.
+    expect(fetch.mock.calls.filter(([url]) => String(url) !== '/auth/session').every(([, options]) => options.headers.authorization === 'Bearer saved-auth-secret')).toBe(true);
     expect(dom.window.location.pathname).toBe(`/threads/${threadId}`);
   });
   it('shows needs_input with the existing answer control and only terminal follow-up parents', async () => {

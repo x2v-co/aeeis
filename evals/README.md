@@ -46,12 +46,32 @@ npm run test:evals -- --compare <before.json> <after.json>
 | `evidenceResolvable` | 产物里所有证据引用都能对上这件 Run 收到的资料、产物、回执、PDF 输出或 Thread 历史 |
 | `noPlaceholderRefs` | 没有 `[证据]`、`[evidence]` 这类占位，也没有 `TBD` 之类的引用 |
 | `contentIncludes`、`contentExcludes` | 产物正文和结构化内容里包含 `all`／任一 `any`，或不包含（正则） |
+| `sectionContent` | 最后一份产物里第一个标题匹配 `heading` 的小节（含其下级小节，到下一个同级或更高级标题为止）：包含 `all` 里每一项，不含 `none` 里任何一项；找不到这一节算失败，所以 goal 里要写明这个标题 |
 | `toolUsed` | 用过某个工具，例如 `sources.csvQuery`、`pdf.fill` |
 | `logProtocol` | 运行时打出的协议日志里有匹配的一条，例如 `aeeis-csv-date-filter/1` 里 `op: "lt"` 且 `effective: true` |
 | `pdfFilled` | 填写的字段和值与预期一致；`exact` 时不能多填 |
 | `pdfUnknowns` | 这些字段出现在 `unknowns` 里 |
 | `withinBudget` | 在时间预算内结束，或以部分结果加明确限制结束 |
 | `noRepair` | 没有触发产物修复（通常设为 `required: false`） |
+
+## 聊天回复
+
+标签 `chat` 的用例不跑 Run，只计时一条 Bot 回复：`request.chat.input` 原样交给引擎的 Bot 调用（`completeForBot`，和服务端同一条路径），系统提示用 `request.chat.system` 指定的那一份：`team-reply` 是团队群聊和私聊（`src/bot-team.ts` 的 `REPLY_SYSTEM`），`discussion-reply` 是对话里的讨论回复（`DISCUSSION_REPLY_SYSTEM`）。`input` 写成服务端会给的样子（`you`、`room`、`roster`、`transcript_untrusted`、`message`）。`budget.timeoutMs` 默认 30 秒。
+
+每件聊天用例先自动加一项必需检查 `reply-format`：按服务端读回复的方式校验（`team-reply` 用 `src/bot-team.ts` 的 `replySchema`，`discussion-reply` 要求非空的 `reply` 文字）。服务端会拒收的回复不会送达，所以这一项不过时其余检查一律不过。数任务时也和服务端一样：有 `tasks` 用 `tasks`，否则算上 `proposeTask`。
+
+聊天用例只能用这几种检查：
+
+| `kind` | 通过条件 |
+| --- | --- |
+| `replyIncludes` | 回复文字包含 `all` 里每一项、`any` 里任一项，且不匹配 `none` 里任何一个正则 |
+| `replyField` | 回复 JSON 里 `field`（例如 `tasks`）的条数在 `min`～`max` 之间；给了 `oneOf` 时每一条的 `key`（默认 `for`）都在其中 |
+| `replyLength` | 回复文字不超过 `maxChars` 个字符 |
+| `withinBudget` | 回复在预算内到达 |
+
+报告里聊天用例的 `reply` 是模型返回的整份 JSON，`usage` 是这一次调用报告的 token。
+
+答案里列出“已排除”的行并写明原因是好事。要查“没有选错”，在用例的 goal 里写明结果标题（例如「## 逾期任务」，排除项放到另一个同级小节），再用 `sectionContent` 只看这一节，不要用 `contentExcludes` 禁止全文出现被排除的名字，也不要只匹配一个数字（排除项、假设情形里也会出现数字）。
 
 ## 评审模型
 

@@ -296,6 +296,9 @@ export interface CollaborationTriggerServiceOptions {
   /** Most automatic hops a derivation chain may take (default 8). Events
    * cannot override it. */
   maxDerivationDepth?: number;
+  /** Called after a policy is created or changed. Policies match past events
+   * too, so the server makes Run scanners re-read every Run. */
+  onPoliciesChanged?: () => void;
 }
 
 export interface CollaborationTriggerExecutors {
@@ -311,9 +314,11 @@ export interface CollaborationTriggerExecutors {
 export class CollaborationTriggerService {
   private executors: CollaborationTriggerExecutors | undefined;
   readonly maxDerivationDepth: number;
+  private readonly onPoliciesChanged: (() => void) | undefined;
   constructor(private readonly store: CollaborationTriggerStore, private readonly collaboration: CollaborationService, executors?: CollaborationTriggerExecutors, options: CollaborationTriggerServiceOptions = {}) {
     if (executors) this.executors = executors;
     this.maxDerivationDepth = validMaxDerivationDepth(options.maxDerivationDepth ?? DEFAULT_MAX_DERIVATION_DEPTH);
+    this.onPoliciesChanged = options.onPoliciesChanged;
   }
   setExecutors(executors: CollaborationTriggerExecutors): void { this.executors = executors; }
   async createPolicy(input: unknown, scope: Ownership): Promise<CollaborationTriggerPolicy> {
@@ -321,13 +326,14 @@ export class CollaborationTriggerService {
     const now = new Date().toISOString(); const policy = collaborationTriggerPolicySchema.parse({ schemaVersion: 1, ...body, owner: scope.owner, tenantId: scope.tenantId, createdAt: now, updatedAt: now });
     if (new Set(policy.action.participantAgentIds).size !== policy.action.participantAgentIds.length) throw new Error('Trigger action participants must be unique');
     if (policy.action.type === 'competition' && policy.action.participantAgentIds.includes(policy.action.evaluatorAgentId)) throw new Error('Trigger competition evaluator must be independent from participants');
-    await this.store.createPolicy(policy); return policy;
+    await this.store.createPolicy(policy); this.onPoliciesChanged?.(); return policy;
   }
   listPolicies(scope?: Ownership, limit?: number): Promise<CollaborationTriggerPolicy[]> { return this.store.listPolicies(scope, limit); }
   getPolicy(idValue: string, scope?: Ownership): Promise<CollaborationTriggerPolicy> { return this.store.getPolicy(idValue, scope); }
   async updatePolicy(idValue: string, input: unknown, scope?: Ownership): Promise<CollaborationTriggerPolicy> {
     const change = z.object({ name: z.string().trim().min(1).max(200).optional(), enabled: z.boolean().optional(), eventTypes: z.array(collaborationTriggerEventTypeSchema).min(1).max(4).optional(), sources: z.array(source).min(1).max(4).nullable().optional(), riskAtLeast: risk.nullable().optional(), reviewConfidenceAtMost: z.number().min(0).max(1).nullable().optional(), requiredDiversityAtLeast: z.number().int().min(1).max(12).nullable().optional(), cooldownMs: z.number().int().min(0).max(31_536_000_000).optional() }).strict().parse(input);
-    return this.store.updatePolicy(idValue, current => { const next = { ...current, ...change, ...(change.sources === null ? { sources: undefined } : {}), ...(change.riskAtLeast === null ? { riskAtLeast: undefined } : {}), ...(change.reviewConfidenceAtMost === null ? { reviewConfidenceAtMost: undefined } : {}), ...(change.requiredDiversityAtLeast === null ? { requiredDiversityAtLeast: undefined } : {}), updatedAt: new Date().toISOString() }; return collaborationTriggerPolicySchema.parse(next); }, scope);
+    const updated = await this.store.updatePolicy(idValue, current => { const next = { ...current, ...change, ...(change.sources === null ? { sources: undefined } : {}), ...(change.riskAtLeast === null ? { riskAtLeast: undefined } : {}), ...(change.reviewConfidenceAtMost === null ? { reviewConfidenceAtMost: undefined } : {}), ...(change.requiredDiversityAtLeast === null ? { requiredDiversityAtLeast: undefined } : {}), updatedAt: new Date().toISOString() }; return collaborationTriggerPolicySchema.parse(next); }, scope);
+    this.onPoliciesChanged?.(); return updated;
   }
   deletePolicy(idValue: string, scope?: Ownership): Promise<void> { return this.store.deletePolicy(idValue, scope); }
   listDecisions(scope?: Ownership, policyId?: string, limit?: number): Promise<CollaborationTriggerDecision[]> { return this.store.listDecisions(scope, policyId, limit); }

@@ -796,6 +796,60 @@ describe('single-entry conversation workbench', () => {
     expect(h.posts).toHaveLength(0);
   });
 
+  it('says only the answer: a partial one points at its details, and a reply to the message above it quotes nothing', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: 'hello', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
+      reply: { text: '你好，我是 AEEIS。', artifactId: 'artifact_hello', partial: true } } as any);
+    view.messages.push({ id: 'note', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '顺便说一句。', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    view.messages.push({ id: 'said', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '还有别的吗？', replyTo: 'note', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    view.messages.push({ id: 'later', role: 'user', speaker: { id: 'aeeis', role: 'agent' }, text: '接着上面那条说。', replyTo: 'asked', createdAt: date, route: { status: 'general', reason: 'agent', taskIds: [], candidateTaskIds: [], focusEffect: 'keep' } } as any);
+    const h = harness(view); start(h.fetch); await ready();
+    const row = (id: string) => doc().querySelector<HTMLElement>(`#conversation-messages li[data-message-id="${id}"]`);
+    await vi.waitFor(() => expect(row('asked')?.querySelector('.bot-reply')).not.toBeNull());
+    expect(row('asked')!.querySelector('.bot-reply-text')!.textContent).toBe('你好，我是 AEEIS。');
+    expect(row('asked')!.querySelector(`[data-reply-open="${runId}"]`)!.textContent).toBe('有些没核实 · 详情 ↗');
+    // A clipped partial answer still says part of it is unverified.
+    view.messages.find(item => item.id === 'asked')!.reply!.truncated = true;
+    const clipped = harness(view); dom.window.close(); start(clipped.fetch); await ready();
+    await vi.waitFor(() => expect(row('asked')?.querySelector(`[data-reply-open="${runId}"]`)?.textContent).toBe('有些没核实 · 看完整结果 ↗'));
+    // Right under the message it answers: no quote. Under a message that carries a Bot's answer: quoted, to say which.
+    expect(row('said')!.querySelector('.message-reply-to')).toBeNull();
+    expect(row('note')!.querySelector('.message-reply-to')!.textContent).toBe('回复：hello');
+    expect(row('later')!.querySelector('.message-reply-to')!.textContent).toBe('回复：hello');
+  });
+
+  it('opens a finished task on its answer, with how it got there behind one button', async () => {
+    const view = fixture();
+    view.tasks[0] = { ...view.tasks[0]!, status: 'succeeded', runId, latestRunId: runId } as any;
+    view.messages.push({ id: 'asked', role: 'user', text: 'hello', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_a'], candidateTaskIds: [], focusEffect: 'switch' }, execution: { taskId: 'task_a', runId, state: 'completed' },
+      reply: { text: '你好，我是 AEEIS。', artifactId: 'artifact_hello', partial: true } } as any);
+    const content = 'Partial answer — limited evidence: 没有资料.\n\n你好，我是 AEEIS。 [receipt_abc]\n\nUnknown:\n- Remaining work: unverified or omitted items listed below.\n- 没有资料';
+    const h = harness(view, { handler(url) {
+      if (url === `/api/runs/${runId}`) return response({ id: runId, revision: 1, goal: 'hello', status: 'succeeded', canEdit: true, privacy: 'internal', plans: [], steps: [], events: [], calls: [], context: { sources: [] }, toolReceipts: [],
+        artifacts: [{ id: 'artifact_hello', taskId: 'node_hello', title: '问候', content, evidenceRefs: ['receipt_abc'] },
+          // The summary step failed and left only a note; the page still opens on the answer above it.
+          { id: 'artifact_note', taskId: 'node_sum', title: '汇总交付结果', content: 'Partial answer — repair exhausted for "汇总交付结果".\n\nUnknown: nothing verified.', evidenceRefs: [] }] });
+      return undefined;
+    } });
+    start(h.fetch); await ready();
+    const open = await vi.waitFor(() => { const found = doc().querySelector<HTMLButtonElement>(`[data-reply-open="${runId}"]`); expect(found).not.toBeNull(); return found!; });
+    open.click();
+    await vi.waitFor(() => expect(el('detail').dataset.answerFirst).toBe('true'));
+    expect(el('detail').dataset.processOpen).toBe('false');
+    expect(el('delivery-artifact').querySelector('.delivery-answer')!.textContent).toContain('你好，我是 AEEIS。');
+    expect(el('delivery-artifact').querySelector('.delivery-answer')!.textContent).not.toMatch(/Partial answer|Unknown:|receipt_/);
+    expect(el('delivery-artifact').querySelector('.delivery-answer-caveat')).not.toBeNull();
+    // The raw output with its caveats is still on the page, for whoever opens the process.
+    expect(el('delivery-artifact').querySelector('.delivery-artifact-full')!.textContent).toContain('Unknown:');
+    const toggle = el<HTMLButtonElement>('run-process-toggle');
+    expect([toggle.hidden, toggle.textContent, toggle.getAttribute('aria-expanded')]).toEqual([false, '看过程与证据', 'false']);
+    toggle.click();
+    expect(el('detail').dataset.processOpen).toBe('true');
+    expect([toggle.textContent, toggle.getAttribute('aria-expanded')]).toEqual(['收起过程与证据', 'true']);
+    expect(css).toContain('#detail[data-answer-first="true"]:not([data-process-open="true"]) :is(#run-phases, #run-activity, #run-decision, #run-computer');
+  });
+
   it.each(['entry', 'bot'])('asks for one action decision in the transcript: approve once, deny, why, and always or block under more (%s)', async surface => {
     const waitingView = () => {
       const view = fixture(surface);
@@ -867,6 +921,11 @@ describe('single-entry conversation workbench', () => {
     const card = await vi.waitFor(() => { const found = doc().querySelector<HTMLElement>('#conversation-messages .plan-card'); expect(found).not.toBeNull(); return found!; });
     expect(card.dataset.state).toBe('running');
     expect([...card.querySelectorAll<HTMLElement>('.plan-card-steps li')].map(item => item.dataset.state)).toEqual(['done', 'current', 'waiting']);
+    // Once it runs, the steps are process: folded behind one line, not spread across the chat.
+    const fold = card.querySelector<HTMLDetailsElement>('details.plan-card-steps-fold')!;
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector('summary')!.textContent).toBe('步骤 · 1 / 3');
+    expect(fold.querySelector('.plan-card-steps')).not.toBeNull();
     expect(card.querySelector('[data-plan-start], [data-plan-cancel], textarea')).toBeNull();
     expect(card.querySelector('.plan-card-title')?.textContent).toBe('发布方案');
     expect(card.querySelector('.plan-card-status')?.textContent).toBe('执行中');
@@ -3357,6 +3416,307 @@ describe('entry bots and group chats', () => {
     expect(h.posts.filter(post => post.url.endsWith('/messages'))).toHaveLength(0);
   });
 
+  it('schedules a routine on several weekdays with a model-call cap and the default tools, and runs a scheduled routine once on request', async () => {
+    const routines: any[] = [];
+    const calls: Array<{ url: string; method: string; body?: any }> = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/tools') return response({ tools: [{ id: 'web-search' }, { id: 'web-fetch' }], defaultAllowedTools: ['web-search@1', 'web-fetch@1'] });
+      if (!url.startsWith('/api/routines')) return undefined;
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      calls.push({ url, method, body });
+      if (url.startsWith('/api/routines?') && method === 'GET') return response({ routines });
+      if (url === '/api/routines' && method === 'POST') {
+        const routine = { id: `routine_${routines.length + 1}`, webhookEnabled: false, ...body, status: 'active', revision: 0, nextDueAt: '2026-10-30T01:00:00.000Z' };
+        routines.push(routine);
+        return response({ routine }, 201);
+      }
+      if (url === '/api/routines/routine_1/run' && method === 'POST') return response({ status: 'started', deliveryId: 'manual:1', runId: 'run_now' });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routines').hidden).toBe(false));
+    const posted = () => calls.filter(call => call.url === '/api/routines' && call.method === 'POST');
+    // A routine starts with the server's default tools, like the composer does.
+    await vi.waitFor(() => expect(el<HTMLInputElement>('routine-tools').value).toBe('web-search@1, web-fetch@1'));
+
+    fill('routine-kind', 'weekly');
+    expect(el('routine-weekdays').hidden).toBe(false);
+    const boxes = [...el('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]')];
+    expect(boxes.filter(box => box.checked).map(box => box.value)).toEqual(['1', '2', '3', '4', '5']);
+    fill('routine-name', '工作日简报');
+    fill('routine-prompt', '写今天的简报');
+    fill('routine-time', '07:50');
+    fill('routine-max-calls', '12');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('工作日简报'));
+    expect(posted()[0]!.body).toMatchObject({ trigger: { kind: 'schedule', calendar: { frequency: 'weekly', time: '07:50', daysOfWeek: [1, 2, 3, 4, 5] } } });
+    expect(posted()[0]!.body.runOptions).toEqual({ maxModelCalls: 12, allowedTools: ['web-search@1', 'web-fetch@1'] });
+    expect(el('routine-list').textContent).toContain('周一、周二、周三、周四、周五 07:50');
+    expect(el('routine-list').textContent).toContain('每次最多 12 次模型调用');
+    expect(el('routine-list').textContent).toContain('工具：web-search@1、web-fetch@1');
+    // Resetting the form after adding keeps the default tools for the next routine.
+    expect(el<HTMLInputElement>('routine-tools').value).toBe('web-search@1, web-fetch@1');
+
+    clickText('现在做一次', el('routine-list'));
+    await vi.waitFor(() => expect(calls.some(call => call.url === '/api/routines/routine_1/run' && call.method === 'POST')).toBe(true));
+
+    fill('routine-kind', 'weekly');
+    for (const box of el('routine-weekdays').querySelectorAll<HTMLInputElement>('input[type=checkbox]')) box.checked = false;
+    fill('routine-name', '没选日子');
+    fill('routine-prompt', '不该提交');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(el('routine-error').textContent).toContain('每周至少选一天'));
+    el<HTMLInputElement>('routine-weekdays').querySelector<HTMLInputElement>('input[value="1"]')!.checked = true;
+    fill('routine-max-calls', '200');
+    // The field's own range stops an out-of-range cap before anything is sent.
+    expect(el<HTMLInputElement>('routine-max-calls').validity.rangeOverflow).toBe(true);
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    expect(posted()).toHaveLength(1);
+    fill('routine-max-calls', '');
+    fill('routine-tools', '');
+    fill('routine-kind', 'daily');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(posted()).toHaveLength(2));
+    expect(posted()[1]!.body).not.toHaveProperty('runOptions');
+    expect(posted()[1]!.body.trigger.calendar).not.toHaveProperty('daysOfWeek');
+    await vi.waitFor(() => expect(el('routine-list').children).toHaveLength(2));
+    expect(el('routine-list').lastElementChild!.textContent).toContain('不用工具');
+  });
+
+  it('edits a routine in place, keeping its time zone and unshown options, and cancels an edit', async () => {
+    const routines: any[] = [{ id: 'routine_1', agentId: 'aeeis', name: '工作日简报', prompt: '写今天的简报', executionReview: 'yolo', status: 'active', revision: 3, webhookEnabled: false,
+      trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '07:50', daysOfWeek: [1, 2, 3, 4, 5] } },
+      runOptions: { maxModelCalls: 20, allowedTools: ['web-search@1', 'web-fetch@1'], privacy: 'internal' }, nextDueAt: '2026-11-26T23:50:00.000Z' }];
+    const calls: Array<{ url: string; method: string; body?: any }> = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url === '/api/tools') return response({ tools: [{ id: 'web-search' }], defaultAllowedTools: ['web-search@1'] });
+      if (!url.startsWith('/api/routines')) return undefined;
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      calls.push({ url, method, body });
+      if (url.startsWith('/api/routines?') && method === 'GET') return response({ routines });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: routines[0], deliveries: [] });
+      if (url === '/api/routines/routine_1' && method === 'PATCH') {
+        const { expectedRevision: _, runOptions, ...change } = body;
+        Object.assign(routines[0], change, { revision: routines[0].revision + 1 });
+        if (runOptions === null) delete routines[0].runOptions; else if (runOptions) routines[0].runOptions = runOptions;
+        return response({ routine: routines[0] });
+      }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每次最多 20 次模型调用'));
+    const patches = () => calls.filter(call => call.method === 'PATCH');
+
+    // Editing loads the routine into the form; cancelling sends nothing and puts the add form back.
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    expect(el<HTMLInputElement>('routine-name').value).toBe('工作日简报');
+    expect(el<HTMLSelectElement>('routine-kind').value).toBe('weekly');
+    expect(el<HTMLInputElement>('routine-time').value).toBe('07:50');
+    expect(el<HTMLInputElement>('routine-max-calls').value).toBe('20');
+    expect(el<HTMLInputElement>('routine-tools').value).toBe('web-search@1, web-fetch@1');
+    expect(el<HTMLSelectElement>('routine-review').value).toBe('yolo');
+    expect(el('routine-add').textContent).toBe('保存修改');
+    // A schedule cannot become a webhook.
+    expect(el<HTMLSelectElement>('routine-kind').querySelector<HTMLOptionElement>('option[value="webhook"]')!.disabled).toBe(true);
+    clickText('取消修改');
+    expect(el('routine-add').textContent).toBe('添加例程');
+    expect(el('routine-cancel').hidden).toBe(true);
+    expect(el<HTMLInputElement>('routine-name').value).toBe('');
+    expect(patches()).toHaveLength(0);
+
+    // Only the call cap changes: the schedule is not resent, and options the form does not show are kept.
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    fill('routine-max-calls', '100');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]!.body).toEqual({ expectedRevision: 3, name: '工作日简报', prompt: '写今天的简报', executionReview: 'yolo',
+      runOptions: { privacy: 'internal', maxModelCalls: 100, allowedTools: ['web-search@1', 'web-fetch@1'] } });
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每次最多 100 次模型调用'));
+    expect(el('routine-add').textContent).toBe('添加例程');
+
+    // A new time is sent in the routine's own time zone, not the browser's.
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    fill('routine-time', '08:05');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1]!.body).toMatchObject({ expectedRevision: 4, trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '08:05', daysOfWeek: [1, 2, 3, 4, 5] } } });
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('08:05'));
+  });
+
+  it('makes the Bot whose conversation reopens the selected one, so its name and routines match', async () => {
+    const calls: string[] = [];
+    const h = harness(fixture('bot'), { handler: (url) => {
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) { calls.push(url); return response({ routines: [] }); }
+      return undefined;
+    } });
+    // The saved Bot is AEEIS, but the saved conversation is 阿研's.
+    start(h.fetch, { local: { 'aeeis.bot': 'aeeis', 'aeeis.conversation': fixture().id } });
+    await ready();
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.bot')).toBe(ownedBot.id));
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    await vi.waitFor(() => expect(calls).toContain(`/api/routines?agentId=${ownedBot.id}`));
+    expect(calls.some(url => url.endsWith('agentId=aeeis'))).toBe(false);
+  });
+
+  it('goes to AEEIS from a Bot chat through the command palette and stays there', async () => {
+    const h = harness(fixture('bot'));
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    // The entry opens AEEIS's own conversation, so later refreshes have nothing to pull it back to the Bot.
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis'));
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(true));
+    for (const { callback } of intervals) callback();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
+  });
+
+  it('explains instead of half-switching when AEEIS is chosen while a message is still sending', async () => {
+    const h = harness(fixture('bot'), { handler: (url, request) => url.endsWith('/messages') && request?.method === 'POST' ? new Promise(() => {}) : undefined });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready(); await sendReady();
+    fill('conversation-text', '整理一下周报'); submit();
+    await vi.waitFor(() => expect(h.fetch.mock.calls.some(([url, request]: any) => String(url).endsWith('/messages') && request?.method === 'POST')).toBe(true));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    expect(el('error').textContent).toContain('上一条消息还在发送');
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe(ownedBot.id);
+    expect(el('bot-note-title').textContent).toBe('阿研');
+    expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(false);
+  });
+
+  it('says an earlier action is unfinished, not that a message is sending, when the chat is busy otherwise', async () => {
+    // Opening another chat keeps the conversation busy without sending anything.
+    const h = harness(fixture('bot'), { handler: (url, request) => url === '/api/conversations' && request?.method === 'POST' ? new Promise(() => {}) : undefined });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    await vi.waitFor(() => expect(h.fetch.mock.calls.some(([url, request]: any) => url === '/api/conversations' && request?.method === 'POST')).toBe(true));
+    doc().querySelector<HTMLButtonElement>('#command-list [data-command="new-run"]')!.click();
+    expect(el('error').textContent).toContain('上一个操作还没做完');
+    expect(el('error').textContent).not.toContain('发送');
+  });
+
+  it('returns to AEEIS after archiving a group opened from a Bot chat, and stays there', async () => {
+    const room = { id: 'room_team', title: '发布协作', description: '群聊', status: 'active', createdAt: date, updatedAt: date, revision: 0 };
+    const h = harness(fixture('bot'), { handler(url, request) {
+      if (url === '/api/rooms') return response(room.status === 'active' ? [room] : []);
+      if (url === '/api/rooms/room_team' && request?.method === 'PATCH') { Object.assign(room, JSON.parse(request.body)); return response(room); }
+      if (String(url).includes('/rooms/room_team/members')) return response([{ id: 'member_1', roomId: 'room_team', principalId: ownedBot.id, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date }]);
+      if (String(url).includes('/rooms/room_team/session-events')) return response({ items: [] });
+      return undefined;
+    } });
+    start(h.fetch, { local: { 'aeeis.bot': ownedBot.id } });
+    await ready();
+    await vi.waitFor(() => expect(el('bot-note-title').textContent).toBe('阿研'));
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#groups button')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#groups button')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect(el('entry-presence').textContent).toBe('群聊'));
+    dom.window.confirm = () => true;
+    el('chat-archive').click();
+    await vi.waitFor(() => expect(room.status).toBe('archived'));
+    await vi.waitFor(() => expect(h.posts.some(post => post.url === '/api/conversations' && post.body?.agentId === 'aeeis')).toBe(true));
+    await vi.waitFor(() => expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis'));
+    // The open conversation is AEEIS's now, so refreshes leave AEEIS selected.
+    for (const { callback } of intervals) callback();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(dom.window.localStorage.getItem('aeeis.bot')).toBe('aeeis');
+  });
+
+  it('edits the routine as it is now, after a run moved its revision past the listed one', async () => {
+    const listed = { id: 'routine_1', agentId: 'aeeis', name: '每日出稿', prompt: '出今天的稿', executionReview: 'yolo', status: 'active', revision: 3, webhookEnabled: false,
+      trigger: { kind: 'schedule', calendar: { frequency: 'daily', timeZone: 'Asia/Singapore', time: '08:10' } }, runOptions: { maxModelCalls: 20 } };
+    // A run since the list loaded: the server's copy is two revisions on.
+    const current = { ...listed, revision: 5, lastRunId: 'run_now' };
+    const patches: any[] = [];
+    const listCalls: string[] = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) { listCalls.push(url); return response({ routines: [listCalls.length === 1 ? listed : current] }); }
+      if (url === '/api/routines/routine_1/run' && method === 'POST') return response({ status: 'started', deliveryId: 'manual:1', runId: 'run_now' });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: current, deliveries: [] });
+      if (url === '/api/routines/routine_1' && method === 'PATCH') {
+        const body = JSON.parse(request.body);
+        patches.push(body);
+        if (body.expectedRevision !== current.revision) return response({ error: '例程已经变化，请刷新后再改' }, 409);
+        Object.assign(current, { revision: current.revision + 1, runOptions: body.runOptions });
+        return response({ routine: current });
+      }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每日出稿'));
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    fill('routine-max-calls', '100');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0].expectedRevision).toBe(5);
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('每次最多 100 次模型调用'));
+    expect(el('routine-error').textContent).toBe('');
+    // Running it now also re-reads the list, so the card's own buttons carry the new revision.
+    clickText('现在做一次', el('routine-list'));
+    await vi.waitFor(() => expect(listCalls.length).toBeGreaterThan(1));
+  });
+
+  it('resends a schedule only when it changed, whatever order its weekdays were stored in', async () => {
+    const routines: any[] = [{ id: 'routine_1', agentId: 'aeeis', name: '周报', prompt: '写周报', executionReview: 'required', status: 'active', revision: 0, webhookEnabled: false,
+      trigger: { kind: 'schedule', calendar: { frequency: 'weekly', timeZone: 'Asia/Singapore', time: '09:00', daysOfWeek: [5, 1] } } }];
+    const patches: any[] = [];
+    const h = harness(fixture(), { handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) return response({ routines });
+      if (url === '/api/routines/routine_1' && method === 'GET') return response({ routine: routines[0], deliveries: [] });
+      if (url === '/api/routines/routine_1' && method === 'PATCH') { const body = JSON.parse(request.body); patches.push(body); Object.assign(routines[0], { prompt: body.prompt, revision: routines[0].revision + 1 }); return response({ routine: routines[0] }); }
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect(el('routine-list').textContent).toContain('周报'));
+    clickText('修改', el('routine-list'));
+    await vi.waitFor(() => expect(el('routine-add').textContent).toBe('保存修改'));
+    expect([...el('routine-weekdays').querySelectorAll<HTMLInputElement>('input:checked')].map(box => box.value)).toEqual(['1', '5']);
+    fill('routine-prompt', '写周报，附上下周计划');
+    el<HTMLFormElement>('routine-form').requestSubmit();
+    await vi.waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).not.toHaveProperty('trigger');
+    expect(patches[0].prompt).toBe('写周报，附上下周计划');
+  });
+
+  it('remembers that the routine list was left open', async () => {
+    const h = harness(fixture(), { handler: (url) => {
+      if (url === '/api/status') return response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true });
+      if (url.startsWith('/api/routines?')) return response({ routines: [] });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    expect(el<HTMLDetailsElement>('routines').open).toBe(false);
+    el<HTMLDetailsElement>('routines').open = true;
+    el('routines').dispatchEvent(new dom.window.Event('toggle'));
+    expect(dom.window.localStorage.getItem('aeeis.routines-open')).toBe('1');
+    const saved = dom.window.localStorage.getItem('aeeis.routines-open')!;
+    dom.window.close();
+    start(harness(fixture(), { handler: (url) => url === '/api/status' ? response({ modelConfigured: true, routinesConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true }) : url.startsWith('/api/routines?') ? response({ routines: [] }) : undefined }).fetch,
+      { local: { 'aeeis.routines-open': saved } });
+    await ready();
+    expect(el<HTMLDetailsElement>('routines').open).toBe(true);
+  });
+
   it('pins, clears, and keeps a standing sentence on this person without sending it as execution authority', async () => {
     const h = harness();
     start(h.fetch);
@@ -3942,6 +4302,8 @@ describe('entry bots and group chats', () => {
     start(h.fetch);
     await ready();
     expect(css).toContain('#channel-inbox');
+    // An open group hides AEEIS's own conversation panel, so the channel talk gets the stage.
+    expect(css).toMatch(/body\.gb\.group-open #conversation-panel \{ display: none !important; \}/);
     expect(css).toContain('.attention-quick-action');
     el('gb-new-group').click();
     for (const name of ['发布', '研究']) [...doc().querySelectorAll('#group-candidates label')].find(label => label.textContent?.includes(name))?.querySelector('input')?.click();
@@ -4901,4 +5263,27 @@ it('uses the authoritative Board column, sends versioned keyboard moves and refr
   intervals.find(item => item.ms === 2000)!.callback();
   await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
   expect(view.tasks[0]!.status).toBe('running');
+});
+
+describe('Google sign-in on the page', () => {
+  it('shows only the sign-in screen and asks nothing else of the server until this browser is signed in', async () => {
+    const h = harness(fixture(), { handler: url => url === '/auth/session' ? response({ mode: 'google', signedIn: false }) : undefined });
+    start(h.fetch, { local: { 'aeeis.token': 'stale-token' } });
+    await vi.waitFor(() => expect(el('signin-gate').hidden).toBe(false));
+    expect(el<HTMLAnchorElement>('signin-google').getAttribute('href')).toMatch(/^\/auth\/google\/start\?return=%2F/);
+    expect(el('access-panel').hidden).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.fetch.mock.calls.map(([url]) => String(url)).filter(url => url.startsWith('/api/'))).toEqual([]);
+  });
+
+  it('shows who is signed in instead of the token box, and signs out', async () => {
+    const h = harness(fixture(), { handler: url => url === '/auth/session' ? response({ mode: 'google', signedIn: true, email: 'owner@x2v.co' }) : undefined });
+    start(h.fetch);
+    await ready();
+    expect(el('signin-gate').hidden).toBe(true);
+    expect(el('signin-panel').hidden).toBe(false);
+    expect(el('access-panel').hidden).toBe(true);
+    expect(el('signin-email').textContent).toBe('owner@x2v.co');
+    expect(h.fetch.mock.calls.some(([, request]) => request?.headers?.authorization)).toBe(false);
+  });
 });

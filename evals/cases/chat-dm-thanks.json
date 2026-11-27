@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "aeeis-eval-case/1",
+  "id": "chat-dm-thanks",
+  "title": "Bot answers a thank-you briefly, without inventing work",
+  "source": "evals/README.md#聊天回复",
+  "tags": [
+    "chat"
+  ],
+  "request": {
+    "chat": {
+      "system": "team-reply",
+      "input": {
+        "you": {
+          "name": "AEEIS",
+          "role": "入口，负责接话、拆活和分派",
+          "frontDoor": true
+        },
+        "room": {
+          "title": "和 AEEIS 的私聊",
+          "kind": "私聊"
+        },
+        "roster": [
+          {
+            "name": "AEEIS",
+            "role": "入口，负责接话、拆活和分派",
+            "doing": 0
+          },
+          {
+            "name": "小研",
+            "role": "调研：竞品、价格、用户反馈",
+            "doing": 1
+          },
+          {
+            "name": "小文",
+            "role": "写作：发布说明、公告、文档",
+            "doing": 0
+          }
+        ],
+        "transcript_untrusted": [
+          {
+            "speaker": "用户",
+            "text": "发布说明的初稿我看过了，没问题。"
+          }
+        ],
+        "message": {
+          "speaker": "用户",
+          "text": "好的，谢谢！"
+        }
+      }
+    }
+  },
+  "budget": {
+    "timeoutMs": 15000
+  },
+  "checks": [
+    {
+      "id": "no-task",
+      "kind": "replyField",
+      "field": "tasks",
+      "max": 0
+    },
+    {
+      "id": "brief",
+      "kind": "replyLength",
+      "maxChars": 80
+    },
+    {
+      "id": "fast",
+      "kind": "withinBudget"
+    }
+  ]
+}

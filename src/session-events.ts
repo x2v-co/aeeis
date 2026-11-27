@@ -426,13 +426,20 @@ export class SessionEventService {
   /** Installed by the dialogue gateway; includes background Bot writes. */
   writeGate?: <T>(roomId: string, actorId: string, tenantId: string, work: () => Promise<T>) => Promise<T>;
   readonly delivery: ChannelDigestDelivery;
+  /** Called after every event is stored (the chat list's summary). It must not throw; a failure there never undoes the write. */
+  onWritten?: (event: SessionEvent) => Promise<void>;
+  private async record(draft: SessionEventDraft, append: (draft: SessionEventDraft) => Promise<SessionEvent>): Promise<SessionEvent> {
+    const event = await this.delivery.write(draft, append);
+    if (this.onWritten) await this.onWritten(event).catch(error => console.error('AEEIS chat summary hook failed', error instanceof Error ? error.message : error));
+    return event;
+  }
   constructor(private readonly repository: SessionEventRepository, private readonly domain: AeeisService, readonly noise: ChannelNoiseStore = new InMemoryChannelNoiseStore(), now: () => number = Date.now) {
     this.delivery = new ChannelDigestDelivery(repository, noise, now);
   }
 
   async boardRoomsPage(after?: string): Promise<{ items: ChannelScope[]; next?: string }> { return this.repository.boardRoomsPage?.(after,25) ?? { items: [] }; }
   async create(roomId: Id, input: CreateSessionEventInput, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
-    const write = async () => this.delivery.write(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
+    const write = async () => this.record(await this.draft(roomId, input, actorId, tenantId, actorType), draft => this.repository.append(draft));
     return this.writeGate ? this.writeGate(roomId, actorId, tenantId, write) : write();
   }
 
@@ -442,7 +449,7 @@ export class SessionEventService {
   async createTaskAction(roomId: Id, input: Omit<CreateSessionEventInput, 'type' | 'actor'> & { taskAction: ChannelTaskAction; type?: 'task_update' | 'system' }, actorId: string, tenantId: string, guard: TaskActionGuard): Promise<SessionEvent> {
     const action = channelTaskActionSchema.parse(input.taskAction);
     const draft = await this.draft(roomId, { ...input, type: input.type ?? 'task_update' }, actorId, tenantId, 'principal', action);
-    return this.delivery.write(draft, item => this.repository.appendGuarded(item, action.taskId, guard));
+    return this.record(draft, item => this.repository.appendGuarded(item, action.taskId, guard));
   }
 
   /** System-only invalidation reuses the original audience/manifest. It may
@@ -518,7 +525,7 @@ export class SessionEventService {
     const revision = target.revision + 1;
     const contentHash = digestProtocol({ type: target.type, operation: 'revise', targetEventId: target.id, revision, content, evidenceRefs, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
     const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'revise' as const, targetEventId: target.id, revision, classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs, idempotencyKey: input.idempotencyKey, createdAt: new Date().toISOString() };
-    return this.delivery.write(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
+    return this.record(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
   }
 
   async retract(roomId: Id, eventId: Id, reason: string, idempotencyKey: string, actorId: string, tenantId: string, actorType: SessionEventActorType = 'principal'): Promise<SessionEvent> {
@@ -542,7 +549,7 @@ export class SessionEventService {
     const content = `Retracted: ${reason.trim()}`;
     const contentHash = digestProtocol({ type: target.type, operation: 'retract', targetEventId: target.id, content, contextManifestId: manifest.id, contextManifestHash, audienceDigest: snapshot.digest });
     const draft = { roomId, ...(target.goalId === undefined ? {} : { goalId: target.goalId }), owner: room.owner ?? 'owner', tenantId, type: target.type, actorId, actorType, recordedBy: { id: actorId, type: actorType }, operation: 'retract' as const, targetEventId: target.id, revision: target.revision, retractionReason: reason.trim(), classification: manifestClassification(manifest), contextManifestId: manifest.id, contextManifestHash, audienceSnapshot: snapshot, content, contentHash, evidenceRefs: target.evidenceRefs, idempotencyKey, createdAt: new Date().toISOString() };
-    return this.delivery.write(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
+    return this.record(draft, item => this.repository.appendLinear ? this.repository.appendLinear(item, target.id, target.revision) : this.repository.append(item));
   }
 
   async page(roomId: Id, actorId: string, tenantId: string, limit = 50, afterSequence = 0): Promise<SessionEventPage> {

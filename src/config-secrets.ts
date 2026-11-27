@@ -26,7 +26,9 @@ export function loadFileEnvironment(env: NodeJS.ProcessEnv = process.env): void 
     if (!stat.isFile()) throw new Error(`${fileName} must point to a regular file`);
     let value: string;
     try {
-      value = readFileSync(path, 'utf8').replace(/\r?\n$/, '');
+      // A pasted secret often carries a trailing space, a Windows line ending or a byte-order mark; none of them is
+      // ever part of a secret, and a value sent with them is simply rejected by the provider. Inner lines stay.
+      value = readFileSync(path, 'utf8').replace(/^\uFEFF/, '').trim();
     } catch {
       throw new Error(`${fileName} points to an unreadable file`);
     }

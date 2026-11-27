@@ -7,6 +7,8 @@ export interface PlanReviewRun {
   id: string; plans: ReviewPlan[]; taskExecution?: unknown;
   modelBudget?: { tokens?: number; moneyUsd?: number };
   externalBudget?: { calls?: number; tokens?: number; moneyUsd?: number };
+  /** Approving the plan approves this push, so the card has to say it. */
+  publish?: { repo: string; folder?: string };
 }
 type Submit = (action: string, body: unknown) => Promise<void>;
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text = ''): HTMLElementTagNameMap[K] => {
@@ -35,6 +37,10 @@ export function planReview(run: PlanReviewRun, submit: Submit, writable: boolean
   if (cached?.key === key) return cached;
   const root = el('div'); root.className = 'plan-review-editor';
   const error = el('p'); error.setAttribute('role', 'alert');
+  if (run.publish) {
+    const note = el('p', `独立检查通过后，AEEIS 会把项目推送到仓库 ${run.publish.repo} 的 bot/ 分支${run.publish.folder ? `（放在 ${run.publish.folder}）` : ''}，并开一个 draft PR。批准这份计划就是批准这次推送。`);
+    note.className = 'plan-publish'; root.append(note);
+  }
   const history = el('details'); history.append(el('summary', `计划版本历史 · ${run.plans.length} 个版本`));
   run.plans.forEach((version, index) => {
     const item = el('details'); item.append(el('summary', `v${version.version} · ${version.author?.type === 'user' ? '用户编辑' : version.author?.type === 'policy' ? '直接执行' : '模型规划'} · ${version.summary}`));

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { answerArtifact } from '../readable-answer.js';
 import { z } from 'zod';
 import type { Ownership } from '../security/principal.js';
 import { requestSchema } from '../runtime/contracts.js';
@@ -43,7 +44,7 @@ export class ThreadService {
       id: run.id, threadId: id, threadSequence: run.threadSequence!, ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
       goal: run.goal, status: run.status, createdAt: run.createdAt, updatedAt: run.updatedAt,
       privacy: run.privacy ?? 'internal',
-      ...(run.artifacts.length ? { outputExcerpt: redactRunData(run.artifacts.at(-1)!.content, { credentialSource: run }).slice(0, 1000) } : {}),
+      ...(run.artifacts.length ? { outputExcerpt: redactRunData(answerArtifact(run.artifacts)!.content, { credentialSource: run }).slice(0, 1000) } : {}),
       links: { run: `/runs/${run.id}`, api: `/api/runs/${run.id}` },
     }));
     return { ...thread, runs, ...(page.length > limit ? { nextAfterSequence: runs.at(-1)!.threadSequence } : {}) };

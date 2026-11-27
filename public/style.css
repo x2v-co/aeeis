@@ -1260,6 +1260,12 @@ body.conversation-mode #routine-form input, body.conversation-mode #routine-form
 body.conversation-mode #routine-form textarea { min-height: 44px; resize: vertical; }
 body.conversation-mode #routine-form .standing-actions { flex-wrap: wrap; }
 body.conversation-mode #routine-form .standing-actions select, body.conversation-mode #routine-form .standing-actions input { width: auto; min-height: 28px; padding: 4px 8px; }
+body.conversation-mode #routine-form .routine-weekdays { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0; padding: 0; border: 0; }
+body.conversation-mode #routine-form .routine-weekdays[hidden] { display: none; }
+body.conversation-mode #routine-form .routine-weekdays label { display: inline-flex; align-items: center; gap: 2px; }
+body.conversation-mode #routine-form .routine-weekdays input { width: auto; min-height: 0; margin: 0; padding: 0; }
+body.conversation-mode #routine-form #routine-max-calls { width: 9em; }
+body.conversation-mode #routine-form #routine-tools { flex: 1 1 14em; min-width: 0; }
 body.conversation-mode #last-delivery { flex: none; padding: 8px 16px 0; }
 body.conversation-mode #last-delivery h3 { margin: 0 0 4px; font-size: 13px; }
 body.conversation-mode #last-delivery p { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
@@ -1584,7 +1590,9 @@ body.gb #group-speaker[hidden],
 body.gb #group-handoff[hidden],
 body.gb #life-speaker[hidden],
 body.gb #conversation-panel[hidden],
-body.gb.group-draft #conversation-panel { display: none !important; }
+body.gb.group-draft #conversation-panel,
+/* An open group channel takes the whole stage: AEEIS's own conversation panel above it left the talk two lines tall. */
+body.gb.group-open #conversation-panel { display: none !important; }
 body.gb #group-panel:not([hidden]) { display: flex; flex-direction: column; min-height: 0; }
 body.gb #group-panel:not([hidden]) #group-composer { display: flex; flex-direction: column; }
 body.gb.group-open #group-panel,
@@ -1627,6 +1635,9 @@ body.gb.group-open #group-composer { display: flex; flex-direction: column; }
 .teaching-steps li[data-current="true"] { color: var(--ink); font-weight: 600; }
 .teaching-adopt { display: grid; gap: 6px; }
 #channel-upgrades:not([hidden]) { display: grid; gap: 8px; margin: 8px 0; }
+.upgrade-fold { display: grid; gap: 8px; }
+.upgrade-fold > summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 4px 0; }
+.upgrade-fold[open] { max-height: 50vh; overflow: auto; }
 .upgrade-card p { margin: 4px 0; white-space: pre-wrap; }
 .upgrade-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .upgrade-actions textarea { flex: 1 1 100%; }
@@ -1753,3 +1764,21 @@ body.gb.conversation-mode #conversation-status:empty, body.gb.conversation-mode 
 .computer-acceptance li.acceptance-passed { border-left-color: var(--cyan, #3d6b52); }
 .computer-acceptance li.acceptance-failed, .computer-acceptance li.acceptance-unverified { border-left-color: var(--amber, #8a5a12); }
 .computer-acceptance li p { margin: 2px 0 0; }
+
+/* A finished task opens on its answer. Everything about how it got there waits behind "看过程与证据". */
+#detail[data-answer-first="true"]:not([data-process-open="true"]) :is(#run-phases, #run-activity, #run-decision, #run-computer, #usage, #evolution-traffic, #external-usage, #delivery-summary > h2, #delivery-message, #delivery-metrics, #follow-up-plan, #run-details-toggle-row, .delivery-artifact-kicker, .delivery-runtime-ok, .delivery-runtime-warning, .delivery-artifact-full, .delivery-artifact-evidence, .delivery-artifact-warning, .delivery-artifact-open) { display: none !important; }
+#detail:not([data-answer-first="true"]) :is(.delivery-answer, .delivery-answer-caveat),
+#detail[data-process-open="true"] :is(.delivery-answer, .delivery-answer-caveat) { display: none !important; }
+#detail[data-answer-first="true"] #delivery-summary { border: 0; background: transparent; box-shadow: none; padding-inline: 0; }
+.delivery-answer { font-size: 15px; line-height: 1.7; }
+.delivery-answer-caveat { display: block; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.run-process-toggle { float: right; margin: 0 0 8px 12px; font-size: 12px; }
+
+/* Sign-in screen: covers the page until this browser is signed in. */
+.signin-gate { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 16px; background: var(--paper, #fff); }
+.signin-gate[hidden] { display: none; }
+.signin-card { width: min(100%, 24rem); border: 1px solid var(--line, #ececec); border-radius: 14px; padding: 28px 24px; background: var(--surface, #fff); color: var(--ink, #171717); }
+.signin-card h1 { margin: 0 0 8px; font-size: 1.25rem; }
+.signin-card p { margin: 0 0 20px; color: var(--ink-soft, #3f3f3f); line-height: 1.6; }
+.signin-button { display: inline-flex; align-items: center; justify-content: center; width: 100%; min-height: 44px; border-radius: 10px; background: var(--ink, #171717); color: var(--paper, #fff); font-weight: 600; text-decoration: none; }
+.signin-button:focus-visible { outline: 2px solid var(--ink, #171717); outline-offset: 2px; }

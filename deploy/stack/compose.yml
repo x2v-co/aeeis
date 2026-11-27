@@ -184,13 +184,17 @@ services:
         AEEIS_TRUSTED_ORIGINS: ${AEEIS_TRUSTED_ORIGINS:-}
         AEEIS_REMINDER_INTERVAL_MS: ${AEEIS_REMINDER_INTERVAL_MS:-0}
         AEEIS_DEMO_MODE: "0"
-      AEEIS_ACCESS_TOKEN: ${AEEIS_ACCESS_TOKEN:?Copy the existing AEEIS_ACCESS_TOKEN into the selected env file}
+      # Empty with Google sign-in (AEEIS_GOOGLE_CLIENT_ID); startup validation requires one sign-in method.
+      AEEIS_ACCESS_TOKEN: ${AEEIS_ACCESS_TOKEN:-}
       AEEIS_MODEL_BASE_URL: ${AEEIS_MODEL_BASE_URL:?Set a real HTTPS OpenAI-compatible provider URL}
       AEEIS_MODEL: ${AEEIS_MODEL:?Set the real provider model or endpoint ID}
     # SIGTERM drains the Engine (AEEIS_SHUTDOWN_DRAIN_MS, 240s): no new step
     # starts and in-flight model (<=180s) / tool calls finish and persist
     # before SIGKILL. Keep this above the drain budget.
     stop_grace_period: 300s
+    # A changed file in the secrets directory changes this label, so `up` restarts the API (bin/_lib.sh).
+    labels:
+      aeeis.secrets-fingerprint: ${AEEIS_SECRETS_FINGERPRINT:-none}
     volumes:
       - aeeis-data:/app/data
       # Optional *_FILE secrets (e.g. AEEIS_MODEL_API_KEY_FILE=/run/aeeis-secrets/model-key).

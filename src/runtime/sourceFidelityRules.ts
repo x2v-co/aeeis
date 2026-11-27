@@ -65,6 +65,35 @@ const clean = (text: string) => text.replace(/\[[^\]]*\]/g, '').replace(/^(?:\s+
 export const vacuousInference = /^(?:推断\s*[:：]\s*)?(?:除(?:上述|以上|此)?[^，,。]{0,12}外)?[，,\s]*(?:未|没有|并未|不)(?:作|做|进行)?(?:任何|额外|其他|其它|进一步)*(?:的)?推断[。.；;]?$|^(?:推断\s*[:：]\s*)?no (?:further|additional|other) inferences?(?: (?:were|was) made)?[.;]?$/iu;
 const inferencePrefix = /^(?:推断\s*[:：]|Inference\s*:)/i;
 const inferenceText = (text: string) => text.replace(inferencePrefix, '推断：').replace(/[。；.!;]+$/, '').trim();
+// Eval baseline 2026-11-19 (pulse-csv-followup/large, pulse-r79-csv): a heading such as "八、下一步（推断/建议）" was
+// labelled "推断：" and every labelled line, wherever it stood, was copied into structured.risks; the reviewer then
+// rejected each pulse because its risks did not match the text. Headings are titles, not claims, and only lines under a
+// risk heading (or in content without headings) become derived risks.
+const markdownHeading = /^\s{0,3}#{1,6}\s/;
+const riskHeading = /风险|risk/i;
+// Eval pulse-r79-csv (2026-11-19): a pulse written as "一、当前进度：…" … "四、风险：…" … "八、下一步行动：…" paragraphs had
+// no markdown heading, so every labelled line was treated as a risk and re-added after each revision. A numbered Chinese
+// section opener (also after an auto-added "推断：") or a bold-only line opens a section as well; inside a markdown section
+// it is a subsection, so a numbered list under "## 风险" stays under risks.
+const ordinalOpener = /^(?:\*\*)?(?:[一二三四五六七八九十]+、|第[一二三四五六七八九十]+[节部分][、：:]?)\s*([^：:\n]{1,40}?)(?:\*\*)?\s*[：:]\s*/u;
+const boldOpener = /^\*\*([^*\n]{1,40})\*\*\s*[：:]?\s*$/u;
+// A third run wrote plain title lines ("风险", "负责人", "下一步（均为基于来源的推断）"). A line that is only a Project Pulse
+// section name — optionally joined with another, with a title suffix or a parenthetical note — is a title too. A sentence
+// that merely starts with one ("负责人可能无法按时完成") stays prose (review on #241).
+const sectionWord = '(?:总览|概览|概述|摘要|当前进度|进展|进度|已完成变更|已完成|完成变更|阻塞|风险|决策|负责人|责任人|截止日期|截止|期限|里程碑|下一步|后续|行动|未知项?|待确认|限制|summary|overview|progress|completed changes|completed|blockers?|risks?|decisions?|owners?|deadlines?|next steps?|next actions?|unknowns?|limitations?)';
+const plainTitlePattern = new RegExp(`^${sectionWord}(?:\\s*(?:与|和|及|、|/|&|and)\\s*${sectionWord})*(?:项|清单|情况|行动|建议|计划|汇总|一览|分析|说明|与建议)?\\s*(?:[（(][^（）()]{0,40}[）)])?$`, 'iu');
+const plainTitle = (text: string) => plainTitlePattern.test(text);
+function sectionOpener(line: string): { markdownLevel?: number; title: string; rest: string } | undefined {
+  if (markdownHeading.test(line)) return { markdownLevel: /^\s{0,3}(#{1,6})/.exec(line)![1]!.length, title: line, rest: '' };
+  const plain = line.replace(/^\s*(?:[-*+>]\s+)?(?:推断\s*[:：]\s*)?/u, '');
+  const ordinal = ordinalOpener.exec(plain);
+  if (ordinal) return { title: ordinal[1]!, rest: plain.slice(ordinal[0].length) };
+  const bold = boldOpener.exec(plain);
+  if (bold) return { title: bold[1]!, rest: '' };
+  // A list item is never a plain title: only the "推断：" a runtime label may have added is ignored here.
+  const bare = line.replace(/^\s*(?:推断\s*[:：]\s*)?/u, '').replace(/[：:]\s*$/u, '').trim();
+  return plainTitle(bare) ? { title: bare, rest: '' } : undefined;
+}
 const narrativeKeys = new Set(['text', 'responsibility', 'summary', 'description', 'rationale', 'recommendation']);
 
 /** PDF choice inferences must be stated as labelled prose as well as structured evidence. */
@@ -102,6 +131,7 @@ export function labelInferences(content: string | { content: string }, structure
   if (structured?.schemaVersion === 'fillable-pdf/1') visit(structured.inferences, refs, 'structured.inferences');
   else visit(structured);
   const labelledContent = (typeof content === 'string' ? content : content.content).split('\n').map((line, index) => {
+    if (markdownHeading.test(line)) return line;
     let sentenceIndex = 0;
     // Preserve separators and whitespace, using the checker's sentence boundaries.
     return line.replace(/[^。；]+[。；]?/g, sentence => {
@@ -181,7 +211,24 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
   visit(structured);
   let derived = 0;
   const warnings: string[] = [];
-  for (const line of content.split(/\n|(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i)) {
+  const sections = content.split('\n');
+  const hasHeadings = sections.some(line => sectionOpener(line) !== undefined);
+  // Open headings by level: a subheading stays inside its risk section until a heading of the same or a higher level.
+  const open: Array<{ level: number; risk: boolean; markdown: boolean }> = [];
+  const lines = sections.flatMap(raw => {
+    let line = raw;
+    const opener = sectionOpener(raw);
+    if (opener) {
+      const level = opener.markdownLevel ?? (open.filter(item => item.markdown).at(-1)?.level ?? 0) + 1;
+      while (open.length && open.at(-1)!.level >= level) open.pop();
+      open.push({ level, risk: riskHeading.test(opener.title), markdown: opener.markdownLevel !== undefined });
+      if (!opener.rest.trim()) return [];
+      line = opener.rest;
+    }
+    const underRisks = !hasHeadings || open.some(item => item.risk);
+    return line.split(/(?<=[。；])\s*|(?<=[.!;])\s+(?=(?:推断\s*[:：]|Inference\s*:))/i).map(text => ({ text, underRisks }));
+  });
+  for (const { text: line, underRisks } of lines) {
     const text = clean(line);
     if (inferencePrefix.test(text) && vacuousInference.test(text)) continue;
     if (!inferencePrefix.test(text) || entries.includes(inferenceText(text)) || structured?.schemaVersion === 'fillable-pdf/1' && structured.inferences?.some(inference => hasProseInference(line, inference.text))) continue;
@@ -195,7 +242,7 @@ export function deriveProseInferences(content: string, structured: ProjectPulseA
       // r62 txt: the same inference restated in several prose clauses must not become several risks.
       entries.push(inferenceText(text)); continue;
     }
-    if (structured?.schemaVersion === 'project-pulse/1' && refs.length && structured.risks.length < 30 && text.length <= 2000) {
+    if (structured?.schemaVersion === 'project-pulse/1' && underRisks && refs.length && structured.risks.length < 30 && text.length <= 2000) {
       structured.risks.push({ text: text.replace(inferencePrefix, '推断：').replace(/[；;]+$/u, '。'), evidenceRefs: [...refs].slice(0, 50), derived: true });
       entries.push(inferenceText(text)); derived++;
     } else warnings.push(`Prose inference has no structured counterpart: ${text.slice(0, 200)}`);
@@ -230,7 +277,7 @@ export function inferenceFidelityProblems(content: string, structured: ProjectPu
   visit(structured);
   for (const line of content.split(/\n|(?<=[。；])\s*/)) {
     const text = clean(line);
-    if (!text || /^(?:推断|Inference)$/i.test(text)) continue;
+    if (!text || markdownHeading.test(line) || /^(?:推断|Inference)$/i.test(text)) continue;
     check(text, sourceText(refs), 'content');
   }
   return [...new Set(problems)];

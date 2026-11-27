@@ -95,6 +95,13 @@ key, remove `AEEIS_MODEL_API_KEY` and use
 `AEEIS_MODEL_HEALTH_URL` if the provider exposes an appropriate real endpoint.
 Do not enable insecure-HTTP flags in production.
 
+The API reads `secrets/` only when it starts. After changing a file there
+(`local-tools.json`, a key, `ssh/`), run `bin/deploy.sh` again, even without a
+new commit: it fingerprints the directory (names, sizes, modes, owners and
+modification times, never contents) into the API's
+`aeeis.secrets-fingerprint` label, so a change restarts the API, and it prints
+the fingerprint. Run it as root so it can see the whole directory.
+
 Keep the **existing access and worker tokens** during migration so Toolkit
 Global and other callers continue to work. Preserve the old Temporal namespace,
 queue and database credentials when carrying over state. A fresh installation
@@ -128,14 +135,153 @@ certificate; a paused or cooling-down machine is waited for up to
 and to the npm registry for the pinned `instabox` CLI. The Anthropic key never
 enters the Bot's container: the per-Run relay holds it.
 
-Production allows local tools only in this shape: `sandbox.ssh` set, network
-`proxied` or `none`, no `web-fetch`, and a single owner (no
-`AEEIS_PRINCIPAL_TOKENS` or `AEEIS_OIDC_ISSUER`). `bin/deploy.sh` runs a startup
+#### Several sandbox hosts, one per user
+
+`hosts` names each sandbox host and `assign` says whose machines run where
+(`local-tools.example.hosts.json`). `sandbox` keeps what a Run may do on every
+host (network, egress, image, relay, workspaces, lifetimes); a host adds how to
+reach it (`ssh`, `sshLoginCommand`, `sshWaitSeconds`), its previews
+(`previewPorts`, `previewCommand`; a host without a `previewCommand` shares
+previews only through `sandbox.previewDomain`, below) and its size
+(`memoryMiB`, `cpus`, `pids`).
+
+#### Previews through AEEIS (`previewDomain`)
+
+A host that cannot share a port itself (a plain VPS) can still show a Bot's dev
+server: set `sandbox.previewDomain` (for example `"aeeis.link"`) and list the
+host's `previewPorts` without a `previewCommand`. A preview link is then
+`https://p-<random>.<previewDomain>/`. AEEIS answers it itself: it looks the
+random id up among the Runs' machines on every host, and carries the visitor's
+requests (websockets included) to that port through a relay it starts in the
+Run's proxy container, over the SSH connection it already uses for the host.
+The host needs no open port, no tunnel and no SSH forwarding.
+
+- Use a domain of its own, not AEEIS's: every preview is a Bot's page, and each
+  one gets its own origin under it. Requests for `p-*` hosts never reach the
+  AEEIS app, and the app refuses requests from them.
+- Point a wildcard at AEEIS: with the Cloudflare tunnel, add the public hostname
+  `*.<previewDomain>` to the tunnel with the same service as AEEIS (Cloudflare
+  then adds the DNS record). Cloudflare's free certificate covers one level, so
+  `p-<random>.aeeis.link` needs nothing more.
+- The id is the only key (130 random bits): anyone with the link can open the
+  page while the Run's machine is kept. AEEIS checks the id again every 30
+  seconds, so a link stops working soon after the machine is released.
+- The dev server sees `Host: localhost:<port>` (so dev servers that check the
+  host accept it) and `X-Forwarded-Host` with the link's host. It must listen on
+  `0.0.0.0` inside the Run's container.
+- A Run made before its host had `previewPorts` has no preview port; previews
+  start working for new Runs.
+
+- `assign.principals` maps `"<tenant>/<principal>"` (or `"<principal>"` for any
+  tenant) to a host; everyone else gets `assign.default`. A Run stays on the
+  host its machine was created on, so changing the assignment moves only new
+  Runs. A Work Grant's workspace volume lives on one host, so a user moved to
+  another host starts that workspace afresh there.
+- `assign.existing` is the host that machines made before hosts had names live
+  on (default: `assign.default`). Set it to the host the old `sandbox.ssh`
+  pointed at when converting a running deployment.
+- Each user's machines are labelled as theirs (a hash, not the user's name), and
+  a container or workspace volume labelled for someone else is refused. Each
+  user's calls queue apart, per host, so one user's long call or waiting host
+  never holds up another's tools. `perPrincipal.maxMachines` caps how many
+  machines one user has at once across all hosts.
+
+For a plain VPS host: install Docker, give a dedicated user access to it, build
+the image there with `npm run sandbox:build -- --host <name>` (or `docker build
+-t aeeis-sandbox:3 sandbox/` on the VPS), and put an SSH entry for it in
+`secrets/ssh/<name>.conf` with its key and `known_hosts` beside it
+(`ssh.example.conf`). The API container reads `/run/aeeis-secrets/ssh/*.conf`.
+
+Production allows local tools only in this shape: every host remote (`ssh` set
+on each of `hosts`, or `sandbox.ssh`), network `proxied` or `none`, no
+`web-fetch`. Several users (`AEEIS_PRINCIPAL_TOKENS` or `AEEIS_OIDC_ISSUER`)
+also need `perPrincipal.maxMachines`. `bin/deploy.sh` runs a startup
 gate (`scripts/check-tools.mjs`) in a one-off container before replacing anything:
-startup checks, Toolkit plus local tools, and default tools must pass, and the
-sandbox host is reported but not required. AEEIS starts without the sandbox
-host, and its readiness check leaves the host alone while no Run uses it, so an
+startup checks, Toolkit plus local tools, and default tools must pass, and each
+sandbox host is reported but not required. AEEIS starts without its sandbox
+hosts, and its readiness check leaves a host alone while no Run uses it, so an
 idle Instabox machine can pause.
+
+#### Publishing to GitHub (`repo-push`)
+
+`repos` in `local-tools.json` lets Bots publish a workspace folder to a GitHub
+repository as a `bot/<name>` branch with a draft pull request:
+
+```json
+"repos": [{ "name": "sandbox", "url": "https://github.com/x2v-co/aeeis-bots-repo",
+            "tokenFile": "/run/aeeis-secrets/github-sandbox.token" }]
+```
+
+- The token is a fine-grained personal access token for that repository only,
+  with **Contents** and **Pull requests** set to read and write. Put it in
+  `secrets/github-sandbox.token` (owner uid 1000, mode 0400). It is read for each
+  push and never enters a Run machine: AEEIS copies the files out, commits them
+  in a scratch clone and pushes over HTTPS itself.
+- Only `bot/` branches are pushed, never with force. Pushing to the same branch
+  again adds a commit and keeps the pull request. The base branch
+  (`baseBranch`, default `main`) must already exist.
+- Every push asks the owner first, unless the Run's Work Grant lists
+  `repo-push:<name>` under "不用问就能推送的仓库" (and `repo-push` under tools).
+- A push interrupted midway is checked on GitHub (each commit carries an
+  `AEEIS-Push:` trailer) before it is ever tried again.
+- **Coding tasks can end in a draft PR.** A Run started with acceptance
+  requirements and "检查通过后开 PR 到仓库" (`publish: { repo, folder? }`) is
+  pushed by AEEIS itself once the independent check passes: one
+  `bot/run-<id>` branch per Run, the project in `folder` (default: the branch
+  name), and the check results in the PR description. Only checked work is
+  pushed; a later revision round adds a commit to the same PR. Approving the
+  plan approves the push, so automatic review never clears such a plan; under a
+  Work Grant the grant must list `repo-push:<name>`. The block list still wins.
+  A failed push does not fail the Run: the result card says why there is no PR.
+  AEEIS's own screenshots, `artifacts/source.tar.gz` and `.previous-artifacts`
+  are never pushed.
+
+## Sign-in: Google accounts, no shared token
+
+With Google sign-in each person signs in with their own Google account and gets
+their own identity; there is no shared `AEEIS_ACCESS_TOKEN`. The server runs the
+sign-in itself (authorization code with PKCE): the browser never holds a Google
+token, only an HttpOnly, `Secure`, `SameSite=Lax` session cookie
+(`__Host-aeeis_session`) that the server signs. Every request re-checks the
+signed-in address against the current allow-list, so removing an address takes
+effect at once; changing `AEEIS_SESSION_SECRET` signs everyone out.
+
+1. In Google Cloud Console, create an OAuth client of type **Web application**
+   with the authorized redirect URI `https://<public host>/auth/google/callback`.
+2. Put the client secret and a session secret (`openssl rand -base64 48`) in
+   `secrets/` (uid 1000, mode 0400) and set, with `AEEIS_ACCESS_TOKEN` left empty:
+
+```dotenv
+AEEIS_ACCESS_TOKEN=
+AEEIS_GOOGLE_CLIENT_ID=1234-abc.apps.googleusercontent.com
+AEEIS_GOOGLE_CLIENT_SECRET_FILE=/run/aeeis-secrets/google-client-secret
+AEEIS_GOOGLE_REDIRECT_URI=https://aeeis.example/auth/google/callback
+AEEIS_SESSION_SECRET_FILE=/run/aeeis-secrets/session-secret
+# Who may sign in, and as whom. Map the existing owner's address to id "owner",
+# tenant "local" to keep everything created before the switch. Gmail addresses and
+# Workspace accounts of their own domain need nothing more. Any other address
+# also needs "sub" (the sign-in error page shows it): Google verified such an
+# address only once, and it may have changed hands since.
+AEEIS_GOOGLE_USERS={"you@example.com":{"id":"owner","tenantId":"local","roles":["owner","operator"]}}
+# Optional: every verified account of a Google Workspace domain (checked by the
+# token's hd claim, not the address), each as its own user google:<sub>.
+# AEEIS_GOOGLE_ALLOWED_DOMAINS=example.com
+# AEEIS_GOOGLE_DOMAIN_TENANT=example
+# AEEIS_GOOGLE_DOMAIN_ROLES=owner
+# AEEIS_SESSION_TTL_HOURS=168
+```
+
+3. Several users need `perPrincipal.maxMachines` in `local-tools.json` (see
+   Bot computer). `AEEIS_TRUSTED_ORIGINS` must include the public origin, as for
+   any browser use.
+
+Google sign-in cannot be combined with `AEEIS_ACCESS_TOKEN` or OIDC. Machines
+(a `/metrics` scraper, scripts) get their own entries in `AEEIS_PRINCIPAL_TOKENS`
+beside it, one token per machine; give a scraper only `["operator"]`. A request
+that sends `Authorization: Bearer …` is judged by that token alone and never by a
+session cookie. Readiness probes (`bin/health.sh`, `bin/deploy.sh`) call
+`/readyz`, which needs no credentials. To go back, clear the Google settings and
+set `AEEIS_ACCESS_TOKEN` again.
 
 ## Network and trust
 
