@@ -97,7 +97,7 @@ describe('action decisions under a work grant', () => {
 });
 
 /** `edit` is confined to the workspace by the gateway's own code; `publish` is not. */
-function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boolean; wrongVersionFirst?: boolean; muddledCall?: boolean; verifier?: { verify(input: VerifyInput): Promise<AcceptanceCheck> } } = {}) {
+function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boolean; wrongVersionFirst?: boolean; unknownTool?: number; muddledCall?: boolean; verifier?: { verify(input: VerifyInput): Promise<AcceptanceCheck> } } = {}) {
   const repository = new InMemoryRunRepository();
   const grants = new InMemoryWorkGrantStore();
   const interrupt = vi.fn<NonNullable<ToolGateway['interruptRun']>>(async () => ({ confirmed: true }));
@@ -133,6 +133,8 @@ function harness(options: { twoSteps?: boolean; calls?: string[]; reject?: boole
     }
     if (request.system.includes('You review one external side effect')) throw new Error('no approval model in this test');
     const next = sequence[input.observations.length];
+    // As production saw it: the model named its tool list as if it were a tool.
+    if (next && options.unknownTool && !input.executionBudget.finalOnly && input.observations.length < options.unknownTool) return { value: { type: 'tool', tool: 'capabilityCatalog', argument: 'x' } };
     if (next && options.muddledCall && !input.executionBudget.finalOnly) return { value: { type: 'tool', tool: 'capability', toolId: next, toolVersion: '1', input: { step: 0 } } };
     if (next && !input.executionBudget.finalOnly) return { value: { type: 'capability', toolId: next, toolVersion: options.wrongVersionFirst && !input.observations.length ? '9' : '1', purpose: `Use ${next}`, input: { step: input.observations.length } } };
     const refs = (input.availableEvidenceRefs as string[]).slice(0, 1);
@@ -795,6 +797,27 @@ describe('a slip in naming a tool', () => {
     const slip = (await h.repository.get(run.id)).events.find(item => item.type === 'tool.failed_recoverable');
     expect(JSON.stringify(slip?.data)).toContain('toolVersion');
     expect(h.invoke).toHaveBeenCalledTimes(1);
+  });
+  it('hands back a tool name that was never approved, with the approved names, instead of ending the Run', async () => {
+    const h = harness({ unknownTool: 1, calls: ['edit', 'edit'] });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    expect(await h.settle(run.id)).toBe('succeeded');
+    const slip = (await h.repository.get(run.id)).events.find(item => item.type === 'tool.failed_recoverable');
+    expect(slip?.data).toMatchObject({ toolId: 'capabilityCatalog', errorCode: 'tool_not_approved' });
+    expect(String(slip?.data.message)).toContain('edit@1');
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    expect(h.invoke.mock.calls[0]![0].toolId).toBe('edit');
+  });
+  it('does not loop when the model keeps naming tools that were never approved', async () => {
+    const h = harness({ unknownTool: 99, calls: Array(10).fill('edit') });
+    const grant = await h.grants.create(scope, grantInput);
+    const run = await h.engine.create({ goal: 'Add a footer', materials: h.materials, workGrantId: grant.grantId, origin: 'channel' });
+    await h.settle(run.id);
+    const slips = (await h.repository.get(run.id)).events.filter(item => item.type === 'tool.failed_recoverable');
+    expect(slips.length).toBeGreaterThan(0);
+    expect(slips.length).toBeLessThanOrEqual(4);
+    expect(h.invoke).not.toHaveBeenCalled();
   });
 });
 
