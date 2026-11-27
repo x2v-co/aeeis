@@ -45,6 +45,30 @@ describe('Shared Session canonical events', () => {
     await expect(events.page(room.id, 'bob', 'team-a')).rejects.toThrow('Unknown room');
   });
 
+  it('lets a room editor write under the owner\'s Goal with a manifest that carries none of the owner\'s memory', async () => {
+    const memberships = new InMemoryRoomMembershipRepository();
+    const domain = new AeeisService(new InMemoryStore(), [], memberships);
+    const room = await domain.createRoom({ title: 'Group' }, undefined, 'alice', 'team-a');
+    const goal = await domain.createGoal({ title: 'Group', roomId: room.id }, undefined, 'alice', 'team-a');
+    await domain.addMemory(goal.id, { kind: 'note', content: 'alice keeps this', scope: 'project' }, undefined, 'alice', 'team-a');
+    await domain.addRoomMember(room.id, 'bob', 'editor', 'alice', 'team-a');
+    await domain.addRoomMember(room.id, 'carol', 'viewer', 'alice', 'team-a');
+    // The owner gets exactly what createContextManifest gives, memory included.
+    const own = await domain.createRoomMessageManifest(goal.id, '群聊消息', undefined, 'alice', 'team-a');
+    expect(own.included.map(item => item.content)).toEqual(['alice keeps this']);
+    const bobs = await domain.createRoomMessageManifest(goal.id, '群聊消息', undefined, 'bob', 'team-a');
+    expect(bobs).toMatchObject({ owner: 'alice', goalId: goal.id, included: [], memoryRefs: [] });
+    expect(bobs.audienceSnapshot?.participants.map(item => item.principalId)).toEqual(['alice', 'bob', 'carol']);
+    const events = new SessionEventService(new InMemorySessionEventRepository(), domain);
+    const line = await events.create(room.id, { goalId: goal.id, type: 'message', content: 'bob 说一句', contextManifestId: bobs.id, idempotencyKey: 'bob-1' }, 'bob', 'team-a');
+    expect(line).toMatchObject({ owner: 'alice', actorId: 'bob', actorType: 'principal' });
+    expect((await events.page(room.id, 'alice', 'team-a')).items.map(item => item.content)).toEqual(['bob 说一句']);
+    // A viewer may not, nor anyone outside the room or tenant.
+    await expect(domain.createRoomMessageManifest(goal.id, '群聊消息', undefined, 'carol', 'team-a')).rejects.toThrow('Room editor role required');
+    await expect(domain.createRoomMessageManifest(goal.id, '群聊消息', undefined, 'dave', 'team-a')).rejects.toThrow('Unknown room');
+    await expect(domain.createRoomMessageManifest(goal.id, '群聊消息', undefined, 'bob', 'team-b')).rejects.toThrow('Unknown goal');
+  });
+
   it('rejects a viewer from publishing a canonical event', async () => {
     const memberships = new InMemoryRoomMembershipRepository();
     const domain = new AeeisService(new InMemoryStore(), [], memberships);

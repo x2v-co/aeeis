@@ -482,6 +482,35 @@ export class AeeisService {
     return manifest;
   }
 
+  /**
+   * The manifest a group message is written under. The Goal's owner gets the
+   * same manifest as before. Another owner or editor of the Goal's Room gets one
+   * with the Room as audience and none of the Goal owner's memory, so the
+   * member can speak in the Room without reading what the owner kept.
+   */
+  async createRoomMessageManifest(goalId: Id, purpose: string, now = new Date().toISOString(), actor = 'owner', tenantId = 'local'): Promise<ContextManifest> {
+    const goal = await this.store.getGoal(goalId);
+    if (!goal || (goal.tenantId ?? 'local') !== tenantId) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+    if (this.owns(goal, actor, tenantId)) return this.createContextManifest(goalId, { purpose, audienceMode: 'room' }, now, actor, tenantId);
+    if (!goal.roomId) throw new AeeisNotFound(`Unknown goal: ${goalId}`);
+    const room = await this.getRoomForPrincipal(goal.roomId, actor, tenantId);
+    const role = await this.roomRole(room, actor, tenantId);
+    if (role !== 'owner' && role !== 'editor') throw new RoomMembershipConflict('Room editor role required');
+    if (room.status !== 'active') throw new AeeisConflict('这间已归档，只能阅读，不能再写入');
+    if (!purpose.trim()) throw new AeeisConflict('Context purpose is required');
+    const goalOwner = goal.owner ?? 'owner';
+    const audienceSnapshot = await this.captureContextAudience(goal, { purpose, audienceMode: 'room' }, now, goalOwner, tenantId);
+    if (!audienceSnapshot.participants.some(participant => participant.principalId === actor)) throw new AeeisConflict('Context audience must include its creator');
+    const manifest: ContextManifest = {
+      id: `ctx_${randomUUID()}`, goalId, owner: goalOwner, tenantId, purpose: purpose.trim(),
+      audience: audienceSnapshot.participants.map(participant => participant.audience), audienceSnapshot,
+      memoryRefs: [], included: [], excluded: ['Goal owner memory is not shared through a room member\'s manifest'], createdAt: now,
+    };
+    await this.assertAudienceCurrent(manifest);
+    await this.store.saveContextManifest(manifest);
+    return manifest;
+  }
+
   /** Compose published Goal contexts without acquiring any new data access. */
   async createSessionContextManifest(roomId: Id, input: CreateSessionContextInput, now = new Date().toISOString(), actor = 'owner', tenantId = 'local'): Promise<ContextManifest> {
     const room = await this.getRoomForPrincipal(roomId, actor, tenantId);
