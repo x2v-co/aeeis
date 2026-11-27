@@ -176,6 +176,8 @@ describe('Privacy page', () => {
       expect(page.statusCode).toBe(200);
       expect(page.headers['content-type']).toMatch(/text\/html/);
       for (const text of ['从 Google 拿到什么', '存了什么', '谁能看见', '怎么删', 'Brain', 'Run 记录和回执', '每个租户有自己的数据密钥', '加密备份保留 14 天', 'mailto:privacy@example.com', '有限使用']) expect(page.body).toContain(text);
+      // Cloudflare leaves the contact address alone, so it reads the same without JavaScript.
+      expect(page.body).toContain('<!--email_off--><a href="mailto:privacy@example.com">privacy@example.com</a><!--/email_off-->');
       expect((await app.inject({ method: 'GET', url: '/privacy.css' })).statusCode).toBe(200);
       // Other pages still refuse a cross-site navigation.
       expect((await app.inject({ method: 'GET', url: '/', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).statusCode).toBe(403);
