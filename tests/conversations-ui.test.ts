@@ -5252,9 +5252,13 @@ it('uses the authoritative Board column, sends versioned keyboard moves and refr
   await vi.waitFor(() => expect(el('group-transcript').textContent).toContain('联动任务'));
   el('channel-board-open').click();
   await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());
-  const menu = doc().querySelector<HTMLSelectElement>('[aria-label="移动到 · 联动任务"]')!; menu.focus(); menu.value = 'doing'; menu.dispatchEvent(new dom.window.Event('change'));
+  expect(doc().querySelector('[aria-label^="移动到"]')).toBeNull();
+  const grip = doc().querySelector<HTMLButtonElement>('[data-board-task="task_live"]')!;
+  Object.defineProperty(doc(),'elementFromPoint',{ configurable: true,value: () => doc().querySelector('[data-column="doing"]') });
+  const pointer = (target: EventTarget,type: string,x: number) => { const event = new dom.window.MouseEvent(type,{ clientX: x,clientY: 1,bubbles: true,button: 0 }); Object.defineProperty(event,'pointerType',{ value: 'mouse' }); target.dispatchEvent(event); };
+  pointer(grip,'pointerdown',1); pointer(dom.window,'pointermove',40); pointer(dom.window,'pointerup',40);
   await vi.waitFor(() => expect(doc().querySelector('[data-column="doing"] [data-board-task="task_live"]')).not.toBeNull());
-  expect(h.posts.find(post => post.url.endsWith('/board-controls'))?.body).toMatchObject({ expectedVersion: 3,expectedRunId: runId,expectedRunRevision: 7,toColumn: 'doing',source: 'home',reason: '等待设计确认' });
+  expect(h.posts.find(post => post.url.endsWith('/board-controls'))?.body).toMatchObject({ expectedVersion: 3,expectedRunId: runId,expectedRunRevision: 7,toColumn: 'doing',source: 'home',reason: '主人整理任务板' });
   column = 'blocked'; version++;
   intervals.find(item => item.ms === 2000)!.callback();
   await vi.waitFor(() => expect(doc().querySelector('[data-column="blocked"] [data-board-task="task_live"]')).not.toBeNull());

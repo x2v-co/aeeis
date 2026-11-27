@@ -2637,6 +2637,8 @@ async function showChannelBoard(): Promise<void> {
   renderChannelBoard();
 }
 function renderChannelBoard(): void {
+  // A poll must not pull the card out from under a drag; the drop renders again.
+  if (boardDragActive) { boardRenderDeferred = true; return; }
   const board = $('channel-board');
   const columns = $('channel-board-columns');
   const failures = $('channel-board-failures');
@@ -2672,23 +2674,25 @@ function renderChannelBoard(): void {
   if (note) note.textContent = ['这六列只列出这个频道交接过的事。看一眼不会执行，也不会改讨论焦点。', ...wip].filter(Boolean).join(' ');
   const moreButton = $('channel-board-more');
   if (moreButton) moreButton.hidden = true;
+  const scrolled = columns.scrollLeft;
   columns.replaceChildren();
   const pending = pendingBoardMove();
   if (pending) columns.append(dashboardButton('用原请求确认上次移动', () => submitBoardMove(pending)));
   for (const column of BOARD_COLUMNS) {
     const section = element('section', '', 'channel-board-column');
     section.dataset.column = column.id;
-    section.addEventListener('dragover', event => event.preventDefault());
-    section.addEventListener('drop', event => { event.preventDefault(); const card = draggedBoardCard; draggedBoardCard = undefined; if (card) void moveChannelCard(card, column.id).catch(error => message(errorMessage(error))); });
     const items = placed.filter(card => card.column === column.id);
-    section.append(element('h3', `${column.title} ${items.length}`));
-    if (!items.length) section.append(element('small', '这一列还空着'));
-    for (const card of items) section.append(boardCard(card.view, card.task, card.owner, 'channel-board-card', card.decision));
+    const head = element('h3', '', 'channel-board-column-head');
+    head.append(element('span', column.title, 'channel-board-column-title'), ' ', element('span', String(items.length), 'channel-board-count'));
+    const list = element('div', '', 'channel-board-list');
+    if (!items.length) list.append(element('p', '这一列还空着', 'channel-board-empty'));
+    for (const card of items) list.append(boardCard(card.view, card.task, card.owner, 'channel-board-card', card.decision));
+    section.append(head, list);
     columns.append(section);
   }
   if (!cards.length) columns.append(element('p', '这个频道还没有记下的事。'));
+  columns.scrollLeft = scrolled;
 }
-let draggedBoardCard: ChannelBoardCardView | undefined;
 const BOARD_MOVE_PENDING = 'aeeis.board.pending';
 interface BoardMoveAttempt { roomId: string; scope: string; body: string }
 function pendingBoardMove(): BoardMoveAttempt | undefined {
@@ -2704,7 +2708,9 @@ async function moveChannelCard(card: ChannelBoardCardView, toColumn: string | nu
   const existing = pendingBoardMove();
   if (existing) { await submitBoardMove(existing); return; }
   const roomId = openGroupId;
-  const reason = window.prompt('移动原因（移动不会执行、暂停或批准 Run）', '主人整理任务板');
+  // Only undoing an acceptance needs the owner's own words; any other move is plain tidying.
+  const undo = card.column === 'done' && toColumn === 'review';
+  const reason = undo ? window.prompt('撤销验收的原因（移动不会执行、暂停或批准 Run）', '') : '主人整理任务板';
   if (!reason?.trim()) return;
   const attempt = { roomId,scope: conversationScope,body: JSON.stringify({ kind: toColumn === null ? 'clear_override' : 'move',conversationId: card.conversationId,taskId: card.taskId,toColumn,expectedVersion: card.version,expectedRunId: card.runId ?? null,expectedRunRevision: card.runRevision ?? null,reason,source: 'home',idempotencyKey: crypto.randomUUID() }) };
   sessionStorage.setItem(BOARD_MOVE_PENDING,JSON.stringify(attempt));
@@ -2712,51 +2718,140 @@ async function moveChannelCard(card: ChannelBoardCardView, toColumn: string | nu
   try { await submitBoardMove(attempt); }
   catch (error) { card.column = oldColumn; renderChannelBoard(); message('移动未确认，已重新读取任务板；可用原请求确认结果。'); throw error; }
 }
+/** The columns a card may go to; the server's assertBoardMove stays the authority. */
+function boardTargets(card: ChannelBoardCardView): BoardColumn[] {
+  if (card.status === 'succeeded') return (['review', 'done'] as BoardColumn[]).filter(column => column !== card.column);
+  if (!['discussion', 'preparing', 'queued', 'planning', 'running', 'reviewing'].includes(card.status)) return [];
+  const live = card.runId && card.status !== 'queued';
+  return BOARD_COLUMNS.map(column => column.id).filter(column => column !== card.column && column !== 'review' && column !== 'done' && !(live && (column === 'capture' || column === 'ready')));
+}
+function boardTag(text: string, tone = ''): HTMLElement {
+  return element('span', text, tone ? `board-tag board-tag-${tone}` : 'board-tag');
+}
 function boardCard(view: ConversationView, task: ConversationTaskView, owner: string, className: string, decision: BoardDecision): HTMLElement {
   const button = element('button', '', className) as HTMLButtonElement;
   button.type = 'button';
   button.dataset.boardTask = task.id;
   button.dataset.boardOwner = view.agentId ?? '';
-  button.append(element('strong', task.title), element('small', owner), element('small', taskStateLabel(task)));
+  const meta = element('span', '', 'board-card-meta');
+  meta.append(element('span', owner, 'board-card-owner'), element('span', taskStateLabel(task)));
+  const tags = element('span', '', 'board-card-tags');
   const blocked = blockedCaption(task.status);
-  if (blocked) button.append(element('small', blocked));
+  if (blocked) tags.append(boardTag(blocked, 'amber'));
   const blockNote = blockNoteCurrent(task.status, decision);
-  if (blockNote) button.append(element('small', `阻塞：${blockNote}`));
-  if (decision.proposedBy && !decision.adopted && !decision.cancelled && task.status === 'discussion') button.append(element('small', `提议 · ${participantLabel(decision.proposedBy)}${decision.proposalReason ? `：${decision.proposalReason}` : ''}`));
-  if (decision.offer) button.append(element('small', `交接中 → ${participantLabel(decision.offer.to)}`));
+  if (blockNote) tags.append(boardTag(`阻塞：${blockNote}`, 'red'));
+  if (decision.proposedBy && !decision.adopted && !decision.cancelled && task.status === 'discussion') tags.append(boardTag(`提议 · ${participantLabel(decision.proposedBy)}${decision.proposalReason ? `：${decision.proposalReason}` : ''}`));
+  if (decision.offer) tags.append(boardTag(`交接中 → ${participantLabel(decision.offer.to)}`));
   const held = holderNote(view.id, task.id, decision);
-  if (held) button.append(element('small', held));
-  if (decision.conflicts.length) button.append(element('small', '已被领取'));
-  if (decision.accepted) button.append(element('small', '已验收'));
-  if (decision.revision) button.append(element('small', `要求修改：${decision.revision}`));
-  if (channelCancelHolds(task, decision)) button.append(element('small', '已在频道里取消'));
+  if (held) tags.append(boardTag(held));
+  if (decision.conflicts.length) tags.append(boardTag('已被领取', 'amber'));
+  if (decision.accepted) tags.append(boardTag('已验收', 'green'));
+  if (decision.revision) tags.append(boardTag(`要求修改：${decision.revision}`, 'amber'));
+  if (channelCancelHolds(task, decision)) tags.append(boardTag('已在频道里取消', 'red'));
   const age = taskAgeLabel(task.createdAt);
-  if (age) button.append(element('small', age));
-  button.addEventListener('click', () => openChannelTask(view, task, owner));
-  const card = boardCardFor(view.id, task.id);
-  if (!card?.canMove) return button;
-  button.draggable = true;
-  button.addEventListener('dragstart', event => { draggedBoardCard = card; event.dataTransfer?.setData('text/plain', task.id); });
-  button.addEventListener('dragend', () => { draggedBoardCard = undefined; });
-  const wrap = element('div', '', 'channel-board-control');
-  const menu = element('select', '') as HTMLSelectElement; menu.setAttribute('aria-label', `移动到 · ${task.title}`);
-  menu.append(new Option('移动到…', ''));
-  for (const column of BOARD_COLUMNS) if (column.id !== card.column) menu.append(new Option(column.title, column.id));
-  menu.addEventListener('change', () => { if (menu.value) void moveChannelCard(card, menu.value).catch(error => message(errorMessage(error))); });
-  const handle = element('button', '⠿', 'board-touch-handle') as HTMLButtonElement; handle.type = 'button'; handle.setAttribute('aria-label', `拖动 ${task.title}`);
-  let start: { x: number; y: number } | undefined;
-  handle.addEventListener('pointerdown', event => { if (event.pointerType !== 'mouse') { start = { x: event.clientX, y: event.clientY }; handle.setPointerCapture?.(event.pointerId); } });
-  handle.addEventListener('pointercancel', () => { start = undefined; });
-  handle.addEventListener('pointerup', event => {
-    if (!start) return;
-    const distance = Math.hypot(event.clientX-start.x, event.clientY-start.y); start = undefined;
-    if (distance < 8) return;
-    const target = document.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>('[data-column]');
-    if (target?.dataset.column) void moveChannelCard(card,target.dataset.column).catch(error => message(errorMessage(error)));
+  if (age) tags.append(boardTag(age));
+  button.append(element('strong', task.title, 'board-card-title'), meta);
+  if (tags.childElementCount) button.append(tags);
+  button.addEventListener('click', event => {
+    if (boardDragJustEnded) { event.preventDefault(); boardDragJustEnded = false; return; }
+    openChannelTask(view, task, owner);
   });
-  wrap.append(button, handle, menu);
-  if (card.override) wrap.append(dashboardButton('恢复自动列', () => moveChannelCard(card, null)));
-  return wrap;
+  const card = boardCardFor(view.id, task.id);
+  const shell = element('article', '', 'board-card');
+  shell.append(button);
+  if (!card?.canMove) return shell;
+  const targets = boardTargets(card);
+  if (!targets.length && !card.override) return shell;
+  shell.classList.add('is-movable');
+  if (targets.length) enableBoardDrag(shell, button, card, targets);
+  if (card.override) {
+    const actions = element('div', '', 'board-card-actions');
+    const restore = dashboardButton('恢复自动列', () => moveChannelCard(card, null)); restore.classList.add('board-card-restore');
+    actions.append(restore);
+    shell.append(actions);
+  }
+  return shell;
+}
+/** Set for one click after a drag so dropping a card does not also open it. */
+let boardDragJustEnded = false;
+let boardDragActive = false;
+let boardRenderDeferred = false;
+/** Drag a card with a mouse, pen or finger. A finger holds still briefly first so the board still scrolls. */
+function enableBoardDrag(shell: HTMLElement, grip: HTMLElement, card: ChannelBoardCardView, targets: BoardColumn[]): void {
+  let start: { x: number; y: number; id: number; type: string } | undefined;
+  let hold: number | undefined;
+  let armed = false;
+  let drag: { ghost: HTMLElement; dx: number; dy: number; over?: HTMLElement | undefined } | undefined;
+  const columnsAt = (x: number, y: number) => document.elementFromPoint(x, y)?.closest<HTMLElement>('.channel-board-column[data-column]') ?? undefined;
+  const begin = (x: number, y: number) => {
+    const rect = shell.getBoundingClientRect();
+    const ghost = shell.cloneNode(true) as HTMLElement;
+    ghost.classList.add('board-card-ghost');
+    ghost.style.width = `${rect.width}px`;
+    ghost.querySelectorAll('.board-card-actions').forEach(node => node.remove());
+    document.body.append(ghost);
+    drag = { ghost, dx: x - rect.left, dy: y - rect.top };
+    boardDragActive = true;
+    window.addEventListener('keydown', escape);
+    shell.classList.add('is-dragging');
+    document.body.classList.add('board-dragging');
+    for (const column of document.querySelectorAll<HTMLElement>('.channel-board-column[data-column]')) {
+      column.classList.toggle('is-drop-allowed', targets.includes(column.dataset.column as BoardColumn));
+      column.classList.toggle('is-drop-blocked', column.dataset.column !== card.column && !targets.includes(column.dataset.column as BoardColumn));
+    }
+    follow(x, y);
+  };
+  const follow = (x: number, y: number) => {
+    if (!drag) return;
+    drag.ghost.style.transform = `translate(${x - drag.dx}px, ${y - drag.dy}px) rotate(1.5deg)`;
+    const over = columnsAt(x, y);
+    if (over !== drag.over) { drag.over?.classList.remove('is-drop-target'); drag.over = over; if (over && targets.includes(over.dataset.column as BoardColumn)) over.classList.add('is-drop-target'); }
+  };
+  const finish = (drop: boolean) => {
+    if (hold !== undefined) { window.clearTimeout(hold); hold = undefined; }
+    const current = drag; drag = undefined; start = undefined; armed = false;
+    listen(false);
+    window.removeEventListener('keydown', escape);
+    shell.classList.remove('is-dragging', 'is-armed');
+    document.body.classList.remove('board-dragging');
+    for (const column of document.querySelectorAll<HTMLElement>('.channel-board-column')) column.classList.remove('is-drop-allowed', 'is-drop-blocked', 'is-drop-target');
+    if (!current) return;
+    current.ghost.remove();
+    boardDragActive = false;
+    boardDragJustEnded = true;
+    window.setTimeout(() => { boardDragJustEnded = false; }, 0);
+    const to = current.over?.dataset.column as BoardColumn | undefined;
+    const deferred = boardRenderDeferred; boardRenderDeferred = false;
+    if (drop && to && targets.includes(to)) void moveChannelCard(card, to).catch(error => message(errorMessage(error)));
+    else if (deferred) renderChannelBoard();
+  };
+  const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') finish(false); };
+  // Once pressed, follow the pointer anywhere on the page; a quick flick leaves the card at once.
+  const move = (event: PointerEvent) => {
+    if (!start || event.pointerId !== start.id) return;
+    if (drag) { event.preventDefault(); follow(event.clientX, event.clientY); return; }
+    const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+    if (start.type === 'mouse' ? moved > 5 : armed) begin(event.clientX, event.clientY);
+    else if (start.type !== 'mouse' && moved > 8) finish(false); // the finger was scrolling
+  };
+  const up = (event: PointerEvent) => { if (start && event.pointerId === start.id) finish(true); };
+  const cancel = () => finish(false);
+  const listen = (on: boolean) => {
+    const method = on ? 'addEventListener' : 'removeEventListener';
+    window[method]('pointermove', move as EventListener);
+    window[method]('pointerup', up as EventListener);
+    window[method]('pointercancel', cancel);
+  };
+  grip.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || start) return;
+    start = { x: event.clientX, y: event.clientY, id: event.pointerId, type: event.pointerType };
+    listen(true);
+    if (event.pointerType !== 'mouse') hold = window.setTimeout(() => { hold = undefined; armed = true; shell.classList.add('is-armed'); navigator.vibrate?.(10); }, 280);
+  });
+  // While a finger drags, the page must not scroll under it.
+  grip.addEventListener('touchmove', event => { if (armed || drag) event.preventDefault(); }, { passive: false });
+  grip.addEventListener('contextmenu', event => { if (armed || drag) event.preventDefault(); });
+  grip.draggable = false;
 }
 function channelOwnerName(view: ConversationView, task: ConversationTaskView): string {
   const cite = channelCitations().find(item => item.conversationId === view.id && item.taskId === task.id);
