@@ -227,4 +227,77 @@ describe('Bot dialogue canonical dataflow', () => {
       expect((await f.request(`/rooms/${binding.roomId}/dialogue/artifacts`, undefined, undefined, 'bob')).statusCode).toBe(404);
     } finally { await f.close(); }
   });
+  it('hands a sent group line to a Bot once: reassigns an earlier intake, returns a send-time handoff, counts an AEEIS entry', async () => {
+    const f = await dialogueFixture();
+    try {
+      const group = await f.domain.createRoom({ title: '东云', description: '群聊' }, undefined, scope.owner, scope.tenantId);
+      await f.domain.addRoomMember(group.id, f.bot.id, 'agent', scope.owner, scope.tenantId);
+      const goal = await f.domain.createGoal({ title: '东云', roomId: group.id }, undefined, scope.owner, scope.tenantId);
+      const manifest = await f.domain.createContextManifest(goal.id, { purpose: '投递', audienceMode: 'room' }, undefined, scope.owner, scope.tenantId);
+      const say = (content: string, key: string, actor?: { type: 'agent'; id: string }) => f.events.create(group.id, { type: 'message', content, goalId: goal.id, contextManifestId: manifest.id, idempotencyKey: key, ...(actor ? { actor } : {}) }, scope.owner, scope.tenantId);
+      const deliver = (eventId: string, botId: string, kind: string) => f.request(`/rooms/${group.id}/session-events/${eventId}/deliver`, { botId, kind });
+      const tasksOf = (body: any, eventId: string) => body.conversation.tasks.filter((task: any) => body.conversation.messages.some((m: any) => m.source?.externalEventId === eventId && (m.route.taskIds.includes(task.id) || m.effectiveTaskIds?.includes(task.id))));
+
+      // Unaddressed when sent: it reached the Bot as an unassigned intake, so handing it over reassigns that message.
+      const loose = await say('下周的发布清单谁来对一下？', 'loose');
+      const intake = await deliver(loose.id, f.bot.id, 'intake');
+      expect(intake.statusCode, intake.body).toBe(200);
+      expect(intake.json().message.route.taskIds).toEqual([]);
+      const handed = await deliver(loose.id, f.bot.id, 'handoff');
+      expect(handed.statusCode, handed.body).toBe(200);
+      const correction = handed.json().message;
+      expect(correction.correctsMessageId).toBe(intake.json().message.id);
+      expect(correction.route.taskIds).toHaveLength(1);
+      expect(correction.speaker).toEqual({ role: 'user', id: scope.owner });
+      expect(correction.source).toMatchObject({ kind: 'channel', channel: 'room', externalEventId: loose.id });
+      const view = handed.json().conversation;
+      expect(view.messages.filter((m: any) => m.source?.externalEventId === loose.id)).toHaveLength(2);
+      const original = view.messages.find((m: any) => m.id === intake.json().message.id);
+      expect(original.text).toBe('下周的发布清单谁来对一下？');
+      expect(original.route.taskIds).toEqual([]);
+      expect(original.effectiveTaskIds).toEqual(correction.route.taskIds);
+      expect(tasksOf(handed.json(), loose.id).map((task: any) => task.title)).toEqual(['下周的发布清单谁来对一下？']);
+      // Pressing it again returns the same task and writes nothing.
+      const again = await deliver(loose.id, f.bot.id, 'handoff');
+      expect(again.json().message.id).toBe(correction.id);
+      expect(again.json().conversation.messages).toHaveLength(view.messages.length);
+      expect(again.json().conversation.tasks).toHaveLength(view.tasks.length);
+
+      // Handed over when it was sent: the same task comes back.
+      const pointed = await say('@阿研 看一下竞品定价', 'pointed');
+      const atSend = await deliver(pointed.id, f.bot.id, 'handoff');
+      const later = await deliver(pointed.id, f.bot.id, 'handoff');
+      expect(later.json().message.id).toBe(atSend.json().message.id);
+      expect(later.json().conversation.tasks).toHaveLength(atSend.json().conversation.tasks.length);
+
+      // AEEIS: an entry discussion recorded when sent counts as handed over.
+      const asked = await say('@AEEIS 帮我拆一下这周的事', 'asked');
+      const entry = await deliver(asked.id, 'aeeis', 'entry');
+      expect(entry.statusCode, entry.body).toBe(200);
+      const toAeeis = await deliver(asked.id, 'aeeis', 'handoff');
+      expect(toAeeis.statusCode, toAeeis.body).toBe(200);
+      expect(toAeeis.json().message.id).toBe(entry.json().message.id);
+      expect(toAeeis.json().conversation.tasks).toHaveLength(entry.json().conversation.tasks.length);
+
+      // A Bot's reply can be handed over too; it keeps the Bot as the speaker.
+      const reply = await say('我先列三个要点。', 'reply', { type: 'agent', id: f.bot.id });
+      const fromReply = await deliver(reply.id, f.bot.id, 'handoff');
+      expect(fromReply.statusCode, fromReply.body).toBe(200);
+      expect(fromReply.json().message.speaker).toEqual({ role: 'agent', id: f.bot.id });
+      expect(fromReply.json().message.route.taskIds).toHaveLength(1);
+
+      // Only a Bot that received the line when it was sent; a Bot added afterwards, or one retired, cannot take it.
+      const newcomer = await f.bots.create({ name: '阿审', mark: 'letter', color: '#176b45', background: '审稿', autonomy: 'quiet' }, scope);
+      await f.domain.addRoomMember(group.id, newcomer.id, 'agent', scope.owner, scope.tenantId);
+      const refused = await deliver(loose.id, newcomer.id, 'handoff');
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toContain('Bot is not in the message audience');
+      const manifestTwo = await f.domain.createContextManifest(goal.id, { purpose: '投递', audienceMode: 'room' }, undefined, scope.owner, scope.tenantId);
+      const heard = await f.events.create(group.id, { type: 'message', content: '阿审也听到了', goalId: goal.id, contextManifestId: manifestTwo.id, idempotencyKey: 'heard' }, scope.owner, scope.tenantId);
+      await f.bots.remove(newcomer.id, scope);
+      expect((await deliver(heard.id, newcomer.id, 'handoff')).statusCode).toBeGreaterThanOrEqual(400);
+      // Recorded as discussion under the person who clicked; nothing runs.
+      expect(await f.runs.list()).toEqual([]);
+    } finally { await f.close(); }
+  });
 });

@@ -1380,6 +1380,36 @@ describe('single-entry conversation routing', () => {
     expect(JSON.stringify(runs[1]!.context)).not.toContain('纠正这条讨论');
     expect(JSON.stringify(runs[2]!.context)).toContain('triple-correction-fact');
   });
+  it('lets a correction open a new discussion task only while the corrected message still belongs to no task', async () => {
+    const f = await fixture(), entry = await f.create();
+    const a = await f.addTask(entry.id, '任务甲');
+    const aId = a.message.route.taskIds[0]!;
+    const note = (await f.post(entry.id, { text: '群里那句话', unassigned: true, expectedRevision: a.conversation.revision })).json();
+    expect(note.message.route.taskIds).toEqual([]);
+    const correction = await f.post(entry.id, { text: '在群里交给这位 Bot', correctsMessageId: note.message.id, newTask: { title: '群里那句话' }, expectedRevision: note.conversation.revision });
+    expect(correction.statusCode, correction.body).toBe(200);
+    const taskId = correction.json().message.route.taskIds[0]!;
+    expect(correction.json().conversation.tasks.map((task: any) => task.id)).toEqual([aId, taskId]);
+    expect(await f.repository.list()).toEqual([]);
+    const original = correction.json().conversation.messages.find((message: any) => message.id === note.message.id);
+    expect(original.text).toBe('群里那句话');
+    expect(original.route.taskIds).toEqual([]);
+    expect(original.effectiveTaskIds).toEqual([taskId]);
+    // Correcting the same message again cannot open a second task: a later correction already gave it one.
+    const again = await f.post(entry.id, { text: '再交一次', correctsMessageId: note.message.id, newTask: { title: '第二个任务' }, expectedRevision: correction.json().conversation.revision });
+    expect(again.statusCode, again.body).toBe(409);
+    // A message that already belongs to a task, an executed one, or a correction that wants to start work stay refused.
+    const routed = (await f.post(entry.id, { text: '归任务甲的话', taskIds: [aId], expectedRevision: 0 })).json();
+    const started = (await f.post(entry.id, { text: '执行', taskIds: [aId], expectedRevision: 0, intent: 'execute' })).json();
+    let current = await f.fresh(entry.id);
+    expect((await f.post(entry.id, { text: '新任务', correctsMessageId: routed.message.id, newTask: { title: '另开' }, expectedRevision: current.revision })).statusCode).toBe(409);
+    expect((await f.post(entry.id, { text: '新任务', correctsMessageId: started.message.id, newTask: { title: '另开' }, expectedRevision: current.revision })).statusCode).toBe(409);
+    const loose = (await f.post(entry.id, { text: '另一句', unassigned: true, expectedRevision: current.revision })).json();
+    expect((await f.post(entry.id, { text: '开工', correctsMessageId: loose.message.id, newTask: { title: '另开' }, intent: 'execute', expectedRevision: loose.conversation.revision })).statusCode).toBe(409);
+    expect((await f.post(entry.id, { text: '两样都要', correctsMessageId: loose.message.id, newTask: { title: '另开' }, taskIds: [aId], expectedRevision: loose.conversation.revision })).statusCode).toBe(409);
+    current = await f.fresh(entry.id);
+    expect(current.tasks).toHaveLength(2);
+  });
   it('rejects forged scope, empty keys and undeclared input without mutation', async () => {
     const f = await fixture(), entry = await f.create();
     for (const extra of [{ owner: 'bob' }, { tenantId: 'other' }, { runId: 'run_fake' }]) expect((await f.post(entry.id, { text: 'hello', expectedRevision: 0, ...extra })).statusCode).toBe(400);

@@ -20,7 +20,7 @@ interface SessionEventSummary {
   schemaVersion: 'session-event/1'; id: string; roomId: string; goalId?: string; owner: string; tenantId: string;
   sequence: number; type: 'message' | 'canonical_response' | 'decision' | 'task_update' | 'system' | 'digest';
   actorId: string; actorType: 'principal' | 'agent' | 'system'; recordedBy?: { id: string; type: 'principal' | 'agent' | 'system' }; operation?: 'publish' | 'revise' | 'retract'; targetEventId?: string; revision?: number; retractionReason?: string; classification?: 'public' | 'internal' | 'confidential' | 'private'; contextManifestId: string; contextManifestHash: string;
-  audienceSnapshot: { digest: string; members: Array<{ principalId: string; role: string; status: string }> };
+  audienceSnapshot: { digest: string; members?: Array<{ principalId: string; role: string; status: string }>; participants?: Array<{ principalId: string; role: string }> };
   content: string; contentHash: string; evidenceRefs: string[]; idempotencyKey: string; createdAt: string;
   botDelivery?: { mode: 'immediate' | 'digest'; at: string };
   digest?: { eventIds: string[]; minutes: number };
@@ -293,6 +293,10 @@ let channelReadEpoch = 0;
 const CHANNEL_TRANSCRIPT_PAGE = 50;
 let channelHistoryPages = 1;
 let channelTranscriptKey = '';
+/** The group message whose 「交给它」 picker is open. */
+let sentHandoffEventId = '';
+/** A quiet note under one line, such as "already handed over". */
+let sentHandoffNote = { eventId: '', text: '' };
 let channelReadQueue: Promise<void> = Promise.resolve();
 let channelReadFlight: Promise<void> | undefined;
 const handoffViews = new Map<string, ConversationView>();
@@ -2448,7 +2452,7 @@ function channelTranscriptSignature(): string {
     (event.evidenceRefs ?? []).join(' '),
     citedTaskSignature(event),
   ].join('\u001f')).join('\u001e');
-  return `${channelHistoryPages}\u0000${earlierChannelCount()}\u0000${members}\u0000${events}`;
+  return `${channelHistoryPages}\u0000${earlierChannelCount()}\u0000${members}\u0000${sentHandoffEventId}:${sentHandoffNote.eventId}:${sentHandoffNote.text}\u0000${events}`;
 }
 function eventCursor(event: SessionEventSummary | undefined): string | undefined {
   const sequence = event?.sequence;
@@ -4826,10 +4830,98 @@ function renderGroupTranscript(): void {
     }
     const cite = handoffCitation(event);
     appendHandoffCard(item, event, { answer: answerDrafts, reject: rejectDrafts }, !cite || latestCite.get(`${cite.conversationId}:${cite.taskId}`) === event.id);
+    appendSentHandoff(item, event, shown);
     list.append(item);
   }
   syncGroupSpeaker();
   renderMentions();
+}
+/** Bots that may take a line already sent: those who heard it when it was sent and are still here. AEEIS always may. */
+function sentHandoffChoices(event: SessionEventSummary): RosterBot[] {
+  const heard = new Set((event.audienceSnapshot?.participants ?? []).map(item => item.principalId));
+  const present = new Set(groupMembers.filter(member => member.role === 'agent' && member.status === 'active').map(member => member.principalId));
+  const owned = new Set(ownedBotRecords.map(bot => bot.id));
+  return rosterBots().filter(bot => bot.id === 'aeeis' || owned.has(bot.id) && heard.has(bot.id) && present.has(bot.id));
+}
+/** The Bot that said this line, or the first Bot that answered it, else AEEIS. */
+function sentHandoffDefault(event: SessionEventSummary, shown: SessionEventSummary[], choices: RosterBot[]): string {
+  const offered = (id: string | undefined) => id && choices.some(bot => bot.id === id) ? id : undefined;
+  if (event.actorType === 'agent') return offered(event.actorId) ?? 'aeeis';
+  const answer = shown.find(item => item.actorType === 'agent' && item.type === 'message' && item.idempotencyKey?.startsWith('bot-reply:') && (item.evidenceRefs ?? []).includes(event.id) && offered(item.actorId));
+  return answer?.actorId ?? 'aeeis';
+}
+function sentHandoffAllowed(event: SessionEventSummary): boolean {
+  if (!botDialogueRouting || !conversationEnabled || event.type !== 'message' || (event.operation ?? 'publish') !== 'publish' || event.actorType === 'system') return false;
+  const room = roomSummaries.find(item => item.id === event.roomId);
+  return Boolean(room && room.status === 'active' && roomChat(room) !== 'direct');
+}
+function appendSentHandoff(item: HTMLElement, event: SessionEventSummary, shown: SessionEventSummary[]): void {
+  if (!sentHandoffAllowed(event)) return;
+  const choices = sentHandoffChoices(event);
+  const row = element('div', '', 'group-handover');
+  if (sentHandoffEventId !== event.id) {
+    const open = element('button', '交给它', 'quiet-button') as HTMLButtonElement;
+    open.type = 'button';
+    open.dataset.handOver = event.id;
+    open.setAttribute('aria-label', `把这句话交给一位 Bot：${event.content.slice(0, 40)}`);
+    open.addEventListener('click', () => { sentHandoffEventId = event.id; sentHandoffNote = { eventId: '', text: '' }; channelTranscriptKey = ''; renderGroupTranscript(); $(`hand-over-bot-${event.id}`)?.focus(); });
+    row.append(open);
+    if (sentHandoffNote.eventId === event.id) row.append(element('small', sentHandoffNote.text, 'group-handover-note'));
+    item.append(row);
+    return;
+  }
+  const select = document.createElement('select');
+  select.id = `hand-over-bot-${event.id}`;
+  select.setAttribute('aria-label', '交给哪位 Bot');
+  for (const bot of choices) {
+    const option = document.createElement('option');
+    option.value = bot.id; option.textContent = bot.name;
+    select.append(option);
+  }
+  select.value = sentHandoffDefault(event, shown, choices);
+  const confirm = element('button', '交给', 'quiet-button') as HTMLButtonElement;
+  confirm.type = 'button';
+  confirm.dataset.handOverConfirm = event.id;
+  const cancel = element('button', '取消', 'quiet-button') as HTMLButtonElement;
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => { sentHandoffEventId = ''; channelTranscriptKey = ''; renderGroupTranscript(); });
+  confirm.addEventListener('click', () => {
+    const bot = choices.find(candidate => candidate.id === select.value);
+    if (!bot) return;
+    confirm.disabled = true; select.disabled = true;
+    void handOverSentLine(event, bot).catch(error => message(errorMessage(error))).finally(() => { confirm.disabled = false; select.disabled = false; });
+  });
+  row.append(element('small', '只列发这句话时就在群里的 Bot。记成它的一条讨论，不会开工。'), select, confirm, cancel);
+  item.append(row);
+}
+/** Hands a line already in the group to a Bot. The server records it once per Bot, so pressing again returns the same task. */
+async function handOverSentLine(event: SessionEventSummary, bot: RosterBot): Promise<void> {
+  const roomId = event.roomId;
+  const room = roomSummaries.find(item => item.id === roomId);
+  let goalId = event.goalId;
+  if (!goalId) {
+    const listed = await api<GoalSummary[] | { goals?: GoalSummary[] }>(`/rooms/${encodeURIComponent(roomId)}/goals`);
+    const goals = Array.isArray(listed) ? listed : (listed.goals ?? []);
+    goalId = (goals.find(item => item.status === 'active') ?? goals[0] ?? await api<GoalSummary>('/goals', { title: room?.title || '群聊', roomId })).id;
+  }
+  const postSession = async (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => {
+    const manifest = await api<{ id: string }>(`/goals/${encodeURIComponent(goalId!)}/context-manifests`, { purpose: '群聊消息', audienceMode: 'room' });
+    return api(`/rooms/${encodeURIComponent(roomId)}/session-events`, { goalId, type, content, contextManifestId: manifest.id, idempotencyKey: groupIdempotencyKey(), ...(evidenceRefs?.length ? { evidenceRefs } : {}) });
+  };
+  let already = '';
+  const error = await recordRosterHandoff(bot, event.content, room, undefined, postSession, (title, recorded) => {
+    // The same task came back: say so here instead of writing a second receipt into the group.
+    if (channelLog().some(item => { const cite = handoffCitation(item); return cite?.conversationId === recorded.conversationId && cite.taskId === recorded.taskId; })) {
+      already = `这句话已经交给${bot.name}了，是讨论「${title}」。`;
+      return '';
+    }
+    return `已交给${bot.name}，记为讨论「${title}」。未执行，原话还在群里。`;
+  }, 'handoff', true, event.id);
+  if (error) { message(error); return; }
+  sentHandoffEventId = '';
+  sentHandoffNote = { eventId: already ? event.id : '', text: already };
+  channelTranscriptKey = '';
+  await loadGroup(roomId);
 }
 function mentionTargets(): Array<{ label: string }> {
   return [{ label: 'AEEIS' }, { label: '所有人' }, ...groupMembers.map(member => ({ label: participantLabel(member.principalId) }))];
@@ -4910,7 +5002,7 @@ async function recordRosterHandoff(
   room: RoomSummary | undefined,
   spoken: { type: 'agent' | 'principal'; id: string } | undefined,
   postSession: (type: 'message' | 'system', content: string, evidenceRefs?: string[]) => Promise<unknown>,
-  receipt: (title: string) => string,
+  receipt: (title: string, recorded: { conversationId: string; taskId: string }) => string,
   mode: 'intake' | 'entry' | 'handoff',
   announce = true,
   sourceEventId?: string,
@@ -4974,8 +5066,10 @@ async function recordRosterHandoff(
   if (handoffError || !recorded || !announce) return handoffError;
   const cited = mode === 'handoff' && CITATION_ID.test(conversationId) && CITATION_ID.test(taskId);
   const refs = cited ? [conversationId, taskId, bot.id].filter(item => CITATION_ID.test(item)) : (CITATION_ID.test(conversationId) ? [conversationId] : undefined);
+  const line = receipt(title, { conversationId, taskId });
+  if (!line) return '';
   try {
-    await postSession('system', receipt(title), refs);
+    await postSession('system', line, refs);
   } catch (error) {
     return bot.id === 'aeeis'
       ? `入口讨论已记下，回执没有写进会话。${errorMessage(error)}`

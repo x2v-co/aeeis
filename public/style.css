@@ -1420,6 +1420,13 @@ button.bot-group-label { color: var(--muted); font-size: 12px; cursor: pointer; 
 .group-message header { display: flex; gap: 8px; align-items: baseline; }
 .group-message p { margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
 .group-message[data-type="system"] p { padding-left: 0; color: var(--muted); background: transparent; }
+.group-handover { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.group-handover .quiet-button { min-height: 24px; padding: 2px 8px; }
+.group-message .group-handover > .quiet-button:only-child { opacity: .6; }
+.group-message:hover .group-handover > .quiet-button, .group-handover > .quiet-button:focus-visible { opacity: 1; }
+.group-handover small { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.group-handover small.group-handover-note { flex-basis: auto; }
+.group-handover select { width: auto; max-width: 16em; min-height: 24px; padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface); font: inherit; font-size: 12px; }
 .group-run-card { display: grid; gap: 4px; max-width: 46ch; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
 .group-run-card strong, .group-run-card small { display: block; }
 .group-run-card small { font-size: 12px; white-space: pre-wrap; }

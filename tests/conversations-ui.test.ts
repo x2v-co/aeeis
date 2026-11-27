@@ -4989,3 +4989,69 @@ describe('Google sign-in on the page', () => {
   });
 });
 
+describe('handing a sent group line to a Bot', () => {
+  it('offers 交给它 under each line, lists only Bots who heard it, defaults to the one that replied, and returns the same task when pressed again', async () => {
+    const room = { id: 'room_handover', title: '发布协作', description: '群聊', chat: 'group', status: 'active', createdAt: date, updatedAt: date };
+    const late = { id: 'bot_00000002', name: '阿审', mark: 'letter', color: '#176b45', background: '审稿', autonomy: 'quiet' };
+    const member = (principalId: string) => ({ id: `member_${principalId}`, roomId: room.id, principalId, role: 'agent', status: 'active', invitedBy: 'owner', createdAt: date, updatedAt: date });
+    // 阿研 heard the line; 阿审 joined afterwards; bot_00000003 heard it but has been retired and is no longer listed.
+    const heard = { digest: 'a'.repeat(64), participants: [{ principalId: 'owner', role: 'owner' }, { principalId: ownedBot.id, role: 'agent' }, { principalId: 'bot_00000003', role: 'agent' }] };
+    const events: any[] = [
+      { id: 'evt_line', roomId: room.id, goalId: 'goal_group', owner: 'owner', operation: 'publish', type: 'message', actorType: 'principal', actorId: 'owner', content: '下周的发布清单谁来对一下？', evidenceRefs: [], audienceSnapshot: heard, idempotencyKey: 'line', createdAt: date },
+      { id: 'evt_reply', roomId: room.id, goalId: 'goal_group', owner: 'owner', operation: 'publish', type: 'message', actorType: 'agent', actorId: ownedBot.id, content: '我先列三个要点。', evidenceRefs: ['evt_line'], audienceSnapshot: heard, idempotencyKey: `bot-reply:evt_line:${ownedBot.id}`, createdAt: date },
+      { id: 'evt_note', roomId: room.id, goalId: 'goal_group', owner: 'owner', operation: 'publish', type: 'system', actorType: 'system', actorId: 'system', content: '已送到阿研 👍。', evidenceRefs: [], audienceSnapshot: heard, idempotencyKey: 'note', createdAt: date },
+    ];
+    const handed = { id: 'conv_handover', title: '阿研', agentId: ownedBot.id, revision: 3, tasks: [{ id: 'task_handed', title: '下周的发布清单谁来对一下？', threadId: 'thread_handed', status: 'discussion' }], messages: [], hasEarlierMessages: false };
+    const view = { ...fixture(), agentId: 'aeeis' };
+    const h = harness(view as any, { owned: true, handler: (url, request) => {
+      const method = request?.method ?? 'GET';
+      const body = request?.body ? JSON.parse(request.body) : undefined;
+      if (url === '/api/status') return response({ modelConfigured: true, runner: 'fixture', mode: 'single-owner-local', principal: 'owner', tenantId: 'local', conversationRouting: true, botDialogueRouting: true });
+      if (url === '/api/bots/aeeis/dialogue') return response({ roomId: 'room_aeeis', conversationId: view.id, revision: view.revision, bindingVersion: 2 });
+      if (url === '/api/bots' && method === 'GET') return response([ownedBot, late]);
+      if (url === '/api/rooms') return response([room]);
+      if (url === `/api/rooms/${room.id}/members`) return response([member(ownedBot.id), member(late.id), member('bot_00000003')]);
+      if (url.endsWith('/context-manifests')) return response({ id: 'ctx_group' });
+      if (url === `/api/conversations/${handed.id}`) return response(handed);
+      if (url.endsWith('/deliver')) return response({ conversation: handed, message: { id: 'message_handed', role: 'user', text: '在群里交给这位 Bot', createdAt: date, route: { status: 'routed', reason: 'new-task', taskIds: ['task_handed'], candidateTaskIds: [], focusEffect: 'keep' } }, response: '已记录讨论，未触发执行。' });
+      if (url === `/api/rooms/${room.id}/session-events` && method === 'POST') {
+        const event = { id: `evt_${events.length}`, roomId: room.id, goalId: body.goalId, owner: 'owner', operation: 'publish', type: body.type, actorType: 'principal', actorId: 'owner', content: body.content, evidenceRefs: body.evidenceRefs ?? [], audienceSnapshot: heard, idempotencyKey: body.idempotencyKey, createdAt: date };
+        events.push(event);
+        return response(event);
+      }
+      if (url.startsWith(`/api/rooms/${room.id}/session-events`)) return response({ items: events });
+      return undefined;
+    } });
+    start(h.fetch);
+    await ready();
+    await vi.waitFor(() => expect([...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].some(button => button.textContent?.includes('发布协作'))).toBe(true));
+    [...doc().querySelectorAll<HTMLButtonElement>('#chats .group-row')].find(button => button.textContent?.includes('发布协作'))!.click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-hand-over="evt_line"]')).not.toBeNull());
+    // Every line a person or a Bot said has it; system lines do not.
+    expect(doc().querySelector('[data-hand-over="evt_reply"]')).not.toBeNull();
+    expect(doc().querySelector('[data-hand-over="evt_note"]')).toBeNull();
+    doc().querySelector<HTMLButtonElement>('[data-hand-over="evt_line"]')!.click();
+    const picker = await vi.waitFor(() => { const found = el<HTMLSelectElement>('hand-over-bot-evt_line'); expect(found).not.toBeNull(); return found; });
+    expect([...picker.options].map(option => option.textContent)).toEqual(['AEEIS', '阿研']);
+    expect(picker.value).toBe(ownedBot.id);
+    doc().querySelector<HTMLButtonElement>('[data-hand-over-confirm="evt_line"]')!.click();
+    await vi.waitFor(() => expect(h.posts.some(post => post.url.endsWith('/deliver'))).toBe(true));
+    const delivered = h.posts.filter(post => post.url.endsWith('/deliver'));
+    expect(delivered[0]).toMatchObject({ url: `/api/rooms/${room.id}/session-events/evt_line/deliver`, body: { botId: ownedBot.id, kind: 'handoff' } });
+    await vi.waitFor(() => expect(events.some(event => event.type === 'system' && event.content.includes('已交给阿研'))).toBe(true));
+    expect(events.at(-1)!.evidenceRefs).toEqual([handed.id, 'task_handed', ownedBot.id]);
+    expect(h.posts.some(post => post.url.endsWith('/messages'))).toBe(false);
+    // Pressing it again: the server returns the same task, and the group gets no second receipt.
+    await vi.waitFor(() => expect(doc().querySelector('[data-hand-over="evt_line"]')).not.toBeNull());
+    doc().querySelector<HTMLButtonElement>('[data-hand-over="evt_line"]')!.click();
+    await vi.waitFor(() => expect(el('hand-over-bot-evt_line')).not.toBeNull());
+    doc().querySelector<HTMLButtonElement>('[data-hand-over-confirm="evt_line"]')!.click();
+    await vi.waitFor(() => expect(doc().querySelector('[data-hand-over="evt_line"]')?.parentElement?.textContent).toContain('已经交给阿研了'));
+    expect(el('error').textContent).toBe('');
+    expect(h.posts.filter(post => post.url.endsWith('/deliver'))).toHaveLength(2);
+    expect(events.filter(event => event.type === 'system' && event.content.includes('已交给阿研'))).toHaveLength(1);
+    // A Bot's own reply defaults to that Bot.
+    doc().querySelector<HTMLButtonElement>('[data-hand-over="evt_reply"]')!.click();
+    await vi.waitFor(() => expect(el<HTMLSelectElement>('hand-over-bot-evt_reply').value).toBe(ownedBot.id));
+  });
+});
