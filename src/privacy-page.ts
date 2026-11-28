@@ -22,8 +22,10 @@ function escapeHtml(value: string): string {
 
 export function privacyPage(options: PrivacyPageOptions & { signIn?: 'google' | 'token' } = {}): string {
   const contact = options.contact?.trim();
+  // Cloudflare's email obfuscation would turn the address into "[email protected]" for anyone without JavaScript,
+  // including reviewers; email_off leaves this one address as written and the rest of the site protected.
   const contactHtml = contact
-    ? (/^[^\s@<>"']+@[^\s@<>"']+$/.test(contact) ? `<a href="mailto:${escapeHtml(contact)}">${escapeHtml(contact)}</a>` : escapeHtml(contact))
+    ? (/^[^\s@<>"']+@[^\s@<>"']+$/.test(contact) ? `<!--email_off--><a href="mailto:${escapeHtml(contact)}">${escapeHtml(contact)}</a><!--/email_off-->` : escapeHtml(contact))
     : '运行这个 AEEIS 的管理员';
   const backup = options.backupDays && Number.isFinite(options.backupDays) && options.backupDays > 0
     ? `加密备份保留 ${Math.round(options.backupDays)} 天，到期自动删除；删除的内容最晚在这之后从备份里消失。`
