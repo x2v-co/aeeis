@@ -1227,9 +1227,11 @@ export class AgentEngine {
    * and validates the value. Errors carrying usage are settled, unknown
    * outcomes are marked for reconciliation.
    */
-  async completeForBot(request: Pick<ModelRequest, 'system' | 'input' | 'maxTokens'> & { idempotencyKey: string }, scope: Ownership): Promise<unknown> {
+  /** `onUsage` hears the tokens the provider reported for this reply (stage 3c counts them for an opened Bot). */
+  async completeForBot(request: Pick<ModelRequest, 'system' | 'input' | 'maxTokens'> & { idempotencyKey: string; onUsage?: (tokens: number) => void }, scope: Ownership): Promise<unknown> {
     return this.budgetedOwnerCall(`aeeis:bot-turn:${request.idempotencyKey}`, scope, { act: 'Bot 回复', thing: '回复' }, async adapter => {
       const response = await adapter.complete({ system: `${request.system}${selfModelNote(adapter.pin)}`, input: request.input, idempotencyKey: request.idempotencyKey, maxTokens: request.maxTokens ?? 1200, disableRetries: true });
+      if (request.onUsage && validModelUsage(response.usage)) request.onUsage(response.usage.inputTokens + response.usage.outputTokens);
       return { value: response.value, ...(response.usage ? { usage: response.usage } : {}) };
     });
   }

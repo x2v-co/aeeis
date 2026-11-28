@@ -23,6 +23,7 @@ const schema = z.object({
   schemaVersion: z.literal('conversation/1'), id: z.string().regex(conversationId),
   owner: identifier, tenantId: identifier, title: z.string(),
   agentId: z.string().trim().min(1).max(100).optional(),
+  botOwner: z.string().trim().min(1).max(200).optional(),
   standingInstruction: z.string().trim().min(1).max(500).optional(),
   revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), createdAt: timestamp, updatedAt: timestamp,
   focusTaskId: identifier.optional(), recentTaskIds: z.array(identifier).max(100),

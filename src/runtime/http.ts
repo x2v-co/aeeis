@@ -84,7 +84,8 @@ import { ActionPolicyConflict, ownerActionPolicyChangeSchema, type ActionPolicyS
 import { createWorkGrantSchema, WorkGrantConflict, WorkGrantNotFound, workGrantRemaining, workGrantState, type WorkGrant, type WorkGrantStore } from '../work-grant-store.js';
 import type { GrantLedger } from '../agent-ledger.js';
 import { DeviceSessionConflict, DeviceSessionNotFound, deviceCapabilitySchema, deviceIdSchema, type DeviceSessionRepository } from '../device-sessions.js';
-import { botAutonomySchema, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { botAutonomySchema, botOpenAudienceSchema, OPEN_RUN_LIMIT_DEFAULT, OwnedBotConflict, OwnedBotNotFound, OWNED_BOT_COLORS, OWNED_BOT_MARKS, visibleOwnedBot, type OwnedBotStore } from '../owned-bots.js';
+import { checkOpenTools, InMemoryOpenBotUsageStore, openAccess, openBotCard, OpenBotRefusal, OpenBots, openToolChoices, usageMonth, type OpenBotUsageStore } from '../open-bots.js';
 import { releaseHeldBotTasks } from '../release-owned-bot.js';
 import type { HostWait, MachineView } from '../docker-sandbox.js';
 import { runMetrics } from './run-metrics.js';
@@ -104,7 +105,7 @@ interface RunComputer {
   deliverables?(runId: string): Promise<{ savedSite: boolean; sourceArchive: boolean }>;
   savedSiteFile?(runId: string, path: string): Promise<{ body: Buffer; type: string } | undefined>;
 }
-interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; chatSummaries?: ChatSummaryService; conversationThreads?: ConversationThreadIndex; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number; tenantMembers?: TenantMembers; privacy?: PrivacyPageOptions }
+interface Options { runComputer?: RunComputer; previewProxy?: PreviewProxy; taskBoardControls?: TaskBoardStore; conversationStore?: ConversationStore; chatSummaries?: ChatSummaryService; conversationThreads?: ConversationThreadIndex; botDialogues?: BotDialogueStore; threadContextBudgetBytes?: number; localToolDefaults?: string[]; demoMode?: boolean; repository: RunRepository; engine?: AgentEngine; dispatcher?: Dispatcher; token?: string; workerToken?: string; trustedHosts?: string[]; publicHosts?: string[]; trustedOrigins?: string[]; agentEndpointHosts?: string[]; principalTokens?: Record<string, Principal>; principalResolver?: PrincipalResolver; googleSignIn?: GoogleSignIn; authMode?: string; brain?: GovernedBrain; brainStore?: BrainPersistence; brainSemanticIndex?: BrainSemanticIndexMaintenance; rsi?: RsiService; rsiProposalSynthesis?: DurableRsiProposalSynthesis; rsiHarness?: RsiEvaluationHarness; rsiAutomation?: { status(): unknown }; skills?: SkillGovernance; tools?: ToolGateway; runMachines?: (runId: string) => Promise<{ state: 'present'; ready: boolean } | { state: 'released'; ready: false } | undefined>; knowledge?: KnowledgeEmbeddingMaintenance; knowledgeProvider?: KnowledgeProvider; projectSourcesProvider?: ProjectSourceProvider; collaboration?: CollaborationService; collaborationTriggers?: CollaborationTriggerService; projection?: ProjectionOutbox; projectionSink?: ProjectionSink; domain?: AeeisService; taskScheduler?: TaskScheduler; reminders?: ReminderStore; reminderPump?: Pick<ReminderPump, 'advance'>; competitionRunner?: CandidateRunner; competitionEvaluator?: IndependentEvaluator; competitionEvaluatorAgentId?: string; debateRunner?: { run(id: string, scope?: Ownership): Promise<DebateRecord> }; feishuDebateIngress?: FeishuDebateIngress; hermesDebateIngress?: HermesDebateIngress; agentDirectory?: AgentDirectoryPort; grantLedger?: GrantLedger; principalDirectory?: PrincipalDirectory; channelIdentityResolver?: ChannelIdentityResolver; sessionEvents?: SessionEventService; actionPolicies?: ActionPolicyStore; workGrants?: WorkGrantStore; routines?: RoutineStore; feishuLife?: { routes: FeishuLifeRoute[]; encryptKey: string; verificationToken?: string }; deviceSessions?: DeviceSessionRepository; uiEvents?: UiEventCountStore; push?: { store: PushStore; webPublicKey?: string; channels: PushChannel[] }; ownedBots?: OwnedBotStore; openBotUsage?: OpenBotUsageStore; machineTools?: string[]; globalBudget?: { ledger: GlobalBudgetLedger; select: GlobalBudgetSelector }; readinessCheckTimeoutMs?: number; readinessCacheTtlMs?: number; readinessLastGoodGraceMs?: number; readinessToolsGraceMs?: number; readinessToolsTimeoutMs?: number; readinessToolsRefreshMs?: number; readinessToolsLastGoodMs?: number; maxSseConnections?: number; tenantMembers?: TenantMembers; privacy?: PrivacyPageOptions }
 function matches(expected: string | undefined, received: string | undefined): boolean {
   if (!expected || !received) return false;
   const a = Buffer.from(`Bearer ${expected}`), b = Buffer.from(received);
@@ -198,6 +199,10 @@ export function buildApp(options: Options) {
   const dialogues = conversations && options.conversationStore && options.domain && options.sessionEvents
     ? new BotDialogueService(options.botDialogues ?? new InMemoryBotDialogueStore(), conversations, options.conversationStore, options.domain, options.sessionEvents, options.ownedBots, personName) : undefined;
   const dialogueService = () => { if (!dialogues) throw new Conflict('Bot dialogue routing is not configured'); return dialogues; };
+  // Stage 3c: Bots other people in this tenant opened to someone. One port for both conversation services.
+  const openBots = options.ownedBots ? new OpenBots(options.ownedBots, options.openBotUsage ?? new InMemoryOpenBotUsageStore(), new Set(options.machineTools ?? []), personName) : undefined;
+  if (conversations && openBots) conversations.openBots = openBots;
+  if (dialogues && openBots) dialogues.openBots = openBots;
   if (dialogues) {
     conversations!.writeGate = (id, scope, work) => dialogues.conversationWrite(id, scope, work);
     options.sessionEvents!.writeGate = (id, actor, tenant, work) => dialogues.roomWrite(id, actor, tenant, work);
@@ -277,7 +282,7 @@ export function buildApp(options: Options) {
       complete: (request, scope) => options.engine!.completeForBot(request, scope),
       ...(dialogues ? {
         dialogueRoom: async (room, scope) => Boolean(await dialogues.binding(room.id, scope)),
-        dialogueSweep: (room, scope) => dialogues.sweep(room.id, scope, (input, key) => options.engine!.completeForBot({ system: DISCUSSION_REPLY_SYSTEM, input, idempotencyKey: key }, scope), (actions): Promise<void> => botTeam!.directActions(actions, scope)),
+        dialogueSweep: (room, scope) => dialogues.sweep(room.id, scope, (input, key, onUsage) => options.engine!.completeForBot({ system: DISCUSSION_REPLY_SYSTEM, input, idempotencyKey: key, ...(onUsage ? { onUsage } : {}) }, scope), (actions): Promise<void> => botTeam!.directActions(actions, scope)),
       } : {}),
       canExecute: Boolean(options.engine && options.dispatcher),
       notifyRun: async (runId, scope) => { const run = await options.repository.get(runId, scope); if (isBootRecoverableRun(run.status)) await notify(run.id); },
@@ -570,7 +575,7 @@ export function buildApp(options: Options) {
       // A tenant owner never acquires installation operator privileges.
       const operatorRoute = route === '/metrics' || /^\/api\/(?:skills|agents|knowledge)(?:\/|$)/.test(route) || route === '/api/brain/semantic-reindex' || route === '/api/admin/reconcile' || route.startsWith('/api/admin/change-audit/');
       if ((route === '/api/bot-dialogues' || route.includes('/dialogue') || route.endsWith('/deliver')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
-      if ((route === '/api/bots' || route === '/api/bots/:id' || route.startsWith('/api/chats') || route.startsWith('/api/members') || route.startsWith('/api/people/')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
+      if ((route === '/api/bots' || route === '/api/bots/:id' || route.startsWith('/api/bots/:id/open') || route === '/api/open-bots' || route.startsWith('/api/chats') || route.startsWith('/api/members') || route.startsWith('/api/people/')) && !principal.roles.includes('owner')) return reply.code(403).send({ error: 'Resource owner role required' });
       if (operatorRoute && !principal.roles.includes('operator')) return reply.code(403).send({ error: 'Installation operator role required' });
       // Installation-wide operator views read as the system; every other principal reads as its tenant.
       if (!operatorRoute) request.aeeisDbTenant = principal.tenantId;
@@ -616,7 +621,7 @@ export function buildApp(options: Options) {
     if (error instanceof AeeisNotFound || error instanceof RoomMembershipNotFound || error instanceof OwnedBotNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof PrincipalDirectoryUnavailable) return reply.code(503).send({ error: 'Principal directory unavailable; invitation refused' });
     if (error instanceof ChannelIdentityUnavailable) return reply.code(503).send({ error: 'Channel identity resolver unavailable; event admission refused' });
-    if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof AeeisConflict || error instanceof RoomMembershipConflict || error instanceof OpenBotRefusal) return reply.code(409).send({ error: error.message });
     if (error instanceof CollaborationNotFound || error instanceof CollaborationTriggerNotFound || error instanceof ProjectionNotFound || error instanceof ReminderNotFound) return reply.code(404).send({ error: error.message });
     if (error instanceof ReminderConflict || error instanceof OwnedBotConflict || error instanceof ActionPolicyConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof Conflict || error instanceof ThreadConflict) {
@@ -1012,6 +1017,73 @@ export function buildApp(options: Options) {
     await options.ownedBots.remove(id, scope);
     return { removed: true, id, ...(returned.length ? { returned } : {}) };
   });
+  // ---------------------------------------------------------------- stage 3c: opening a Bot to others
+  const openBotBody = z.object({
+    audience: botOpenAudienceSchema.default({ kind: 'tenant' }),
+    tools: z.array(z.string().trim().min(1).max(200)).max(50),
+    publicBackground: z.string().trim().max(800).optional(),
+    monthlyRunLimit: z.number().int().min(0).max(1000).default(OPEN_RUN_LIMIT_DEFAULT),
+    /** The owner confirmed opening tools that write. */
+    confirmWrite: z.boolean().default(false),
+  }).strict();
+  /** The tools an owner may open: configured ones that do not need a Bot computer. Read-only ones start checked. */
+  const openToolsFor = async () => openToolChoices(options.tools ? await options.tools.listTools() : [], new Set(options.machineTools ?? []));
+  const ownBot = async (id: string, principal: Principal) => {
+    const bot = await options.ownedBots?.get(id);
+    if (!bot || bot.owner !== principal.id || bot.tenantId !== principal.tenantId) throw new OwnedBotNotFound('没有这位 Bot');
+    return bot;
+  };
+  app.get<{ Params: { id: string } }>('/api/bots/:id/open', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const bot = await ownBot(ownedBotId.parse(request.params.id), principalOf(request));
+    return { ...(bot.open ? { open: bot.open } : {}), toolChoices: await openToolsFor(), defaultRunLimit: OPEN_RUN_LIMIT_DEFAULT };
+  });
+  app.put<{ Params: { id: string } }>('/api/bots/:id/open', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const id = ownedBotId.parse(request.params.id);
+    const principal = principalOf(request);
+    await ownBot(id, principal);
+    const body = openBotBody.parse(request.body);
+    const tools = checkOpenTools(body.tools, await openToolsFor(), body.confirmWrite);
+    if (body.audience.kind === 'people') {
+      // Only people of this tenant; the list is the same one Settings → 成员 shows.
+      const members = new Set((await tenantMembers.list(principal)).map(member => member.principalId));
+      const unknown = body.audience.people.filter(person => !members.has(person));
+      if (unknown.length) throw new OpenBotRefusal(`名单里有不在这个租户里的人：${unknown.join('、')}`);
+    }
+    const publicBackground = body.publicBackground?.trim();
+    const saved = await options.ownedBots.setOpen(id, { audience: body.audience, tools, ...(publicBackground ? { publicBackground } : {}), monthlyRunLimit: body.monthlyRunLimit }, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
+  });
+  /** Close the Bot again. Their chats stay theirs and become read-only; a Run already going finishes. */
+  app.delete<{ Params: { id: string } }>('/api/bots/:id/open', async request => {
+    if (!options.ownedBots) throw new Conflict('Bot roster is not configured');
+    const principal = principalOf(request);
+    const saved = await options.ownedBots.setOpen(ownedBotId.parse(request.params.id), undefined, { owner: principal.id, tenantId: principal.tenantId });
+    return visibleOwnedBot(saved);
+  });
+  /** How others use it this month: per person, last time, Runs and tokens. No content, nothing to open. */
+  app.get<{ Params: { id: string } }>('/api/bots/:id/open/usage', async request => {
+    if (!options.ownedBots || !openBots) throw new Conflict('Bot roster is not configured');
+    const principal = principalOf(request);
+    const bot = await ownBot(ownedBotId.parse(request.params.id), principal);
+    const month = usageMonth(new Date().toISOString());
+    const lines = await openBots.usage.summary(principal.tenantId, bot.id, principal.id, month);
+    return { month, items: await Promise.all(lines.map(async line => ({ ...line, name: (await tenantMembers.find(principal, line.requester))?.name ?? line.requester }))) };
+  });
+  /** Bots other people in this tenant opened to the reader. Public profile only. */
+  app.get('/api/open-bots', async request => {
+    if (!options.ownedBots || !openBots) return { items: [] };
+    const principal = principalOf(request);
+    const scope = { owner: principal.id, tenantId: principal.tenantId };
+    const bots = await options.ownedBots.listTenant(principal.tenantId);
+    const items = [];
+    for (const bot of bots) {
+      const open = openAccess(bot, scope);
+      if (open) items.push(openBotCard(bot, open, await openBots.ownerName(bot.owner, bot.tenantId)));
+    }
+    return { items };
+  });
   app.post('/api/bots/background', async request => {
     if (!options.engine) throw new Conflict('模型尚未就绪');
     const body = z.object({ role: z.string().trim().min(1).max(120) }).strict().parse(request.body);
@@ -1387,6 +1459,9 @@ export function buildApp(options: Options) {
   });
   app.post('/api/routines', async (request, reply) => {
     const principal = principalOf(request);
+    // A routine runs a Bot in its owner's scope; someone else's Bot (opened to you or not) cannot get one.
+    const agentId = (request.body as { agentId?: unknown } | undefined)?.agentId;
+    if (typeof agentId === 'string' && await openBots?.foreign(agentId, { owner: principal.id, tenantId: principal.tenantId })) throw new NotFound('Unknown Bot');
     return reply.code(201).send(await routineService().create(request.body, { owner: principal.id, tenantId: principal.tenantId }));
   });
   app.get<{ Params: { id: string } }>('/api/routines/:id', async request => {
@@ -2260,8 +2335,8 @@ export function buildApp(options: Options) {
   const messagePage = (query: unknown) => z.object({ before: z.string().min(1).max(200).optional() }).strict().parse(query);
   const queueDialogueReply = (result: { conversation: { id: string }; message: { id: string } }, input: unknown, scope: Ownership) => {
     if (!dialogues || !botTeam || (input as { intent?: string })?.intent === 'execute') return;
-    botTeam.enqueue(() => dialogues.respond(result.conversation.id, result.message.id, scope, (input, key) => options.engine!.completeForBot({
-      system: DISCUSSION_REPLY_SYSTEM, input, idempotencyKey: key,
+    botTeam.enqueue(() => dialogues.respond(result.conversation.id, result.message.id, scope, (input, key, onUsage) => options.engine!.completeForBot({
+      system: DISCUSSION_REPLY_SYSTEM, input, idempotencyKey: key, ...(onUsage ? { onUsage } : {}),
     }, scope), actions => botTeam.directActions(actions, scope)));
   };
   async function registerTaskRelations(id: string, scope: Ownership): Promise<void> {
