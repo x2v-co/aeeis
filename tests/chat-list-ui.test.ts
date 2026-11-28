@@ -186,13 +186,13 @@ describe('消息 list', () => {
     expect(el('profile-kind').textContent).toBe(`Bot · ${ownedBot.id}`);
     expect(el('profile-avatar').querySelector('.bot-corner')).not.toBeNull();
     const sections = () => [...doc().querySelectorAll<HTMLElement>('#profile-sections [data-section]')];
-    expect(sections().map(section => section.dataset.section)).toEqual(['role', 'autonomy', 'tools', 'routines', 'groups', 'side-threads']);
+    expect(sections().map(section => section.dataset.section)).toEqual(['role', 'autonomy', 'open', 'usage', 'tools', 'routines', 'groups', 'side-threads']);
     expect(sections()[0]!.textContent).toContain('负责研究');
     expect(el<HTMLSelectElement>('profile-autonomy').value).toBe('quiet');
-    await vi.waitFor(() => expect(sections()[3]!.textContent).toContain('早报 · 每天 09:00'));
-    expect(sections()[2]!.textContent).toContain('web-search@1');
-    await vi.waitFor(() => expect(sections()[4]!.textContent).toContain('发布协作'));
-    const threads = sections()[5] as HTMLDetailsElement;
+    await vi.waitFor(() => expect(sections()[5]!.textContent).toContain('早报 · 每天 09:00'));
+    expect(sections()[4]!.textContent).toContain('web-search@1');
+    await vi.waitFor(() => expect(sections()[6]!.textContent).toContain('发布协作'));
+    const threads = sections()[7] as HTMLDetailsElement;
     expect(threads.tagName).toBe('DETAILS');
     expect(threads.open).toBe(false);
     threads.open = true;

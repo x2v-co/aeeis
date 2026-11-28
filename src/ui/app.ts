@@ -3193,7 +3193,7 @@ function profileOpenSection(botId: string): HTMLElement {
   void Promise.all([
     api<{ open?: BotOpenView; toolChoices: OpenToolChoice[]; defaultRunLimit: number }>(`/bots/${encodeURIComponent(botId)}/open`),
     api<{ members: MemberView[] }>('/members').then(result => result.members ?? []).catch(() => memberViews),
-  ]).then(([state, members]) => { if (epoch === profileEpoch) renderOpenForm(host, botId, state, members.filter(member => !member.isSelf)); })
+  ]).then(([state, members]) => { if (epoch === profileEpoch) renderOpenForm(host, botId, { ...state, toolChoices: Array.isArray(state?.toolChoices) ? state.toolChoices : [], defaultRunLimit: state?.defaultRunLimit ?? 50 }, (Array.isArray(members) ? members : []).filter(member => !member.isSelf)); })
     .catch(error => { if (epoch === profileEpoch) host.replaceChildren(element('p', errorMessage(error), 'muted')); });
   return host;
 }
@@ -3278,7 +3278,7 @@ function profileUsageSection(botId: string): HTMLElement {
   const epoch = profileEpoch;
   void api<{ month: string; items: Array<{ requester: string; name: string; lastAt: string; runs: number; tokens: number }> }>(`/bots/${encodeURIComponent(botId)}/open/usage`).then(usage => {
     if (epoch !== profileEpoch) return;
-    host.replaceChildren(profileList(usage.items.map(line => element('li', `${line.name} · 最近 ${new Date(line.lastAt).toLocaleString()} · 本月 ${line.runs} 个 Run · ${line.tokens.toLocaleString()} tokens`)), '这个月还没有别人用过。'),
+    host.replaceChildren(profileList((Array.isArray(usage?.items) ? usage.items : []).map(line => element('li', `${line.name} · 最近 ${new Date(line.lastAt).toLocaleString()} · 本月 ${line.runs} 个 Run · ${line.tokens.toLocaleString()} tokens`)), '这个月还没有别人用过。'),
       element('small', '只有次数和用量。别人和它的对话只有他们自己能看到。', 'muted'));
   }).catch(error => { if (epoch === profileEpoch) host.replaceChildren(element('p', errorMessage(error), 'muted')); });
   return host;
@@ -8223,8 +8223,9 @@ async function refresh(background = false): Promise<void> {
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms'),
     api<OwnedBotView[]>('/bots').catch(() => null), slow, loadChats(),
   ]);
-  const opened = await api<{ items: OpenBotCard[] }>('/open-bots').catch(() => null);
-  if (opened) {
+  const opened = await api<{ items?: OpenBotCard[] }>('/open-bots').catch(() => null);
+  // An older server has no such route; anything but a list of cards leaves no borrowed Bots.
+  if (opened && Array.isArray(opened.items)) {
     const before = openBotRecords.map(bot => bot.id).join(',');
     openBotRecords = opened.items.map(openRosterBot);
     // A chat with a borrowed Bot may have rendered before its name was known.
