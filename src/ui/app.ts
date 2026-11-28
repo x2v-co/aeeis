@@ -125,7 +125,7 @@ interface RoutineView {
   nextDueAt?: string; pendingDueAt?: string; lastRunId?: string; webhookConfigured?: boolean; webhookEnabled: boolean;
 }
 interface LifePresence { state: 'idle' | 'working' | 'thinking' | 'waiting' | 'paused' | 'blocked' | 'unknown'; label: string; taskId?: string; taskTitle?: string }
-interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; standingInstruction?: string; hasStandingInstruction?: boolean; presence?: LifePresence }
+interface ConversationSummary { id: string; title: string; revision: number; focusTaskId?: string; taskCount?: number; agentId?: string; botOwner?: string; standingInstruction?: string; hasStandingInstruction?: boolean; presence?: LifePresence }
 interface LastDelivery { taskId: string; taskTitle: string; runId: string; planSummary?: string; artifactTitles?: string[] }
 interface AcceptedPractice { claimId: string; text: string; runId: string; evidenceRefs: string[] }
 interface SkillProfileView { claimId: string; taskKind: string; methodId: string; version: string; runId: string; evidenceRefs: string[] }
@@ -138,7 +138,9 @@ interface TaskKindComparison {
   proposal?: { candidateId: string; status: string };
 }
 interface TaskSettingsView { skills: SkillProfileView[]; models: TaskModelView[]; comparisons?: TaskKindComparison[] }
-interface ConversationView extends ConversationSummary { tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice; taskSettings?: TaskSettingsView }
+/** Stage 3c: a chat with someone else's Bot, opened to the reader. */
+interface BorrowedChat { owner: string; ownerName: string; state: 'open' | 'closed' | 'retired' }
+interface ConversationView extends ConversationSummary { borrowed?: BorrowedChat; tasks: ConversationTaskView[]; messages: ConversationMessageView[]; hasEarlierMessages?: boolean; lastDelivery?: LastDelivery; acceptedPractice?: AcceptedPractice; taskSettings?: TaskSettingsView }
 interface ConversationAttempt { conversationId: string; scope: string; key: string; body: string }
 interface ConversationPost { conversation: ConversationView; message: ConversationMessageView; response: string; runId?: string }
 interface RuntimeStatus {
@@ -256,7 +258,17 @@ let runFilter = localStorage.getItem('aeeis.run-filter') ?? 'all';
 let runSummaries: RunSummary[] = [];
 interface BotGroups { groups: Array<{ id: string; name: string }>; placement: Record<string, string> }
 type BotMark = 'letter' | 'round' | 'square' | 'diamond' | 'drop';
-interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string; autonomy?: BotAutonomy }
+interface RosterBot { id: string; name: string; note: string; demo: boolean; mark?: BotMark; color?: string; background?: string; role?: string; held?: string; autonomy?: BotAutonomy; borrowed?: { owner: string; ownerName: string; tools: string[]; monthlyRunLimit: number } }
+/** Stage 3c: a Bot someone else in this tenant opened to you, as /api/open-bots shows it (public profile only). */
+interface OpenBotCard { id: string; name: string; mark: BotMark; color: string; role?: string; background: string; owner: string; ownerName: string; tools: string[]; monthlyRunLimit: number }
+/** The owner's open settings for one of their Bots. */
+interface BotOpenView { audience: { kind: 'tenant' } | { kind: 'people'; people: string[] }; tools: string[]; publicBackground?: string; monthlyRunLimit: number; updatedAt: string }
+interface OpenToolChoice { id: string; version: string; readOnly: boolean; write: boolean; capabilities: string[]; description?: string }
+let openBotRecords: RosterBot[] = [];
+function openRosterBot(card: OpenBotCard): RosterBot {
+  return { id: card.id, name: card.name, note: '', demo: false, mark: card.mark, color: card.color, background: card.background, ...(card.role ? { role: card.role } : {}), borrowed: { owner: card.owner, ownerName: card.ownerName, tools: card.tools, monthlyRunLimit: card.monthlyRunLimit } };
+}
+const PRIVACY_LINE = (owner: string) => `这是${owner}的 Bot。你们的对话只有你能看到；${owner}能看到你用了多少次、多少 token，看不到内容。`;
 interface StoredBot { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; held?: string }
 const CUSTOM_BOTS_KEY = 'aeeis.custom-bots';
 const LOCAL_BOT_ACCOUNT = 'aeeis.custom-bots-account';
@@ -276,7 +288,7 @@ const BOT_AUTONOMY_LABEL: Record<BotAutonomy, string> = { quiet: '只记录，�
 type BotAutonomy = 'quiet' | 'reply' | 'auto' | 'yolo';
 let localBotsAdopted = false;
 let localBotNote = '';
-interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; autonomy?: BotAutonomy; createdAt?: string; updatedAt?: string }
+interface OwnedBotView { id: string; name: string; mark: BotMark; color: string; background: string; role?: string; autonomy?: BotAutonomy; open?: BotOpenView; createdAt?: string; updatedAt?: string }
 let roomSummaries: RoomSummary[] = [];
 let botGroups: BotGroups | undefined;
 let selectedBotId = linkedRunId || linkedThreadId || readOnlyShare ? 'aeeis' : (localStorage.getItem('aeeis.bot') || 'aeeis');
@@ -522,7 +534,7 @@ function syncEmptyCopy(): void {
 }
 /** The entry, built-in starter Bots and live account Bots use the local execution path; admitted external agents only discuss. */
 function localBotCanExecute(id = activeBotId()): boolean {
-  return id === 'aeeis' || Boolean(starterBot(id)) || ownedBotRecords.some(bot => bot.id === id);
+  return id === 'aeeis' || Boolean(starterBot(id)) || ownedBotRecords.some(bot => bot.id === id) || openBotRecords.some(bot => bot.id === id);
 }
 function syncComposerForBot(): void {
   const other = entryShowsBot() && !localBotCanExecute();
@@ -1619,7 +1631,7 @@ function updateConversationControls(): void {
 function syncStandingInstruction(): void {
   const section = $('standing-instruction');
   if (!section) return;
-  const life = (rosterView() === 'entry' || rosterView() === 'bot') && !retiredOpen();
+  const life = (rosterView() === 'entry' || rosterView() === 'bot') && !retiredOpen() && !conversation?.botOwner;
   section.hidden = !life;
   const field = $<HTMLTextAreaElement>('standing-text');
   const locked = conversationBusy || Boolean(conversationAttempt) || !conversation || !life || archivedDialogue();
@@ -2057,7 +2069,8 @@ function rosterBots(): RosterBot[] {
   const admitted = agentSummaries.filter(rosterAgent).map(agent => ({
     id: agent.agentId, name: agent.card.name, note: '已准入', demo: false,
   }));
-  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
+  const borrowed = openBotRecords.filter(bot => !ownedBotRecords.some(own => own.id === bot.id));
+  return [{ id: 'aeeis', name: 'AEEIS', note: '', demo: false }, ...ownedBotRecords, ...borrowed, ...(admitted.length ? admitted : (usingDemoBots() ? DEMO_BOTS : []))];
 }
 function claimableLocalBots(): RosterBot[] {
   const account = localStorage.getItem(LOCAL_BOT_ACCOUNT);
@@ -2290,7 +2303,9 @@ function aeeisThread(): { id: string; revision: number } | undefined {
   return conversation;
 }
 function participantLabel(principalId: string): string {
-  return botById(principalId)?.name ?? groupMembers.find(member => member.principalId === principalId)?.displayName ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
+  // A Bot no longer on the roster (retired, or no longer opened to you) keeps the name its chat was given.
+  const chatTitle = conversation && lifeAgent(conversation) === principalId && principalId.startsWith('bot_') ? conversation.title : undefined;
+  return botById(principalId)?.name ?? chatTitle ?? groupMembers.find(member => member.principalId === principalId)?.displayName ?? agentSummaries.find(agent => agent.agentId === principalId)?.card.name ?? principalId;
 }
 function eventWriter(event: SessionEventSummary): { id: string; type: 'principal' | 'agent' | 'system' } {
   return event.recordedBy ?? { id: event.actorId, type: event.actorType };
@@ -3155,7 +3170,121 @@ function profileBotGroups(botId: string, host: HTMLElement): void {
     host.replaceChildren(profileList(profileGroupItems(rooms.filter((room): room is RoomSummary => Boolean(room))), '还不在哪个群聊里。'));
   });
 }
+/** Someone else's Bot opened to you: what they chose to show, whose it is, and what the chat with it means. */
+function profileBorrowedSections(bot: RosterBot): ProfileSection[] {
+  const borrowed = bot.borrowed!;
+  const intro = element('div');
+  intro.append(element('p', botDutyLine(bot)));
+  const whose = element('div');
+  whose.append(element('p', PRIVACY_LINE(borrowed.ownerName)));
+  const privacy = document.createElement('a');
+  privacy.href = '/privacy'; privacy.target = '_blank'; privacy.rel = 'noopener'; privacy.textContent = '隐私说明';
+  whose.append(privacy);
+  const limits = element('div');
+  limits.append(element('p', borrowed.tools.length ? `能用的工具：${borrowed.tools.join('、')}` : '不用工具，只回答和提议。'));
+  limits.append(element('p', `每个 Run 都要你批准计划才开始。每月最多 ${borrowed.monthlyRunLimit} 个 Run。`, 'muted'));
+  return [{ key: 'role', title: '介绍', body: intro }, { key: 'whose', title: `${borrowed.ownerName}的 Bot`, body: whose }, { key: 'limits', title: '它能做什么', body: limits }];
+}
+/** 「对别人开放」 on the owner's profile page (stage 3c). Off by default; the server checks every value again. */
+function profileOpenSection(botId: string): HTMLElement {
+  const host = element('div');
+  host.append(element('p', '正在读取…', 'muted'));
+  const epoch = profileEpoch;
+  void Promise.all([
+    api<{ open?: BotOpenView; toolChoices: OpenToolChoice[]; defaultRunLimit: number }>(`/bots/${encodeURIComponent(botId)}/open`),
+    api<{ members: MemberView[] }>('/members').then(result => result.members ?? []).catch(() => memberViews),
+  ]).then(([state, members]) => { if (epoch === profileEpoch) renderOpenForm(host, botId, state, members.filter(member => !member.isSelf)); })
+    .catch(error => { if (epoch === profileEpoch) host.replaceChildren(element('p', errorMessage(error), 'muted')); });
+  return host;
+}
+function renderOpenForm(host: HTMLElement, botId: string, state: { open?: BotOpenView; toolChoices: OpenToolChoice[]; defaultRunLimit: number }, others: MemberView[]): void {
+  const open = state.open;
+  const form = document.createElement('form');
+  form.className = 'open-bot-form';
+  const check = (label: string, checked: boolean, name?: string) => {
+    const wrap = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox'; input.checked = checked; if (name) input.name = name;
+    wrap.append(input, document.createTextNode(` ${label}`));
+    return { wrap, input };
+  };
+  const radio = (label: string, value: string, checked: boolean) => {
+    const wrap = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'radio'; input.name = 'open-audience'; input.value = value; input.checked = checked;
+    wrap.append(input, document.createTextNode(` ${label}`));
+    return { wrap, input };
+  };
+  const enabled = check('对别人开放', Boolean(open));
+  const fields = element('div', '', 'open-bot-fields');
+  const people = open?.audience.kind === 'people' ? new Set(open.audience.people) : new Set<string>();
+  const everyone = radio('本租户所有人', 'tenant', open?.audience.kind !== 'people');
+  const some = radio('只给这些人', 'people', open?.audience.kind === 'people');
+  const pickers = element('div', '', 'open-bot-people');
+  const personBoxes = others.map(member => { const box = check(member.name, people.has(member.principalId)); box.input.value = member.principalId; pickers.append(box.wrap); return box.input; });
+  if (!others.length) pickers.append(element('small', '这个租户里还没有别人。请管理员把邮箱加进登录名单。', 'muted'));
+  const audience = element('fieldset');
+  audience.append(element('legend', '谁能用'), everyone.wrap, some.wrap, pickers);
+  const tools = element('fieldset');
+  tools.append(element('legend', '对别人开放的工具'));
+  const toolBoxes = state.toolChoices.map(choice => {
+    const box = check(`${choice.id}${choice.readOnly ? ' · 只读' : choice.write ? ' · 会写入' : ' · 不是只读'}`, open ? open.tools.includes(choice.id) : choice.readOnly);
+    box.input.value = choice.id;
+    box.input.dataset.write = String(choice.write);
+    box.input.addEventListener('change', () => {
+      if (box.input.checked && choice.write && !window.confirm(`${choice.id} 会写入。开放后，别人在和这位 Bot 的对话里批准计划，就能让它写入。确定开放吗？`)) box.input.checked = false;
+    });
+    tools.append(box.wrap);
+    return box.input;
+  });
+  if (!state.toolChoices.length) tools.append(element('small', '没有可以开放的工具。要用 Bot 电脑的工具不开放给别人。', 'muted'));
+  const background = document.createElement('textarea');
+  background.maxLength = 800; background.rows = 3; background.value = open?.publicBackground ?? '';
+  background.placeholder = '给别人看的背景。不填就用原来的背景。';
+  background.setAttribute('aria-label', '别人看得到的背景');
+  const limit = document.createElement('input');
+  limit.type = 'number'; limit.min = '0'; limit.max = '1000'; limit.value = String(open?.monthlyRunLimit ?? state.defaultRunLimit);
+  limit.setAttribute('aria-label', '每人每月最多几个 Run');
+  const limitRow = element('label', '每人每月最多 ');
+  limitRow.append(limit, document.createTextNode(' 个 Run'));
+  const intro = element('fieldset');
+  intro.append(element('legend', '别人看得到的介绍'), element('small', '名字、角色和这段背景。常驻嘱咐、你和它的对话、记忆、例程都不给别人。', 'muted'), background);
+  fields.append(audience, tools, intro, limitRow, element('small', '常驻嘱咐在有别人的群里也会用到，别写不想让群友知道的事。别人和它一对一时不用。', 'muted'));
+  const sync = () => { fields.hidden = !enabled.input.checked; pickers.hidden = !some.input.checked; };
+  enabled.input.addEventListener('change', sync); everyone.input.addEventListener('change', sync); some.input.addEventListener('change', sync);
+  sync();
+  const save = document.createElement('button');
+  save.type = 'submit'; save.textContent = '保存';
+  const status = element('small', open ? `已开放 · ${new Date(open.updatedAt).toLocaleString()} 改过` : '没有开放。别人看不到它。', 'muted');
+  form.append(enabled.wrap, fields, save, status);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    save.disabled = true;
+    const url = `/bots/${encodeURIComponent(botId)}/open`;
+    const write = toolBoxes.some(box => box.checked && box.dataset.write === 'true');
+    const body = { audience: some.input.checked ? { kind: 'people', people: personBoxes.filter(box => box.checked).map(box => box.value) } : { kind: 'tenant' }, tools: toolBoxes.filter(box => box.checked).map(box => box.value), monthlyRunLimit: Number(limit.value || state.defaultRunLimit), confirmWrite: write, ...(background.value.trim() ? { publicBackground: background.value.trim() } : {}) };
+    const done = enabled.input.checked ? api<OwnedBotView>(url, body, 'PUT') : open ? api<OwnedBotView>(url, undefined, 'DELETE') : Promise.resolve(undefined);
+    void done.then(saved => {
+      message(enabled.input.checked ? '已开放。名单里的人在「新建」里能选它。' : open ? '已关闭。别人的对话留给他们，只读。' : '没有开放。');
+      if (saved) renderOpenForm(host, botId, { toolChoices: state.toolChoices, defaultRunLimit: state.defaultRunLimit, ...(saved.open ? { open: saved.open } : {}) }, others);
+    }).catch(error => message(errorMessage(error))).finally(() => { save.disabled = false; });
+  });
+  host.replaceChildren(form);
+}
+/** 「别人怎么用它」: per person this month, the last time, Runs and tokens. No content, nothing to open. */
+function profileUsageSection(botId: string): HTMLElement {
+  const host = element('div');
+  host.append(element('p', '正在读取…', 'muted'));
+  const epoch = profileEpoch;
+  void api<{ month: string; items: Array<{ requester: string; name: string; lastAt: string; runs: number; tokens: number }> }>(`/bots/${encodeURIComponent(botId)}/open/usage`).then(usage => {
+    if (epoch !== profileEpoch) return;
+    host.replaceChildren(profileList(usage.items.map(line => element('li', `${line.name} · 最近 ${new Date(line.lastAt).toLocaleString()} · 本月 ${line.runs} 个 Run · ${line.tokens.toLocaleString()} tokens`)), '这个月还没有别人用过。'),
+      element('small', '只有次数和用量。别人和它的对话只有他们自己能看到。', 'muted'));
+  }).catch(error => { if (epoch === profileEpoch) host.replaceChildren(element('p', errorMessage(error), 'muted')); });
+  return host;
+}
 function profileBotSections(botId: string, bot: RosterBot | undefined): ProfileSection[] {
+  if (bot?.borrowed) return profileBorrowedSections(bot);
   const sections: ProfileSection[] = [];
   const role = element('div');
   role.append(element('p', bot ? (bot.background || bot.note ? botDutyLine(bot) : '职责：见背景资料。') : '这位 Bot 已经撤下，背景不再保留。'));
@@ -3173,6 +3302,8 @@ function profileBotSections(botId: string, bot: RosterBot | undefined): ProfileS
       autonomy.append(select);
     } else autonomy.append(element('p', BOT_AUTONOMY_LABEL[owned.autonomy ?? 'reply']));
     sections.push({ key: 'autonomy', title: '自主程度', body: autonomy });
+    sections.push({ key: 'open', title: '对别人开放', body: profileOpenSection(owned.id) });
+    sections.push({ key: 'usage', title: '别人怎么用它', body: profileUsageSection(owned.id), collapsed: true });
   }
   if (bot) {
     const tools = element('div');
@@ -3248,7 +3379,8 @@ function renderProfile(): void {
   profileEpoch += 1;
   $('profile-avatar')?.replaceChildren(chatAvatar(name, { ...(bot ? { bot } : {}), isBot, ...(isBot || other ? {} : { text: '你' }), ...(bot ? { state: lifeAvatarState(id) } : {}) }));
   $('profile-name').textContent = name;
-  $('profile-kind').textContent = isBot ? `Bot · ${id}${bot ? '' : ' · 已撤下'}` : other ? `成员 · ${member?.email ?? id}` : `你 · ${sessionPrincipal || 'owner'}`;
+  const closedBorrowed = isBot && !bot && conversationList.some(entry => entry.agentId === id && entry.botOwner);
+  $('profile-kind').textContent = isBot ? bot?.borrowed ? `Bot · ${bot.borrowed.ownerName}开放给你` : `Bot · ${id}${bot ? '' : closedBorrowed ? ' · 已不再开放' : ' · 已撤下'}` : other ? `成员 · ${member?.email ?? id}` : `你 · ${sessionPrincipal || 'owner'}`;
   $('profile-status').textContent = isBot
     ? bot ? lifePresenceLabel(id) : '已撤下。和它的对话留在消息列表里，只读。'
     : other ? (member ? personStatus(member) : '正在读取…') : '这个工作区的主人。Bot 和群聊都在你名下。';
@@ -3857,7 +3989,17 @@ function syncEntrySurface(): void {
   const retired = retiredOpen();
   if (composer) composer.hidden = view === 'group' || view === 'draft' || view === 'direct' || retired;
   const retiredNote = $('retired-note');
-  if (retiredNote) retiredNote.hidden = !retired;
+  if (retiredNote) {
+    retiredNote.hidden = !retired;
+    const borrowedChat = conversation?.borrowed;
+    retiredNote.textContent = borrowedChat && borrowedChat.state !== 'retired' ? `${borrowedChat.ownerName}已不再开放这位 Bot。你们的对话留在这里，只读，不能再发消息。` : '这位 Bot 已经撤下。和它的对话留在这里，只读，不能再发消息。';
+  }
+  const borrowedNote = $('borrowed-note');
+  if (borrowedNote) {
+    const borrowedChat = conversation?.borrowed;
+    borrowedNote.hidden = !borrowedChat || borrowedChat.state !== 'open' || retired || !(view === 'entry' || view === 'bot');
+    if (borrowedChat) { borrowedNote.replaceChildren(document.createTextNode(`${PRIVACY_LINE(borrowedChat.ownerName)} `)); const link = document.createElement('a'); link.href = '/privacy'; link.target = '_blank'; link.rel = 'noopener'; link.textContent = '隐私说明'; borrowedNote.append(link); }
+  }
   if (note) note.hidden = view !== 'bot' || retired;
   if (placement) placement.hidden = (view !== 'bot' && view !== 'direct') || retired;
   if (draft) draft.hidden = view !== 'draft';
@@ -3876,7 +4018,9 @@ function syncEntrySurface(): void {
     const actions = $('bot-profile-actions');
     if (actions) actions.hidden = !counterpart || counterpart.id === 'aeeis' || !ownedBotRecords.some(bot => bot.id === counterpart.id);
     const boundary = $('bot-profile-boundary');
-    if (boundary) boundary.textContent = localBotCanExecute()
+    if (boundary) boundary.textContent = counterpart?.borrowed
+      ? `边界：这是${counterpart.borrowed.ownerName}开放给你的 Bot。它只用${counterpart.borrowed.ownerName}开放的工具，每个 Run 都等你批准计划，不用 Bot 电脑，也不和别的 Bot 交接。`
+      : localBotCanExecute()
       ? '边界：背景与常驻嘱咐只是参考，不授予权限。你派的任务沿用执行审批；它自主开的 Run 来源是 agent，写操作要你批准，放手档下直接拒绝。'
       : '边界：外部准入成员仅支持讨论，不作为本地 Bot 执行，也不会自己回复。';
     if (copy && botsActive && localBotCanExecute()) copy.textContent += '只记下的讨论是否自主回复，按下面的设置。';
@@ -3922,7 +4066,7 @@ function syncEntrySurface(): void {
   const entryTitle = $('entry-title');
   const entryPresence = $('entry-presence');
   const titleText = retired ? (conversation?.title || '已撤下的 Bot') : view === 'group' ? (room?.title || '群聊') : view === 'draft' ? '新建群聊' : (view === 'direct' || view === 'bot') ? personName : 'AEEIS';
-  const presenceText = retired ? '已撤下 · 只读' : view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
+  const presenceText = retired ? (conversation?.borrowed && conversation.borrowed.state !== 'retired' ? '已不再开放 · 只读' : '已撤下 · 只读') : view === 'group' ? '群聊' : view === 'direct' ? '私聊' : view === 'draft' ? '选择成员' : lifePresenceLabel(view === 'bot' ? activeBotId() : 'aeeis');
   if (entryTitle) entryTitle.textContent = titleText;
   if (entryPresence) entryPresence.textContent = presenceText;
   const shellTitle = $('gb-title');
@@ -4061,6 +4205,8 @@ function renderBotRoster(): void {
   for (const bot of bots) {
     if (chatFilter && groups.placement[bot.id] !== chatFilter) continue;
     const item = botChatItem(bot.id);
+    // A Bot someone opened to you shows up here once you talk to it; until then it waits in 「新建」.
+    if (bot.borrowed && !item && !(viewingBot && bot.id === visible)) continue;
     const row = chatRow('bot-row', chatAvatar(bot.name, { bot, isBot: true, profile: `bot:${bot.id}`, state: lifeAvatarState(bot.id) }), bot.name, item?.preview || lifePresenceLabel(bot.id), item?.unread ?? 0, doingLabel(bot.id));
     row.dataset.botId = bot.id;
     if (item) row.dataset.chatId = item.chatId;
@@ -4071,7 +4217,8 @@ function renderBotRoster(): void {
   if (!chatFilter) {
     for (const item of retiredBotChats()) {
       const name = item.title || '已撤下的 Bot';
-      const row = chatRow('bot-row retired-row', chatAvatar(name, { isBot: true, profile: `bot:${item.counterpart}` }), name, item.preview || '只读的历史', item.unread, '已撤下');
+      const closed = conversationList.some(entry => entry.agentId === item.counterpart && entry.botOwner);
+      const row = chatRow('bot-row retired-row', chatAvatar(name, { isBot: true, profile: `bot:${item.counterpart}` }), name, item.preview || '只读的历史', item.unread, closed ? '已不再开放' : '已撤下');
       row.dataset.chatId = item.chatId;
       row.dataset.retired = item.counterpart ?? '';
       row.setAttribute('aria-pressed', String(retired && conversation?.id === item.chatId));
@@ -4173,14 +4320,17 @@ async function markOpenChatRead(): Promise<void> {
 function renderNewChatMenu(): void {
   const host = $('new-chat-bots');
   if (!host) return;
-  host.replaceChildren(...rosterBots().map(bot => {
+  const item = (bot: RosterBot) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'new-chat-item';
     button.dataset.newChatBot = bot.id;
     button.append(chatAvatar(bot.name, { bot, isBot: true }), element('span', bot.name));
+    if (bot.borrowed) { button.append(element('small', `${bot.borrowed.ownerName}的`, 'muted')); button.title = PRIVACY_LINE(bot.borrowed.ownerName); }
     return button;
-  }));
+  };
+  const mine = rosterBots().filter(bot => !bot.borrowed), borrowed = rosterBots().filter(bot => bot.borrowed);
+  host.replaceChildren(...mine.map(item), ...(borrowed.length ? [element('p', '别人开放给你的', 'new-chat-label'), ...borrowed.map(item)] : []));
 }
 function setNewChatMenu(open: boolean): void {
   const menu = $('new-chat-menu');
@@ -8073,6 +8223,13 @@ async function refresh(background = false): Promise<void> {
     api<RunPage>('/runs/page?limit=50'), api<GoalPage>('/goals/page?limit=50').then(page => page.goals), api<RoomSummary[]>('/rooms'),
     api<OwnedBotView[]>('/bots').catch(() => null), slow, loadChats(),
   ]);
+  const opened = await api<{ items: OpenBotCard[] }>('/open-bots').catch(() => null);
+  if (opened) {
+    const before = openBotRecords.map(bot => bot.id).join(',');
+    openBotRecords = opened.items.map(openRosterBot);
+    // A chat with a borrowed Bot may have rendered before its name was known.
+    if (conversation?.botOwner && before !== openBotRecords.map(bot => bot.id).join(',')) { conversationRenderSignature = ''; followConversationBot(); renderConversation(); }
+  }
   if (full) { slowLists = lists; slowRefreshAt = Date.now(); }
   const { candidates, signals, competitions, debates, projections, agents, triggerPolicies, triggerDecisions, reminderPage } = lists;
   const runs = runPage.items;
@@ -8798,6 +8955,8 @@ function currentPlanningDecision(goal = conversationExecutionGoal()) {
   });
 }
 function executionReviewValue(): 'required' | 'auto' | 'yolo' {
+  // Someone else's Bot: every Run waits for the requester's approval (the server enforces it too).
+  if (conversation?.botOwner) return 'required';
   const value = $<HTMLSelectElement>('execution-review')?.value;
   return value === 'auto' || value === 'yolo' ? value : 'required';
 }
@@ -8806,6 +8965,9 @@ function restoreExecutionReview(): void {
   const select = $<HTMLSelectElement>('execution-review');
   if (!select) return;
   // Default is auto: a small task runs, and a real plan waits. YOLO runs the plan too. A saved grant is restored once grants load.
+  const borrowedChat = Boolean(conversation?.botOwner);
+  for (const option of select.options) option.disabled = borrowedChat && option.value !== 'required';
+  if (borrowedChat) { select.value = 'required'; return; }
   if (saved?.startsWith('grant:') && [...select.options].some(option => option.value === saved)) { select.value = saved; return; }
   select.value = saved === 'required' || saved === 'yolo' ? saved : 'auto';
 }

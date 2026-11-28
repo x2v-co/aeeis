@@ -236,6 +236,7 @@
 <button id="conversation-earlier" class="quiet-button" type="button" hidden>读取更早消息</button>
 <ol id="conversation-messages" class="conversation-messages" aria-label="讨论记录"></ol>
 <p id="conversation-empty" class="conversation-welcome">今天要我做什么？</p>
+<p id="borrowed-note" class="borrowed-note" hidden></p>
 <p id="retired-note" class="retired-note" hidden>这位 Bot 已经撤下。和它的对话留在这里，只读，不能再发消息。</p>
 <form id="conversation-composer">
 <div id="conversation-reply" class="conversation-reply" hidden>
@@ -776,7 +777,7 @@
 </section>
 <section id="standing-instruction" hidden>
 <h3>这个人记得</h3>
-<p id="standing-note">这句话留在这个人身上。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。</p>
+<p id="standing-note">这句话留在这个人身上。下一次在这里明确创建 Run，会把它带进那次材料，标明不可信，不能当执行授权。讨论不会改它。在有别人的群里也会用到，别写不想让群友知道的事；别人和这位 Bot 一对一时不用。</p>
 <form id="standing-form">
 <textarea id="standing-text" maxlength="500" placeholder="空着表示这个人还没有长期嘱咐" aria-label="这个人记得的一句话"></textarea>
 <div class="standing-actions">

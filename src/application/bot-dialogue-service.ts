@@ -7,6 +7,7 @@ import type { BotDialogue, BotDialogueStore } from '../bot-dialogues.js';
 import type { ConversationStore, ConversationMessage } from '../conversations.js';
 import { visibleConversationMessages } from '../conversations.js';
 import type { OwnedBotStore } from '../owned-bots.js';
+import { OpenBotRefusal, publicBotProfile, type BorrowedBot, type OpenBots } from '../open-bots.js';
 import type { SessionEvent, SessionEventService } from '../session-events.js';
 import { BotReplyNotice, Conflict } from '../runtime/engine.js';
 import { NotFound } from '../runtime/repository.js';
@@ -24,8 +25,12 @@ const directSchema = z.object({
   ask: z.object({ to: z.string().trim().min(1).max(40), question: z.string().trim().min(1).max(1000) }).strip().optional(),
   handoff: z.object({ to: z.string().trim().min(1).max(40), task: z.string().trim().min(2).max(80).optional(), note: z.string().trim().max(300).optional() }).strip().optional(),
 }).strip();
+/** The owner's own Bot as its private-chat reply sees it; who it is opened to is not the model's business. */
+function ownBotInput(bot: object): object { const { open: _open, ...rest } = bot as { open?: unknown }; return rest; }
 const importedId = (room: string, event: string) => `message_${hash(`${room}:${event}`)}`;
 export class BotDialogueService {
+  /** Bots other people opened to this scope (stage 3c). */
+  openBots?: OpenBots;
   constructor(readonly store: BotDialogueStore, private readonly conversations: ConversationService,
     private readonly aggregates: ConversationStore, private readonly domain: AeeisService,
     private readonly events: SessionEventService, private readonly bots?: OwnedBotStore,
@@ -43,6 +48,21 @@ export class BotDialogueService {
     if (!bot || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId || bot.retiredAt) throw new NotFound('Unknown Bot');
     return bot;
   }
+  /**
+   * The Bot of a private chat in this scope: one of the owner's own, or (stage 3c) a Bot someone else opened to this
+   * person. The second carries its open settings; callers must not read anything else of the owner's for it.
+   */
+  async chatBot(botId: string, scope: Ownership): Promise<{ bot: Awaited<ReturnType<BotDialogueService['bot']>>; borrowed?: BorrowedBot }> {
+    try { return { bot: await this.bot(botId, scope) }; }
+    catch (error) {
+      if (!(error instanceof NotFound)) throw error;
+      const borrowed = await this.openBots?.access(botId, scope);
+      if (borrowed) return { bot: borrowed.bot, borrowed };
+      // A Bot that was opened to this person and is not any more: the chat stays, read-only.
+      if (await this.openBots?.foreign(botId, scope) && (await this.store.list(scope)).some(b => b.botId === botId)) throw new OpenBotRefusal('这位 Bot 已不再开放给你，这段对话只能阅读。');
+      throw error;
+    }
+  }
   async binding(roomId: string, scope: Ownership): Promise<BotDialogue | undefined> {
     const alias = (await this.store.aliases(scope)).find(a => a.aliasRoomId === roomId);
     return (await this.store.list(scope)).find(b => b.roomId === (alias?.canonicalRoomId ?? roomId) || b.state.roomIds.includes(roomId));
@@ -54,7 +74,7 @@ export class BotDialogueService {
   async conversationWrite<T>(conversationId: string, scope: Ownership, work: () => Promise<T>): Promise<T> {
     return this.store.withOwner(scope, async () => {
       const binding = (await this.store.list(scope)).find(b => b.conversationId === conversationId);
-      if (binding) { this.ready(binding); await this.bot(binding.botId, scope); await this.domain.assertRoomEventWriter(binding.roomId, scope.owner, scope.tenantId); }
+      if (binding) { this.ready(binding); await this.chatBot(binding.botId, scope); await this.domain.assertRoomEventWriter(binding.roomId, scope.owner, scope.tenantId); }
       return work();
     });
   }
@@ -67,7 +87,15 @@ export class BotDialogueService {
     });
   }
   async ensure(botId: string, scope: Ownership, actor?: Principal): Promise<BotDialogue> {
-    const bot = await this.bot(botId, scope);
+    let chat: Awaited<ReturnType<BotDialogueService['chatBot']>>;
+    try { chat = await this.chatBot(botId, scope); }
+    catch (error) {
+      // A chat with a Bot that is no longer open to this person still opens, to read. Every write refuses.
+      const kept = error instanceof OpenBotRefusal ? (await this.store.list(scope)).find(b => b.botId === botId && b.phase === 'ready') : undefined;
+      if (kept) return kept;
+      throw error;
+    }
+    const { bot, borrowed } = chat;
     return this.store.withOwner(scope, async () => {
       let binding = (await this.store.list(scope)).find(b => b.botId === botId);
       if (binding?.phase === 'ready') {
@@ -81,7 +109,7 @@ export class BotDialogueService {
         const unclaimed = all.filter(c => !c.agentId);
         if (botId === 'aeeis' && !all.some(c => c.agentId === botId) && unclaimed.length > 1) throw new Conflict('存在多条未认领对话，请先确认 AEEIS 生命线');
         const conversation = await this.conversations.create({ agentId: botId, title: bot.name,
-          ...(botId === 'aeeis' && !all.some(c => c.agentId === botId) && unclaimed[0] ? { claimId: unclaimed[0].id } : {}) }, scope, actor);
+          ...(botId === 'aeeis' && !all.some(c => c.agentId === botId) && unclaimed[0] ? { claimId: unclaimed[0].id } : {}) }, scope, actor, borrowed ? { botOwner: borrowed.bot.owner } : undefined);
         const candidates: string[] = [], conflictRoomIds: string[] = []; let conflict = false;
         // No UI list limit: scans every owned Room, including archived ones.
         const rooms = (await this.domain.listRooms(scope.owner, scope.tenantId)).sort((a,b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
@@ -170,7 +198,7 @@ export class BotDialogueService {
     await this.domain.assertRoomEventWriter(roomId, scope.owner, scope.tenantId);
     const binding = await this.binding(roomId, scope);
     if (!binding) throw new NotFound('Room has no Bot dialogue');
-    this.ready(binding); await this.bot(binding.botId, scope);
+    this.ready(binding); await this.chatBot(binding.botId, scope);
     return this.conversations.post(binding.conversationId, input, scope, key, canExecute, actor);
   }
   async resolveRoom(roomId: string, scope: Ownership, actor?: Principal): Promise<BotDialogue> {
@@ -180,7 +208,7 @@ export class BotDialogueService {
     if (room.chat !== 'direct' && (room.chat !== undefined || room.description !== '私聊')) throw new NotFound('Room has no Bot dialogue');
     const members = (await this.domain.listRoomMembers(roomId, scope.owner, scope.tenantId)).filter(m => m.status === 'active' && m.principalId !== scope.owner);
     if (members.length !== 1) throw new Conflict('私聊身份不明确');
-    await this.bot(members[0]!.principalId, scope);
+    await this.chatBot(members[0]!.principalId, scope);
     return this.ensure(members[0]!.principalId, scope, actor);
   }
   async deliver(roomId: string, eventId: string, botId: string, kind: 'intake' | 'entry' | 'handoff', scope: Ownership, actor?: Principal) {
@@ -250,7 +278,7 @@ export class BotDialogueService {
     for (const message of current.messages) if (message.source?.kind === 'artifact') latest.set(message.source.artifactId, { id: message.source.artifactId, title: message.source.title, content: message.text, messageId: message.id });
     return { revision: current.revision, items: [...latest.values()] };
   }
-  async sweep(roomId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
+  async sweep(roomId: string, scope: Ownership, complete: (input: unknown, key: string, onUsage?: (tokens: number) => void) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
     const binding = await this.binding(roomId, scope);
     if (!binding || binding.roomId !== roomId || binding.phase !== 'ready') return;
     const current = await this.aggregates.get(binding.conversationId, scope);
@@ -265,11 +293,14 @@ export class BotDialogueService {
       .map(item => ({ name: item.name, ...(item.role ? { role: item.role } : {}), ...(item.background ? { background: item.background.slice(0, 200) } : {}) }));
     return botId === 'aeeis' ? others : [{ name: 'AEEIS', role: '入口，负责接话、拆活和分派' }, ...others];
   }
-  async respond(conversationId: string, messageId: string, scope: Ownership, complete: (input: unknown, key: string) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
+  async respond(conversationId: string, messageId: string, scope: Ownership, complete: (input: unknown, key: string, onUsage?: (tokens: number) => void) => Promise<unknown>, act?: (actions: DirectActions) => Promise<void>): Promise<void> {
     const actions = await this.store.withOwner(scope, async (): Promise<DirectActions | undefined> => {
       const binding = (await this.store.list(scope)).find(b => b.conversationId === conversationId);
       if (!binding || binding.phase !== 'ready') return;
-      const bot = await this.bot(binding.botId, scope);
+      let chat: Awaited<ReturnType<BotDialogueService['chatBot']>>;
+      try { chat = await this.chatBot(binding.botId, scope); }
+      catch (error) { if (error instanceof OpenBotRefusal) return; throw error; }
+      const { bot, borrowed } = chat;
       if (bot.autonomy === 'quiet') return;
       const key = `dialogue-reply:${messageId}:${bot.id}`;
       const current = await this.aggregates.get(conversationId, scope);
@@ -278,9 +309,15 @@ export class BotDialogueService {
       if (!trigger || trigger.execution || trigger.intent !== 'discuss' || trigger.source || trigger.speaker?.role === 'agent') return;
       let reply: string;
       let wanted: z.infer<typeof directSchema> = {};
+      let tokens = 0;
       try {
-        const team = await this.team(bot.id, scope);
-        const raw = await complete({ bot, ...(team.length ? { team } : {}), standingInstruction: current.standingInstruction, tasks: current.tasks.slice(-20).map(task => task.title), transcript_untrusted: visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text })) }, key);
+        // Someone else's Bot knows only its public profile here: no standing instruction, no team, no owner memory.
+        const team = borrowed ? [] : await this.team(bot.id, scope);
+        const transcript = visibleConversationMessages(current.messages).slice(-30).map(m => ({ speaker: m.speaker, text: m.text }));
+        const input = borrowed
+          ? { bot: publicBotProfile(borrowed.bot, borrowed.open), borrowedBy: { note: `这位 Bot 属于${await this.openBots!.ownerName(borrowed.bot.owner, scope.tenantId)}，对方开放给了现在说话的人（user）。只照背景回答这个人；你不知道主人的其他事，也不替主人做决定。` }, tasks: current.tasks.slice(-20).map(task => task.title), transcript_untrusted: transcript }
+          : { bot: ownBotInput(bot), ...(team.length ? { team } : {}), standingInstruction: current.standingInstruction, tasks: current.tasks.slice(-20).map(task => task.title), transcript_untrusted: transcript };
+        const raw = await complete(input, key, used => { tokens += used; });
         if (!raw || typeof raw !== 'object' || !('reply' in raw) || typeof raw.reply !== 'string' || !raw.reply.trim()) throw new Conflict('Invalid Bot reply');
         reply = raw.reply;
         // A malformed ask or handoff is dropped; the reply itself still counts.
@@ -295,6 +332,7 @@ export class BotDialogueService {
       // Agent speech stays discussion. It cannot acquire the owner's execution authority.
       const latest = await this.aggregates.get(conversationId, scope);
       const posted = await this.conversations.post(conversationId, { text: reply.slice(0, 2000), expectedRevision: latest.revision, replyTo: messageId, intent: 'discuss', speaker: { role: 'agent', id: bot.id } }, scope, key, false);
+      if (borrowed) await this.openBots!.recordReply(borrowed, scope, key, tokens).catch(error => console.error('AEEIS open Bot reply usage was not recorded', error instanceof Error ? error.message : error));
       if (!wanted.ask && !wanted.handoff) return undefined;
       return { conversationId, triggerMessageId: messageId, replyMessageId: posted.message.id, botId: bot.id, ...(wanted.ask ? { ask: wanted.ask } : {}), ...(wanted.handoff ? { handoff: { to: wanted.handoff.to, ...(wanted.handoff.task ? { task: wanted.handoff.task } : {}), ...(wanted.handoff.note ? { note: wanted.handoff.note } : {}) } } : {}) };
     });

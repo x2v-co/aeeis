@@ -134,7 +134,13 @@ describe('single-entry conversation routing', () => {
     await f.bots.remove(retired.id, scope);
     await f.bots.create({ id: 'bot_otherown', name: '别人的助手', background: '私有背景', mark: 'letter', color: '#171717' }, { ...scope, owner: 'bob' });
     await f.bots.create({ id: 'bot_otherteam', name: '另一租户', background: '私有背景', mark: 'letter', color: '#171717' }, { ...scope, tenantId: 'team-b' });
-    for (const agentId of [retired.id, 'bot_missing01', 'demo.unknown', 'external.agent', 'bot_otherown', 'bot_otherteam', 'bad/person']) {
+    // Someone else's Bot (another owner, another tenant) does not even get a plain conversation (stage 3c).
+    for (const agentId of ['bot_otherown', 'bot_otherteam']) {
+      const refused = await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { agentId } });
+      expect(refused.statusCode).toBe(404);
+      expect(refused.body).not.toContain('私有背景');
+    }
+    for (const agentId of [retired.id, 'bot_missing01', 'demo.unknown', 'external.agent', 'bad/person']) {
       const entry = (await f.app.inject({ method: 'POST', url: '/api/conversations', headers: f.headers, payload: { agentId } })).json();
       const denied = await f.post(entry.id, { text: '执行任务', newTask: { title: '不可执行' }, expectedRevision: 0, intent: 'execute' });
       expect(denied.statusCode, denied.body).toBe(409);

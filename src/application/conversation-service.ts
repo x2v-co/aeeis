@@ -16,6 +16,7 @@ import { baselineVersions } from '../evolution-activation.js';
 import type { RsiService } from '../rsi.js';
 import type { OwnedBotStore } from '../owned-bots.js';
 import { starterBot } from '../starter-bots.js';
+import { OpenBotRefusal, publicBotProfile, requesterRunOptions, type BorrowedBot, type OpenBots } from '../open-bots.js';
 import type { ChannelInboundMessage, LifeThreadInbox } from '../channel-ingress.js';
 import type { ConversationThreadIndex } from '../adapters/conversation-thread-index.js';
 
@@ -418,17 +419,27 @@ function settingText(taskKind: string, skill: SkillProfileView | undefined, mode
 
 export class ConversationService implements LifeThreadInbox {
   writeGate?: <T>(id: string, scope: Ownership, work: () => Promise<T>) => Promise<T>;
+  /** Bots other people opened to this scope (stage 3c). Without it no conversation can be with someone else's Bot. */
+  openBots?: OpenBots;
   constructor(private store: ConversationStore, private runs: RunRepository, private threads: ThreadService, private brain: GovernedBrain | undefined = undefined, private rsi: RsiService | undefined = undefined, private machines: ((runId: string) => Promise<{ state: 'present' | 'released'; ready: boolean } | undefined>) | undefined = undefined, private bots: Pick<OwnedBotStore, 'list'> | undefined = undefined, private threadIndex: ConversationThreadIndex | undefined = undefined) {}
 
-  async create(input: unknown, scope: Ownership, actor?: Principal) {
+  /** `borrowed` is set only by the private-chat path after it checked the open settings; the request body cannot. */
+  async create(input: unknown, scope: Ownership, actor?: Principal, borrowed?: { botOwner: string }) {
     const body = z.object({
       title: z.string().trim().min(1).max(200).default('AEEIS'),
       agentId: z.string().trim().min(1).max(100).optional(),
       claimId: z.string().trim().min(1).max(200).optional(),
     }).strict().parse(input ?? {});
     if (body.claimId && !body.agentId) throw new Conflict('认领一条生命线需要这个人的标识');
+    // Someone else's Bot gets a conversation only through the open path, never a plain one (and so no routine, channel or proposal thread).
+    if (body.agentId && !borrowed && await this.openBots?.foreign(body.agentId, scope)) throw new NotFound('Unknown Bot');
+    if (borrowed && body.claimId) throw new Conflict('别人开放给你的 Bot 不能认领旧对话');
     if (body.agentId) {
       const existing = (await this.store.list(scope)).find(item => item.agentId === body.agentId);
+      if (existing && borrowed && existing.botOwner !== borrowed.botOwner) {
+        const stamped = await this.store.mutate(existing.id, scope, current => { current.botOwner = borrowed.botOwner; delete current.standingInstruction; });
+        return this.view(stamped, scope, actor);
+      }
       if (existing) return this.view(existing, scope, actor);
     }
     if (body.claimId && body.agentId) {
@@ -442,7 +453,7 @@ export class ConversationService implements LifeThreadInbox {
     const at = new Date().toISOString();
     const conversation: Conversation = {
       schemaVersion: 'conversation/1', id: `conv_${randomUUID()}`, ...scope, title: body.title, revision: 0, createdAt: at, updatedAt: at, recentTaskIds: [], tasks: [], messages: [],
-      ...(body.agentId ? { agentId: body.agentId } : {}),
+      ...(body.agentId ? { agentId: body.agentId } : {}), ...(borrowed && body.agentId ? { botOwner: borrowed.botOwner } : {}),
     };
     try { await this.store.create(conversation); }
     catch (error) {
@@ -455,7 +466,7 @@ export class ConversationService implements LifeThreadInbox {
   }
   async list(scope: Ownership) {
     const conversations = await this.store.list(scope);
-    return Promise.all(conversations.map(async ({ id, title, revision, updatedAt, focusTaskId, tasks, agentId, standingInstruction }) => {
+    return Promise.all(conversations.map(async ({ id, title, revision, updatedAt, focusTaskId, tasks, agentId, standingInstruction, botOwner }) => {
       const items = await Promise.all(tasks.map(async task => {
         if (!task.latestRunId) return { id: task.id, title: task.title, status: task.pendingMessageId ? 'preparing' : 'discussion' };
         try {
@@ -467,7 +478,7 @@ export class ConversationService implements LifeThreadInbox {
           return { id: task.id, title: task.title, status: 'unreadable' };
         }
       }));
-      return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}), ...(standingInstruction ? { hasStandingInstruction: true } : {}) };
+      return { id, title, revision, updatedAt, focusTaskId, taskCount: tasks.length, presence: lifePresence(items), ...(agentId ? { agentId } : {}), ...(botOwner ? { botOwner } : {}), ...(standingInstruction ? { hasStandingInstruction: true } : {}) };
     }));
   }
   async get(id: string, scope: Ownership, actor?: Principal, before?: string) {
@@ -520,7 +531,25 @@ export class ConversationService implements LifeThreadInbox {
     const storedSettings = this.ownerActor(actor, scope) ? await this.readTaskSettings(conversation, scope, actor) : undefined;
     const comparisons = this.ownerActor(actor, scope) ? await this.readTaskComparisons(conversation, scope, actor, storedSettings) : undefined;
     const taskSettings = storedSettings || comparisons?.length ? { skills: storedSettings?.skills ?? [], models: storedSettings?.models ?? [], ...(comparisons?.length ? { comparisons } : {}) } : undefined;
-    return redactRunData({ ...conversation, tasks, ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: visibleConversationMessages(conversation.messages).slice(-100).map(message => { const reply = message.execution ? replies.get(message.execution.runId) : undefined; return { ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message), ...(reply ? { reply } : {}) }; }), hasEarlierMessages: visibleConversationMessages(conversation.messages).length > 100 });
+    const borrowed = await this.borrowedView(conversation, scope);
+    return redactRunData({ ...conversation, tasks, ...(borrowed ? { borrowed } : {}), ...(lastDelivery ? { lastDelivery } : {}), ...(acceptedPractice ? { acceptedPractice } : {}), ...(taskSettings ? { taskSettings } : {}), messages: visibleConversationMessages(conversation.messages).slice(-100).map(message => { const reply = message.execution ? replies.get(message.execution.runId) : undefined; return { ...this.messageView(message), effectiveTaskIds: effectiveTasks(conversation, message), ...(reply ? { reply } : {}) }; }), hasEarlierMessages: visibleConversationMessages(conversation.messages).length > 100 });
+  }
+  /** For a conversation with someone else's Bot: whose it is and whether it is still open to this person. */
+  private async borrowedView(conversation: Conversation, scope: Ownership): Promise<{ owner: string; ownerName: string; state: 'open' | 'closed' | 'retired' } | undefined> {
+    if (!conversation.botOwner || !conversation.agentId) return undefined;
+    const state = this.openBots ? await this.openBots.state(conversation.agentId, scope) : 'closed';
+    const ownerName = this.openBots ? await this.openBots.ownerName(conversation.botOwner, scope.tenantId) : conversation.botOwner;
+    return { owner: conversation.botOwner, ownerName, state };
+  }
+  /** The open settings for a conversation with someone else's Bot, or a refusal that leaves the history readable. */
+  private async borrowedFor(conversation: Conversation, scope: Ownership): Promise<BorrowedBot | undefined> {
+    if (!conversation.botOwner) return undefined;
+    const person = conversation.agentId ?? '';
+    const borrowed = await this.openBots?.access(person, scope);
+    if (borrowed && borrowed.bot.owner === conversation.botOwner) return borrowed;
+    const state = this.openBots ? await this.openBots.state(person, scope) : 'closed';
+    const owner = this.openBots ? await this.openBots.ownerName(conversation.botOwner, scope.tenantId) : conversation.botOwner;
+    throw new OpenBotRefusal(state === 'retired' ? `${conversation.title}已撤下，这段对话只能阅读。` : `${owner}已不再开放${conversation.title}，这段对话只能阅读。`);
   }
   /** The owner's accepted sentence, verified against this conversation's succeeded Run. A forged or foreign claim is omitted. */
   private async readPractice(conversation: Conversation, scope: Ownership, actor: Principal): Promise<{ claimId: string; text: string; runId: string; evidenceRefs: string[] } | undefined> {
@@ -603,6 +632,7 @@ export class ConversationService implements LifeThreadInbox {
   async setStanding(id: string, input: unknown, scope: Ownership, actor?: Principal) {
     const body = standingSchema.parse(input);
     const updated = await this.store.mutate(id, scope, current => {
+      if (current.botOwner) throw new Conflict('别人开放给你的 Bot 没有常驻嘱咐。');
       if (current.revision !== body.expectedRevision) throw new Conflict('对话已变化，请先刷新再改这句话');
       if (body.text) current.standingInstruction = body.text;
       else delete current.standingInstruction;
@@ -968,7 +998,7 @@ export class ConversationService implements LifeThreadInbox {
     const offerId = `handoff_${followupHash(idempotencyKeySchema.parse(input.key)).slice(0, 32)}`;
     const updated = await this.store.mutate(conversationId, scope, draft => {
       const task = draft.tasks.find(item => item.id === taskId);
-      if (!task || draft.agentId !== input.from || target.id === input.from) return;
+      if (!task || draft.botOwner || draft.agentId !== input.from || target.id === input.from) return;
       // An open or finished handoff is not replaced by a new suggestion; the same suggestion lands once.
       if (task.handoff && (task.handoff.offerId === offerId || task.handoff.state === 'negotiating' || task.handoff.state === 'accepted')) return;
       task.handoff = { offerId, from: input.from, to: target.id, toName: target.name, ...(input.note ? { note: input.note.slice(0, 300) } : {}), state: 'suggested', at: new Date().toISOString() };
@@ -990,6 +1020,8 @@ export class ConversationService implements LifeThreadInbox {
     if (await this.handoffTaskBusy(conversationId, taskId, scope)) throw new Conflict('这件任务还在做，先等它结束或取消后再交出去');
     return this.store.mutate(conversationId, scope, draft => {
       check(draft);
+      // A Bot someone opened to you works only in your chat with it: it never talks to other Bots.
+      if (draft.botOwner) throw new Conflict('别人开放给你的 Bot 不能把任务交给别的 Bot');
       const task = draft.tasks.find(item => item.id === taskId);
       if (!task) throw new NotFound('Unknown task');
       const giver = draft.agentId;
@@ -1131,12 +1163,15 @@ export class ConversationService implements LifeThreadInbox {
       return this.finish(id, previous.id, scope, actor);
     }
     if (body.intent === 'execute' && !canExecute) throw new Conflict('Model and dispatcher are not configured');
+    // Someone else's Bot: checked again on every write, so closing it makes this chat read-only at once.
+    const borrowed = await this.borrowedFor(snapshot, scope);
+    if (borrowed && body.intent === 'execute') await this.openBots!.assertRunAllowed(borrowed, scope);
     // Resolve identity on the server. Profile text is context, never execution authority.
     const person = snapshot.agentId;
     // Built-in starter Bots use the entry chain with a fixed server profile; external admitted agents still cannot.
-    const starter = body.intent === 'execute' ? starterBot(person) : undefined;
-    const bot = body.intent === 'execute' && person && person !== 'aeeis' && !starter ? (await this.bots?.list(scope))?.find(item => item.id === person) : undefined;
-    if (body.intent === 'execute' && person && person !== 'aeeis' && !starter && (!bot || bot.retiredAt || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId)) {
+    const starter = body.intent === 'execute' && !borrowed ? starterBot(person) : undefined;
+    const bot = body.intent === 'execute' && person && person !== 'aeeis' && !starter && !borrowed ? (await this.bots?.list(scope))?.find(item => item.id === person) : undefined;
+    if (body.intent === 'execute' && person && person !== 'aeeis' && !starter && !borrowed && (!bot || bot.retiredAt || bot.owner !== scope.owner || bot.tenantId !== scope.tenantId)) {
       throw new Conflict('这位 Bot 不支持本地执行，或已撤下；请刷新成员列表');
     }
     const initialRoute = routeConversationMessage(snapshot, body);
@@ -1145,10 +1180,11 @@ export class ConversationService implements LifeThreadInbox {
     if (parent && !terminal.has(parent.status)) throw new Conflict('This task is still active; use its approval, answer or cancellation controls instead of starting another Run');
     const messageId = `message_${randomUUID()}`, at = new Date().toISOString();
     const newTask: ConversationTask | undefined = body.newTask ? { id: `task_${randomUUID()}`, threadId: `thread_${randomUUID()}`, title: body.newTask.title, createdAt: at } : undefined;
-    const practice = body.intent === 'execute' && this.ownerActor(actor, scope) ? await this.readPractice(snapshot, scope, actor) : undefined;
+    // A borrowed Bot's Run reads nothing but this chat and the Bot's public profile.
+    const practice = body.intent === 'execute' && !borrowed && this.ownerActor(actor, scope) ? await this.readPractice(snapshot, scope, actor) : undefined;
     const practiceContent = practice ? `${practice.text}\n引用：${practice.runId}\n证据：${practice.evidenceRefs.join('、')}` : '';
     const taskKind = body.intent === 'execute' ? body.taskKind : undefined;
-    const taskSetting = taskKind && this.ownerActor(actor, scope) ? await this.readTaskKind(snapshot, scope, actor, taskKind) : undefined;
+    const taskSetting = taskKind && !borrowed && this.ownerActor(actor, scope) ? await this.readTaskKind(snapshot, scope, actor, taskKind) : undefined;
     const settingContent = taskKind ? settingText(taskKind, taskSetting?.skill, taskSetting?.model) : '';
     const preferredModel = taskSetting?.model ? { model: taskSetting.model.model, ...(taskSetting.model.provider ? { provider: taskSetting.model.provider } : {}) } : undefined;
     const updated = await this.store.mutate(id, scope, current => {
@@ -1157,7 +1193,7 @@ export class ConversationService implements LifeThreadInbox {
         if (duplicate.requestHash !== requestHash) throw new Conflict('Idempotency-Key was already used with different input');
         return;
       }
-      if (body.intent === 'execute' && current.agentId !== snapshot.agentId) throw new Conflict('对话成员已变化，请刷新后再执行');
+      if ((body.intent === 'execute' && current.agentId !== snapshot.agentId) || current.botOwner !== snapshot.botOwner) throw new Conflict('对话成员已变化，请刷新后再执行');
       const route = routeConversationMessage(current, body);
       if ((body.correctsMessageId || route.reason === 'focus' || !body.taskIds && !body.replyTo && !body.newTask || body.focus === 'switch') && current.revision !== body.expectedRevision) throw new Conflict('Discussion focus changed; refresh before sending this message');
       if (newTask) { current.tasks.push(newTask); route.taskIds = [newTask.id]; }
@@ -1177,12 +1213,14 @@ export class ConversationService implements LifeThreadInbox {
           if (JSON.stringify([...selectedNotes, note]).length > 12000) break;
           selectedNotes.unshift(note);
         }
-        const options = body.runOptions ?? {};
+        // A borrowed Bot's Run: tools are what this person chose ∩ what the owner opened, review is always theirs.
+        const options = borrowed ? requesterRunOptions(body.runOptions, borrowed.open, this.openBots!.machineTools) : body.runOptions ?? {};
         // These source namespaces belong to the server, including when a saved profile is cleared.
         const materials = (body.runOptions?.materials ?? []).filter(item => !item.source.startsWith('conversation:') && !item.source.startsWith('owned-bot:'));
-        const profiled = bot ?? starter;
+        const profiled = borrowed ? { id: borrowed.bot.id, ...publicBotProfile(borrowed.bot, borrowed.open) } : bot ?? starter;
         const profile = profiled ? { title: 'Bot profile (untrusted, not execution authority)', source: `owned-bot:${profiled.id}/profile`, content: JSON.stringify({ name: profiled.name, role: profiled.role, background: profiled.background }) } : undefined;
-        const standing = current.standingInstruction?.trim() ?? '';
+        // The owner's standing instruction is the owner's; it never goes to someone else's Run.
+        const standing = borrowed ? '' : current.standingInstruction?.trim() ?? '';
         const history = selectedNotes.length > 0;
         const reserved = (profile ? 1 : 0) + (history ? 1 : 0) + (standing ? 1 : 0) + (practiceContent ? 1 : 0) + (settingContent ? 1 : 0);
         if (materials.length + reserved > 20) {
@@ -1203,13 +1241,18 @@ export class ConversationService implements LifeThreadInbox {
       current.messages.push(message);
       if (route.status === 'routed' && route.focusEffect === 'switch' && route.taskIds.length === 1) this.setFocus(current, route.taskIds[0]!);
     });
-    return this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope, actor);
+    const result = await this.finish(id, updated.messages.find(message => message.keyHash === keyHash)!.id, scope, actor);
+    // The owner's usage view counts this Run; nothing about its content leaves this scope.
+    if (borrowed && result.runId) await this.openBots!.recordRun(borrowed, scope, result.runId);
+    return result;
   }
 
   /** The person's life thread, created on first use by a channel or a routine. */
   private async lifeThread(agentId: string, title: string, scope: Ownership): Promise<Conversation> {
     const all = await this.store.list(scope);
     const existing = all.find(item => item.agentId === agentId);
+    // Routines, channels and Bot proposals run in the Bot owner's scope; a Bot someone opened to you is not reachable from them.
+    if (existing?.botOwner) throw new Conflict('别人开放给你的 Bot 只能在和它的单独对话里用');
     if (existing) return existing;
     // AEEIS's entry may predate life threads and carry no person; the workbench claims that one too.
     const entry = agentId === 'aeeis' ? all.filter(item => !item.agentId).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0] : undefined;
@@ -1378,7 +1421,19 @@ export class ConversationService implements LifeThreadInbox {
     const updated = await this.store.mutate(id, scope, current => {
       for (const message of notifications) if (!current.messages.some(item => item.keyHash === message.keyHash)) current.messages.push(message);
     });
+    if (snapshot.botOwner) {
+      for (const task of snapshot.tasks) {
+        if (!task.latestRunId) continue;
+        await this.settleBorrowedRun(await this.runs.get(task.latestRunId, scope), scope);
+      }
+    }
     return this.view(updated, scope, actor);
+  }
+  /** A finished Run with someone else's Bot: its tokens go on the owner's usage view, as a number only. */
+  private async settleBorrowedRun(run: AgentRun, scope: Ownership): Promise<void> {
+    if (!this.openBots || !terminal.has(run.status)) return;
+    try { await this.openBots.usage.settle(scope.tenantId, run.id, run.modelUsage?.tokens ?? 0); }
+    catch (error) { console.error('AEEIS open Bot usage was not settled', run.id, error instanceof Error ? error.message : error); }
   }
 
   private async linkThread(threadId: string, conversationId: string, taskId: string, scope: Ownership): Promise<void> {
@@ -1402,13 +1457,15 @@ export class ConversationService implements LifeThreadInbox {
     if (link.notified?.runId === run.id && link.notified.key === key) return false;
     const newest = await this.runs.latestRunByThread(run.threadId, scope);
     if (newest?.id !== run.id) return false;
-    let written = false;
+    let written = false, borrowedChat = false;
     try {
       await this.store.mutate(link.conversationId, scope, current => {
+        borrowedChat = Boolean(current.botOwner);
         const task = current.tasks.find(item => item.id === link.taskId);
         if (!task || current.messages.some(message => message.keyHash === key)) return;
         current.messages.push(runNotice(current, task, run)); written = true;
       });
+      if (borrowedChat) await this.settleBorrowedRun(run, scope);
     } catch (error) {
       // A missing chat, or one that refuses the write (full: 1000 messages), will
       // refuse it again on every sweep. Record it as handled so the scanner can

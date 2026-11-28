@@ -90,6 +90,9 @@ export interface Conversation extends Ownership {
   title: string;
   /** Stable person this life thread belongs to. Missing on conversations created before personal agents. */
   agentId?: string;
+  /** Set when `agentId` is someone else's Bot they opened to this conversation's owner (stage 3c). The conversation
+   * is the requester's: their scope, their key, their budget. The Bot's owner never reads it. */
+  botOwner?: string;
   /** Owner-written sentence that stays with this person. Missing when none is pinned. */
   standingInstruction?: string;
   revision: number;
